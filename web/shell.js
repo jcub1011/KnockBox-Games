@@ -1,7 +1,8 @@
 // Platform shell — owns the single CONTROL websocket, identity, and the lobby UI. When a game
-// starts it requests a one-time ticket and embeds the game in a cross-origin iframe (the game
+// starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
+import { buildGameSrc, gameWsEndpoint, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -76,14 +77,14 @@ function handle(msg) {
       break;
     case 'PlayerJoined':
       if (lobby && msg.lobbyId === lobby.lobbyId) {
-        if (!lobby.players.some((p) => p.id === msg.player.id)) lobby.players.push(msg.player);
+        lobby.players = rosterAdd(lobby.players, msg.player);
         renderRoster();
         updateWaiting();
       }
       break;
     case 'PlayerLeft':
       if (lobby && msg.lobbyId === lobby.lobbyId) {
-        lobby.players = lobby.players.filter((p) => p.id !== msg.playerId);
+        lobby.players = rosterRemove(lobby.players, msg.playerId);
         renderRoster();
         updateWaiting();
       }
@@ -209,14 +210,13 @@ async function enterGame(starting) {
   el('lobby-code').textContent = starting.lobbyId;
   renderRoster();
 
-  // One-time, lobby-scoped credential for the game's own data socket. The game never sees our token.
+  // Lobby-scoped credential for the game's own data socket. The game never sees our identity token.
   const reply = await request('RequestGameTicket', { lobbyId: starting.lobbyId });
   if (reply.type !== 'GameTicket') { setStatus('⚠ ' + (reply.reason || 'Could not start game')); return; }
 
   const entry = manifest ? manifest.entry : 'index.html';
-  const wsEndpoint = gameOrigin.replace(/^http/, 'ws') + '/ws';
-  const src = `${gameOrigin}/games/${starting.gameId}/${entry}`
-    + `?kbTicket=${encodeURIComponent(reply.ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
+  // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.
+  const src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
 
   el('waiting').style.display = 'none';
   el('frame-host').innerHTML = '';

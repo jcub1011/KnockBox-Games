@@ -30,6 +30,7 @@ public sealed class ConnectionManager
     public Connection? Get(string playerId) => _byPlayer.TryGetValue(playerId, out var c) ? c : null;
 
     // ── Data-role (game) connections ─────────────────────────────────────────
+    public Connection? GetGame(string playerId) => _gameByPlayer.TryGetValue(playerId, out var c) ? c : null;
     public void AddGame(Connection c) => _gameByPlayer[c.PlayerId] = c;
     public void RemoveGame(Connection c) => _gameByPlayer.TryRemove(KeyValuePair.Create(c.PlayerId, c));
 

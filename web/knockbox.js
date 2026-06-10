@@ -1,9 +1,14 @@
 // KnockBox Networking API — the game's "just send/receive over a websocket" client library.
 //
-// Loaded inside a game served from the GAME ORIGIN. It reads a one-time ticket + endpoint from its
-// own URL (the shell put them there), opens its OWN websocket to the server, authenticates with the
-// ticket, and exposes a tiny API. The game never sees a lobby id, the player's identity, or the
-// shell — the server resolves all routing from the bound connection.
+// Loaded inside a game served from the GAME ORIGIN, as an ES module (so it can share kb-core.js):
+//   <script type="module" src="/knockbox.js"></script>
+//   <script type="module" src="game.js"></script>   <!-- runs after, reads window.KnockBox -->
+//
+// It reads a lobby-scoped ticket + endpoint from its own URL FRAGMENT (the shell put them there;
+// the fragment, unlike a query string, never leaks via Referer or server logs), opens its OWN
+// websocket to the server, authenticates with the ticket, and exposes a tiny API. The game never
+// sees a lobby id, the player's identity, or the shell — the server resolves all routing from the
+// bound connection.
 //
 //   KnockBox.onReady(({ playerId, players, isHost }) => { ... })
 //   KnockBox.onMessage(({ from, payload }) => { ... })
@@ -17,16 +22,25 @@
 // Engine note: this is the reference (vanilla-JS) client. A Godot addon (WebSocketPeer) or a Unity
 // jslib package speaks the same JSON protocol: send {type:"Attach",ticket}; then exchange
 // {type:"Game",to,payload} frames; read {type:"Ready",...} / {type:"GamePlayerJoined|Left",...}.
+import {
+  parseLaunchParams,
+  defaultEndpoint,
+  reconnectDelay,
+  isTerminalClose,
+  rosterAdd,
+  rosterRemove,
+} from './kb-core.js';
+
 (function () {
-  const params = new URLSearchParams(location.search);
-  const ticket = params.get('kbTicket');
-  // Endpoint the shell handed us; fall back to this origin's /ws.
-  const endpoint = params.get('kbEndpoint') ||
-    `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+  const launch = parseLaunchParams(location.hash);
+  const ticket = launch.ticket;
+  const endpoint = launch.endpoint || defaultEndpoint(location.protocol, location.host);
 
   const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [] };
   let ready = false;
   let ws = null;
+  let attempt = 0;        // consecutive failed/transient connects, for backoff
+  let stopped = false;    // set on a terminal close — don't reconnect
 
   const KnockBox = {
     playerId: null,
@@ -51,14 +65,28 @@
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'Game', to, payload }));
   }
 
+  function scheduleReconnect() {
+    if (stopped) return;
+    const delay = reconnectDelay(attempt++);
+    setTimeout(connect, delay);
+  }
+
   function connect() {
     if (!ticket) { console.error('[KnockBox] missing kbTicket — cannot attach.'); return; }
     ws = new WebSocket(endpoint);
 
     ws.onopen = () => ws.send(JSON.stringify({ type: 'Attach', ticket }));
     ws.onmessage = (e) => handle(JSON.parse(e.data));
-    // Session-scoped ticket: reconnect on drop and re-attach (the server re-validates membership).
-    ws.onclose = () => setTimeout(connect, 1000);
+    ws.onerror = () => { /* a failed connect surfaces as a close; reconnect is handled there */ };
+    ws.onclose = (e) => {
+      if (isTerminalClose(e.code)) {
+        // The ticket is invalid or our lobby membership ended — retrying is pointless.
+        stopped = true;
+        console.warn('[KnockBox] data socket closed permanently:', e.reason || e.code);
+        return;
+      }
+      scheduleReconnect();
+    };
   }
 
   function handle(msg) {
@@ -68,17 +96,18 @@
         KnockBox.players = msg.players || [];
         KnockBox.isHost = !!msg.isHost;
         ready = true;
+        attempt = 0; // healthy connection — reset backoff
         handlers.ready.forEach((cb) => cb(snapshot()));
         break;
       case 'Game':
         handlers.message.forEach((cb) => cb({ from: msg.from, payload: msg.payload }));
         break;
       case 'GamePlayerJoined':
-        if (!KnockBox.players.some((p) => p.id === msg.player.id)) KnockBox.players.push(msg.player);
+        KnockBox.players = rosterAdd(KnockBox.players, msg.player);
         handlers.playerJoined.forEach((cb) => cb(msg.player));
         break;
       case 'GamePlayerLeft':
-        KnockBox.players = KnockBox.players.filter((p) => p.id !== msg.playerId);
+        KnockBox.players = rosterRemove(KnockBox.players, msg.playerId);
         handlers.playerLeft.forEach((cb) => cb(msg.playerId));
         break;
     }

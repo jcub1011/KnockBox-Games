@@ -16,9 +16,9 @@ nothing to compile into the server**.
 Your game runs inside an `<iframe>` served from the platform's **game origin** (a separate origin
 from the shell, for isolation). It uses the **`KnockBox` client library**, which opens its **own
 WebSocket** to the server and exchanges messages with the other players. You never see the socket
-URL, a lobby id, or the player's identity token — the library reads a one-time **ticket** from its
-page URL, authenticates with it, and the **server resolves all routing from your connection**. You
-just send and receive messages.
+URL, a lobby id, or the player's identity token — the library reads a lobby-scoped **ticket** from
+its page URL fragment, authenticates with it, and the **server resolves all routing from your
+connection**. You just send and receive messages.
 
 Key consequences:
 
@@ -81,15 +81,16 @@ The SDK is served by the platform at a fixed, absolute path. Reference it from y
   <head><meta charset="utf-8" /><title>Your Game</title></head>
   <body>
     <!-- your UI -->
-    <script src="/knockbox.js"></script>  <!-- absolute path; provided by the platform -->
-    <script src="game.js"></script>        <!-- your code (relative path) -->
+    <script type="module" src="/knockbox.js"></script>  <!-- absolute path; provided by the platform -->
+    <script type="module" src="game.js"></script>        <!-- your code (relative path) -->
   </body>
 </html>
 ```
 
-`window.KnockBox` is available after `/knockbox.js` loads. On load it reads a one-time ticket from
-its own page URL (the platform put it there) and opens the data socket automatically — **don't strip
-the query string** from your entry URL.
+Load both as `type="module"` so the SDK runs before your code (modules execute in document order).
+`window.KnockBox` is available once `/knockbox.js` has run. On load it reads its ticket from the page
+URL **fragment** (`#kbTicket=…`, which the platform put there) and opens the data socket
+automatically — **don't strip the fragment** from your entry URL.
 
 ---
 
@@ -248,7 +249,7 @@ The platform doesn't care how your iframe was built. Two integration routes:
   `KnockBox` API from the engine's JS interop layer (Godot `JavaScriptBridge`, Unity `.jslib`).
 - **Native — speak the protocol directly.** The SDK is a thin client over a simple JSON WebSocket
   protocol; an engine can open the socket itself (Godot's `WebSocketPeer`, a Unity jslib socket).
-  Read the ticket and endpoint from your page URL (`?kbTicket=…&kbEndpoint=…`) and:
+  Read the ticket and endpoint from your page URL **fragment** (`#kbTicket=…&kbEndpoint=…`) and:
 
   ```jsonc
   → { "type": "Attach", "ticket": "<kbTicket>" }            // your first frame
@@ -259,13 +260,14 @@ The platform doesn't care how your iframe was built. Two integration routes:
   ← { "type": "GamePlayerLeft",   "playerId": "…" }
   ```
 
-  Connect to `kbEndpoint` (the data socket). Reconnect with the same ticket if the socket drops.
+  Connect to `kbEndpoint` (the data socket). On a *transient* drop, reconnect with the same ticket
+  (back off between attempts); on close code **`1008`** the ticket/membership is gone — stop retrying.
 
 **Threaded exports** (Godot 4 with threads, Unity with threads) need `SharedArrayBuffer`, which
 requires cross-origin isolation. Set `"crossOriginIsolated": true` in `GAME.json` and the platform
-serves your game with `Cross-Origin-Opener-Policy`/`Cross-Origin-Embedder-Policy`. (Fully isolating
-a cross-origin iframe also requires the shell to be served cross-origin-isolated — see
-INFRASTRUCTURE.md §8.) **Single-threaded exports need none of this** — leave the flag `false`.
+serves your game with `Cross-Origin-Opener-Policy`/`Cross-Origin-Embedder-Policy`. Full isolation
+also requires the operator to enable `KnockBox:IsolateShell` so the shell page is isolated too — see
+INFRASTRUCTURE.md §8. **Single-threaded exports need none of this** — leave the flag `false`.
 
 ---
 
@@ -285,8 +287,8 @@ Static files are read per request, so editing your game and reloading the tabs i
 ## 12. Rules & gotchas
 
 - **Folder name must equal `id`.** Your assets are served at `/games/{id}/…`.
-- **Load the SDK from `/knockbox.js`** (absolute). Load your own files with relative paths. Don't
-  strip the `?kbTicket=…` query string from your entry URL — the SDK needs it to attach.
+- **Load the SDK from `/knockbox.js`** (absolute, `type="module"`). Load your own files with relative
+  paths. Don't strip the `#kbTicket=…` fragment from your entry URL — the SDK needs it to attach.
 - **The server never inspects payloads.** All validation and rules are yours, on the host.
 - **Don't trust guests.** Only the host should mutate state; guests render what the host sends.
 - **You never name a lobby.** Send to `host` / everyone / a player id; the server routes by your

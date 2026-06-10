@@ -52,7 +52,8 @@ public sealed class WebSocketHandler(
             ? verified
             : Guid.NewGuid().ToString("N");
         var displayName = string.IsNullOrWhiteSpace(hello.DisplayName) ? "Player" : hello.DisplayName;
-        var connection = new Connection(playerId, displayName, socket);
+        // Control: lobby events are rare and must not be silently dropped — tear down a stuck socket.
+        var connection = new Connection(playerId, displayName, socket, OutboundOverflow.CloseOnFull);
 
         connections.Add(connection);
         var sendLoop = connection.SendLoopAsync(ct);
@@ -205,7 +206,7 @@ public sealed class WebSocketHandler(
     // ── Data role (a game iframe's own socket) ────────────────────────────────
     private async Task RunDataAsync(WebSocket socket, AttachMessage attach, CancellationToken ct)
     {
-        if (!tokens.TryVerifyTicket(attach.Ticket, out var playerId, out var lobbyId, out _))
+        if (!tokens.TryVerifyTicket(attach.Ticket, out var playerId, out var lobbyId, out var gameId))
         {
             await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Invalid ticket", ct);
             return;
@@ -220,8 +221,23 @@ public sealed class WebSocketHandler(
             return;
         }
 
+        // The ticket is scoped to the game the lobby was created for; reject if they no longer match.
+        if (!string.Equals(gameId, lobby.GameId, StringComparison.OrdinalIgnoreCase))
+        {
+            await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Ticket game mismatch", ct);
+            return;
+        }
+
+        // A re-attach (game reload / reconnect) supersedes any prior game socket for this player —
+        // tear the old one down so it doesn't linger draining into a dead socket.
+        connections.GetGame(playerId)?.CompleteOutbound();
+
         var displayName = lobby.Players.FirstOrDefault(p => p.Id == playerId)?.DisplayName ?? "Player";
-        var connection = new Connection(playerId, displayName, socket) { LobbyId = lobbyId };
+        // Data: host-authoritative state broadcasts — newest snapshot supersedes, so drop oldest.
+        var connection = new Connection(playerId, displayName, socket, OutboundOverflow.DropOldest)
+        {
+            LobbyId = lobbyId,
+        };
 
         connections.AddGame(connection);
         var sendLoop = connection.SendLoopAsync(ct);
