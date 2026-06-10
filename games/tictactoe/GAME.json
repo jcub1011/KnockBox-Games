@@ -1,0 +1,8 @@
+{
+  "id": "tictactoe",
+  "name": "Tic-Tac-Toe",
+  "entry": "index.html",
+  "thumbnail": "thumb.svg",
+  "minPlayers": 2,
+  "maxPlayers": 2
+}

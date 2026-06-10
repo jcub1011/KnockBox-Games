@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KnockBox Games</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, sans-serif; background: #11131a; color: #e7e9ee;
+      min-height: 100vh;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+      padding: .9rem 1.4rem; background: #1a1d27; border-bottom: 1px solid #2a2e3c;
+    }
+    header h1 { font-size: 1.1rem; margin: 0; letter-spacing: .02em; }
+    header .id { display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: #9aa0b0; }
+    input {
+      background: #0d0f15; border: 1px solid #2a2e3c; color: #e7e9ee; border-radius: 6px;
+      padding: .35rem .55rem; font-size: .85rem;
+    }
+    main { max-width: 920px; margin: 0 auto; padding: 1.4rem; }
+    h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .08em; color: #9aa0b0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; }
+    .card {
+      background: #1a1d27; border: 1px solid #2a2e3c; border-radius: 10px; padding: 1rem;
+      display: flex; flex-direction: column; gap: .6rem;
+    }
+    .card img { width: 100%; height: 96px; object-fit: cover; border-radius: 6px; background: #0d0f15; }
+    .card .name { font-weight: 600; }
+    button {
+      background: #4257f5; color: #fff; border: 0; border-radius: 6px; padding: .5rem .8rem;
+      font-size: .85rem; cursor: pointer; font-weight: 600;
+    }
+    button.secondary { background: #2a2e3c; }
+    button:hover { filter: brightness(1.1); }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: .6rem;
+      padding: .55rem .7rem; background: #1a1d27; border: 1px solid #2a2e3c; border-radius: 8px; margin-bottom: .5rem; }
+    .muted { color: #9aa0b0; font-size: .85rem; }
+    .status { margin-top: 1rem; min-height: 1.2rem; color: #9aa0b0; font-size: .85rem; }
+    #game-view { display: none; }
+    .roster span { display: inline-block; background: #2a2e3c; border-radius: 999px;
+      padding: .2rem .6rem; margin: .15rem .2rem; font-size: .8rem; }
+    .roster span.host::after { content: " ★"; color: #f5c542; }
+    iframe { width: 100%; height: 540px; border: 1px solid #2a2e3c; border-radius: 10px; background: #fff; margin-top: 1rem; }
+    .bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🎮 KnockBox Games</h1>
+    <div class="id">
+      <label for="name">Name</label>
+      <input id="name" maxlength="20" />
+      <span id="conn" class="muted">connecting…</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="lobby-view">
+      <h2>Games</h2>
+      <div id="games" class="grid"></div>
+
+      <div class="bar" style="margin-top:1.6rem">
+        <h2 style="margin:0">Open lobbies</h2>
+        <button class="secondary" id="refresh">Refresh</button>
+      </div>
+      <div id="lobbies"></div>
+
+      <div id="status" class="status"></div>
+    </section>
+
+    <section id="game-view">
+      <div class="bar">
+        <div>
+          <strong id="game-title"></strong>
+          <span class="muted">· lobby <code id="lobby-code"></code></span>
+        </div>
+        <button class="secondary" id="leave">Leave</button>
+      </div>
+      <div class="roster" id="roster"></div>
+      <div id="waiting" class="muted" style="margin-top:1rem;"></div>
+      <div id="frame-host"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/shell.js"></script>
+</body>
+</html>
