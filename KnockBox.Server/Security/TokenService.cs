@@ -5,80 +5,98 @@ using System.Text.Json;
 namespace KnockBox.Server.Security;
 
 /// <summary>
-/// Issues and verifies HMAC-signed tokens. Two kinds, both signed with the same per-process secret:
+/// Issues and verifies HMAC-signed tokens. Two kinds, both signed with the same per-process secret
+/// and both carrying an <c>exp</c> (absolute expiry) so a leaked token is bounded in time:
 /// <list type="bullet">
 /// <item><b>Identity token</b> — binds an anonymous, per-tab <c>playerId</c> so a reconnecting
 /// client can prove it owns that id (anti-spoof) without any login. Lives only on the shell origin.</item>
-/// <item><b>Game ticket</b> — a scoped credential for the data role, carrying
+/// <item><b>Game ticket</b> — a lobby-scoped credential for the data role, carrying
 /// <c>(playerId, lobbyId, gameId)</c>. Handed to a game iframe so it can open its own websocket
-/// without ever seeing the identity token.</item>
+/// without ever seeing the identity token. It is reusable while the holder remains a lobby member
+/// (so reconnects work) and until it expires — the live membership check in the handler is the
+/// primary control; expiry is defence-in-depth.</item>
 /// </list>
-/// The secret is random per process: a restart invalidates all tokens, which is harmless because
-/// in-memory lobbies are dropped on restart too. Set <c>KnockBox:TokenSecret</c> in config to keep
-/// tokens valid across restarts.
+/// The secret is random per process unless <c>KnockBox:TokenSecret</c> is configured; a restart then
+/// invalidates all tokens, which is harmless because in-memory lobbies are dropped on restart too.
 /// </summary>
 public sealed class TokenService
 {
     private readonly byte[] _secret;
+    private readonly TimeProvider _clock;
+    private readonly TimeSpan _identityTtl;
+    private readonly TimeSpan _ticketTtl;
 
-    public TokenService(IConfiguration config)
+    public TokenService(IConfiguration config, TimeProvider clock)
     {
+        _clock = clock;
         var configured = config["KnockBox:TokenSecret"];
         _secret = string.IsNullOrWhiteSpace(configured)
             ? RandomNumberGenerator.GetBytes(32)
             : Encoding.UTF8.GetBytes(configured);
+
+        _identityTtl = TimeSpan.FromHours(config.GetValue("KnockBox:IdentityTokenTtlHours", 720.0)); // 30 days
+        _ticketTtl = TimeSpan.FromHours(config.GetValue("KnockBox:GameTicketTtlHours", 12.0));        // a play session
     }
 
-    // ── Identity token: "<playerId>.<sig>" ───────────────────────────────────
-    public string IssueIdentity(string playerId) => $"{playerId}.{Sign(playerId)}";
+    // ── Identity token: base64url(json{playerId,exp}).<sig> ──────────────────
+    private sealed record IdentityPayload(string PlayerId, long Exp);
+
+    public string IssueIdentity(string playerId) =>
+        Encode(new IdentityPayload(playerId, ExpiresAt(_identityTtl)));
 
     public bool TryVerifyIdentity(string? token, out string playerId)
     {
         playerId = "";
-        if (string.IsNullOrEmpty(token)) return false;
-        var dot = token.LastIndexOf('.');
-        if (dot <= 0) return false;
-
-        var id = token[..dot];
-        var sig = token[(dot + 1)..];
-        if (!FixedTimeEquals(sig, Sign(id))) return false;
-
-        playerId = id;
+        if (!TryDecode<IdentityPayload>(token, out var p) || IsExpired(p!.Exp)) return false;
+        playerId = p.PlayerId;
         return true;
     }
 
-    // ── Game ticket: base64url(json).<sig> ───────────────────────────────────
-    private sealed record Ticket(string PlayerId, string LobbyId, string GameId);
+    // ── Game ticket: base64url(json{playerId,lobbyId,gameId,exp}).<sig> ───────
+    private sealed record TicketPayload(string PlayerId, string LobbyId, string GameId, long Exp);
 
-    public string IssueTicket(string playerId, string lobbyId, string gameId)
-    {
-        var payload = Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(new Ticket(playerId, lobbyId, gameId)));
-        return $"{payload}.{Sign(payload)}";
-    }
+    public string IssueTicket(string playerId, string lobbyId, string gameId) =>
+        Encode(new TicketPayload(playerId, lobbyId, gameId, ExpiresAt(_ticketTtl)));
 
     public bool TryVerifyTicket(string? ticket, out string playerId, out string lobbyId, out string gameId)
     {
         playerId = lobbyId = gameId = "";
-        if (string.IsNullOrEmpty(ticket)) return false;
-        var dot = ticket.LastIndexOf('.');
+        if (!TryDecode<TicketPayload>(ticket, out var t) || IsExpired(t!.Exp)) return false;
+        (playerId, lobbyId, gameId) = (t.PlayerId, t.LobbyId, t.GameId);
+        return true;
+    }
+
+    // ── Encode / decode ──────────────────────────────────────────────────────
+    private string Encode<T>(T payload)
+    {
+        var body = Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload));
+        return $"{body}.{Sign(body)}";
+    }
+
+    private bool TryDecode<T>(string? token, out T? payload) where T : class
+    {
+        payload = null;
+        if (string.IsNullOrEmpty(token)) return false;
+        var dot = token.LastIndexOf('.');
         if (dot <= 0) return false;
 
-        var payload = ticket[..dot];
-        var sig = ticket[(dot + 1)..];
-        if (!FixedTimeEquals(sig, Sign(payload))) return false;
+        var body = token[..dot];
+        var sig = token[(dot + 1)..];
+        if (!FixedTimeEquals(sig, Sign(body))) return false;
 
         try
         {
-            var t = JsonSerializer.Deserialize<Ticket>(Base64UrlDecode(payload));
-            if (t is null) return false;
-            (playerId, lobbyId, gameId) = (t.PlayerId, t.LobbyId, t.GameId);
-            return true;
+            payload = JsonSerializer.Deserialize<T>(Base64UrlDecode(body));
+            return payload is not null;
         }
         catch (Exception ex) when (ex is JsonException or FormatException)
         {
             return false;
         }
     }
+
+    private long ExpiresAt(TimeSpan ttl) => _clock.GetUtcNow().Add(ttl).ToUnixTimeSeconds();
+    private bool IsExpired(long exp) => _clock.GetUtcNow().ToUnixTimeSeconds() >= exp;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
     private string Sign(string data)

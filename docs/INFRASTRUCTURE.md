@@ -139,9 +139,11 @@ broadcasts `GameStarting` to all members.
 
 ### Entering the game (control → data)
 On `GameStarting` the shell calls `RequestGameTicket`, receives a scoped ticket, and embeds the
-game iframe **on the game origin** at `…/games/{id}/{entry}?kbTicket=…&kbEndpoint=wss://host:5115/ws`.
-The game's `knockbox.js` reads the ticket, opens its **own** data socket, sends `Attach`, and gets
-`Ready`.
+game iframe **on the game origin** at `…/games/{id}/{entry}#kbTicket=…&kbEndpoint=wss://host:5115/ws`.
+The credentials ride in the URL **fragment** (`#…`), not a query string, so they are never sent in a
+`Referer` header or written to server/proxy logs — untrusted game code that loads an external
+resource can't leak its own ticket. The game's `knockbox.js` reads the ticket from `location.hash`,
+opens its **own** data socket, sends `Attach`, and gets `Ready`.
 
 ### In-game relay (host-authoritative)
 ```
@@ -155,9 +157,11 @@ truth.
 ### Disconnect & reconnect
 - Closing the **control** socket removes the player from its lobby, broadcasts `PlayerLeft` (and
   `GamePlayerLeft` to game sockets), and deletes the lobby if empty.
-- The **data** socket reconnects on drop and re-`Attach`es with the same session ticket (re-validated
-  against live membership). Because the server keeps no game state, the game client re-syncs (a
-  guest asks the host for current state).
+- The **data** socket reconnects on a *transient* drop with capped exponential backoff (1s→30s) and
+  re-`Attach`es with the same ticket (re-validated against live membership). A **terminal** close
+  (code `1008`: invalid ticket / membership ended) stops reconnection — no retry storm after a game
+  ends. Because the server keeps no game state, the game client re-syncs on reconnect (a guest asks
+  the host for current state).
 
 ---
 
@@ -216,10 +220,22 @@ Intentionally **not** built (future work):
 - Multi-server scale-out (today all state is single-process; would need sticky lobby routing + a
   backplane). Binary wire format (protobuf) for high-tick games.
 - Server-authoritative game logic / anti-cheat; host migration; persistent match history.
-- **Full cross-origin isolation for threaded engine exports.** The platform serves COOP/COEP per
-  game (`crossOriginIsolated`), but a cross-origin iframe is only truly isolated if the **shell**
-  page is also served cross-origin-isolated and the iframe carries `allow="cross-origin-isolated"`.
-  Single-threaded exports work today without any of this.
+- **Server-authoritative game logic / anti-cheat; host migration; persistent match history.**
+
+### Cross-origin isolation for threaded engine exports
+
+A cross-origin iframe only gets `SharedArrayBuffer` (needed by threaded Godot/Unity exports) when
+**all three** hold:
+
+1. the game's assets are served COOP/COEP+CORP — automatic when its manifest sets
+   `crossOriginIsolated: true`;
+2. the iframe carries `allow="cross-origin-isolated"` — the shell adds this automatically for such
+   games;
+3. the **shell page itself** is cross-origin isolated — set `KnockBox:IsolateShell = true`, which
+   serves the shell with `COOP: same-origin` + `COEP: credentialless`.
+
+`IsolateShell` is **off by default**: single-threaded exports need none of this, and isolating the
+shell constrains what else it can embed. Turn it on only when hosting threaded engine games.
 
 ---
 
@@ -235,3 +251,16 @@ On startup you should see `Discovered game 'tictactoe' (Tic-Tac-Toe)` and
 `Watching … for game changes (hot-reload enabled)`. Open `http://localhost:5114/` in two tabs (each
 tab is a separate player), create a lobby in one, and join it from the other. Drop a new game folder
 into `games/` and it appears within a second or two — no restart.
+
+### Configuration (`KnockBox:*`)
+
+| Key | Default | Purpose |
+|---|---|---|
+| `TokenSecret` | random per process | HMAC secret. Set it to keep identity tokens valid across restarts. |
+| `IdentityTokenTtlHours` | `720` (30d) | Identity-token lifetime (anti-spoof, per-tab id). |
+| `GameTicketTtlHours` | `12` | Game-ticket lifetime. Long enough for a play session + reconnects; live lobby membership is the primary check. |
+| `GamesPort` | `5115` | Dev: the port the game origin is served on. |
+| `GamesHost` | — | Prod: the games subdomain (e.g. `games.knockbox.example`); routes by `Host` header behind a proxy where every request shares one port. |
+| `GamesOrigin` | — | Prod: explicit origin the shell embeds games from (overrides `GamesHost`/`GamesPort`). |
+| `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist (defense-in-depth; the token/ticket is the real auth). An empty `Origin` is always allowed — native engine clients send none. |
+| `IsolateShell` | `false` | Serve the shell cross-origin isolated (COOP/COEP) for threaded engine exports — see §8. |

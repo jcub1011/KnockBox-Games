@@ -69,10 +69,11 @@ public sealed record RejoinMessage(string Cid, string LobbyId) : Message;
 public sealed record RejoinFailedMessage(string Cid) : Message;
 
 // ── Game ticket (control role) ───────────────────────────────────────────────
-// When a game starts, the shell asks for a one-time ticket scoped to (its player, this lobby).
+// When a game starts, the shell asks for a lobby-scoped ticket bound to (its player, this lobby).
 // It hands the ticket to the game iframe (served from the game origin), and the game's client
 // library opens its OWN data-role websocket and authenticates with it — without ever seeing the
-// player's identity token.
+// player's identity token. The ticket is reusable while the holder stays a lobby member (so the
+// data socket can reconnect) and until it expires; the server re-checks live membership on attach.
 public sealed record RequestGameTicketMessage(string Cid, string LobbyId) : Message;
 public sealed record GameTicketMessage(string Cid, string Ticket) : Message;
 

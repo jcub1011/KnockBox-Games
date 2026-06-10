@@ -91,6 +91,13 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
         _watcher.Changed += onChange;
         _watcher.Deleted += onChange;
         _watcher.Renamed += (_, _) => ScheduleRescan();
+        // On buffer overflow the OS drops events and the watcher stops raising them; without this,
+        // hot-reload would silently die. Log it and force a rescan so we recover the current state.
+        _watcher.Error += (_, e) =>
+        {
+            logger.LogWarning(e.GetException(), "Game folder watcher error; forcing a rescan.");
+            ScheduleRescan();
+        };
         logger.LogInformation("Watching {Path} for game changes (hot-reload enabled).", gamesRoot);
     }
 
