@@ -1,4 +1,4 @@
 <Solution>
-  <Project Path="Contracts/Contracts.csproj" />
-  <Project Path="Server/Server.csproj" />
+  <Project Path="KnockBox.Contracts/KnockBox.Contracts.csproj" />
+  <Project Path="KnockBox.Server/KnockBox.Server.csproj" />
 </Solution>
