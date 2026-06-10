@@ -10,8 +10,18 @@ namespace KnockBox.Server.Networking;
 /// </summary>
 public sealed class Connection(string playerId, string displayName, WebSocket socket)
 {
+    // Bounded so a dead/slow socket can't grow the queue without limit and pressure server memory.
+    // The cap is generous — a healthy connection never fills it; only a stuck one does, and for our
+    // host-authoritative state-broadcast model the newest frame supersedes older ones, so evicting
+    // the oldest is the safe degradation. A persistently stuck socket is torn down by its handler.
+    private const int OutboundCapacity = 1024;
+
     private readonly Channel<byte[]> _outbound =
-        Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+        Channel.CreateBounded<byte[]>(new BoundedChannelOptions(OutboundCapacity)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.DropOldest,
+        });
 
     public string PlayerId { get; } = playerId;
     public string DisplayName { get; set; } = displayName;

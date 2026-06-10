@@ -1,83 +1,89 @@
-// KnockBox Networking API — loaded *inside* a game's iframe.
+// KnockBox Networking API — the game's "just send/receive over a websocket" client library.
 //
-// A game never touches the WebSocket, identity, or lobby. It talks to the platform shell
-// (the parent window) over postMessage; the shell wraps these calls in WebSocket relay
-// envelopes. Same-origin, so messages are addressed to location.origin.
+// Loaded inside a game served from the GAME ORIGIN. It reads a one-time ticket + endpoint from its
+// own URL (the shell put them there), opens its OWN websocket to the server, authenticates with the
+// ticket, and exposes a tiny API. The game never sees a lobby id, the player's identity, or the
+// shell — the server resolves all routing from the bound connection.
 //
-//   KnockBox.onReady(({ playerId, players, isHost, lobbyId }) => { ... })
-//   KnockBox.onMessage(({ from, payload }) => { ... })   // a relayed game message arrived
+//   KnockBox.onReady(({ playerId, players, isHost }) => { ... })
+//   KnockBox.onMessage(({ from, payload }) => { ... })
 //   KnockBox.onPlayerJoined(player => ...) / onPlayerLeft(playerId => ...)
-//   KnockBox.sendToHost(payload)   // guest -> authoritative host (intent)
-//   KnockBox.sendToAll(payload)    // host  -> everyone (state)
-//   KnockBox.sendTo(playerId, payload)
+//   KnockBox.sendToHost(payload)        // -> the authoritative host (intent)
+//   KnockBox.sendToAll(payload)         // -> everyone incl. self (state)
+//   KnockBox.sendTo(playerId, payload)  // -> one specific player
 //
-// After onReady fires, KnockBox.playerId / players / isHost / lobbyId are populated.
+// After onReady fires, KnockBox.playerId / players / isHost are populated.
+//
+// Engine note: this is the reference (vanilla-JS) client. A Godot addon (WebSocketPeer) or a Unity
+// jslib package speaks the same JSON protocol: send {type:"Attach",ticket}; then exchange
+// {type:"Game",to,payload} frames; read {type:"Ready",...} / {type:"GamePlayerJoined|Left",...}.
 (function () {
+  const params = new URLSearchParams(location.search);
+  const ticket = params.get('kbTicket');
+  // Endpoint the shell handed us; fall back to this origin's /ws.
+  const endpoint = params.get('kbEndpoint') ||
+    `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+
   const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [] };
   let ready = false;
+  let ws = null;
 
   const KnockBox = {
     playerId: null,
     players: [],
     isHost: false,
-    lobbyId: null,
 
-    onReady(cb) {
-      handlers.ready.push(cb);
-      if (ready) cb(snapshot()); // late subscriber still gets the init
-    },
+    onReady(cb) { handlers.ready.push(cb); if (ready) cb(snapshot()); },
     onMessage(cb) { handlers.message.push(cb); },
     onPlayerJoined(cb) { handlers.playerJoined.push(cb); },
     onPlayerLeft(cb) { handlers.playerLeft.push(cb); },
 
-    sendToHost(payload) { relay('host', payload); },
-    sendToAll(payload) { relay('all', payload); },
-    sendTo(playerId, payload) { relay(playerId, payload); },
+    sendToHost(payload) { send('host', payload); },
+    sendToAll(payload) { send('all', payload); },
+    sendTo(playerId, payload) { send(playerId, payload); },
   };
 
   function snapshot() {
-    return {
-      playerId: KnockBox.playerId,
-      players: KnockBox.players,
-      isHost: KnockBox.isHost,
-      lobbyId: KnockBox.lobbyId,
-    };
+    return { playerId: KnockBox.playerId, players: KnockBox.players, isHost: KnockBox.isHost };
   }
 
-  function relay(to, payload) {
-    parent.postMessage({ kb: true, kind: 'relay', to, payload }, location.origin);
+  function send(to, payload) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'Game', to, payload }));
   }
 
-  window.addEventListener('message', (e) => {
-    if (e.origin !== location.origin) return;
-    const msg = e.data;
-    if (!msg || msg.kb !== true) return;
+  function connect() {
+    if (!ticket) { console.error('[KnockBox] missing kbTicket — cannot attach.'); return; }
+    ws = new WebSocket(endpoint);
 
-    switch (msg.kind) {
-      case 'init':
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'Attach', ticket }));
+    ws.onmessage = (e) => handle(JSON.parse(e.data));
+    // Session-scoped ticket: reconnect on drop and re-attach (the server re-validates membership).
+    ws.onclose = () => setTimeout(connect, 1000);
+  }
+
+  function handle(msg) {
+    switch (msg.type) {
+      case 'Ready':
         KnockBox.playerId = msg.playerId;
         KnockBox.players = msg.players || [];
         KnockBox.isHost = !!msg.isHost;
-        KnockBox.lobbyId = msg.lobbyId;
         ready = true;
         handlers.ready.forEach((cb) => cb(snapshot()));
         break;
-      case 'relay':
+      case 'Game':
         handlers.message.forEach((cb) => cb({ from: msg.from, payload: msg.payload }));
         break;
-      case 'playerJoined':
-        KnockBox.players = msg.players || KnockBox.players;
+      case 'GamePlayerJoined':
+        if (!KnockBox.players.some((p) => p.id === msg.player.id)) KnockBox.players.push(msg.player);
         handlers.playerJoined.forEach((cb) => cb(msg.player));
         break;
-      case 'playerLeft':
-        KnockBox.players = msg.players || KnockBox.players;
+      case 'GamePlayerLeft':
+        KnockBox.players = KnockBox.players.filter((p) => p.id !== msg.playerId);
         handlers.playerLeft.forEach((cb) => cb(msg.playerId));
         break;
     }
-  });
-
-  // Tell the shell we're loaded and ready to receive init.
-  parent.postMessage({ kb: true, kind: 'gameLoaded' }, location.origin);
+  }
 
   window.KnockBox = KnockBox;
+  connect();
 })();

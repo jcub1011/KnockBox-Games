@@ -25,16 +25,28 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(LeaveLobbyMessage), "LeaveLobby")]
 [JsonDerivedType(typeof(RejoinMessage), "Rejoin")]
 [JsonDerivedType(typeof(RejoinFailedMessage), "RejoinFailed")]
+[JsonDerivedType(typeof(RequestGameTicketMessage), "RequestGameTicket")]
+[JsonDerivedType(typeof(GameTicketMessage), "GameTicket")]
 [JsonDerivedType(typeof(PlayerJoinedMessage), "PlayerJoined")]
 [JsonDerivedType(typeof(PlayerLeftMessage), "PlayerLeft")]
 [JsonDerivedType(typeof(GameStartingMessage), "GameStarting")]
-[JsonDerivedType(typeof(RelayMessage), "Relay")]
+[JsonDerivedType(typeof(AttachMessage), "Attach")]
+[JsonDerivedType(typeof(ReadyMessage), "Ready")]
+[JsonDerivedType(typeof(GameMessage), "Game")]
+[JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
+[JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
 public abstract record Message;
 
-// ── Identity (first exchange after connect) ──────────────────────────────────
-public sealed record HelloMessage(string? PlayerId, string DisplayName) : Message;
-public sealed record WelcomeMessage(string PlayerId) : Message;
+// ── Identity (first exchange after connect on the CONTROL role) ──────────────
+// The signed Token makes the anonymous, per-tab playerId unforgeable: the client resends it on
+// reconnect and the server only honours a claimed PlayerId whose Token verifies. The token never
+// leaves the shell origin — games authenticate with a scoped ticket instead (see RequestGameTicket).
+public sealed record HelloMessage(string? PlayerId, string DisplayName, string? Token = null) : Message;
+// GameOrigin is the separate origin (scheme://host:gamesPort) the shell uses to embed game iframes
+// and that a game's data socket connects back to. The server derives it from the request, so a
+// manager changing the games port needs no client edits.
+public sealed record WelcomeMessage(string PlayerId, string Token, string GameOrigin) : Message;
 
 // ── Catalog (over WebSocket) ─────────────────────────────────────────────────
 public sealed record ListGamesMessage(string Cid) : Message;
@@ -56,6 +68,14 @@ public sealed record LeaveLobbyMessage(string LobbyId) : Message;
 public sealed record RejoinMessage(string Cid, string LobbyId) : Message;
 public sealed record RejoinFailedMessage(string Cid) : Message;
 
+// ── Game ticket (control role) ───────────────────────────────────────────────
+// When a game starts, the shell asks for a one-time ticket scoped to (its player, this lobby).
+// It hands the ticket to the game iframe (served from the game origin), and the game's client
+// library opens its OWN data-role websocket and authenticates with it — without ever seeing the
+// player's identity token.
+public sealed record RequestGameTicketMessage(string Cid, string LobbyId) : Message;
+public sealed record GameTicketMessage(string Cid, string Ticket) : Message;
+
 // ── Lobby push events (server → client, no cid) ──────────────────────────────
 public sealed record PlayerJoinedMessage(string LobbyId, Player Player) : Message;
 public sealed record PlayerLeftMessage(string LobbyId, string PlayerId) : Message;
@@ -65,17 +85,16 @@ public sealed record GameStartingMessage(
     string HostId,
     IReadOnlyList<Player> Players) : Message;
 
-// ── Relay (opaque game payload; the server never inspects it) ────────────────
-/// <summary>
-/// Carries an opaque game payload between lobby members. <c>To</c> is the routing target:
-/// <c>"host"</c> (the lobby's authoritative host), <c>"all"</c> (every member incl. sender),
-/// or a specific <c>playerId</c>. The server stamps <c>From</c> (sender's id) on the way out.
-/// </summary>
-public sealed record RelayMessage(
-    string LobbyId,
-    string To,
-    JsonElement Payload,
-    string? From = null) : Message;
+// ── Data role (game ⇄ server) ────────────────────────────────────────────────
+// The game's first frame is Attach{ticket}. The server validates the ticket against live lobby
+// membership, binds the connection to (playerId, lobbyId), and replies Ready. After that the game
+// only sends GameMessage{to, payload} — it never names a lobby; the server resolves routing from
+// the bound connection. To ∈ { "host", "all", "<playerId>" }; From is stamped on the way out.
+public sealed record AttachMessage(string Ticket) : Message;
+public sealed record ReadyMessage(string PlayerId, IReadOnlyList<Player> Players, bool IsHost) : Message;
+public sealed record GameMessage(string To, JsonElement Payload, string? From = null) : Message;
+public sealed record GamePlayerJoinedMessage(Player Player) : Message;
+public sealed record GamePlayerLeftMessage(string PlayerId) : Message;
 
 // ── Errors / rejections ──────────────────────────────────────────────────────
 public sealed record ErrorMessage(string? Cid, string Reason) : Message;

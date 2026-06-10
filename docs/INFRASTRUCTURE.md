@@ -1,7 +1,7 @@
 # KnockBox Games — Infrastructure
 
-How the platform is put together: what the server does, how clients talk to it, and how a
-multiplayer game session flows end to end.
+How the platform is put together: what the server does, how the shell and games talk to it, and how
+a multiplayer game session flows end to end.
 
 > For building a game, see **[GAME_DEVELOPER_GUIDE.md](./GAME_DEVELOPER_GUIDE.md)**.
 
@@ -9,22 +9,24 @@ multiplayer game session flows end to end.
 
 ## 1. Philosophy
 
-KnockBox hosts multiplayer **HTML5 games** supplied as drop-in content folders. Three principles
-shape the whole design:
+KnockBox hosts multiplayer **web games** (hand-written HTML5 or Godot/Unity/engine web exports)
+supplied as drop-in content folders. Four principles shape the design:
 
-1. **Games are content, not code.** A game is a folder containing an HTML5 build plus a
-   `GAME.json` manifest. The server discovers it at startup and serves it. The server **never runs
-   game logic** and has no compile-time knowledge of any game.
+1. **Games are content, not code.** A game is a folder containing a web build plus a `GAME.json`
+   manifest. The server discovers it (and re-discovers on change) and serves it. The server **never
+   runs game logic** and has no compile-time knowledge of any game.
 2. **The server is a coordinator, not an authority.** Its entire job is **discover, serve, relay**:
-   find games, serve their files, track in-memory lobbies, and forward opaque messages between the
-   players in a lobby. It never inspects the contents of a game message.
-3. **One game session is authoritative on one client — the host.** Game rules run in the lobby
-   creator's browser (the *host*). Other players send intent; the host validates and broadcasts the
-   resulting state. (This is *host-client* authority. Real cheat-resistance would require server-side
-   logic, which is intentionally out of scope here.)
+   find games, serve their files, track in-memory lobbies, identify players, and forward opaque
+   messages between the players in a lobby. It never inspects the contents of a game message.
+3. **Games just send and receive over a websocket.** A game opens its own data socket (via the SDK)
+   and exchanges role-addressed messages (`host` / everyone / a player). It never names a lobby —
+   the server resolves routing from the connection, which it bound to a lobby at attach time.
+4. **One session is authoritative on one client — the host.** Game rules run in the lobby creator's
+   browser. Others send intent; the host validates and broadcasts state. (Real cheat-resistance
+   would need server-side logic, intentionally out of scope.)
 
-The server holds **no durable state**. A restart drops all in-progress lobbies by design; all
-persistent data (identity, etc.) lives in the browser.
+The server holds **no durable state**: a restart drops all in-progress lobbies by design. Anonymous,
+per-tab player identity lives in the browser and is made unforgeable with a signed token (§4).
 
 ---
 
@@ -33,9 +35,13 @@ persistent data (identity, etc.) lives in the browser.
 ```
 KnockBox-Games.sln(x)
 ├─ KnockBox.Contracts/     # Class library: shared WebSocket DTOs + GAME.json shape
-├─ KnockBox.Server/        # ASP.NET Core (.NET 10) Web API host — no DB, no EF
-├─ web/                    # Platform shell (owns the socket) + knockbox.js game SDK
-├─ games/                  # Runtime drop folder: one subfolder per game
+├─ KnockBox.Server/        # ASP.NET Core (.NET 10) host — no DB, no EF
+│  ├─ Games/               #   GameCatalog (discovery + hot-reload)
+│  ├─ Lobbies/             #   Lobby, LobbyManager
+│  ├─ Networking/          #   Connection, ConnectionManager, WebSocketHandler
+│  └─ Security/            #   TokenService (HMAC identity token + game ticket)
+├─ web/                    # Platform shell (owns the control socket) + knockbox.js game SDK
+├─ games/                  # Runtime drop folder: one subfolder per game (hot-reloaded)
 │  └─ tictactoe/           # Sample game (GAME.json, index.html, game.js, thumb.svg)
 └─ docs/
 ```
@@ -43,13 +49,6 @@ KnockBox-Games.sln(x)
 There is **no database, ORM, or migration layer**. The server is a plain Web API host (chosen over
 Blazor Server because game clients are JS/WASM in iframes and engine exports can only speak raw
 WebSockets).
-
-### Projects
-
-| Project | Purpose |
-|---|---|
-| **KnockBox.Contracts** | Plain C# records: the WebSocket envelope hierarchy (`Message` and its derived types) and `GameManifest` (the `GAME.json` shape). Serialized with `System.Text.Json`. |
-| **KnockBox.Server** | The host: game discovery, static file serving, the `/ws` endpoint, lobby tracking, and message relay. |
 
 ---
 
@@ -59,191 +58,168 @@ All are registered as singletons in `Program.cs`.
 
 | Component | File | Responsibility |
 |---|---|---|
-| **GameCatalog** | `Games/GameCatalog.cs` | At startup, scans `games/*/GAME.json`, validates each entry file exists, and registers manifests keyed by `Id`. Logs every discovered game. |
-| **LobbyManager** | `Lobby/LobbyManager.cs` | Tracks active lobbies in a `ConcurrentDictionary`. Creates lobbies with short 4-char codes; the creator becomes the lobby **host**. |
-| **Lobby** | `Lobby/Lobby.cs` | Membership for one lobby: players, `HostId`, min/max, and a `Started` flag. Thread-safe add/remove. |
-| **Connection** | `Networking/Connection.cs` | Wraps one client `WebSocket`. Outbound frames go through a single-reader channel drained by one writer task (a `WebSocket` forbids concurrent sends), preserving order without locks. |
-| **ConnectionManager** | `Networking/ConnectionManager.cs` | Registry of live connections keyed by `playerId`, plus the JSON (de)serialization helpers. |
-| **WebSocketHandler** | `Networking/WebSocketHandler.cs` | Owns a connection's lifecycle: identity handshake, message routing, lobby ops, and relay fan-out. |
+| **GameCatalog** | `Games/GameCatalog.cs` | Scans `games/*/GAME.json`, validates each entry file, registers manifests by `Id`. **Hot-reloads** via a debounced `FileSystemWatcher`; rebuilds into a local dictionary and **atomically swaps** it so readers never see a half-built catalog. |
+| **TokenService** | `Security/TokenService.cs` | HMAC-signs/verifies the **identity token** (anti-spoof, per-tab playerId) and the **game ticket** (scoped `playerId+lobbyId+gameId` credential for the data socket). Per-process secret (or `KnockBox:TokenSecret`). |
+| **LobbyManager** | `Lobbies/LobbyManager.cs` | Tracks active lobbies in a `ConcurrentDictionary`. Short 4-char codes; the creator becomes the **host**. |
+| **Lobby** | `Lobbies/Lobby.cs` | Membership for one lobby. Thread-safe add/remove; `Players` returns a snapshot under lock so broadcasts can't race join/leave. |
+| **Connection** | `Networking/Connection.cs` | Wraps one `WebSocket`. Outbound frames go through a **bounded** single-reader channel drained by one writer task (a `WebSocket` forbids concurrent sends), preserving order without locks and bounding memory for a stuck socket. |
+| **ConnectionManager** | `Networking/ConnectionManager.cs` | Two registries keyed by `playerId`: **control** connections (shell) and **game** connections (data sockets). A player has both during a game. JSON (de)serialization helpers. |
+| **WebSocketHandler** | `Networking/WebSocketHandler.cs` | A connection's lifecycle. Dispatches on the **first frame**: `Hello` → control role; `Attach` → data role. |
 
 ### Startup pipeline (`Program.cs`)
 
-1. Resolve the repo root by walking up from the content root until `KnockBox-Games.slnx` is found,
-   then locate `web/` and `games/` beside it.
-2. Register singletons; run `GameCatalog.Discover()` once.
-3. `app.UseWebSockets()`.
-4. Serve `web/` at the site root (shell at `/`, SDK at `/knockbox.js`).
-5. Serve `games/` under the `/games` URL path (each game's assets at `/games/{gameId}/…`).
-6. Map `GET /ws` → accept the socket → hand to `WebSocketHandler.HandleAsync`.
+1. Resolve the repo root by walking up to `KnockBox-Games.slnx`; locate `web/` and `games/`.
+2. Register singletons; `GameCatalog.Discover()` then `StartWatching()`.
+3. `UseWebSockets()`.
+4. Map `GET /ws` (both ports) with an Origin allowlist → `WebSocketHandler.HandleAsync`.
+5. **Game origin** (the games port): serve `/games/{id}/…` and `/knockbox.js`, applying per-game
+   COOP/COEP for `crossOriginIsolated` games. `/ws` is excluded so the shared socket endpoint is
+   reachable here too.
+6. **Shell origin** (the default port): serve `web/` at root and `/games/{id}/…` (for thumbnails).
 
 ---
 
-## 4. The single WebSocket transport
+## 4. The single WebSocket transport, two roles
 
-Everything — identity, lobby operations, and in-game traffic — flows over **one** persistent
-WebSocket per client at **`/ws`**. Messages are UTF-8 **JSON envelopes** discriminated by a
-`"type"` field (the C# side uses `System.Text.Json` polymorphism; field names are camelCase on the
-wire).
+Everything flows over **one** endpoint, **`/ws`**, served on both origins. A connection's role is
+chosen by its **first frame**. Messages are UTF-8 **JSON envelopes** discriminated by a `"type"`
+field (`System.Text.Json` polymorphism; camelCase on the wire). Request/response ops carry a
+client-generated `cid`.
 
-A thin protocol layer provides the three things a higher-level framework would:
+### Control role (the shell) — first frame `Hello`
 
-1. **Routing** — dispatch on `type`.
-2. **Request/response correlation** — requests carry a client-generated `cid`; the matching reply
-   echoes it, so the client can `await` a response.
-3. **Reconnection** — the client reconnects with backoff and re-identifies (`Hello` + `Rejoin`).
-
-### Message reference
-
-Direction is `→` client-to-server, `←` server-to-client.
-
-**Identity** (first exchange after connect)
 ```jsonc
-→ { "type": "Hello",   "playerId": "<id|null>", "displayName": "Alice" }
-← { "type": "Welcome", "playerId": "<id>" }     // server assigns one if null
+→ { "type": "Hello",   "displayName": "Alice", "token": "<id.sig|null>" }
+← { "type": "Welcome", "playerId": "<id>", "token": "<id.sig>", "gameOrigin": "http://host:5115" }
 ```
+The server honours a claimed id **only if its signed `token` verifies**; otherwise it mints a fresh
+anonymous id. The token is per-tab (sessionStorage) and **never leaves the shell origin**.
 
-**Catalog**
 ```jsonc
-→ { "type": "ListGames", "cid": "c1" }
-← { "type": "GameList",  "cid": "c1", "games": [ { "id": "tictactoe", "name": "Tic-Tac-Toe",
-       "entry": "index.html", "thumbnail": "thumb.svg", "minPlayers": 2, "maxPlayers": 2 } ] }
+→ { "type": "ListGames",  "cid": "c1" }   ← { "type": "GameList", "cid": "c1", "games": [ … ] }
+→ { "type": "CreateLobby","cid": "c2", "gameId": "tictactoe" }  ← { "type": "LobbyCreated", "cid":"c2", "lobbyId":"AB12" }
+→ { "type": "ListLobbies","cid": "c3" }   ← { "type": "LobbyList", "cid":"c3", "lobbies":[ { "lobbyId":"AB12","gameId":"tictactoe","players":1 } ] }
+→ { "type": "JoinLobby",  "cid": "c4", "lobbyId": "AB12" }      ← { "type": "Joined", "cid":"c4", "lobbyId":"AB12" }
+→ { "type": "Rejoin",     "cid": "c5", "lobbyId": "AB12" }      ← { "type": "RejoinFailed", "cid":"c5" }   // if gone
+→ { "type": "RequestGameTicket", "cid": "c6", "lobbyId": "AB12" } ← { "type": "GameTicket", "cid":"c6", "ticket":"<scoped>" }
+→ { "type": "LeaveLobby", "lobbyId": "AB12" }   // no response
 ```
+Push events (no `cid`): `PlayerJoined`, `PlayerLeft`, `GameStarting{lobbyId,gameId,hostId,players}`.
 
-**Lobby operations** (request/response, correlated by `cid`)
+### Data role (a game iframe's own socket) — first frame `Attach`
+
 ```jsonc
-→ { "type": "CreateLobby", "cid": "c2", "gameId": "tictactoe" }
-← { "type": "LobbyCreated","cid": "c2", "lobbyId": "AB12" }      // creator becomes host
+→ { "type": "Attach", "ticket": "<from RequestGameTicket>" }
+← { "type": "Ready",  "playerId": "<id>", "players": [ … ], "isHost": true }
 
-→ { "type": "ListLobbies", "cid": "c3" }
-← { "type": "LobbyList",   "cid": "c3", "lobbies": [ { "lobbyId": "AB12", "gameId": "tictactoe", "players": 1 } ] }
-
-→ { "type": "JoinLobby", "cid": "c4", "lobbyId": "AB12" }
-← { "type": "Joined",    "cid": "c4", "lobbyId": "AB12" }
-
-→ { "type": "LeaveLobby", "lobbyId": "AB12" }                   // no response
-
-→ { "type": "Rejoin",       "cid": "c5", "lobbyId": "AB12" }
-← { "type": "RejoinFailed", "cid": "c5" }                       // if the lobby is gone
+→ { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }      // game sends
+← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }        // server stamps From
+← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
 ```
+The server validates the ticket signature **and live lobby membership**, binds the connection to
+`(playerId, lobbyId)`, and resolves all routing from that binding — **the game never sends a lobby
+id.** `to` routing: `"all"` → every member (incl. sender), `"host"` → the lobby's host, `"<id>"` →
+that member only. A message from a non-member is dropped silently.
 
-**Lobby push events** (server → client, no `cid`)
-```jsonc
-← { "type": "PlayerJoined", "lobbyId": "AB12", "player": { "id": "…", "displayName": "Bob" } }
-← { "type": "PlayerLeft",   "lobbyId": "AB12", "playerId": "…" }
-← { "type": "GameStarting", "lobbyId": "AB12", "gameId": "tictactoe",
-       "hostId": "<id>", "players": [ { "id": "…", "displayName": "…" }, … ] }
-```
-
-**Relay** (opaque game payload — the server never reads `payload`)
-```jsonc
-→ { "type": "Relay", "lobbyId": "AB12", "to": "host", "payload": { … } }
-← { "type": "Relay", "lobbyId": "AB12", "to": "all",  "payload": { … }, "from": "<senderId>" }
-```
-`to` routing, resolved by the server:
-
-| `to` | Delivered to |
-|---|---|
-| `"all"` | Every member of the lobby, **including the sender** |
-| `"host"` | The lobby's `hostId` |
-| `"<playerId>"` | That specific player, only if they are in the lobby |
-
-The server stamps `from` (the sender's `playerId`) on every outbound relay. A relay from a
-non-member is dropped silently.
-
-**Error**
-```jsonc
-← { "type": "Error", "cid": "<cid|null>", "reason": "Lobby is full" }
-```
+`← { "type": "Error", "cid": "<cid|null>", "reason": "…" }` reports control-role failures.
 
 ---
 
 ## 5. Lifecycle flows
 
-### Connect & identity
-1. Client opens `/ws` and sends `Hello` with its `playerId` (or `null`) and display name.
-2. Server creates a `Connection`, registers it, starts the per-socket send loop, and replies
-   `Welcome` (assigning a GUID if none was given).
+### Identity (control)
+Client opens `/ws`, sends `Hello` with its stored token (or null). Server verifies/mints the id,
+replies `Welcome` with the (re)issued token and the game origin. The shell persists the token
+per-tab.
 
-### Create / join a lobby
-1. **Create:** `CreateLobby{gameId}` → server makes a `Lobby` (creator = `hostId`), adds the
-   creator, replies `LobbyCreated{lobbyId}`.
-2. **Join:** `JoinLobby{lobbyId}` → server adds the player (rejecting if full), replies `Joined`,
-   sends the joiner a `PlayerJoined` for each existing member, then broadcasts `PlayerJoined` for
-   the new player to everyone else.
-3. **Start:** once member count reaches the game's `MinPlayers`, the server marks the lobby
-   `Started` and broadcasts `GameStarting` (with `hostId` and the full roster) to all members.
+### Create / join a lobby (control)
+`CreateLobby` makes a lobby (creator = host). `JoinLobby` adds the player, seeds them the roster,
+announces them to others. Once `MinPlayers` is reached the server marks the lobby `Started` and
+broadcasts `GameStarting` to all members.
+
+### Entering the game (control → data)
+On `GameStarting` the shell calls `RequestGameTicket`, receives a scoped ticket, and embeds the
+game iframe **on the game origin** at `…/games/{id}/{entry}?kbTicket=…&kbEndpoint=wss://host:5115/ws`.
+The game's `knockbox.js` reads the ticket, opens its **own** data socket, sends `Attach`, and gets
+`Ready`.
 
 ### In-game relay (host-authoritative)
 ```
-guest click ─Relay{to:host}→ server ─→ host
+guest intent ─Game{to:host}→ server ─→ host game socket
 host validates & updates state
-host ─Relay{to:all}→ server ─→ every member (incl. host) renders
+host ─Game{to:all}→ server ─→ every member's game socket renders
 ```
-The server is a blind pipe; the host's browser is the source of truth. The host's own moves take
-the same `to:"host"` loopback path, so there is a single code path for all input.
+The server is a blind pipe routing by the bound connection; the host's browser is the source of
+truth.
 
 ### Disconnect & reconnect
-- On socket close the server removes the player from its lobby, broadcasts `PlayerLeft`, and
-  deletes the lobby if it became empty.
-- A reconnecting client sends `Hello` then `Rejoin{lobbyId}` (from `sessionStorage`). If the lobby
-  still exists the player is re-added and re-sent `GameStarting`; otherwise it gets `RejoinFailed`
-  and returns to the lobby browser. Because the server keeps no game state, the **game client**
-  re-syncs after rejoining (e.g., a guest asks the host for the current state).
+- Closing the **control** socket removes the player from its lobby, broadcasts `PlayerLeft` (and
+  `GamePlayerLeft` to game sockets), and deletes the lobby if empty.
+- The **data** socket reconnects on drop and re-`Attach`es with the same session ticket (re-validated
+  against live membership). Because the server keeps no game state, the game client re-syncs (a
+  guest asks the host for current state).
 
 ---
 
-## 6. The platform shell (`web/`)
+## 6. The two browser origins
 
-The browser side has two parts, both served from the site root (same origin as `/ws`):
+For isolation, the **shell** and **games** are served from different origins (a second port in dev,
+a subdomain in prod):
 
-- **`shell.js` / `index.html`** — the platform shell. It owns the single WebSocket, identity
-  (per-tab, in `sessionStorage`), the lobby browser, and a waiting room. When a game starts it
-  embeds the game in a same-origin `<iframe src="/games/{gameId}/{entry}">` and **bridges** between
-  the iframe and the socket: `postMessage` from the game becomes a `Relay` envelope; inbound
-  `Relay` payloads are `postMessage`d into the iframe.
-- **`knockbox.js`** — the game-facing SDK loaded *inside* each game's iframe. The game calls it
-  instead of touching the socket. See the developer guide.
+- **Shell origin** — `web/shell.js` + `index.html`. Owns the single **control** socket, identity
+  (per-tab token in `sessionStorage`), the lobby browser, and the waiting room. When a game starts
+  it requests a ticket and embeds the game iframe on the game origin. It does **not** bridge
+  gameplay — there is no `postMessage` relay; the game talks to the server directly.
+- **Game origin** — serves each game's build under `/games/{id}/…` plus `knockbox.js`. The SDK opens
+  the game's own data socket using the ticket from its URL.
+
+Because the game is a separate origin, it **cannot** read the shell's `sessionStorage` (the identity
+token), DOM, or socket — yet it keeps a real origin, so engine storage (IndexedDB) and per-origin
+COOP/COEP work normally. Identity (shell) and gameplay (game) are cleanly separated; the game only
+ever holds a lobby-scoped ticket.
 
 ```
-┌────────────────────── browser tab ──────────────────────┐
-│  shell.js  ──(WebSocket /ws)──►  KnockBox.Server         │
-│     ▲  │                                                 │
-│  postMessage (same-origin bridge)                        │
-│     │  ▼                                                 │
-│  <iframe> game  ──uses──►  /knockbox.js                  │
-└──────────────────────────────────────────────────────────┘
+┌── shell origin ──────────────┐        ┌── game origin ───────────────┐
+│ shell.js ─(control /ws)─► server      │ iframe + knockbox.js          │
+│   requests ticket, embeds ──┼──────────►  ─(data /ws, Attach ticket)─► server
+└──────────────────────────────┘        └──────────────────────────────┘
 ```
-
-Identity lives in `sessionStorage`, which is **per-tab**, so two tabs in one browser are two
-distinct players — convenient for local testing.
 
 ---
 
 ## 7. Static file serving
 
-| URL | Source | Notes |
+| URL (origin) | Source | Notes |
 |---|---|---|
-| `/` , `/shell.js` , `/knockbox.js` | `web/` | Platform shell + SDK. |
-| `/games/{gameId}/…` | `games/{gameId}/…` | Each game's HTML5 build and thumbnail. `GAME.json` lives here too but is read server-side, not relied upon by clients. |
+| `/`, `/shell.js`, `/knockbox.js` (shell origin) | `web/` | Platform shell + SDK. |
+| `/games/{id}/thumb…` (shell origin) | `games/{id}/…` | Thumbnails for the lobby browser. |
+| `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
 
-Files are read from disk per request, so editing shell/SDK/game files does not require a server
-rebuild — only C# changes do.
+Files are read from disk per request, and the catalog hot-reloads, so adding/editing a game needs no
+rebuild and no restart — only C# changes do.
 
 ---
 
-## 8. Statelessness, deferred work, and scaling
+## 8. Statelessness, concurrency, and deferred work
 
-The only state the server holds is **in memory**: the game catalog, active lobbies, and live
-connections. There is no recovery layer — a crash drops everything, and clients fall back to the
-lobby browser.
+**State** is in memory only: the game catalog, active lobbies, live connections. A crash drops
+everything; clients fall back to the lobby browser.
 
-Intentionally **not** built in this skeleton (future work):
+**Concurrency** is multithreaded and partitioned: each socket runs an independent async task (no
+global lock), shared maps are `ConcurrentDictionary`, per-lobby state is lock-guarded with snapshot
+reads, and each connection's outbound is a bounded single-reader channel. Separate lobbies never
+contend, so it scales to many concurrent lobbies within one process.
 
-- Protobuf wire format (currently JSON), real authentication (the `playerId` is trusted).
-- Server-authoritative game logic / anti-cheat, fixed-rate tick loops, client prediction.
-- Multi-server scale-out (e.g., a lobby-per-grain actor model) — today all state is single-process.
-- Plugin sandboxing/hot-reload, COOP/COEP headers for threaded-WASM engine exports, persistent
-  match history.
+Intentionally **not** built (future work):
+
+- Real accounts/login (identity is anonymous; the signed token prevents spoofing, not sybils).
+- Multi-server scale-out (today all state is single-process; would need sticky lobby routing + a
+  backplane). Binary wire format (protobuf) for high-tick games.
+- Server-authoritative game logic / anti-cheat; host migration; persistent match history.
+- **Full cross-origin isolation for threaded engine exports.** The platform serves COOP/COEP per
+  game (`crossOriginIsolated`), but a cross-origin iframe is only truly isolated if the **shell**
+  page is also served cross-origin-isolated and the iframe carries `allow="cross-origin-isolated"`.
+  Single-threaded exports work today without any of this.
 
 ---
 
@@ -252,9 +228,10 @@ Intentionally **not** built in this skeleton (future work):
 ```bash
 # From the repo root:
 dotnet run --project KnockBox.Server --launch-profile http
-# → serves http://localhost:5114
+# → shell at http://localhost:5114, games at http://localhost:5115
 ```
 
-On startup you should see a log line confirming discovery, e.g.
-`Discovered game 'tictactoe' (Tic-Tac-Toe)`. Open `http://localhost:5114/` in two tabs (each tab is
-a separate player), create a lobby in one, and join it from the other.
+On startup you should see `Discovered game 'tictactoe' (Tic-Tac-Toe)` and
+`Watching … for game changes (hot-reload enabled)`. Open `http://localhost:5114/` in two tabs (each
+tab is a separate player), create a lobby in one, and join it from the other. Drop a new game folder
+into `games/` and it appears within a second or two — no restart.
