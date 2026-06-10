@@ -3,37 +3,62 @@ using System.Text.Json;
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
+using KnockBox.Server.Security;
 
 namespace KnockBox.Server.Networking;
 
 /// <summary>
-/// Owns a single client's WebSocket lifecycle: identity handshake, message routing, and
-/// host-authoritative relay. The server never inspects relayed game payloads — it only routes them.
+/// Owns a single client's WebSocket lifecycle. One <c>/ws</c> endpoint serves two roles, chosen by
+/// the first frame:
+/// <list type="bullet">
+/// <item><b>Control</b> (first frame <see cref="HelloMessage"/>) — the shell: identity handshake,
+/// discovery, lobby ops, and issuing game tickets.</item>
+/// <item><b>Data</b> (first frame <see cref="AttachMessage"/>) — a game iframe (separate origin):
+/// authenticates with a scoped ticket, binds to its lobby, then exchanges opaque game messages.
+/// The server resolves routing from the bound connection — the game never names a lobby.</item>
+/// </list>
+/// The server never inspects game payloads — it only routes them.
 /// </summary>
 public sealed class WebSocketHandler(
     ConnectionManager connections,
     LobbyManager lobbies,
     GameCatalog catalog,
+    TokenService tokens,
     ILogger<WebSocketHandler> logger)
 {
-    public async Task HandleAsync(WebSocket socket, CancellationToken ct)
+    public async Task HandleAsync(WebSocket socket, string gameOrigin, CancellationToken ct)
     {
-        // ── Identity handshake: first frame must be Hello ──
         var first = await ReceiveMessageAsync(socket, ct);
-        if (first is not HelloMessage hello)
+        switch (first)
         {
-            await socket.CloseAsync(WebSocketCloseStatus.ProtocolError, "Expected Hello", ct);
-            return;
+            case HelloMessage hello:
+                await RunControlAsync(socket, hello, gameOrigin, ct);
+                break;
+            case AttachMessage attach:
+                await RunDataAsync(socket, attach, ct);
+                break;
+            default:
+                await socket.CloseAsync(WebSocketCloseStatus.ProtocolError, "Expected Hello or Attach", ct);
+                break;
         }
+    }
 
-        var playerId = string.IsNullOrWhiteSpace(hello.PlayerId) ? Guid.NewGuid().ToString("N") : hello.PlayerId;
+    // ── Control role (the shell) ──────────────────────────────────────────────
+    private async Task RunControlAsync(WebSocket socket, HelloMessage hello, string gameOrigin, CancellationToken ct)
+    {
+        // Identity is unforgeable: a claimed id is only honoured if its signed token verifies;
+        // otherwise we mint a fresh anonymous id. First-time clients arrive with no token.
+        var playerId = tokens.TryVerifyIdentity(hello.Token, out var verified)
+            ? verified
+            : Guid.NewGuid().ToString("N");
         var displayName = string.IsNullOrWhiteSpace(hello.DisplayName) ? "Player" : hello.DisplayName;
         var connection = new Connection(playerId, displayName, socket);
 
         connections.Add(connection);
         var sendLoop = connection.SendLoopAsync(ct);
-        connection.Send(ConnectionManager.Serialize(new WelcomeMessage(playerId)));
-        logger.LogInformation("Player {PlayerId} ({Name}) connected", playerId, displayName);
+        connection.Send(ConnectionManager.Serialize(
+            new WelcomeMessage(playerId, tokens.IssueIdentity(playerId), gameOrigin)));
+        logger.LogInformation("Player {PlayerId} ({Name}) connected (control)", playerId, displayName);
 
         try
         {
@@ -41,22 +66,22 @@ public sealed class WebSocketHandler(
             {
                 var message = await ReceiveMessageAsync(socket, ct);
                 if (message is null) break; // close frame
-                Dispatch(connection, message);
+                DispatchControl(connection, message);
             }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { logger.LogDebug(ex, "Socket dropped for {PlayerId}", playerId); }
+        catch (WebSocketException ex) { logger.LogDebug(ex, "Control socket dropped for {PlayerId}", playerId); }
         finally
         {
             LeaveCurrentLobby(connection);
             connections.Remove(connection);
             connection.CompleteOutbound();
             await sendLoop;
-            logger.LogInformation("Player {PlayerId} disconnected", playerId);
+            logger.LogInformation("Player {PlayerId} disconnected (control)", playerId);
         }
     }
 
-    private void Dispatch(Connection conn, Message message)
+    private void DispatchControl(Connection conn, Message message)
     {
         switch (message)
         {
@@ -84,12 +109,12 @@ public sealed class WebSocketHandler(
                 LeaveCurrentLobby(conn);
                 break;
 
-            case RelayMessage m:
-                HandleRelay(conn, m);
+            case RequestGameTicketMessage m:
+                HandleRequestGameTicket(conn, m);
                 break;
 
             default:
-                logger.LogDebug("Ignoring unexpected message {Type} from {PlayerId}", message.GetType().Name, conn.PlayerId);
+                logger.LogDebug("Ignoring unexpected control message {Type} from {PlayerId}", message.GetType().Name, conn.PlayerId);
                 break;
         }
     }
@@ -147,8 +172,10 @@ public sealed class WebSocketHandler(
             foreach (var member in lobby.Players.Where(p => p.Id != conn.PlayerId))
                 conn.Send(ConnectionManager.Serialize(new PlayerJoinedMessage(lobby.Id, member)));
 
-            Broadcast(lobby, new PlayerJoinedMessage(lobby.Id, new Player(conn.PlayerId, conn.DisplayName)),
-                exceptPlayerId: conn.PlayerId);
+            var player = new Player(conn.PlayerId, conn.DisplayName);
+            Broadcast(lobby, new PlayerJoinedMessage(lobby.Id, player), exceptPlayerId: conn.PlayerId);
+            // Mid-game joins: also tell the other members' game sockets so in-game rosters update.
+            BroadcastToGame(lobby, new GamePlayerJoinedMessage(player), exceptPlayerId: conn.PlayerId);
         }
 
         // Start once enough players are present. Rejoin re-sends GameStarting so the client re-enters.
@@ -162,34 +189,103 @@ public sealed class WebSocketHandler(
         }
     }
 
-    private void HandleRelay(Connection conn, RelayMessage m)
+    private void HandleRequestGameTicket(Connection conn, RequestGameTicketMessage m)
     {
         var lobby = lobbies.Get(m.LobbyId);
+        if (lobby is null || !lobby.Contains(conn.PlayerId))
+        {
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "Not a member of that lobby")));
+            return;
+        }
+
+        var ticket = tokens.IssueTicket(conn.PlayerId, lobby.Id, lobby.GameId);
+        conn.Send(ConnectionManager.Serialize(new GameTicketMessage(m.Cid, ticket)));
+    }
+
+    // ── Data role (a game iframe's own socket) ────────────────────────────────
+    private async Task RunDataAsync(WebSocket socket, AttachMessage attach, CancellationToken ct)
+    {
+        if (!tokens.TryVerifyTicket(attach.Ticket, out var playerId, out var lobbyId, out _))
+        {
+            await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Invalid ticket", ct);
+            return;
+        }
+
+        // Re-validate against live membership: a ticket only works while the player is still in the
+        // lobby (so it survives reconnects but fails once they've left or the lobby is gone).
+        var lobby = lobbies.Get(lobbyId);
+        if (lobby is null || !lobby.Contains(playerId))
+        {
+            await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Lobby membership expired", ct);
+            return;
+        }
+
+        var displayName = lobby.Players.FirstOrDefault(p => p.Id == playerId)?.DisplayName ?? "Player";
+        var connection = new Connection(playerId, displayName, socket) { LobbyId = lobbyId };
+
+        connections.AddGame(connection);
+        var sendLoop = connection.SendLoopAsync(ct);
+        connection.Send(ConnectionManager.Serialize(
+            new ReadyMessage(playerId, lobby.Players, IsHost: playerId == lobby.HostId)));
+        logger.LogInformation("Player {PlayerId} attached game socket to lobby {LobbyId}", playerId, lobbyId);
+
+        try
+        {
+            while (socket.State == WebSocketState.Open)
+            {
+                var message = await ReceiveMessageAsync(socket, ct);
+                if (message is null) break;
+                if (message is GameMessage gm) HandleGameMessage(connection, gm);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException ex) { logger.LogDebug(ex, "Game socket dropped for {PlayerId}", playerId); }
+        finally
+        {
+            connections.RemoveGame(connection);
+            connection.CompleteOutbound();
+            await sendLoop;
+            logger.LogInformation("Player {PlayerId} detached game socket", playerId);
+        }
+    }
+
+    private void HandleGameMessage(Connection conn, GameMessage m)
+    {
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
         if (lobby is null || !lobby.Contains(conn.PlayerId)) return; // not a member; drop silently
 
-        var outbound = m with { From = conn.PlayerId };
-        var bytes = ConnectionManager.Serialize(outbound);
+        var bytes = ConnectionManager.Serialize(m with { From = conn.PlayerId });
 
         switch (m.To)
         {
             case "all":
-                foreach (var p in lobby.Players) connections.SendRawTo(p.Id, bytes);
+                foreach (var p in lobby.Players) connections.SendRawToGame(p.Id, bytes);
                 break;
             case "host":
-                connections.SendRawTo(lobby.HostId, bytes);
+                connections.SendRawToGame(lobby.HostId, bytes);
                 break;
             default: // a specific playerId, only if they are in this lobby
-                if (lobby.Contains(m.To)) connections.SendRawTo(m.To, bytes);
+                if (lobby.Contains(m.To)) connections.SendRawToGame(m.To, bytes);
                 break;
         }
     }
 
+    // ── Shared lobby helpers ──────────────────────────────────────────────────
     private void Broadcast(Lobby lobby, Message message, string? exceptPlayerId = null)
     {
         var bytes = ConnectionManager.Serialize(message);
         foreach (var p in lobby.Players)
             if (p.Id != exceptPlayerId)
                 connections.SendRawTo(p.Id, bytes);
+    }
+
+    private void BroadcastToGame(Lobby lobby, Message message, string? exceptPlayerId = null)
+    {
+        var bytes = ConnectionManager.Serialize(message);
+        foreach (var p in lobby.Players)
+            if (p.Id != exceptPlayerId)
+                connections.SendRawToGame(p.Id, bytes);
     }
 
     private void LeaveCurrentLobby(Connection conn)
@@ -200,7 +296,10 @@ public sealed class WebSocketHandler(
         if (lobby is null) return;
 
         if (lobby.Remove(conn.PlayerId))
+        {
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
+            BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
+        }
 
         if (lobby.Count == 0)
         {
@@ -218,7 +317,10 @@ public sealed class WebSocketHandler(
         var lobby = lobbies.Get(prev);
         if (lobby is null) return;
         if (lobby.Remove(conn.PlayerId))
+        {
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
+            BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
+        }
         if (lobby.Count == 0) lobbies.Remove(lobby.Id);
     }
 

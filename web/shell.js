@@ -1,24 +1,23 @@
-// Platform shell — owns the single WebSocket, identity, and lobby UI, and bridges the embedded
-// game's postMessage calls to/from WebSocket relay envelopes. The HTML5 game itself only talks to
-// this shell via /knockbox.js; it never sees the socket.
+// Platform shell — owns the single CONTROL websocket, identity, and the lobby UI. When a game
+// starts it requests a one-time ticket and embeds the game in a cross-origin iframe (the game
+// origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
+// talks to the server directly. The shell and game are isolated (separate origins) on purpose.
 
-// ── Identity (client-side only) ─────────────────────────────────────────────
-// Stored in sessionStorage, which is scoped to a single tab, so every tab is a
-// distinct player even within the same browser. (Persistent cross-session identity
-// in localStorage is deferred — see plan §9.)
-function id() {
-  let v = sessionStorage.getItem('kb.playerId');
-  if (!v) { v = crypto.randomUUID().replace(/-/g, ''); sessionStorage.setItem('kb.playerId', v); }
-  return v;
-}
-function name() {
+// ── Identity (client-side) ───────────────────────────────────────────────────
+// The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
+// id) in sessionStorage — per-tab, so each tab is a distinct anonymous player — and resend it to
+// prove ownership of that id on reconnect. The token never leaves this (shell) origin; games get a
+// scoped ticket instead. (No login by design.)
+function displayNameInit() {
   let v = sessionStorage.getItem('kb.displayName');
   if (!v) { v = 'Player-' + Math.floor(1000 + Math.random() * 9000); sessionStorage.setItem('kb.displayName', v); }
   return v;
 }
 
-let playerId = id();
-let displayName = name();
+let playerId = null;                                  // assigned by the server (Welcome)
+let token = sessionStorage.getItem('kb.token');       // signed identity token (anti-spoof)
+let displayName = displayNameInit();
+let gameOrigin = location.origin;                     // where game iframes/sockets live (from Welcome)
 
 const el = (id) => document.getElementById(id);
 const setStatus = (t) => { el('status').textContent = t; };
@@ -27,18 +26,17 @@ const setStatus = (t) => { el('status').textContent = t; };
 let ws = null;
 let games = new Map();          // gameId -> manifest
 let lobby = null;               // { lobbyId, gameId, hostId, players: [] } once in a game
-let gameLoaded = false;         // iframe announced ready?
 const pending = new Map();      // cid -> resolver
 let cidSeq = 0;
 
-// ── WebSocket plumbing ───────────────────────────────────────────────────────
+// ── WebSocket plumbing (control plane) ────────────────────────────────────────
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => {
     el('conn').textContent = 'online';
-    send({ type: 'Hello', playerId, displayName });
+    send({ type: 'Hello', displayName, token });
   };
   ws.onclose = () => {
     el('conn').textContent = 'offline — reconnecting…';
@@ -69,6 +67,9 @@ function handle(msg) {
   switch (msg.type) {
     case 'Welcome':
       playerId = msg.playerId;
+      token = msg.token;
+      sessionStorage.setItem('kb.token', token);
+      gameOrigin = msg.gameOrigin || gameOrigin;
       tryRejoin();
       refreshGames();
       refreshLobbies();
@@ -78,7 +79,6 @@ function handle(msg) {
         if (!lobby.players.some((p) => p.id === msg.player.id)) lobby.players.push(msg.player);
         renderRoster();
         updateWaiting();
-        forwardToGame({ kb: true, kind: 'playerJoined', player: msg.player, players: lobby.players });
       }
       break;
     case 'PlayerLeft':
@@ -86,14 +86,10 @@ function handle(msg) {
         lobby.players = lobby.players.filter((p) => p.id !== msg.playerId);
         renderRoster();
         updateWaiting();
-        forwardToGame({ kb: true, kind: 'playerLeft', playerId: msg.playerId, players: lobby.players });
       }
       break;
     case 'GameStarting':
       enterGame(msg);
-      break;
-    case 'Relay':
-      forwardToGame({ kb: true, kind: 'relay', from: msg.from, payload: msg.payload });
       break;
     case 'Error':
       setStatus('⚠ ' + msg.reason);
@@ -160,8 +156,7 @@ async function createLobby(gameId) {
 }
 
 async function joinLobby(lobbyId, gameId) {
-  // Enter the room optimistically so pushes (PlayerJoined/GameStarting) have a lobby to attach to,
-  // and the user immediately sees they're in a room rather than "nothing happening".
+  // Enter the room optimistically so pushes (PlayerJoined/GameStarting) have a lobby to attach to.
   lobby = { lobbyId, gameId, hostId: null, players: [{ id: playerId, displayName }] };
   showRoom();
   const reply = await request('JoinLobby', { lobbyId });
@@ -200,8 +195,8 @@ function updateWaiting() {
   el('waiting').textContent = `Waiting for players… (${lobby.players.length}/${min})`;
 }
 
-// ── In-game (iframe + bridge) ────────────────────────────────────────────────
-function enterGame(starting) {
+// ── In-game: embed the game on its own origin and hand it a scoped ticket ─────
+async function enterGame(starting) {
   const manifest = games.get(starting.gameId);
   lobby = {
     lobbyId: starting.lobbyId,
@@ -209,18 +204,26 @@ function enterGame(starting) {
     hostId: starting.hostId,
     players: starting.players.slice(),
   };
-  gameLoaded = false;
 
   el('game-title').textContent = manifest ? manifest.name : starting.gameId;
   el('lobby-code').textContent = starting.lobbyId;
   renderRoster();
 
+  // One-time, lobby-scoped credential for the game's own data socket. The game never sees our token.
+  const reply = await request('RequestGameTicket', { lobbyId: starting.lobbyId });
+  if (reply.type !== 'GameTicket') { setStatus('⚠ ' + (reply.reason || 'Could not start game')); return; }
+
   const entry = manifest ? manifest.entry : 'index.html';
+  const wsEndpoint = gameOrigin.replace(/^http/, 'ws') + '/ws';
+  const src = `${gameOrigin}/games/${starting.gameId}/${entry}`
+    + `?kbTicket=${encodeURIComponent(reply.ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
+
   el('waiting').style.display = 'none';
   el('frame-host').innerHTML = '';
   const frame = document.createElement('iframe');
-  frame.src = `/games/${starting.gameId}/${entry}`;
+  frame.src = src;
   frame.id = 'game-frame';
+  if (manifest && manifest.crossOriginIsolated) frame.allow = 'cross-origin-isolated';
   el('frame-host').appendChild(frame);
 
   el('game-view').style.display = 'block';
@@ -242,34 +245,6 @@ function renderRoster() {
     .map((p) => `<span class="${p.id === lobby.hostId ? 'host' : ''}">${p.displayName}</span>`)
     .join('');
 }
-
-function frame() { return document.getElementById('game-frame'); }
-
-function forwardToGame(msg) {
-  const f = frame();
-  if (f && f.contentWindow) f.contentWindow.postMessage(msg, location.origin);
-}
-
-function sendInit() {
-  forwardToGame({
-    kb: true, kind: 'init',
-    playerId, players: lobby.players, isHost: playerId === lobby.hostId, lobbyId: lobby.lobbyId,
-  });
-}
-
-// Messages coming up from the embedded game.
-window.addEventListener('message', (e) => {
-  if (e.origin !== location.origin) return;
-  const msg = e.data;
-  if (!msg || msg.kb !== true) return;
-
-  if (msg.kind === 'gameLoaded') {
-    gameLoaded = true;
-    sendInit();
-  } else if (msg.kind === 'relay' && lobby) {
-    send({ type: 'Relay', lobbyId: lobby.lobbyId, to: msg.to, payload: msg.payload });
-  }
-});
 
 // ── UI wiring ────────────────────────────────────────────────────────────────
 el('name').value = displayName;

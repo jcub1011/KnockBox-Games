@@ -1,7 +1,7 @@
 # KnockBox Games — Game Developer Guide
 
-How to build a multiplayer HTML5 game that runs on the KnockBox platform and talks to other
-players over the server's networking.
+How to build a multiplayer game (hand-written HTML5, or a Godot / Unity / engine web export) that
+runs on the KnockBox platform and talks to other players over the server's networking.
 
 > For how the platform works under the hood, see **[INFRASTRUCTURE.md](./INFRASTRUCTURE.md)**.
 
@@ -13,14 +13,20 @@ A game is a **folder of static files** — an HTML5 build plus a small manifest.
 platform's `games/` directory and it becomes playable; there is **no server-side code to write and
 nothing to compile into the server**.
 
-Your game runs inside an `<iframe>` on the platform shell. It does **not** open its own WebSocket or
-deal with lobbies, identity, or connection management. Instead it uses the **`KnockBox` JavaScript
-API** to exchange messages with the other players in its lobby. The platform shell owns the single
-socket and bridges your messages to/from the server.
+Your game runs inside an `<iframe>` served from the platform's **game origin** (a separate origin
+from the shell, for isolation). It uses the **`KnockBox` client library**, which opens its **own
+WebSocket** to the server and exchanges messages with the other players. You never see the socket
+URL, a lobby id, or the player's identity token — the library reads a one-time **ticket** from its
+page URL, authenticates with it, and the **server resolves all routing from your connection**. You
+just send and receive messages.
 
-Key consequence: **the server is a blind relay.** It forwards your messages between players but
-never reads or validates them. Game rules are your responsibility, and they run on the **host**
-(see §5).
+Key consequences:
+
+- **The server is a blind relay.** It forwards your messages between the players in your lobby but
+  never reads or validates them. Game rules are your responsibility, and they run on the **host**
+  (see §5).
+- **You never name a lobby.** You send to roles (`host`, everyone, a specific player); the server
+  knows which lobby your connection belongs to.
 
 ---
 
@@ -33,19 +39,20 @@ games/
    ├─ index.html          # your entry page (name set by "entry")
    ├─ game.js             # your code (any structure you like)
    ├─ thumb.svg           # thumbnail shown in the game list (optional)
-   └─ … any other assets (images, wasm, css) …
+   └─ … any other assets (images, wasm, data) …
 ```
 
 ### `GAME.json`
 
 ```jsonc
 {
-  "id": "your-game-id",      // unique key; MUST match the folder name
-  "name": "Your Game",       // shown in the lobby browser
-  "entry": "index.html",     // the HTML file loaded in the iframe
-  "thumbnail": "thumb.svg",  // optional; served from your folder
-  "minPlayers": 2,           // a lobby starts once this many players join
-  "maxPlayers": 2            // joins are rejected beyond this
+  "id": "your-game-id",        // unique key; MUST match the folder name
+  "name": "Your Game",         // shown in the lobby browser
+  "entry": "index.html",       // the HTML file loaded in the iframe
+  "thumbnail": "thumb.svg",    // optional; served from your folder
+  "minPlayers": 2,             // a lobby starts once this many players join
+  "maxPlayers": 2,             // joins are rejected beyond this
+  "crossOriginIsolated": false // set true ONLY for threaded engine exports (see §11)
 }
 ```
 
@@ -57,9 +64,10 @@ games/
 | `thumbnail` | — | Path (relative to your folder) to an image for the game card. |
 | `minPlayers` | ✅ | The platform fires "game starting" when the lobby reaches this count. |
 | `maxPlayers` | ✅ | The platform refuses joins past this count. |
+| `crossOriginIsolated` | — | `true` makes the platform serve your game with COOP/COEP so a **threaded** Godot/Unity export can use `SharedArrayBuffer`. Leave `false` for hand-written games and single-threaded exports. |
 
-The server reads `GAME.json` **once at startup**. After adding or changing a game, restart the
-server (there is no hot-reload yet).
+The catalog **hot-reloads**: drop in, edit, or remove a game folder and the change is picked up
+within a second or two — **no server restart**.
 
 ---
 
@@ -79,7 +87,9 @@ The SDK is served by the platform at a fixed, absolute path. Reference it from y
 </html>
 ```
 
-`window.KnockBox` is available to your scripts after `/knockbox.js` loads.
+`window.KnockBox` is available after `/knockbox.js` loads. On load it reads a one-time ticket from
+its own page URL (the platform put it there) and opens the data socket automatically — **don't strip
+the query string** from your entry URL.
 
 ---
 
@@ -92,13 +102,12 @@ The SDK is served by the platform at a fixed, absolute path. Reference it from y
 | `KnockBox.playerId` | `string` | Your player's id in this session. |
 | `KnockBox.players` | `{ id, displayName }[]` | Everyone in the lobby. **Order is stable and shared by all clients** — index 0 is the host/creator. Use it to assign seats/roles. |
 | `KnockBox.isHost` | `boolean` | True if *you* are the authoritative host. |
-| `KnockBox.lobbyId` | `string` | The lobby code. |
 
 ### Lifecycle callbacks
 
 | Method | Fires when | Argument |
 |---|---|---|
-| `KnockBox.onReady(cb)` | The platform has handed you identity + roster. Start here. | `{ playerId, players, isHost, lobbyId }` |
+| `KnockBox.onReady(cb)` | The data socket attached and the server handed you identity + roster. Start here. | `{ playerId, players, isHost }` |
 | `KnockBox.onMessage(cb)` | A relayed message arrives for you. | `{ from, payload }` |
 | `KnockBox.onPlayerJoined(cb)` | A player joins the lobby. | the new `player` |
 | `KnockBox.onPlayerLeft(cb)` | A player leaves/disconnects. | their `playerId` |
@@ -111,8 +120,8 @@ The SDK is served by the platform at a fixed, absolute path. Reference it from y
 | `KnockBox.sendToAll(payload)` | Everyone in the lobby, including yourself (use by the host for **state**). |
 | `KnockBox.sendTo(playerId, payload)` | One specific player (use for **hidden information**). |
 
-`payload` is any JSON-serializable value you define. The platform wraps it in the transport
-envelope and stamps the sender; you receive it as `{ from, payload }`.
+`payload` is any JSON-serializable value you define. The server stamps the sender; you receive it as
+`{ from, payload }`. There is **no lobby parameter** — routing is resolved from your connection.
 
 ---
 
@@ -195,18 +204,6 @@ KnockBox.onMessage(({ from, payload }) => {
   if (payload.kind === 'move') applyMove(from, payload.cell); // validate + mutate
   broadcastState();                        // always re-broadcast (even after an illegal move)
 });
-
-function applyMove(fromId, cell) {
-  if (winner || fromId !== next) return;            // game over / not your turn
-  if (cell < 0 || cell > 8 || board[cell] !== 0) return; // out of range / occupied
-  board[cell] = markOf(fromId);
-  winner = computeWinner();
-  if (!winner) next = players.find(p => p.id !== fromId).id;
-}
-
-function broadcastState() {
-  KnockBox.sendToAll({ kind: 'state', board, next, winner });
-}
 ```
 
 The full file is in `games/tictactoe/` — copy it as a starting point.
@@ -217,11 +214,11 @@ The full file is in `games/tictactoe/` — copy it as a starting point.
 
 - Use `KnockBox.players` (from `onReady`) for the initial roster, and `onPlayerJoined` /
   `onPlayerLeft` to keep it current.
-- The **server keeps no game state**. When a player reconnects, the platform re-enters them into
-  the game but cannot replay the board. Handle this yourself with a **sync** message: on
-  `onReady`, a non-host client asks the host for the current state (`sendToHost({kind:'sync'})`),
-  and the host responds by re-broadcasting (`sendToAll`). Because your state messages are
-  self-contained, the rejoiner is immediately back in sync.
+- The **server keeps no game state**. If your data socket drops, the SDK reconnects and re-attaches
+  with the same session ticket, then fires `onReady` again — but it cannot replay the board. Handle
+  this with a **sync** message: on `onReady`, a non-host client asks the host for the current state
+  (`sendToHost({kind:'sync'})`) and the host re-broadcasts (`sendToAll`). Because your state
+  messages are self-contained, the rejoiner is immediately back in sync.
 - Decide what a `playerLeft` means for your game (pause, forfeit, end). Host migration is not
   provided — if the host leaves, the session effectively ends.
 
@@ -243,28 +240,56 @@ for (const p of KnockBox.players) {
 
 ---
 
-## 10. Test your game locally
+## 10. Engine exports (Godot, Unity, …)
 
-1. Put your folder in `games/your-game-id/` next to the sample.
-2. Run the server: `dotnet run --project KnockBox.Server --launch-profile http` (serves
-   `http://localhost:5114`). Confirm your game appears in the startup log.
-3. Open `http://localhost:5114/` in **two browser tabs** — each tab is a separate player
-   (identity is per-tab). Create a lobby in one, join it from the other, and play.
+The platform doesn't care how your iframe was built. Two integration routes:
 
-Static files are read per request, so you can edit your game and just reload the tabs; only the
-manifest requires a server restart to re-discover.
+- **Easiest — reuse `/knockbox.js`.** Include it in your exported `index.html` and call the same
+  `KnockBox` API from the engine's JS interop layer (Godot `JavaScriptBridge`, Unity `.jslib`).
+- **Native — speak the protocol directly.** The SDK is a thin client over a simple JSON WebSocket
+  protocol; an engine can open the socket itself (Godot's `WebSocketPeer`, a Unity jslib socket).
+  Read the ticket and endpoint from your page URL (`?kbTicket=…&kbEndpoint=…`) and:
+
+  ```jsonc
+  → { "type": "Attach", "ticket": "<kbTicket>" }            // your first frame
+  ← { "type": "Ready",  "playerId": "…", "players": [ { "id": "…", "displayName": "…" } ], "isHost": true }
+  → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }   // send
+  ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }     // receive
+  ← { "type": "GamePlayerJoined", "player": { … } }
+  ← { "type": "GamePlayerLeft",   "playerId": "…" }
+  ```
+
+  Connect to `kbEndpoint` (the data socket). Reconnect with the same ticket if the socket drops.
+
+**Threaded exports** (Godot 4 with threads, Unity with threads) need `SharedArrayBuffer`, which
+requires cross-origin isolation. Set `"crossOriginIsolated": true` in `GAME.json` and the platform
+serves your game with `Cross-Origin-Opener-Policy`/`Cross-Origin-Embedder-Policy`. (Fully isolating
+a cross-origin iframe also requires the shell to be served cross-origin-isolated — see
+INFRASTRUCTURE.md §8.) **Single-threaded exports need none of this** — leave the flag `false`.
 
 ---
 
-## 11. Rules & gotchas
+## 11. Test your game locally
+
+1. Put your folder in `games/your-game-id/` next to the sample.
+2. Run the server: `dotnet run --project KnockBox.Server --launch-profile http` (shell at
+   `http://localhost:5114`, games at `http://localhost:5115`). Your game appears in the startup log
+   and in the browser within a second or two — no restart needed when you add/edit it.
+3. Open `http://localhost:5114/` in **two browser tabs** — each tab is a separate player (identity
+   is per-tab). Create a lobby in one, join it from the other, and play.
+
+Static files are read per request, so editing your game and reloading the tabs is enough.
+
+---
+
+## 12. Rules & gotchas
 
 - **Folder name must equal `id`.** Your assets are served at `/games/{id}/…`.
-- **Load the SDK from `/knockbox.js`** (absolute). Load your own files with relative paths.
+- **Load the SDK from `/knockbox.js`** (absolute). Load your own files with relative paths. Don't
+  strip the `?kbTicket=…` query string from your entry URL — the SDK needs it to attach.
 - **The server never inspects payloads.** All validation and rules are yours, on the host.
 - **Don't trust guests.** Only the host should mutate state; guests render what the host sends.
-- **Same-origin only.** Your game is served from the platform origin and communicates via the SDK's
-  `postMessage` bridge. Don't try to open your own socket to `/ws`.
+- **You never name a lobby.** Send to `host` / everyone / a player id; the server routes by your
+  connection.
 - **No server persistence.** Design state messages to be self-contained so reconnect/late-join just
   works.
-- **Engine exports (Godot/Unity/etc.)** can ship as a game folder too — call the `KnockBox` API
-  from the export's JS layer the same way. (Threaded-WASM COOP/COEP serving is not yet configured.)
