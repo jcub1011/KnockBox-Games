@@ -1,1 +1,2 @@
 # KnockBox-Games
+This is a game hosting platform that allows you to upload any HTML5 or WASM game that uses the (currently non-existent) KnockBox.Networking API to host collaborative and competitive multiplayer experiences.
