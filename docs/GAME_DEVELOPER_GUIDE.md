@@ -50,7 +50,6 @@ games/
   "name": "Your Game",         // shown in the lobby browser
   "entry": "index.html",       // the HTML file loaded in the iframe
   "thumbnail": "thumb.svg",    // optional; served from your folder
-  "minPlayers": 2,             // a lobby starts once this many players join
   "maxPlayers": 2,             // joins are rejected beyond this
   "crossOriginIsolated": false // set true ONLY for threaded engine exports (see §11)
 }
@@ -62,9 +61,12 @@ games/
 | `name` | ✅ | Display name. |
 | `entry` | ✅ | HTML file the iframe loads, relative to your folder. |
 | `thumbnail` | — | Path (relative to your folder) to an image for the game card. |
-| `minPlayers` | ✅ | The platform fires "game starting" when the lobby reaches this count. |
 | `maxPlayers` | ✅ | The platform refuses joins past this count. |
 | `crossOriginIsolated` | — | `true` makes the platform serve your game with COOP/COEP so a **threaded** Godot/Unity export can use `SharedArrayBuffer`. Leave `false` for hand-written games and single-threaded exports. |
+
+Your game **loads as soon as a player creates or joins a lobby** — there is no minimum-player gate.
+Show your own "waiting for players" UI and decide when play begins. You control who may join with
+`setLobbyOpen(true/false)` (§4); a lobby is **open** (listed + joinable) by default.
 
 The catalog **hot-reloads**: drop in, edit, or remove a game folder and the change is picked up
 within a second or two — **no server restart**.
@@ -123,6 +125,16 @@ automatically — **don't strip the fragment** from your entry URL.
 
 `payload` is any JSON-serializable value you define. The server stamps the sender; you receive it as
 `{ from, payload }`. There is **no lobby parameter** — routing is resolved from your connection.
+
+### Controlling who can join
+
+| Method | Effect |
+|---|---|
+| `KnockBox.setLobbyOpen(open)` | **Host-only.** `open: true` → the lobby is listed in the browser and accepts new joins; `false` → hidden and joins are rejected (`"Lobby is closed"`). Existing members and reconnects are unaffected. |
+
+A lobby is **open** when created. The platform never opens or closes it for you — *your game* decides
+(e.g. close once the match is full or has begun, reopen if someone leaves). Calls from non-host players
+are ignored.
 
 ---
 
@@ -213,6 +225,11 @@ The full file is in `games/tictactoe/` — copy it as a starting point.
 
 ## 8. Players joining, leaving, and reconnecting
 
+- **Your game loads the moment you enter a lobby** — the host is alone at first and others arrive
+  via `onPlayerJoined`. Don't assume a full roster in `onReady`; render a "waiting for players"
+  state and begin play when *you* decide (e.g. enough players have joined). Close the lobby with
+  `setLobbyOpen(false)` when you don't want more, and reopen it on `onPlayerLeft` if you want a
+  replacement.
 - Use `KnockBox.players` (from `onReady`) for the initial roster, and `onPlayerJoined` /
   `onPlayerLeft` to keep it current.
 - The **server keeps no game state**. If your data socket drops, the SDK reconnects and re-attaches
@@ -271,6 +288,102 @@ INFRASTRUCTURE.md §8. **Single-threaded exports need none of this** — leave t
 
 ---
 
+## 10b. Godot — use the KnockBox addon (recommended)
+
+For Godot, a maintained GDScript addon removes the boilerplate of the routes above. It is the
+**single source of truth** at `clients/godot/addons/knockbox/` (versioned with `web/knockbox.js`).
+Copy that folder into your project's `addons/`, enable the plugin, and **don't fork it** — fixes
+land there and you copy them forward. It has three layers; use as much as you want:
+
+1. **`KnockBox` autoload** — the raw transport (a `WebSocketPeer` port of the JS SDK). Signals
+   `session_ready(player_id, players, is_host)`, `message_received(from_id, payload)`,
+   `player_joined`, `player_left`, `closed(terminal)`, `resumed`; methods `send_to_host`,
+   `send_to_all`, `send_to`. On web it auto-attaches from the URL fragment; sends made before the
+   socket is open are queued and flushed on connect.
+
+2. **`KBNet`** (`kb_net.gd`) — a façade you register as an autoload named `Net`. On web it forwards
+   `KnockBox`; **in the editor it runs a built-in single-player loopback** so you press Play and
+   develop with no server and no ticket. Same signals/methods as `KnockBox` (plus a `reconnected`
+   flag and `set_lobby_open(open)` for the host's join policy), so your code is identical in both.
+   For native testing against a real server, call `Net.connect_with(ticket, endpoint)`.
+
+3. **`KBAuthority`** (`kb_authority.gd`) — *optional* host-authoritative glue. You write a **model**;
+   it runs the guest-sync / host-broadcast / late-join / reconnect loop for you (plus `set_open(open)`
+   to open/close the lobby). Model contract:
+
+   ```
+   apply_intent(from_id, action) -> Variant   # host only: mutate, return a patch to broadcast (or null to reject)
+   apply_patch(patch) -> void                 # every client applies a broadcast delta
+   snapshot() -> Dictionary                   # full state for sync / late-join / reconnect
+   apply_snapshot(state) -> void              # every client adopts a full snapshot
+   ```
+
+**Project setup.** Add two autoloads (Project Settings → Autoload), in this order:
+
+```
+KnockBox   res://addons/knockbox/knockbox.gd
+Net        res://addons/knockbox/kb_net.gd
+```
+
+Use the **GL Compatibility** renderer for broad web support.
+
+**Tic-Tac-Toe on `KBAuthority`** (the §7 game, in GDScript — the rules object is all you write):
+
+```gdscript
+# board_model.gd — pure rules, no networking.
+class_name BoardModel
+extends RefCounted
+var board := [0, 0, 0, 0, 0, 0, 0, 0, 0]
+var next_id := ""
+var winner = null            # player id, "draw", or null
+var players: Array = []
+func apply_intent(from_id, action):                 # host only
+    if action.get("kind") != "move" or winner != null: return null
+    var cell := int(action.get("cell", -1))
+    if from_id != next_id or cell < 0 or cell > 8 or board[cell] != 0: return null
+    board[cell] = 1 if from_id == players[0]["id"] else 2
+    winner = _winner()
+    if winner == null:
+        next_id = players[1]["id"] if from_id == players[0]["id"] else players[0]["id"]
+    return snapshot()                               # tiny game → broadcast the whole board
+func apply_patch(patch): apply_snapshot(patch)
+func snapshot(): return {"board": board.duplicate(), "next": next_id, "winner": winner}
+func apply_snapshot(s):
+    board = (s.get("board", board)).duplicate(); next_id = s.get("next", ""); winner = s.get("winner")
+func _winner(): ...   # standard 8-line check; "draw" if full
+```
+
+```gdscript
+# main.gd
+extends Node
+var model := BoardModel.new()
+var authority: KBAuthority
+func _ready():
+    Net.session_ready.connect(func(pid, players, is_host):
+        model.players = players
+        if is_host: model.next_id = players[0]["id"]   # host (X) goes first
+        _render())
+    authority = KBAuthority.new(); add_child(authority)
+    authority.setup(Net, model)
+    authority.state_changed.connect(_render)
+func _on_cell_pressed(cell): authority.send_intent({"kind": "move", "cell": cell})
+func _render(): pass   # draw model.board; enable a cell only when model.next_id == Net.player_id
+```
+
+That is the entire multiplayer integration — `KBAuthority` handles sync, late-join and reconnect,
+and the host's own moves loop back through the same path. (For a non-authoritative game, skip
+`KBAuthority` and use `Net`'s signals/sends directly.)
+
+**Export & ship.**
+- Export with the **standard (non-mono) Godot** editor and its Web templates. The .NET/mono Godot
+  build **cannot export to Web**, so write game logic in **GDScript**.
+- In Export → Web, leave **Thread Support off** (single-threaded) so you don't need
+  `crossOriginIsolated`.
+- Set the export so the entry file is `index.html`, then drop the output plus a `GAME.json` into
+  `games/your-id/`. The reference `DiceSimulator` project is a complete working example of this layout.
+
+---
+
 ## 11. Test your game locally
 
 1. Put your folder in `games/your-game-id/` next to the sample.
@@ -278,9 +391,15 @@ INFRASTRUCTURE.md §8. **Single-threaded exports need none of this** — leave t
    `http://localhost:5114`, games at `http://localhost:5115`). Your game appears in the startup log
    and in the browser within a second or two — no restart needed when you add/edit it.
 3. Open `http://localhost:5114/` in **two browser tabs** — each tab is a separate player (identity
-   is per-tab). Create a lobby in one, join it from the other, and play.
+   is per-tab). Create a lobby in one tab — **your game loads immediately** (you're the host, alone).
+   In the other tab the lobby shows in the browser (while it's open); join it and the second player's
+   game loads too.
 
 Static files are read per request, so editing your game and reloading the tabs is enough.
+
+**Faster solo loop:** Godot games using `KBNet` can skip the server entirely while iterating — just
+**press Play in the editor**. The built-in loopback gives you a solo host session, so UI and host
+logic run with no server, ticket, or export.
 
 ---
 

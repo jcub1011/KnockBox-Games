@@ -116,7 +116,7 @@ async function refreshGames() {
     card.innerHTML = `
       <img src="${thumb}" alt="" onerror="this.style.visibility='hidden'" />
       <div class="name">${g.name}</div>
-      <div class="muted">${g.minPlayers}–${g.maxPlayers} players</div>`;
+      <div class="muted">${g.maxPlayers === 1 ? 'Single player' : `Up to ${g.maxPlayers} players`}</div>`;
     const btn = document.createElement('button');
     btn.textContent = 'Create lobby';
     btn.onclick = () => createLobby(g.id);
@@ -191,9 +191,9 @@ function showRoom() {
 
 function updateWaiting() {
   if (!lobby) return;
-  const manifest = games.get(lobby.gameId);
-  const min = manifest ? manifest.minPlayers : 2;
-  el('waiting').textContent = `Waiting for players… (${lobby.players.length}/${min})`;
+  // The game loads as soon as you enter and shows its own waiting UI, so this is just a brief
+  // pre-iframe placeholder.
+  el('waiting').textContent = 'Loading game…';
 }
 
 // ── In-game: embed the game on its own origin and hand it a scoped ticket ─────

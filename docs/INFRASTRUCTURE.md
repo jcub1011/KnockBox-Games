@@ -104,7 +104,9 @@ anonymous id. The token is per-tab (sessionStorage) and **never leaves the shell
 → { "type": "RequestGameTicket", "cid": "c6", "lobbyId": "AB12" } ← { "type": "GameTicket", "cid":"c6", "ticket":"<scoped>" }
 → { "type": "LeaveLobby", "lobbyId": "AB12" }   // no response
 ```
-Push events (no `cid`): `PlayerJoined`, `PlayerLeft`, `GameStarting{lobbyId,gameId,hostId,players}`.
+Push events (no `cid`): `PlayerJoined`, `PlayerLeft`. `GameStarting{lobbyId,gameId,hostId,players}`
+is sent to a single player when they enter a lobby (create/join/rejoin) — it means "load the game
+now", not a min-players threshold.
 
 ### Data role (a game iframe's own socket) — first frame `Attach`
 
@@ -114,6 +116,7 @@ Push events (no `cid`): `PlayerJoined`, `PlayerLeft`, `GameStarting{lobbyId,game
 
 → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }      // game sends
 ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }        // server stamps From
+→ { "type": "SetLobbyOpen", "open": true|false }    // host-only: set the lobby's join policy
 ← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
 ```
 The server validates the ticket signature **and live lobby membership**, binds the connection to
@@ -133,9 +136,12 @@ replies `Welcome` with the (re)issued token and the game origin. The shell persi
 per-tab.
 
 ### Create / join a lobby (control)
-`CreateLobby` makes a lobby (creator = host). `JoinLobby` adds the player, seeds them the roster,
-announces them to others. Once `MinPlayers` is reached the server marks the lobby `Started` and
-broadcasts `GameStarting` to all members.
+`CreateLobby` makes a lobby (creator = host, **open** by default). `JoinLobby` adds the player, seeds
+them the roster, and announces them to others. The server has **no "started" concept** — each player
+who creates, joins, or rejoins is sent `GameStarting` (load-the-game) for themselves, so the game
+runs from the moment anyone enters. The host controls joinability with `SetLobbyOpen`: an **open**
+lobby is listed by `ListLobbies` and accepts joins; a **closed** one is hidden and rejects new joins
+(existing members and reconnects still get back in).
 
 ### Entering the game (control → data)
 On `GameStarting` the shell calls `RequestGameTicket`, receives a scoped ticket, and embeds the

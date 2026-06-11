@@ -129,18 +129,23 @@ public sealed class WebSocketHandler(
         }
 
         LeaveCurrentLobby(conn); // one lobby at a time
-        var lobby = lobbies.Create(game.Id, hostId: conn.PlayerId, game.MinPlayers, game.MaxPlayers);
+        var lobby = lobbies.Create(game.Id, hostId: conn.PlayerId, game.MaxPlayers);
         lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName));
         conn.LobbyId = lobby.Id;
 
         conn.Send(ConnectionManager.Serialize(new LobbyCreatedMessage(m.Cid, lobby.Id)));
         logger.LogInformation("Lobby {LobbyId} created for '{GameId}' by host {HostId}", lobby.Id, game.Id, conn.PlayerId);
+
+        // The game loads as soon as a player is in a lobby — the game itself owns "waiting for
+        // players" and decides when play begins. The lobby is open by default; the host closes it
+        // (SetLobbyOpen) when it should stop accepting joins.
+        SendEnterGame(conn, lobby);
     }
 
     private void HandleListLobbies(Connection conn, ListLobbiesMessage m)
     {
         var summaries = lobbies.All
-            .Where(l => !l.Started && l.Count < l.MaxPlayers)
+            .Where(l => l.Open && l.Count < l.MaxPlayers)
             .Select(l => new LobbySummary(l.Id, l.GameId, l.Count))
             .ToArray();
         conn.Send(ConnectionManager.Serialize(new LobbyListMessage(m.Cid, summaries)));
@@ -157,6 +162,14 @@ public sealed class WebSocketHandler(
         }
 
         var alreadyMember = lobby.Contains(conn.PlayerId);
+        // A fresh join needs the lobby to be open; an existing member rejoining (reconnect) is
+        // always allowed back in, regardless of the game's join policy.
+        if (!rejoin && !alreadyMember && !lobby.Open)
+        {
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(cid, "Lobby is closed")));
+            return;
+        }
+
         if (!lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName)))
         {
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(cid, "Lobby is full")));
@@ -179,15 +192,31 @@ public sealed class WebSocketHandler(
             BroadcastToGame(lobby, new GamePlayerJoinedMessage(player), exceptPlayerId: conn.PlayerId);
         }
 
-        // Start once enough players are present. Rejoin re-sends GameStarting so the client re-enters.
-        if (lobby.Count >= lobby.MinPlayers && (!lobby.Started || rejoin))
+        // Launch the game for the entering player only — existing members already have it running,
+        // and re-sending GameStarting would rebuild their iframe.
+        SendEnterGame(conn, lobby);
+    }
+
+    // Tells one connection to load the game ("enter the game now"). Sent on create, on join, and on
+    // rejoin — once per player, when they enter the lobby. The server no longer has a "started"
+    // concept; this is purely "you're in, here's what to load".
+    private void SendEnterGame(Connection conn, Lobby lobby)
+    {
+        conn.Send(ConnectionManager.Serialize(
+            new GameStartingMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players)));
+    }
+
+    private void HandleSetLobbyOpen(Connection conn, SetLobbyOpenMessage m)
+    {
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
+        if (lobby is null || conn.PlayerId != lobby.HostId)
         {
-            lobby.Started = true;
-            var starting = new GameStartingMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players);
-            if (rejoin) conn.Send(ConnectionManager.Serialize(starting));
-            else Broadcast(lobby, starting);
-            logger.LogInformation("Lobby {LobbyId} starting '{GameId}' (host {HostId})", lobby.Id, lobby.GameId, lobby.HostId);
+            logger.LogDebug("Ignoring SetLobbyOpen from non-host {PlayerId}", conn.PlayerId);
+            return;
         }
+        lobby.Open = m.Open;
+        logger.LogInformation("Lobby {LobbyId} set {State} by host", lobby.Id, m.Open ? "open" : "closed");
     }
 
     private void HandleRequestGameTicket(Connection conn, RequestGameTicketMessage m)
@@ -252,6 +281,7 @@ public sealed class WebSocketHandler(
                 var message = await ReceiveMessageAsync(socket, ct);
                 if (message is null) break;
                 if (message is GameMessage gm) HandleGameMessage(connection, gm);
+                else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
             }
         }
         catch (OperationCanceledException) { }

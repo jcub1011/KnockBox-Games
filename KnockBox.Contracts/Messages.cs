@@ -33,6 +33,7 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(AttachMessage), "Attach")]
 [JsonDerivedType(typeof(ReadyMessage), "Ready")]
 [JsonDerivedType(typeof(GameMessage), "Game")]
+[JsonDerivedType(typeof(SetLobbyOpenMessage), "SetLobbyOpen")]
 [JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
@@ -94,6 +95,10 @@ public sealed record GameStartingMessage(
 public sealed record AttachMessage(string Ticket) : Message;
 public sealed record ReadyMessage(string PlayerId, IReadOnlyList<Player> Players, bool IsHost) : Message;
 public sealed record GameMessage(string To, JsonElement Payload, string? From = null) : Message;
+// Game → server control (data role): the host sets whether the lobby accepts new joins. The server
+// owns no "started" concept — the game decides this. Open lobbies are listed/joinable; closed ones
+// are hidden from the browser and reject new joins (existing members and rejoins are unaffected).
+public sealed record SetLobbyOpenMessage(bool Open) : Message;
 public sealed record GamePlayerJoinedMessage(Player Player) : Message;
 public sealed record GamePlayerLeftMessage(string PlayerId) : Message;
 

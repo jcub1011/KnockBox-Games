@@ -50,6 +50,7 @@ function nameOf(playerId) {
 
 // ── Host authority ───────────────────────────────────────────────────────────
 function applyMove(fromId, cell) {
+  if (players.length < 2) return;           // still waiting for an opponent to join
   if (winner) return;                       // game over
   if (fromId !== next) return;              // not their turn
   if (cell < 0 || cell > 8 || board[cell] !== 0) return; // occupied / out of range
@@ -127,4 +128,25 @@ KnockBox.onMessage(({ from, payload }) => {
   // Always rebroadcast — even an illegal move yields an (unchanged) authoritative state,
   // so the offending client re-renders the real board. (Acceptance #6.)
   broadcastState();
+});
+
+// The game now loads as soon as the host creates the lobby (before an opponent joins), so the
+// roster grows live. The SDK keeps KnockBox.players current; the host closes the lobby once both
+// seats are filled and reopens it if someone leaves, and re-broadcasts so everyone re-syncs.
+KnockBox.onPlayerJoined(() => {
+  players = KnockBox.players;
+  if (isHost) {
+    if (players.length >= 2) KnockBox.setLobbyOpen(false);
+    broadcastState();
+  }
+  render();
+});
+
+KnockBox.onPlayerLeft(() => {
+  players = KnockBox.players;
+  if (isHost) {
+    if (players.length < 2) KnockBox.setLobbyOpen(true);
+    broadcastState();
+  }
+  render();
 });

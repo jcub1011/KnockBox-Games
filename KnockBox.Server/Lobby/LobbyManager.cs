@@ -14,11 +14,11 @@ public sealed class LobbyManager
 
     public Lobby? Get(string id) => _lobbies.TryGetValue(id, out var l) ? l : null;
 
-    public Lobby Create(string gameId, string hostId, int minPlayers, int maxPlayers)
+    public Lobby Create(string gameId, string hostId, int maxPlayers)
     {
         while (true)
         {
-            var lobby = new Lobby(NewId(), gameId, hostId, minPlayers, maxPlayers);
+            var lobby = new Lobby(NewId(), gameId, hostId, maxPlayers);
             if (_lobbies.TryAdd(lobby.Id, lobby)) return lobby;
         }
     }
