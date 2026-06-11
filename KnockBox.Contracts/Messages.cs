@@ -14,12 +14,11 @@ namespace KnockBox.Contracts;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(HelloMessage), "Hello")]
 [JsonDerivedType(typeof(WelcomeMessage), "Welcome")]
+[JsonDerivedType(typeof(SetNameMessage), "SetName")]
 [JsonDerivedType(typeof(ListGamesMessage), "ListGames")]
 [JsonDerivedType(typeof(GameListMessage), "GameList")]
 [JsonDerivedType(typeof(CreateLobbyMessage), "CreateLobby")]
 [JsonDerivedType(typeof(LobbyCreatedMessage), "LobbyCreated")]
-[JsonDerivedType(typeof(ListLobbiesMessage), "ListLobbies")]
-[JsonDerivedType(typeof(LobbyListMessage), "LobbyList")]
 [JsonDerivedType(typeof(JoinLobbyMessage), "JoinLobby")]
 [JsonDerivedType(typeof(JoinedMessage), "Joined")]
 [JsonDerivedType(typeof(LeaveLobbyMessage), "LeaveLobby")]
@@ -49,6 +48,11 @@ public sealed record HelloMessage(string? PlayerId, string DisplayName, string? 
 // manager changing the games port needs no client edits.
 public sealed record WelcomeMessage(string PlayerId, string Token, string GameOrigin) : Message;
 
+// The display name is bound at Hello time; the player can rename themselves later (e.g. after typing
+// a name on the home page) by sending this on the control socket — no reconnect needed. It updates
+// the connection's name used for subsequent CreateLobby/JoinLobby.
+public sealed record SetNameMessage(string DisplayName) : Message;
+
 // ── Catalog (over WebSocket) ─────────────────────────────────────────────────
 public sealed record ListGamesMessage(string Cid) : Message;
 public sealed record GameListMessage(string Cid, IReadOnlyList<GameManifest> Games) : Message;
@@ -56,10 +60,6 @@ public sealed record GameListMessage(string Cid, IReadOnlyList<GameManifest> Gam
 // ── Lobby ops (cid-correlated request/response) ──────────────────────────────
 public sealed record CreateLobbyMessage(string Cid, string GameId) : Message;
 public sealed record LobbyCreatedMessage(string Cid, string LobbyId) : Message;
-
-public sealed record ListLobbiesMessage(string Cid) : Message;
-public sealed record LobbySummary(string LobbyId, string GameId, int Players);
-public sealed record LobbyListMessage(string Cid, IReadOnlyList<LobbySummary> Lobbies) : Message;
 
 public sealed record JoinLobbyMessage(string Cid, string LobbyId) : Message;
 public sealed record JoinedMessage(string Cid, string LobbyId) : Message;

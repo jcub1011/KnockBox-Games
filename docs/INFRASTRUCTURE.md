@@ -98,7 +98,6 @@ anonymous id. The token is per-tab (sessionStorage) and **never leaves the shell
 ```jsonc
 → { "type": "ListGames",  "cid": "c1" }   ← { "type": "GameList", "cid": "c1", "games": [ … ] }
 → { "type": "CreateLobby","cid": "c2", "gameId": "tictactoe" }  ← { "type": "LobbyCreated", "cid":"c2", "lobbyId":"AB12" }
-→ { "type": "ListLobbies","cid": "c3" }   ← { "type": "LobbyList", "cid":"c3", "lobbies":[ { "lobbyId":"AB12","gameId":"tictactoe","players":1 } ] }
 → { "type": "JoinLobby",  "cid": "c4", "lobbyId": "AB12" }      ← { "type": "Joined", "cid":"c4", "lobbyId":"AB12" }
 → { "type": "Rejoin",     "cid": "c5", "lobbyId": "AB12" }      ← { "type": "RejoinFailed", "cid":"c5" }   // if gone
 → { "type": "RequestGameTicket", "cid": "c6", "lobbyId": "AB12" } ← { "type": "GameTicket", "cid":"c6", "ticket":"<scoped>" }
@@ -139,9 +138,10 @@ per-tab.
 `CreateLobby` makes a lobby (creator = host, **open** by default). `JoinLobby` adds the player, seeds
 them the roster, and announces them to others. The server has **no "started" concept** — each player
 who creates, joins, or rejoins is sent `GameStarting` (load-the-game) for themselves, so the game
-runs from the moment anyone enters. The host controls joinability with `SetLobbyOpen`: an **open**
-lobby is listed by `ListLobbies` and accepts joins; a **closed** one is hidden and rejects new joins
-(existing members and reconnects still get back in).
+runs from the moment anyone enters. There is **no lobby-listing endpoint** — players join only by
+entering a lobby code, so private lobbies stay discoverable only to those who have the code. The host
+controls joinability with `SetLobbyOpen`: an **open** lobby accepts joins by code; a **closed** one
+rejects new joins (existing members and reconnects still get back in).
 
 ### Entering the game (control → data)
 On `GameStarting` the shell calls `RequestGameTicket`, receives a scoped ticket, and embeds the

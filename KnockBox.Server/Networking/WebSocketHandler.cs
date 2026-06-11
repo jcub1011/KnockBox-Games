@@ -86,16 +86,16 @@ public sealed class WebSocketHandler(
     {
         switch (message)
         {
+            case SetNameMessage m:
+                conn.DisplayName = string.IsNullOrWhiteSpace(m.DisplayName) ? "Player" : m.DisplayName.Trim();
+                break;
+
             case ListGamesMessage m:
                 conn.Send(ConnectionManager.Serialize(new GameListMessage(m.Cid, catalog.Games.ToArray())));
                 break;
 
             case CreateLobbyMessage m:
                 HandleCreateLobby(conn, m);
-                break;
-
-            case ListLobbiesMessage m:
-                HandleListLobbies(conn, m);
                 break;
 
             case JoinLobbyMessage m:
@@ -140,15 +140,6 @@ public sealed class WebSocketHandler(
         // players" and decides when play begins. The lobby is open by default; the host closes it
         // (SetLobbyOpen) when it should stop accepting joins.
         SendEnterGame(conn, lobby);
-    }
-
-    private void HandleListLobbies(Connection conn, ListLobbiesMessage m)
-    {
-        var summaries = lobbies.All
-            .Where(l => l.Open && l.Count < l.MaxPlayers)
-            .Select(l => new LobbySummary(l.Id, l.GameId, l.Count))
-            .ToArray();
-        conn.Send(ConnectionManager.Serialize(new LobbyListMessage(m.Cid, summaries)));
     }
 
     private void HandleJoin(Connection conn, string cid, string lobbyId, bool rejoin)

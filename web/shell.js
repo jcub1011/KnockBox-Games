@@ -9,19 +9,24 @@ import { buildGameSrc, gameWsEndpoint, rosterAdd, rosterRemove } from './kb-core
 // id) in sessionStorage — per-tab, so each tab is a distinct anonymous player — and resend it to
 // prove ownership of that id on reconnect. The token never leaves this (shell) origin; games get a
 // scoped ticket instead. (No login by design.)
-function displayNameInit() {
-  let v = sessionStorage.getItem('kb.displayName');
-  if (!v) { v = 'Player-' + Math.floor(1000 + Math.random() * 9000); sessionStorage.setItem('kb.displayName', v); }
-  return v;
-}
+//
+// The display NAME, by contrast, lives in localStorage so it survives closing the browser — a
+// returning player doesn't retype it. It is read EXACTLY ONCE into the in-memory `displayName` below
+// and thereafter owned by this tab: we write on change but never re-read and never listen for the
+// cross-tab `storage` event. That isolation is deliberate — with a host tab (screen-share) and a
+// player tab open in the same browser they share the one localStorage key, so reacting to each
+// other's writes would flip a tab's name out from under the user. Last writer wins only for the
+// NEXT fresh load; live tabs keep whatever name they were given.
+//
+// Unlike a server browser, joining here is BY CODE ONLY — there is no lobby-listing endpoint, so a
+// private lobby is discoverable only to players who were given its code.
 
 let playerId = null;                                  // assigned by the server (Welcome)
-let token = sessionStorage.getItem('kb.token');       // signed identity token (anti-spoof)
-let displayName = displayNameInit();
+let token = sessionStorage.getItem('kb.token');       // signed identity token (anti-spoof), per-tab
+let displayName = localStorage.getItem('kb.displayName') || '';   // read once; empty until named
 let gameOrigin = location.origin;                     // where game iframes/sockets live (from Welcome)
 
 const el = (id) => document.getElementById(id);
-const setStatus = (t) => { el('status').textContent = t; };
 
 // Current session state.
 let ws = null;
@@ -37,6 +42,8 @@ function connect() {
 
   ws.onopen = () => {
     el('conn').textContent = 'online';
+    // Hello carries the current name (restored from sessionStorage or just typed), so the server
+    // is in sync from the first frame and after any reconnect.
     send({ type: 'Hello', displayName, token });
   };
   ws.onclose = () => {
@@ -57,6 +64,15 @@ function request(type, extra = {}) {
   });
 }
 
+// Re-announce the chosen display name without cycling the socket. The server binds the name at Hello
+// but honours SetName afterwards; sent on rename and just before create/join (WS preserves order, so
+// the server applies it before the CreateLobby/JoinLobby that follows).
+function sendName() {
+  if (ws && ws.readyState === WebSocket.OPEN && displayName.trim()) {
+    send({ type: 'SetName', displayName });
+  }
+}
+
 function handle(msg) {
   // Resolve any awaiting request first.
   if (msg.cid && pending.has(msg.cid)) {
@@ -73,7 +89,6 @@ function handle(msg) {
       gameOrigin = msg.gameOrigin || gameOrigin;
       tryRejoin();
       refreshGames();
-      refreshLobbies();
       break;
     case 'PlayerJoined':
       if (lobby && msg.lobbyId === lobby.lobbyId) {
@@ -93,7 +108,7 @@ function handle(msg) {
       enterGame(msg);
       break;
     case 'Error':
-      setStatus('⚠ ' + msg.reason);
+      showError(msg.reason || 'Something went wrong.');
       break;
     case 'RejoinFailed':
       sessionStorage.removeItem('kb.lobbyId');
@@ -102,71 +117,85 @@ function handle(msg) {
   }
 }
 
-// ── Lobby browser ──────────────────────────────────────────────────────────
+// ── Home view: name gate, game tiles (host), join-by-code ─────────────────────
+
+// The player must name themselves before hosting or joining (the old CanJoinOrCreate gate).
+function applyGate() {
+  const ok = !!displayName.trim();
+  el('join-btn').disabled = !ok;
+  document.querySelectorAll('#games .game-tile').forEach((b) => { b.disabled = !ok; });
+}
+
 async function refreshGames() {
   const reply = await request('ListGames');
   games = new Map((reply.games || []).map((g) => [g.id, g]));
   const host = el('games');
   host.innerHTML = '';
-  if (games.size === 0) host.innerHTML = '<p class="muted">No games discovered. Drop one in /games.</p>';
-  for (const g of games.values()) {
-    const card = document.createElement('div');
-    card.className = 'card';
-    const thumb = g.thumbnail ? `/games/${g.id}/${g.thumbnail}` : '';
-    card.innerHTML = `
-      <img src="${thumb}" alt="" onerror="this.style.visibility='hidden'" />
-      <div class="name">${g.name}</div>
-      <div class="muted">${g.maxPlayers === 1 ? 'Single player' : `Up to ${g.maxPlayers} players`}</div>`;
-    const btn = document.createElement('button');
-    btn.textContent = 'Create lobby';
-    btn.onclick = () => createLobby(g.id);
-    card.appendChild(btn);
-    host.appendChild(card);
+  if (games.size === 0) {
+    host.innerHTML = '<p class="games-empty">No games discovered. Drop one in /games.</p>';
+    return;
   }
+  for (const g of games.values()) {
+    const btn = document.createElement('button');
+    btn.className = 'game-tile';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', g.name);
+    if (g.thumbnail) {
+      const img = document.createElement('img');
+      img.className = 'game-tile-img game-tile-surface';
+      img.src = `/games/${g.id}/${g.thumbnail}`;
+      img.alt = '';
+      img.draggable = false;
+      img.loading = 'lazy';
+      // No tile art → fall back to the hot-pink "needs art" surface showing the name.
+      img.onerror = () => { img.replaceWith(fallbackSurface(g.name)); };
+      btn.appendChild(img);
+    } else {
+      btn.appendChild(fallbackSurface(g.name));
+    }
+    btn.onclick = () => createLobby(g.id);
+    host.appendChild(btn);
+  }
+  applyGate();
 }
 
-async function refreshLobbies() {
-  const reply = await request('ListLobbies');
-  const host = el('lobbies');
-  host.innerHTML = '';
-  const list = reply.lobbies || [];
-  if (list.length === 0) { host.innerHTML = '<p class="muted">No open lobbies.</p>'; return; }
-  for (const l of list) {
-    const game = games.get(l.gameId);
-    const row = document.createElement('div');
-    row.className = 'row';
-    row.innerHTML = `<span><code>${l.lobbyId}</code> · ${game ? game.name : l.gameId}
-      <span class="muted">(${l.players} in)</span></span>`;
-    const btn = document.createElement('button');
-    btn.textContent = 'Join';
-    btn.onclick = () => joinLobby(l.lobbyId, l.gameId);
-    row.appendChild(btn);
-    host.appendChild(row);
-  }
+function fallbackSurface(name) {
+  const div = document.createElement('div');
+  div.className = 'game-tile-surface game-tile-fallback';
+  div.textContent = name;
+  return div;
 }
 
 async function createLobby(gameId) {
+  if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
+  sendName();
   const reply = await request('CreateLobby', { gameId });
   if (reply.type === 'LobbyCreated') {
     sessionStorage.setItem('kb.lobbyId', reply.lobbyId);
     lobby = { lobbyId: reply.lobbyId, gameId, hostId: playerId, players: [{ id: playerId, displayName }] };
     showRoom();
   } else {
-    setStatus('⚠ ' + (reply.reason || 'Could not create lobby'));
+    showError(reply.reason || 'Could not create lobby.');
   }
 }
 
-async function joinLobby(lobbyId, gameId) {
-  // Enter the room optimistically so pushes (PlayerJoined/GameStarting) have a lobby to attach to.
-  lobby = { lobbyId, gameId, hostId: null, players: [{ id: playerId, displayName }] };
-  showRoom();
-  const reply = await request('JoinLobby', { lobbyId });
+async function joinByCode() {
+  const code = (el('room-code-input').value || '').trim().toUpperCase();
+  if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
+  if (!code) { showError('Please enter a valid room code.'); return; }
+  sendName();
+  // Track the target lobby so any PlayerJoined push that races ahead of GameStarting attaches, but
+  // DON'T switch to the game view yet — a wrong code must not flash the waiting screen. On success
+  // we show the room; the GameStarting that follows swaps in the iframe (it lands after this reply's
+  // continuation, so it never clobbers showRoom).
+  lobby = { lobbyId: code, gameId: null, hostId: null, players: [{ id: playerId, displayName }] };
+  const reply = await request('JoinLobby', { lobbyId: code });
   if (reply.type === 'Joined') {
     sessionStorage.setItem('kb.lobbyId', reply.lobbyId);
+    showRoom();
   } else {
     lobby = null;
-    showLobbyView();
-    setStatus('⚠ ' + (reply.reason || 'Could not join lobby'));
+    showError(reply.reason || 'Could not join lobby.');
   }
 }
 
@@ -177,16 +206,16 @@ function tryRejoin() {
 
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
 function showRoom() {
-  const manifest = games.get(lobby.gameId);
-  el('game-title').textContent = manifest ? manifest.name : lobby.gameId;
+  const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
+  el('game-title').textContent = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
   el('lobby-code').textContent = lobby.lobbyId;
   el('frame-host').innerHTML = ''; // no iframe until GameStarting
   el('waiting').style.display = 'block';
   renderRoster();
   updateWaiting();
+  document.body.classList.add('in-game');
   el('game-view').style.display = 'block';
   el('lobby-view').style.display = 'none';
-  setStatus('');
 }
 
 function updateWaiting() {
@@ -212,7 +241,7 @@ async function enterGame(starting) {
 
   // Lobby-scoped credential for the game's own data socket. The game never sees our identity token.
   const reply = await request('RequestGameTicket', { lobbyId: starting.lobbyId });
-  if (reply.type !== 'GameTicket') { setStatus('⚠ ' + (reply.reason || 'Could not start game')); return; }
+  if (reply.type !== 'GameTicket') { showError(reply.reason || 'Could not start game.'); return; }
 
   const entry = manifest ? manifest.entry : 'index.html';
   // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.
@@ -226,17 +255,17 @@ async function enterGame(starting) {
   if (manifest && manifest.crossOriginIsolated) frame.allow = 'cross-origin-isolated';
   el('frame-host').appendChild(frame);
 
+  document.body.classList.add('in-game');
   el('game-view').style.display = 'block';
   el('lobby-view').style.display = 'none';
-  setStatus('');
 }
 
 function showLobbyView() {
   lobby = null;
   el('frame-host').innerHTML = '';
+  document.body.classList.remove('in-game');
   el('game-view').style.display = 'none';
   el('lobby-view').style.display = 'block';
-  refreshLobbies();
 }
 
 function renderRoster() {
@@ -246,22 +275,53 @@ function renderRoster() {
     .join('');
 }
 
+// ── Transient error toast ─────────────────────────────────────────────────────
+function showError(message) {
+  const prev = document.querySelector('.home-error-toast');
+  if (prev) prev.remove();
+  const toast = document.createElement('div');
+  toast.className = 'home-error-toast';
+  const icon = document.createElement('span');
+  icon.className = 'home-error-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = '⚠️';
+  const text = document.createElement('span');
+  text.textContent = message;
+  toast.append(icon, text);
+  document.body.appendChild(toast);
+  // Mirror the .home-error-toast CSS animation duration (3s) then remove.
+  setTimeout(() => toast.remove(), 3000);
+}
+
 // ── UI wiring ────────────────────────────────────────────────────────────────
-el('name').value = displayName;
-el('name').onchange = (e) => {
-  displayName = e.target.value.trim() || displayName;
-  sessionStorage.setItem('kb.displayName', displayName);
-};
-el('refresh').onclick = refreshLobbies;
+const nameInput = el('player-name-input');
+nameInput.value = displayName;
+nameInput.addEventListener('input', () => {
+  displayName = nameInput.value.trim();
+  // Persist for the next browser session. This tab keeps its own in-memory name regardless of what
+  // other tabs write (no `storage` listener) — see the identity note above.
+  localStorage.setItem('kb.displayName', displayName);
+  applyGate();
+  sendName();
+});
+
+el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
+
 el('leave').onclick = () => {
   if (lobby) send({ type: 'LeaveLobby', lobbyId: lobby.lobbyId });
   sessionStorage.removeItem('kb.lobbyId');
   showLobbyView();
 };
 
-connect();
+// Room code is blurred until hovered/focused (shoulder-surf guard); click pins it open.
+const rc = el('room-code-btn');
+rc.addEventListener('mouseenter', () => rc.classList.add('revealed'));
+rc.addEventListener('mouseleave', () => { if (!rc.dataset.pinned) rc.classList.remove('revealed'); });
+rc.addEventListener('focus', () => rc.classList.add('revealed'));
+rc.addEventListener('click', () => {
+  rc.dataset.pinned = rc.dataset.pinned ? '' : '1';
+  rc.classList.toggle('revealed', !!rc.dataset.pinned);
+});
 
-// Keep the lobby browser fresh so newly created lobbies appear without manual refresh.
-setInterval(() => {
-  if (!lobby && ws && ws.readyState === WebSocket.OPEN) refreshLobbies();
-}, 3000);
+applyGate();
+connect();

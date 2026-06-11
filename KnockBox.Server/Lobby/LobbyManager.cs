@@ -10,8 +10,6 @@ public sealed class LobbyManager
 
     private readonly ConcurrentDictionary<string, Lobby> _lobbies = new(StringComparer.OrdinalIgnoreCase);
 
-    public IEnumerable<Lobby> All => _lobbies.Values;
-
     public Lobby? Get(string id) => _lobbies.TryGetValue(id, out var l) ? l : null;
 
     public Lobby Create(string gameId, string hostId, int maxPlayers)
