@@ -55,6 +55,13 @@ import {
     sendToHost(payload) { send('host', payload); },
     sendToAll(payload) { send('all', payload); },
     sendTo(playerId, payload) { send(playerId, payload); },
+
+    // Host-only: set whether the lobby accepts new joins (open = listed + joinable). The game
+    // owns this; the server never changes it on its own.
+    setLobbyOpen(open) {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'SetLobbyOpen', open: !!open }));
+    },
   };
 
   function snapshot() {

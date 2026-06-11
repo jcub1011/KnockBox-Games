@@ -1,0 +1,8 @@
+{
+  "id": "dice-simulator",
+  "name": "Dice Simulator",
+  "entry": "index.html",
+  "thumbnail": "thumb.svg",
+  "maxPlayers": 8,
+  "crossOriginIsolated": false
+}

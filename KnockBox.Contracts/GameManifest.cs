@@ -16,6 +16,5 @@ public sealed record GameManifest(
     string Name,
     string Entry,
     string? Thumbnail,
-    int MinPlayers,
     int MaxPlayers,
     bool CrossOriginIsolated = false);

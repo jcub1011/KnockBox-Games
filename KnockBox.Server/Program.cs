@@ -1,9 +1,12 @@
+using System.IO.Compression;
 using System.Net.WebSockets;
 using KnockBox.Server.Games;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using Microsoft.AspNetCore.ResponseCompression;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 using Serilog;
 
@@ -61,6 +64,23 @@ builder.Services.AddSingleton<ConnectionManager>();
 builder.Services.AddSingleton<LobbyManager>();
 builder.Services.AddSingleton<WebSocketHandler>();
 
+// Compress responses (game bundles are large). Brotli + Gzip, including the engine asset
+// types that are off the default list. Level = Fastest to bound the CPU cost of compressing
+// big payloads on the fly; combined with the ETag/Cache-Control below a client compresses an
+// unchanged asset roughly once and then revalidates with 304s. NOTE: for production scale,
+// precompressed `.br`/`.gz` next to each asset (served via content negotiation) avoids
+// per-request CPU entirely — see the plan's load-time follow-up.
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+    o.Providers.Add<BrotliCompressionProvider>();
+    o.Providers.Add<GzipCompressionProvider>();
+    o.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(
+        ["application/wasm", "application/octet-stream"]);
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+
 var app = builder.Build();
 
 // Discover games at startup, then watch the folder so dropping in (or removing) a game needs no
@@ -72,10 +92,35 @@ catalog.StartWatching();
 if (allowedOrigins.Length == 0)
     app.Logger.LogWarning("KnockBox:AllowedOrigins is empty — /ws accepts any Origin. Set it for production.");
 
+// Must precede the static-file maps (and the MapWhen branch) so it can wrap their responses.
+app.UseResponseCompression();
 app.UseWebSockets();
 
 var webFiles = new PhysicalFileProvider(webRoot);
 var gamesFiles = new PhysicalFileProvider(gamesRoot);
+
+// `.wasm` is built in (application/wasm — REQUIRED for streaming WebAssembly compilation); keep
+// the explicit `.pck`/`.data` mappings for clarity. Everything else falls through to the
+// octet-stream default below, so any engine export's assets serve with zero server edits.
+var gameContentTypes = new FileExtensionContentTypeProvider();
+gameContentTypes.Mappings[".pck"] = "application/octet-stream";
+gameContentTypes.Mappings[".data"] = "application/octet-stream";
+
+// Shared options for serving game folders (used on both the game origin and the shell origin):
+//   • ServeUnknownFileTypes + octet-stream default → no future engine asset 404s (zero-edit hosting).
+//   • Cache-Control public/must-revalidate → caches store assets and revalidate via the ETag that
+//     UseStaticFiles already emits, so unchanged builds (esp. the large .wasm) return 304 — safe
+//     even with hot-reload because filenames aren't content-hashed.
+StaticFileOptions GamesStaticOptions() => new()
+{
+    FileProvider = gamesFiles,
+    RequestPath = "/games",
+    ContentTypeProvider = gameContentTypes,
+    ServeUnknownFileTypes = true,
+    DefaultContentType = "application/octet-stream",
+    OnPrepareResponse = ctx =>
+        ctx.Context.Response.Headers.CacheControl = "public, max-age=0, must-revalidate",
+};
 
 // The single real-time transport (both origins/ports). The connection's role is decided by its
 // first frame: Hello = control (shell), Attach = data (game). See WebSocketHandler.
@@ -116,7 +161,7 @@ app.MapWhen(
             await next();
         });
         gameApp.UseStaticFiles(new StaticFileOptions { FileProvider = webFiles });   // /knockbox.js
-        gameApp.UseStaticFiles(new StaticFileOptions { FileProvider = gamesFiles, RequestPath = "/games" });
+        gameApp.UseStaticFiles(GamesStaticOptions());
     });
 
 // ── Shell origin (default port / apex host) ────────────────────────────────────
@@ -134,7 +179,7 @@ if (isolateShell)
 
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
 app.UseStaticFiles(new StaticFileOptions { FileProvider = webFiles });
-app.UseStaticFiles(new StaticFileOptions { FileProvider = gamesFiles, RequestPath = "/games" });
+app.UseStaticFiles(GamesStaticOptions());
 
 app.Run();
 

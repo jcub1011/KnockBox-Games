@@ -6,7 +6,13 @@ namespace KnockBox.Server.Tests;
 
 public class LobbyTests
 {
-    private static Lobby New(int min = 2, int max = 2) => new("ABCD", "ttt", "host", min, max);
+    private static Lobby New(int max = 2) => new("ABCD", "ttt", "host", max);
+
+    [Fact]
+    public void Open_defaults_to_true()
+    {
+        Assert.True(New().Open);
+    }
 
     [Fact]
     public void TryAdd_is_idempotent_for_an_existing_member()
@@ -51,7 +57,7 @@ public class LobbyManagerTests
 
         for (var i = 0; i < 200; i++)
         {
-            var lobby = mgr.Create("ttt", "host", 2, 2);
+            var lobby = mgr.Create("ttt", "host", 2);
             Assert.Equal(4, lobby.Id.Length);
             Assert.True(ids.Add(lobby.Id), "lobby ids must be unique");
         }
@@ -61,7 +67,7 @@ public class LobbyManagerTests
     public void Get_returns_null_for_unknown_lobby_and_after_removal()
     {
         var mgr = new LobbyManager();
-        var lobby = mgr.Create("ttt", "host", 2, 2);
+        var lobby = mgr.Create("ttt", "host", 2);
 
         Assert.NotNull(mgr.Get(lobby.Id));
         mgr.Remove(lobby.Id);
