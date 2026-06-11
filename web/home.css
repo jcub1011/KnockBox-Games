@@ -53,10 +53,11 @@ button { font-family: var(--font-primary); font-optical-sizing: auto; }
 input { font-family: var(--font-primary); font-optical-sizing: auto; }
 
 /* ── Atmospheric background (two fixed layers behind all content) ─────────── */
-/* Home: bold scrolling diagonal "candy" stripes (::before) + a static halftone
-   dot texture (::after). In-game: a calm dimmed blob glow so a loud background
-   never competes with gameplay. The Chrome-only scroll-driven dot parallax from
-   the original is intentionally dropped — the dots render static here. */
+/* Home: bold scrolling diagonal "candy" stripes (::before) + a halftone dot
+   texture (::after) that drifts as you scroll (a scroll-driven parallax bound to
+   the root scroller). In-game: a calm dimmed blob glow so a loud background never
+   competes with gameplay. The parallax needs scroll-driven animations (Chrome/
+   Edge 115+); browsers without them simply render the dots static. */
 body::before,
 body::after {
     content: "";
@@ -88,9 +89,25 @@ body:not(.in-game)::before {
 }
 
 body:not(.in-game)::after {
+    /* bottom overscan covers one loop's 198px upward rise so no gap appears */
+    inset: -96px -96px -300px -96px;
     background-image:
         radial-gradient(rgba(255, 255, 255, 0.12) 1.1px, transparent 1.6px);
     background-size: 22px 22px;
+    /* Scroll-driven parallax bound to the root scroller. Each loop maps a fixed
+       1400px of scroll (56000px / 40) to a 198px (9 × 22px) drift, so the rate is
+       constant regardless of page height and the -198px → 0 wrap is invisible.
+       Chrome/Edge 115+; browsers without scroll-driven animations show static dots. */
+    animation: dotParallax linear;
+    animation-timeline: scroll(root block);
+    animation-range: 0px 56000px;
+    animation-iteration-count: 40;
+    will-change: translate;
+}
+
+@keyframes dotParallax {
+    from { translate: 0 0; }
+    to   { translate: 0 -198px; }   /* 9 dot-cells (22px) → seamless wrap */
 }
 
 /* In-game: calm dimmed blob glow. */
@@ -807,6 +824,7 @@ body.in-game::after {
     }
     .join-card, .game-tile, .game-tile-surface { transition: none; }
     .hero-ribbon-track { animation: none; }
-    body:not(.in-game)::before { animation: none; }
+    body:not(.in-game)::before,
+    body:not(.in-game)::after { animation: none; }
     .home-error-toast { animation: none; opacity: 1; transform: translateX(-50%); }
 }
