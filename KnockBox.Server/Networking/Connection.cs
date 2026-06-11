@@ -98,4 +98,13 @@ public sealed class Connection
     }
 
     public void CompleteOutbound() => _outbound.Writer.TryComplete();
+
+    /// <summary>Forcibly tears down the socket. Unlike <see cref="CompleteOutbound"/> (which only ends
+    /// the send loop), this also unblocks the receive loop so the owning handler's cleanup runs —
+    /// used to evict a kicked player immediately.</summary>
+    public void Abort()
+    {
+        _outbound.Writer.TryComplete();
+        _socket.Abort();
+    }
 }

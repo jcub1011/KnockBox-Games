@@ -140,6 +140,12 @@ func set_lobby_open(open: bool) -> void:
 	_send_frame({"type": "SetLobbyOpen", "open": open})
 
 
+## Host-only control: remove a player from the lobby. The kick is permanent for this lobby (the
+## target cannot rejoin) and their sockets are evicted. Non-host senders are ignored by the server.
+func kick_player(player_id_: String) -> void:
+	_send_frame({"type": "KickPlayer", "targetPlayerId": player_id_})
+
+
 func _send_frame(msg: Dictionary) -> void:
 	# sort_keys=false: the server deserializes polymorphically on a "type" discriminator, which
 	# System.Text.Json requires to be the FIRST property. Godot's stringify sorts keys by default,
@@ -170,6 +176,8 @@ func _process(_delta: float) -> void:
 				var msg = JSON.parse_string(text)
 				if msg is Dictionary:
 					_handle(msg)
+				else:
+					push_warning("[KnockBox] dropping malformed (non-JSON) frame.")
 		WebSocketPeer.STATE_CLOSED:
 			var code := _socket.get_close_code()
 			var terminal := KBCore.is_terminal_close(code)
@@ -179,6 +187,8 @@ func _process(_delta: float) -> void:
 			if terminal:
 				# Invalid ticket or our lobby membership ended — retrying is pointless.
 				_stopped = true
+				_has_session = false
+				reconnected = false
 				push_warning("[KnockBox] data socket closed permanently (code %s)." % code)
 			else:
 				_schedule_reconnect()
@@ -204,8 +214,13 @@ func _schedule_reconnect() -> void:
 func _handle(msg: Dictionary) -> void:
 	match msg.get("type", ""):
 		"Ready":
-			player_id = msg.get("playerId", "")
-			players = msg.get("players", [])
+			var pid: String = msg.get("playerId", "")
+			var roster: Array = msg.get("players", [])
+			if pid == "" or roster.is_empty():
+				push_error("[KnockBox] malformed Ready (missing playerId/players); ignoring.")
+				return
+			player_id = pid
+			players = roster
 			is_host = bool(msg.get("isHost", false))
 			_attempt = 0  # healthy connection — reset backoff
 			reconnected = _has_session  # a prior session means this Ready is a resume

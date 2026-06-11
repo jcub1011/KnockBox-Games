@@ -51,6 +51,32 @@ public class MessageSerializationTests
         Assert.Equal(4, back.Payload.GetProperty("cell").GetInt32());
     }
 
+    [Fact]
+    public void KickPlayer_round_trips_with_type_first()
+    {
+        var json = JsonSerializer.Serialize<Message>(new KickPlayerMessage("p2"), Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("KickPlayer", doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("p2", doc.RootElement.GetProperty("targetPlayerId").GetString());
+
+        var back = Assert.IsType<KickPlayerMessage>(JsonSerializer.Deserialize<Message>(json, Options));
+        Assert.Equal("p2", back.TargetPlayerId);
+    }
+
+    [Fact]
+    public void Kicked_round_trips_with_type_first()
+    {
+        var json = JsonSerializer.Serialize<Message>(new KickedMessage("ABCD"), Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("Kicked", doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("ABCD", doc.RootElement.GetProperty("lobbyId").GetString());
+
+        var back = Assert.IsType<KickedMessage>(JsonSerializer.Deserialize<Message>(json, Options));
+        Assert.Equal("ABCD", back.LobbyId);
+    }
+
     [Theory]
     [InlineData(typeof(AttachMessage))]
     [InlineData(typeof(ReadyMessage))]
@@ -58,6 +84,8 @@ public class MessageSerializationTests
     [InlineData(typeof(RequestGameTicketMessage))]
     [InlineData(typeof(GamePlayerJoinedMessage))]
     [InlineData(typeof(GamePlayerLeftMessage))]
+    [InlineData(typeof(KickPlayerMessage))]
+    [InlineData(typeof(KickedMessage))]
     public void Every_new_message_type_has_a_registered_discriminator(Type messageType)
     {
         // Constructing each is overkill; we only assert the polymorphism attribute knows the subtype,

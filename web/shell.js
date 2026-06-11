@@ -110,6 +110,15 @@ function handle(msg) {
     case 'Error':
       showError(msg.reason || 'Something went wrong.');
       break;
+    case 'Kicked':
+      // The host removed us. Leave the game, forget the lobby (so we don't auto-rejoin), and say so.
+      console.info('[KnockBox shell] Kicked received for lobby', msg.lobbyId);
+      if (!lobby || msg.lobbyId === lobby.lobbyId) {
+        sessionStorage.removeItem('kb.lobbyId');
+        showLobbyView();
+        showError('You were kicked from the lobby.');
+      }
+      break;
     case 'RejoinFailed':
       sessionStorage.removeItem('kb.lobbyId');
       showLobbyView();
@@ -305,6 +314,18 @@ nameInput.addEventListener('input', () => {
   sendName();
 });
 
+// A game iframe (on the game origin) can tell us its session ended terminally — kicked, ticket
+// expired, or lobby gone — so we leave the game view even if the control-plane push was missed.
+// This only fires on a terminal socket close, never on a normal game-over (the data socket stays up).
+window.addEventListener('message', (e) => {
+  if (e.origin !== gameOrigin) return;            // only trust the game origin
+  if (e.data && e.data.kb === 'session-ended' && lobby) {
+    sessionStorage.removeItem('kb.lobbyId');
+    showLobbyView();
+    showError('The game session ended.');
+  }
+});
+
 el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
 
 el('leave').onclick = () => {
@@ -323,5 +344,6 @@ rc.addEventListener('click', () => {
   rc.classList.toggle('revealed', !!rc.dataset.pinned);
 });
 
+console.info('[KnockBox shell] loaded (kick-aware build)');
 applyGate();
 connect();

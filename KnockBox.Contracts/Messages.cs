@@ -28,11 +28,13 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(GameTicketMessage), "GameTicket")]
 [JsonDerivedType(typeof(PlayerJoinedMessage), "PlayerJoined")]
 [JsonDerivedType(typeof(PlayerLeftMessage), "PlayerLeft")]
+[JsonDerivedType(typeof(KickedMessage), "Kicked")]
 [JsonDerivedType(typeof(GameStartingMessage), "GameStarting")]
 [JsonDerivedType(typeof(AttachMessage), "Attach")]
 [JsonDerivedType(typeof(ReadyMessage), "Ready")]
 [JsonDerivedType(typeof(GameMessage), "Game")]
 [JsonDerivedType(typeof(SetLobbyOpenMessage), "SetLobbyOpen")]
+[JsonDerivedType(typeof(KickPlayerMessage), "KickPlayer")]
 [JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
@@ -81,6 +83,9 @@ public sealed record GameTicketMessage(string Cid, string Ticket) : Message;
 // ── Lobby push events (server → client, no cid) ──────────────────────────────
 public sealed record PlayerJoinedMessage(string LobbyId, Player Player) : Message;
 public sealed record PlayerLeftMessage(string LobbyId, string PlayerId) : Message;
+// Pushed to a player's CONTROL socket when the host kicks them: the shell leaves the game and
+// returns home with a clear message (distinct from a transient drop or a "lobby full" rejection).
+public sealed record KickedMessage(string LobbyId) : Message;
 public sealed record GameStartingMessage(
     string LobbyId,
     string GameId,
@@ -99,6 +104,10 @@ public sealed record GameMessage(string To, JsonElement Payload, string? From = 
 // owns no "started" concept — the game decides this. Open lobbies are listed/joinable; closed ones
 // are hidden from the browser and reject new joins (existing members and rejoins are unaffected).
 public sealed record SetLobbyOpenMessage(bool Open) : Message;
+// Game → server control (data role): the host removes a player from the lobby. Host-only; the target
+// is dropped, blocked from rejoining (a kick is permanent for this lobby), and their sockets are
+// evicted. Ignored from non-hosts or when targeting the host itself.
+public sealed record KickPlayerMessage(string TargetPlayerId) : Message;
 public sealed record GamePlayerJoinedMessage(Player Player) : Message;
 public sealed record GamePlayerLeftMessage(string PlayerId) : Message;
 

@@ -45,6 +45,31 @@ public class LobbyTests
         Assert.False(lobby.Remove("p1")); // already gone
         Assert.False(lobby.Contains("p1"));
     }
+
+    [Fact]
+    public void Kick_removes_member_and_bars_rejoin()
+    {
+        var lobby = New(max: 4);
+        var p = new Player("p1", "Ann");
+        Assert.True(lobby.TryAdd(p));
+
+        Assert.False(lobby.IsKicked("p1"));
+        Assert.True(lobby.Kick("p1"));        // was a member
+        Assert.False(lobby.Contains("p1"));
+        Assert.True(lobby.IsKicked("p1"));    // flagged so the join handler can give a clear reason
+        Assert.False(lobby.TryAdd(p));        // kicked → cannot rejoin
+        Assert.Equal(0, lobby.Count);
+    }
+
+    [Fact]
+    public void Kick_is_recorded_even_if_target_already_left()
+    {
+        var lobby = New(max: 4);
+        var p = new Player("p1", "Ann");
+
+        Assert.False(lobby.Kick("p1"));       // not currently a member
+        Assert.False(lobby.TryAdd(p));        // but the block still stands
+    }
 }
 
 public class LobbyManagerTests

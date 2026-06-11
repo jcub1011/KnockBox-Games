@@ -52,7 +52,30 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
                     continue;
                 }
 
-                if (!File.Exists(Path.Combine(dir, manifest.Entry)))
+                // Assets are served at /games/{id}/…, so the folder name must equal the id or loads 404.
+                var folderName = new DirectoryInfo(dir).Name;
+                if (!string.Equals(folderName, manifest.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning("Skipping game '{Id}': folder name '{Folder}' must match the manifest id.", manifest.Id, folderName);
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(manifest.Entry))
+                {
+                    logger.LogWarning("Skipping game '{Id}': manifest has no entry.", manifest.Id);
+                    continue;
+                }
+
+                // The entry must resolve to a file inside the game folder — never escape it (path traversal).
+                var dirFull = Path.GetFullPath(dir);
+                var entryFull = Path.GetFullPath(Path.Combine(dir, manifest.Entry));
+                var dirPrefix = dirFull.EndsWith(Path.DirectorySeparatorChar) ? dirFull : dirFull + Path.DirectorySeparatorChar;
+                if (!entryFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning("Skipping game '{Id}': entry '{Entry}' escapes the game folder.", manifest.Id, manifest.Entry);
+                    continue;
+                }
+                if (!File.Exists(entryFull))
                 {
                     logger.LogWarning("Skipping game '{Id}': entry file '{Entry}' not found.", manifest.Id, manifest.Entry);
                     continue;
