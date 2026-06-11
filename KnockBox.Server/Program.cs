@@ -143,7 +143,15 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
         ctx.Request.Scheme, ctx.Request.Host.Host, gamesPort, gamesHost, gamesOrigin);
 
     using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
-    await handler.HandleAsync(socket, gameOrigin, ctx.RequestAborted);
+    try
+    {
+        await handler.HandleAsync(socket, gameOrigin, ctx.RequestAborted);
+    }
+    catch (OperationCanceledException) { }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Unhandled error on /ws connection.");
+    }
 });
 
 // ── Game origin (separate port in dev, subdomain in prod) ──────────────────────
@@ -181,7 +189,21 @@ app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
 app.UseStaticFiles(new StaticFileOptions { FileProvider = webFiles });
 app.UseStaticFiles(GamesStaticOptions());
 
-app.Run();
+// app.Run() blocks for the server's lifetime. Guard it so an unhandled exception that would
+// otherwise terminate the process is recorded, and the log buffer is always flushed on shutdown
+// (UseSerilog assigns the static Log.Logger, so these route through the configured sinks).
+try
+{
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "KnockBox server terminated unexpectedly.");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
 
 // Sets cross-origin-isolation headers for a CrossOriginIsolated game's assets so threaded
 // Godot/Unity exports get SharedArrayBuffer. CORP: cross-origin lets the shell embed the frame.

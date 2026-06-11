@@ -1,4 +1,5 @@
 using KnockBox.Server.Security;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace KnockBox.Server.Tests;
@@ -15,7 +16,7 @@ public class TokenServiceTests
             ("KnockBox:TokenSecret", secret),
             ("KnockBox:IdentityTokenTtlHours", identityTtlHours.ToString()),
             ("KnockBox:GameTicketTtlHours", ticketTtlHours.ToString()));
-        return (new TokenService(config, clock), clock);
+        return (new TokenService(config, clock, NullLogger<TokenService>.Instance), clock);
     }
 
     [Fact]

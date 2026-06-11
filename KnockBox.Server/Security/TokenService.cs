@@ -23,12 +23,14 @@ public sealed class TokenService
 {
     private readonly byte[] _secret;
     private readonly TimeProvider _clock;
+    private readonly ILogger<TokenService> _logger;
     private readonly TimeSpan _identityTtl;
     private readonly TimeSpan _ticketTtl;
 
-    public TokenService(IConfiguration config, TimeProvider clock)
+    public TokenService(IConfiguration config, TimeProvider clock, ILogger<TokenService> logger)
     {
         _clock = clock;
+        _logger = logger;
         var configured = config["KnockBox:TokenSecret"];
         _secret = string.IsNullOrWhiteSpace(configured)
             ? RandomNumberGenerator.GetBytes(32)
@@ -91,6 +93,9 @@ public sealed class TokenService
         }
         catch (Exception ex) when (ex is JsonException or FormatException)
         {
+            // Signature already verified above, so a malformed body here is unusual (corruption or a
+            // forged-but-correctly-signed token). Not Error-worthy, but worth an audit trail.
+            _logger.LogDebug(ex, "Discarding token with a valid signature but an undecodable {Payload} payload.", typeof(T).Name);
             return false;
         }
     }
