@@ -5,6 +5,7 @@ using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using Microsoft.Extensions.FileProviders;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,8 +14,26 @@ var builder = WebApplication.CreateBuilder(args);
 var repoRoot = FindRepoRoot(builder.Environment.ContentRootPath);
 var webRoot = Path.Combine(repoRoot, "web");
 var gamesRoot = Path.Combine(repoRoot, "games");
+var logsRoot = Path.Combine(repoRoot, "logs");
 Directory.CreateDirectory(webRoot);
 Directory.CreateDirectory(gamesRoot);
+Directory.CreateDirectory(logsRoot);
+
+// Persist logs to a file that rolls once per day (knockbox-YYYYMMDD.log) while still echoing to the
+// console for dev. Daily files are retained for KnockBox:LogRetentionDays days (default 31); because
+// we roll once per day, the retained-file count equals the retained-day count. All existing
+// ILogger<T> usage routes through this unchanged.
+var logRetentionDays = builder.Configuration.GetValue("KnockBox:LogRetentionDays", 31);
+builder.Host.UseSerilog((context, services, config) => config
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services)
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .WriteTo.File(
+        Path.Combine(logsRoot, "knockbox-.log"),
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: logRetentionDays,
+        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
 
 // Games are served from a SEPARATE ORIGIN (a second port in dev, a subdomain in prod) so that
 // untrusted game code is isolated from the shell — it cannot read the shell's identity token or
