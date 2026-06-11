@@ -344,6 +344,5 @@ rc.addEventListener('click', () => {
   rc.classList.toggle('revealed', !!rc.dataset.pinned);
 });
 
-console.info('[KnockBox shell] loaded (kick-aware build)');
 applyGate();
 connect();
