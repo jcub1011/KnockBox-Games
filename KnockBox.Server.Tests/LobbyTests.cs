@@ -57,7 +57,7 @@ public class LobbyManagerTests
 
         for (var i = 0; i < 200; i++)
         {
-            var lobby = mgr.Create("ttt", "host", 2);
+            Assert.True(mgr.TryCreate("ttt", "host", 2, out var lobby));
             Assert.Equal(4, lobby.Id.Length);
             Assert.True(ids.Add(lobby.Id), "lobby ids must be unique");
         }
@@ -67,7 +67,7 @@ public class LobbyManagerTests
     public void Get_returns_null_for_unknown_lobby_and_after_removal()
     {
         var mgr = new LobbyManager();
-        var lobby = mgr.Create("ttt", "host", 2);
+        Assert.True(mgr.TryCreate("ttt", "host", 2, out var lobby));
 
         Assert.NotNull(mgr.Get(lobby.Id));
         mgr.Remove(lobby.Id);

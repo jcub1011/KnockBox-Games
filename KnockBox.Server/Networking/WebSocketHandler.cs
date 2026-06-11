@@ -24,23 +24,34 @@ public sealed class WebSocketHandler(
     LobbyManager lobbies,
     GameCatalog catalog,
     TokenService tokens,
+    ILoggerFactory loggerFactory,
     ILogger<WebSocketHandler> logger)
 {
+    // Per-connection Connection instances are created with `new` (not DI), so they get their logger
+    // category from this shared factory.
+    private readonly ILogger _connectionLogger = loggerFactory.CreateLogger<Connection>();
+
     public async Task HandleAsync(WebSocket socket, string gameOrigin, CancellationToken ct)
     {
-        var first = await ReceiveMessageAsync(socket, ct);
-        switch (first)
+        try
         {
-            case HelloMessage hello:
-                await RunControlAsync(socket, hello, gameOrigin, ct);
-                break;
-            case AttachMessage attach:
-                await RunDataAsync(socket, attach, ct);
-                break;
-            default:
-                await socket.CloseAsync(WebSocketCloseStatus.ProtocolError, "Expected Hello or Attach", ct);
-                break;
+            var first = await ReceiveMessageAsync(socket, ct);
+            switch (first)
+            {
+                case HelloMessage hello:
+                    await RunControlAsync(socket, hello, gameOrigin, ct);
+                    break;
+                case AttachMessage attach:
+                    await RunDataAsync(socket, attach, ct);
+                    break;
+                default:
+                    await socket.CloseAsync(WebSocketCloseStatus.ProtocolError, "Expected Hello or Attach", ct);
+                    break;
+            }
         }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException ex) { logger.LogDebug(ex, "Socket dropped during handshake."); }
+        catch (Exception ex) { logger.LogError(ex, "Unexpected error handling a connection."); }
     }
 
     // ── Control role (the shell) ──────────────────────────────────────────────
@@ -53,7 +64,7 @@ public sealed class WebSocketHandler(
             : Guid.NewGuid().ToString("N");
         var displayName = string.IsNullOrWhiteSpace(hello.DisplayName) ? "Player" : hello.DisplayName;
         // Control: lobby events are rare and must not be silently dropped — tear down a stuck socket.
-        var connection = new Connection(playerId, displayName, socket, OutboundOverflow.CloseOnFull);
+        var connection = new Connection(playerId, displayName, socket, _connectionLogger, OutboundOverflow.CloseOnFull);
 
         connections.Add(connection);
         var sendLoop = connection.SendLoopAsync(ct);
@@ -67,11 +78,12 @@ public sealed class WebSocketHandler(
             {
                 var message = await ReceiveMessageAsync(socket, ct);
                 if (message is null) break; // close frame
-                DispatchControl(connection, message);
+                SafeDispatch(connection, message, () => DispatchControl(connection, message));
             }
         }
         catch (OperationCanceledException) { }
         catch (WebSocketException ex) { logger.LogDebug(ex, "Control socket dropped for {PlayerId}", playerId); }
+        catch (Exception ex) { logger.LogError(ex, "Unexpected error in control loop for {PlayerId}", playerId); }
         finally
         {
             LeaveCurrentLobby(connection);
@@ -79,6 +91,22 @@ public sealed class WebSocketHandler(
             connection.CompleteOutbound();
             await sendLoop;
             logger.LogInformation("Player {PlayerId} disconnected (control)", playerId);
+        }
+    }
+
+    // Runs one message handler with a guard: an unexpected exception is logged and reported to the
+    // client, but never tears down the connection's receive loop — one bad message stays contained.
+    private void SafeDispatch(Connection conn, Message message, Action handle)
+    {
+        try
+        {
+            handle();
+        }
+        catch (Exception ex)
+        {
+            var type = message.GetType().Name;
+            logger.LogError(ex, "Unhandled error dispatching {Type} for {PlayerId}", type, conn.PlayerId);
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(null, $"Internal error handling {type}")));
         }
     }
 
@@ -129,10 +157,22 @@ public sealed class WebSocketHandler(
         }
 
         LeaveCurrentLobby(conn); // one lobby at a time
-        var lobby = lobbies.Create(game.Id, hostId: conn.PlayerId, game.MaxPlayers);
-        lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName));
-        conn.LobbyId = lobby.Id;
 
+        if (!lobbies.TryCreate(game.Id, conn.PlayerId, game.MaxPlayers, out var lobby))
+        {
+            logger.LogError("Failed to create a lobby with game {id} for user {playerId}.", game.Id, conn.PlayerId);
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "Could not create a lobby, please try again.")));
+            return;
+        }
+
+        if (!lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName)))
+        {
+            logger.LogError("Failed to add host {playerId} to lobby {lobbyId}.", conn.PlayerId, lobby.Id);
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "Could not join the lobby you created.")));
+            return;
+        }
+
+        conn.LobbyId = lobby.Id;
         conn.Send(ConnectionManager.Serialize(new LobbyCreatedMessage(m.Cid, lobby.Id)));
         logger.LogInformation("Lobby {LobbyId} created for '{GameId}' by host {HostId}", lobby.Id, game.Id, conn.PlayerId);
 
@@ -254,7 +294,7 @@ public sealed class WebSocketHandler(
 
         var displayName = lobby.Players.FirstOrDefault(p => p.Id == playerId)?.DisplayName ?? "Player";
         // Data: host-authoritative state broadcasts — newest snapshot supersedes, so drop oldest.
-        var connection = new Connection(playerId, displayName, socket, OutboundOverflow.DropOldest)
+        var connection = new Connection(playerId, displayName, socket, _connectionLogger, OutboundOverflow.DropOldest)
         {
             LobbyId = lobbyId,
         };
@@ -271,12 +311,16 @@ public sealed class WebSocketHandler(
             {
                 var message = await ReceiveMessageAsync(socket, ct);
                 if (message is null) break;
-                if (message is GameMessage gm) HandleGameMessage(connection, gm);
-                else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
+                SafeDispatch(connection, message, () =>
+                {
+                    if (message is GameMessage gm) HandleGameMessage(connection, gm);
+                    else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
+                });
             }
         }
         catch (OperationCanceledException) { }
         catch (WebSocketException ex) { logger.LogDebug(ex, "Game socket dropped for {PlayerId}", playerId); }
+        catch (Exception ex) { logger.LogError(ex, "Unexpected error in data loop for {PlayerId}", playerId); }
         finally
         {
             connections.RemoveGame(connection);

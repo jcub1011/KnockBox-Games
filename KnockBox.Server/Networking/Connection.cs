@@ -36,24 +36,30 @@ public sealed class Connection
     private readonly Channel<byte[]> _outbound;
     private readonly WebSocket _socket;
     private readonly OutboundOverflow _overflow;
+    private readonly ILogger _logger;
 
-    public Connection(string playerId, string displayName, WebSocket socket,
+    public Connection(string playerId, string displayName, WebSocket socket, ILogger logger,
         OutboundOverflow overflow = OutboundOverflow.DropOldest)
     {
         PlayerId = playerId;
         DisplayName = displayName;
         _socket = socket;
         _overflow = overflow;
+        _logger = logger;
 
         // CloseOnFull uses Wait mode: TryWrite returns false when full instead of dropping, which we
-        // turn into a teardown. DropOldest evicts the oldest queued frame and the write always succeeds.
-        _outbound = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(OutboundCapacity)
-        {
-            SingleReader = true,
-            FullMode = overflow == OutboundOverflow.DropOldest
-                ? BoundedChannelFullMode.DropOldest
-                : BoundedChannelFullMode.Wait,
-        });
+        // turn into a teardown. DropOldest evicts the oldest queued frame and the write always succeeds —
+        // the itemDropped callback surfaces that eviction so a slow/stuck data socket isn't silent.
+        _outbound = Channel.CreateBounded<byte[]>(
+            new BoundedChannelOptions(OutboundCapacity)
+            {
+                SingleReader = true,
+                FullMode = overflow == OutboundOverflow.DropOldest
+                    ? BoundedChannelFullMode.DropOldest
+                    : BoundedChannelFullMode.Wait,
+            },
+            itemDropped: _ => _logger.LogWarning(
+                "Outbound queue full for {PlayerId}; dropped oldest frame (slow or stuck socket).", PlayerId));
     }
 
     public string PlayerId { get; }
@@ -80,7 +86,15 @@ public sealed class Connection
                 await _socket.SendAsync(frame, WebSocketMessageType.Text, endOfMessage: true, ct);
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException) { }
+        catch (WebSocketException ex)
+        {
+            // Expected when the client drops: the socket faulted mid-send. The owning handler tears down.
+            _logger.LogDebug(ex, "Send loop ended for {PlayerId}: socket error.", PlayerId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error in send loop for {PlayerId}.", PlayerId);
+        }
     }
 
     public void CompleteOutbound() => _outbound.Writer.TryComplete();
