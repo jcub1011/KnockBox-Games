@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
+  <defs>
+    <radialGradient id="crt" cx="50%" cy="45%" r="75%">
+      <stop offset="0%" stop-color="#06160d"/>
+      <stop offset="100%" stop-color="#020705"/>
+    </radialGradient>
+  </defs>
+  <rect width="320" height="200" fill="#000"/>
+  <rect x="6" y="6" width="308" height="188" rx="10" fill="url(#crt)" stroke="#1f7a45" stroke-width="2"/>
+  <g font-family="'Courier New', monospace" fill="#5cff9a">
+    <text x="24" y="48" font-size="30" font-weight="bold" letter-spacing="2">CODE</text>
+    <text x="24" y="84" font-size="30" font-weight="bold" letter-spacing="2">WORD</text>
+    <text x="24" y="120" font-size="12" fill="#3aa468">&gt; identify the impostor_</text>
+    <text x="24" y="150" font-size="11" fill="#2c8050">[ AGENT // INSIDER // INFORMANT ]</text>
+    <text x="24" y="172" font-size="11" fill="#2c8050">4-8 OPERATIVES</text>
+  </g>
+  <g stroke="#0a3d22" stroke-width="1" opacity="0.5">
+    <line x1="6" y1="30" x2="314" y2="30"/>
+    <line x1="6" y1="60" x2="314" y2="60"/>
+    <line x1="6" y1="90" x2="314" y2="90"/>
+    <line x1="6" y1="120" x2="314" y2="120"/>
+    <line x1="6" y1="150" x2="314" y2="150"/>
+    <line x1="6" y1="180" x2="314" y2="180"/>
+  </g>
+</svg>

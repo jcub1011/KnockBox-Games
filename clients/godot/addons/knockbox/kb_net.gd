@@ -30,6 +30,9 @@ var loopback: bool = false
 # (tooling, `--script` runs) and isn't hard-coupled to the singleton name.
 var _kb: Node = null
 
+# Set when joined to an in-process KBLocalRelay for multiplayer editor/testing (see connect_local).
+var _relay = null
+
 
 func _ready() -> void:
 	if OS.has_feature("web"):
@@ -65,6 +68,16 @@ func connect_with(ticket: String, endpoint := "") -> void:
 		_kb.set_launch_params(ticket, endpoint)
 
 
+## Join an in-process KBLocalRelay (see kb_local_relay.gd) for solo multiplayer testing: multiple
+## KBNet peers share one relay and message each other with no server. Call at startup (it suppresses
+## the default solo loopback). Connect this peer's signals BEFORE calling so session_ready isn't missed.
+func connect_local(relay, p_player_id: String, display_name := "", is_host_hint := false) -> void:
+	loopback = true
+	_relay = relay
+	player_id = p_player_id
+	relay.register(self, p_player_id, display_name, is_host_hint)
+
+
 func _on_ready(pid: String, pl: Array, ih: bool) -> void:
 	player_id = pid
 	players = pl
@@ -89,21 +102,29 @@ func _on_left(pid: String) -> void:
 
 func send_to_host(payload) -> void:
 	if loopback:
-		_loop(payload)
+		if _relay != null:
+			_relay.deliver("host", player_id, payload)
+		else:
+			_loop(payload)
 	else:
 		_kb.send_to_host(payload)
 
 
 func send_to_all(payload) -> void:
 	if loopback:
-		_loop(payload)
+		if _relay != null:
+			_relay.deliver("all", player_id, payload)
+		else:
+			_loop(payload)
 	else:
 		_kb.send_to_all(payload)
 
 
 func send_to(target_id: String, payload) -> void:
 	if loopback:
-		if target_id == player_id:
+		if _relay != null:
+			_relay.deliver(target_id, player_id, payload)
+		elif target_id == player_id:
 			_loop(payload)
 	else:
 		_kb.send_to(target_id, payload)
@@ -115,6 +136,16 @@ func set_lobby_open(open: bool) -> void:
 		_kb.set_lobby_open(open)
 
 
+## Host-only: remove a player from the lobby. Forwards to the relay in a local multiplayer loopback
+## (see connect_local); no-op in the solo loopback.
+func kick_player(player_id_: String) -> void:
+	if loopback:
+		if _relay != null:
+			_relay.kick(player_id, player_id_)
+	elif _kb != null:
+		_kb.kick_player(player_id_)
+
+
 # In loopback every send comes from, and is delivered to, the lone local player. Deferred
 # to avoid re-entrancy while a message is still being handled.
 func _loop(payload) -> void:
@@ -122,10 +153,36 @@ func _loop(payload) -> void:
 
 
 func _start_loopback() -> void:
-	if not loopback:
-		return  # connect_with() opted into the real server before this fired
+	if not loopback or _relay != null:
+		return  # connect_with() opted into the real server, or connect_local() joined a relay
 	player_id = "local-player"
 	players = [{"id": "local-player", "displayName": "You"}]
 	is_host = true
 	reconnected = false
 	session_ready.emit(player_id, players, is_host)
+
+
+# ── KBLocalRelay callbacks (invoked by the relay; see kb_local_relay.gd) ──
+func _lr_ready(roster: Array, is_host_: bool) -> void:
+	players = roster
+	is_host = is_host_
+	reconnected = false
+	session_ready.emit(player_id, players, is_host)
+
+
+func _lr_deliver(from_id: String, payload) -> void:
+	message_received.emit(from_id, payload)
+
+
+func _lr_joined(roster: Array, player: Dictionary) -> void:
+	players = roster
+	player_joined.emit(player)
+
+
+func _lr_left(roster: Array, left_id: String) -> void:
+	players = roster
+	player_left.emit(left_id)
+
+
+func _lr_closed() -> void:
+	closed.emit(true)

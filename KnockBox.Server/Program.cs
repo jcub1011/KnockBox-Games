@@ -122,6 +122,16 @@ StaticFileOptions GamesStaticOptions() => new()
         ctx.Context.Response.Headers.CacheControl = "public, max-age=0, must-revalidate",
 };
 
+// Shell files (index.html, shell.js, home.css, knockbox.js) change between deploys and are tiny, so
+// always revalidate — otherwise a browser can keep serving a heuristically-cached old shell after an
+// update (e.g. a fresh shell.js with new message handling), which looks like "the fix didn't deploy".
+StaticFileOptions WebStaticOptions() => new()
+{
+    FileProvider = webFiles,
+    OnPrepareResponse = ctx =>
+        ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate",
+};
+
 // The single real-time transport (both origins/ports). The connection's role is decided by its
 // first frame: Hello = control (shell), Attach = data (game). See WebSocketHandler.
 app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
@@ -168,7 +178,7 @@ app.MapWhen(
             ApplyCrossOriginIsolation(ctx, catalog);
             await next();
         });
-        gameApp.UseStaticFiles(new StaticFileOptions { FileProvider = webFiles });   // /knockbox.js
+        gameApp.UseStaticFiles(WebStaticOptions());   // /knockbox.js
         gameApp.UseStaticFiles(GamesStaticOptions());
     });
 
@@ -186,7 +196,7 @@ if (isolateShell)
     });
 
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
-app.UseStaticFiles(new StaticFileOptions { FileProvider = webFiles });
+app.UseStaticFiles(WebStaticOptions());
 app.UseStaticFiles(GamesStaticOptions());
 
 // app.Run() blocks for the server's lifetime. Guard it so an unhandled exception that would

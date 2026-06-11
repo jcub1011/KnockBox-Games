@@ -192,6 +192,15 @@ public sealed class WebSocketHandler(
             return;
         }
 
+        // A kicked player is barred from this lobby. Tell a rejoin to give up (the shell clears its
+        // saved lobby and returns home); give a fresh join a clear reason (not "lobby full").
+        if (lobby.IsKicked(conn.PlayerId))
+        {
+            conn.Send(ConnectionManager.Serialize(
+                rejoin ? new RejoinFailedMessage(cid) : new ErrorMessage(cid, "You were kicked from this lobby.")));
+            return;
+        }
+
         var alreadyMember = lobby.Contains(conn.PlayerId);
         // A fresh join needs the lobby to be open; an existing member rejoining (reconnect) is
         // always allowed back in, regardless of the game's join policy.
@@ -248,6 +257,30 @@ public sealed class WebSocketHandler(
         }
         lobby.Open = m.Open;
         logger.LogInformation("Lobby {LobbyId} set {State} by host", lobby.Id, m.Open ? "open" : "closed");
+    }
+
+    private void HandleKickPlayer(Connection conn, KickPlayerMessage m)
+    {
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
+        if (lobby is null || conn.PlayerId != lobby.HostId)
+        {
+            logger.LogDebug("Ignoring KickPlayer from non-host {PlayerId}", conn.PlayerId);
+            return;
+        }
+        if (m.TargetPlayerId == lobby.HostId) return; // the host can't kick itself
+        if (!lobby.Kick(m.TargetPlayerId)) return;     // not a member (kick still recorded)
+
+        // Announce on both planes so shells and in-game rosters drop the player.
+        Broadcast(lobby, new PlayerLeftMessage(lobby.Id, m.TargetPlayerId));
+        BroadcastToGame(lobby, new GamePlayerLeftMessage(m.TargetPlayerId));
+        // Tell the kicked player on their CONTROL socket so the shell leaves the game and shows a
+        // clear message — don't abort that socket (the push must deliver). Their game (data) socket
+        // is evicted, and the kicked-set bars any rejoin.
+        connections.SendTo(m.TargetPlayerId, new KickedMessage(lobby.Id));
+        connections.GetGame(m.TargetPlayerId)?.Abort();
+        logger.LogInformation("Host {HostId} kicked {TargetId} from lobby {LobbyId}",
+            conn.PlayerId, m.TargetPlayerId, lobby.Id);
     }
 
     private void HandleRequestGameTicket(Connection conn, RequestGameTicketMessage m)
@@ -315,6 +348,7 @@ public sealed class WebSocketHandler(
                 {
                     if (message is GameMessage gm) HandleGameMessage(connection, gm);
                     else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
+                    else if (message is KickPlayerMessage kp) HandleKickPlayer(connection, kp);
                 });
             }
         }
@@ -405,7 +439,12 @@ public sealed class WebSocketHandler(
         if (lobby.Count == 0) lobbies.Remove(lobby.Id);
     }
 
-    /// <summary>Reassembles one full text message across frames; returns null on a close frame.</summary>
+    // A single relayed frame should never approach this; the cap stops a malicious/buggy client from
+    // growing the reassembly buffer without bound (memory-pressure DoS).
+    private const int MaxMessageBytes = 512 * 1024;
+
+    /// <summary>Reassembles one full text message across frames; returns null on a close frame.
+    /// Closes the socket and returns null if the message exceeds <see cref="MaxMessageBytes"/>.</summary>
     private async Task<Message?> ReceiveMessageAsync(WebSocket socket, CancellationToken ct)
     {
         using var ms = new MemoryStream();
@@ -416,6 +455,12 @@ public sealed class WebSocketHandler(
             result = await socket.ReceiveAsync(buffer, ct);
             if (result.MessageType == WebSocketMessageType.Close) return null;
             ms.Write(buffer, 0, result.Count);
+            if (ms.Length > MaxMessageBytes)
+            {
+                logger.LogWarning("Message exceeded {Max} bytes; closing socket.", MaxMessageBytes);
+                await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message too large", ct);
+                return null;
+            }
         }
         while (!result.EndOfMessage);
 
