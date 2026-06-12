@@ -1,9 +1,11 @@
+using System.Buffers;
 using System.Net.WebSockets;
 using System.Text.Json;
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Security;
+using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Networking;
 
@@ -39,7 +41,7 @@ public sealed class WebSocketHandler(
         {
             // The first frame must arrive within the handshake deadline — an accepted socket that
             // never speaks would otherwise hold its slot (and an IP-gate slot) indefinitely.
-            Message? first;
+            IMessage? first;
             using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 if (limits.HandshakeTimeout > TimeSpan.Zero) handshake.CancelAfter(limits.HandshakeTimeout);
@@ -91,7 +93,7 @@ public sealed class WebSocketHandler(
         var playerId = tokens.TryVerifyIdentity(hello.Token, out var verified)
             ? verified
             : Guid.NewGuid().ToString("N");
-        var displayName = string.IsNullOrWhiteSpace(hello.DisplayName) ? "Player" : hello.DisplayName;
+        var displayName = NormalizeDisplayName(hello.DisplayName);
         // Control: lobby events are rare and must not be silently dropped — tear down a stuck socket.
         var connection = new Connection(playerId, displayName, socket, _connectionLogger, OutboundOverflow.CloseOnFull);
 
@@ -99,7 +101,8 @@ public sealed class WebSocketHandler(
         var sendLoop = connection.SendLoopAsync(ct);
         connection.Send(ConnectionManager.Serialize(
             new WelcomeMessage(playerId, tokens.IssueIdentity(playerId), gameOrigin)));
-        logger.LogInformation("Player {PlayerId} ({Name}) connected (control)", playerId, displayName);
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Player {PlayerId} ({Name}) connected (control)", playerId, displayName);
 
         // Control traffic is rare (lobby ops); sustained spam past the burst is hostile or a bug —
         // either way, terminate. Lobby creation gets its own slower bucket (codes are a shared,
@@ -122,7 +125,11 @@ public sealed class WebSocketHandler(
             }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { logger.LogDebug(ex, "Control socket dropped for {PlayerId}", playerId); }
+        catch (WebSocketException ex)
+        {
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(ex, "Control socket dropped for {PlayerId}", playerId); 
+        }
         catch (Exception ex) { logger.LogError(ex, "Unexpected error in control loop for {PlayerId}", playerId); }
         finally
         {
@@ -130,13 +137,14 @@ public sealed class WebSocketHandler(
             connections.Remove(connection);
             connection.CompleteOutbound();
             await sendLoop;
-            logger.LogInformation("Player {PlayerId} disconnected (control)", playerId);
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Player {PlayerId} disconnected (control)", playerId);
         }
     }
 
     // Runs one message handler with a guard: an unexpected exception is logged and reported to the
     // client, but never tears down the connection's receive loop — one bad message stays contained.
-    private void SafeDispatch(Connection conn, Message message, Action handle)
+    private void SafeDispatch(Connection conn, IMessage message, Action handle)
     {
         try
         {
@@ -167,16 +175,16 @@ public sealed class WebSocketHandler(
         catch (WebSocketException) { /* already dropped */ }
     }
 
-    private void DispatchControl(Connection conn, Message message, TokenBucket lobbyCreates)
+    private void DispatchControl(Connection conn, IMessage message, TokenBucket lobbyCreates)
     {
         switch (message)
         {
             case SetNameMessage m:
-                conn.DisplayName = string.IsNullOrWhiteSpace(m.DisplayName) ? "Player" : m.DisplayName.Trim();
+                conn.DisplayName = NormalizeDisplayName(m.DisplayName);
                 break;
 
             case ListGamesMessage m:
-                conn.Send(ConnectionManager.Serialize(new GameListMessage(m.Cid, catalog.Games.ToArray())));
+                conn.Send(ConnectionManager.Serialize(new GameListMessage(m.Cid, [.. catalog.Games])));
                 break;
 
             case CreateLobbyMessage m:
@@ -206,7 +214,8 @@ public sealed class WebSocketHandler(
                 break;
 
             default:
-                logger.LogDebug("Ignoring unexpected control message {Type} from {PlayerId}", message.GetType().Name, conn.PlayerId);
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug("Ignoring unexpected control message {Type} from {PlayerId}", message.GetType().Name, conn.PlayerId);
                 break;
         }
     }
@@ -237,7 +246,8 @@ public sealed class WebSocketHandler(
 
         conn.LobbyId = lobby.Id;
         conn.Send(ConnectionManager.Serialize(new LobbyCreatedMessage(m.Cid, lobby.Id)));
-        logger.LogInformation("Lobby {LobbyId} created for '{GameId}' by host {HostId}", lobby.Id, game.Id, conn.PlayerId);
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Lobby {LobbyId} created for '{GameId}' by host {HostId}", lobby.Id, game.Id, conn.PlayerId);
 
         // The game loads as soon as a player is in a lobby — the game itself owns "waiting for
         // players" and decides when play begins. The lobby is open by default; the host closes it
@@ -273,13 +283,17 @@ public sealed class WebSocketHandler(
             return;
         }
 
+        // Leave any previous lobby BEFORE joining the new one so the player is never momentarily a
+        // member of two (one-lobby-at-a-time), mirroring HandleCreateLobby. Switching to a full lobby
+        // is rare; the explicit join means leaving the old one is the intended outcome.
+        LeaveOtherLobby(conn, lobby.Id);
+
         if (!lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName)))
         {
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(cid, "Lobby is full")));
             return;
         }
 
-        LeaveOtherLobby(conn, lobby.Id);
         conn.LobbyId = lobby.Id;
         conn.Send(ConnectionManager.Serialize(new JoinedMessage(cid, lobby.Id)));
 
@@ -303,7 +317,7 @@ public sealed class WebSocketHandler(
     // Tells one connection to load the game ("enter the game now"). Sent on create, on join, and on
     // rejoin — once per player, when they enter the lobby. The server no longer has a "started"
     // concept; this is purely "you're in, here's what to load".
-    private void SendEnterGame(Connection conn, Lobby lobby)
+    private static void SendEnterGame(Connection conn, Lobby lobby)
     {
         conn.Send(ConnectionManager.Serialize(
             new GameStartingMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players)));
@@ -313,22 +327,27 @@ public sealed class WebSocketHandler(
     {
         if (conn.LobbyId is null) return;
         var lobby = lobbies.Get(conn.LobbyId);
-        if (lobby is null || conn.PlayerId != lobby.HostId)
+        // Re-check live membership too: a lobby code can be reused after the original is emptied, so
+        // host identity alone isn't enough — the caller must still be a member of THIS lobby instance.
+        if (lobby is null || conn.PlayerId != lobby.HostId || !lobby.Contains(conn.PlayerId))
         {
-            logger.LogDebug("Ignoring SetLobbyOpen from non-host {PlayerId}", conn.PlayerId);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Ignoring SetLobbyOpen from non-host {PlayerId}", conn.PlayerId);
             return;
         }
         lobby.Open = m.Open;
-        logger.LogInformation("Lobby {LobbyId} set {State} by host", lobby.Id, m.Open ? "open" : "closed");
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Lobby {LobbyId} set {State} by host", lobby.Id, m.Open ? "open" : "closed");
     }
 
     private void HandleKickPlayer(Connection conn, KickPlayerMessage m)
     {
         if (conn.LobbyId is null) return;
         var lobby = lobbies.Get(conn.LobbyId);
-        if (lobby is null || conn.PlayerId != lobby.HostId)
+        if (lobby is null || conn.PlayerId != lobby.HostId || !lobby.Contains(conn.PlayerId))
         {
-            logger.LogDebug("Ignoring KickPlayer from non-host {PlayerId}", conn.PlayerId);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Ignoring KickPlayer from non-host {PlayerId}", conn.PlayerId);
             return;
         }
         if (m.TargetPlayerId == lobby.HostId) return; // the host can't kick itself
@@ -342,12 +361,20 @@ public sealed class WebSocketHandler(
         // is evicted, and the kicked-set bars any rejoin.
         connections.SendTo(m.TargetPlayerId, new KickedMessage(lobby.Id));
         connections.GetGame(m.TargetPlayerId)?.Abort();
-        logger.LogInformation("Host {HostId} kicked {TargetId} from lobby {LobbyId}",
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Host {HostId} kicked {TargetId} from lobby {LobbyId}",
             conn.PlayerId, m.TargetPlayerId, lobby.Id);
     }
 
     private void HandleRequestGameTicket(Connection conn, RequestGameTicketMessage m)
     {
+        // A ticket is only ever issued for the player's CURRENT lobby — enforce the one-lobby-at-a-time
+        // invariant on this path rather than trusting the client-supplied id alone.
+        if (m.LobbyId != conn.LobbyId)
+        {
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "Not a member of that lobby")));
+            return;
+        }
         var lobby = lobbies.Get(m.LobbyId);
         if (lobby is null || !lobby.Contains(conn.PlayerId))
         {
@@ -399,7 +426,8 @@ public sealed class WebSocketHandler(
         var sendLoop = connection.SendLoopAsync(ct);
         connection.Send(ConnectionManager.Serialize(
             new ReadyMessage(playerId, lobby.Players, IsHost: playerId == lobby.HostId)));
-        logger.LogInformation("Player {PlayerId} attached game socket to lobby {LobbyId}", playerId, lobbyId);
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Player {PlayerId} attached game socket to lobby {LobbyId}", playerId, lobbyId);
 
         // Every relayed frame fans out O(lobby size), so inbound spam multiplies on the way out.
         // The burst absorbs legitimate spikes (a host re-syncing several joiners at once).
@@ -425,14 +453,19 @@ public sealed class WebSocketHandler(
             }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { logger.LogDebug(ex, "Game socket dropped for {PlayerId}", playerId); }
+        catch (WebSocketException ex)
+        {
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(ex, "Game socket dropped for {PlayerId}", playerId); 
+        }
         catch (Exception ex) { logger.LogError(ex, "Unexpected error in data loop for {PlayerId}", playerId); }
         finally
         {
             connections.RemoveGame(connection);
             connection.CompleteOutbound();
             await sendLoop;
-            logger.LogInformation("Player {PlayerId} detached game socket", playerId);
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Player {PlayerId} detached game socket", playerId);
         }
     }
 
@@ -459,7 +492,7 @@ public sealed class WebSocketHandler(
     }
 
     // ── Shared lobby helpers ──────────────────────────────────────────────────
-    private void Broadcast(Lobby lobby, Message message, string? exceptPlayerId = null)
+    private void Broadcast(Lobby lobby, IMessage message, string? exceptPlayerId = null)
     {
         var bytes = ConnectionManager.Serialize(message);
         foreach (var p in lobby.Players)
@@ -467,7 +500,7 @@ public sealed class WebSocketHandler(
                 connections.SendRawTo(p.Id, bytes);
     }
 
-    private void BroadcastToGame(Lobby lobby, Message message, string? exceptPlayerId = null)
+    private void BroadcastToGame(Lobby lobby, IMessage message, string? exceptPlayerId = null)
     {
         var bytes = ConnectionManager.Serialize(message);
         foreach (var p in lobby.Players)
@@ -491,7 +524,8 @@ public sealed class WebSocketHandler(
         if (lobby.Count == 0)
         {
             lobbies.Remove(lobby.Id);
-            logger.LogInformation("Lobby {LobbyId} emptied and removed", lobby.Id);
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Lobby {LobbyId} emptied and removed", lobby.Id);
         }
     }
 
@@ -511,40 +545,74 @@ public sealed class WebSocketHandler(
         if (lobby.Count == 0) lobbies.Remove(lobby.Id);
     }
 
+    // Display names are echoed into every roster/join broadcast, so a giant one lets a single client
+    // amplify O(lobby size). Trim, fall back to "Player" when blank, and clamp the length.
+    private const int MaxDisplayNameLength = 64;
+
+    private static string NormalizeDisplayName(string? name)
+    {
+        var trimmed = name?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return "Player";
+        return trimmed.Length <= MaxDisplayNameLength ? trimmed : trimmed[..MaxDisplayNameLength];
+    }
+
     // A single relayed frame should never approach this; the cap stops a malicious/buggy client from
     // growing the reassembly buffer without bound (memory-pressure DoS).
     private const int MaxMessageBytes = 512 * 1024;
 
     /// <summary>Reassembles one full text message across frames; returns null on a close frame.
     /// Closes the socket and returns null if the message exceeds <see cref="MaxMessageBytes"/>.</summary>
-    private async Task<Message?> ReceiveMessageAsync(WebSocket socket, CancellationToken ct)
+    private async Task<IMessage?> ReceiveMessageAsync(WebSocket socket, CancellationToken ct)
     {
-        using var ms = new MemoryStream();
-        var buffer = new byte[4096];
-        WebSocketReceiveResult result;
-        do
-        {
-            result = await socket.ReceiveAsync(buffer, ct);
-            if (result.MessageType == WebSocketMessageType.Close) return null;
-            ms.Write(buffer, 0, result.Count);
-            if (ms.Length > MaxMessageBytes)
-            {
-                logger.LogWarning("Message exceeded {Max} bytes; closing socket.", MaxMessageBytes);
-                await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message too large", ct);
-                return null;
-            }
-        }
-        while (!result.EndOfMessage);
-
-        if (ms.Length == 0) return null;
+        // Rent the per-frame read buffer instead of allocating it on every inbound message (hot path).
+        var buffer = ArrayPool<byte>.Shared.Rent(4096);
         try
         {
-            return JsonSerializer.Deserialize<Message>(ms.ToArray(), ConnectionManager.SerializerOptions);
+            var result = await socket.ReceiveAsync(buffer, ct);
+            if (result.MessageType == WebSocketMessageType.Close) return null;
+
+            // Fast path: the whole message arrived in one frame (the common case for control/game
+            // frames). Deserialize straight from the rented buffer — no MemoryStream, no ToArray copy.
+            if (result.EndOfMessage)
+                return result.Count == 0 ? null : Deserialize(buffer.AsSpan(0, result.Count));
+
+            // Slow path: a multi-frame / >4 KB message. Accumulate, then deserialize from the stream's
+            // own buffer (it's exposable — parameterless ctor) instead of copying it out with ToArray.
+            using var ms = new MemoryStream();
+            ms.Write(buffer, 0, result.Count);
+            while (!result.EndOfMessage)
+            {
+                result = await socket.ReceiveAsync(buffer, ct);
+                if (result.MessageType == WebSocketMessageType.Close) return null;
+                ms.Write(buffer, 0, result.Count);
+                if (ms.Length > MaxMessageBytes)
+                {
+                    logger.LogWarning("Message exceeded {Max} bytes; closing socket.", MaxMessageBytes);
+                    await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message too large", ct);
+                    return null;
+                }
+            }
+
+            if (ms.Length == 0) return null;
+            var seg = ms.TryGetBuffer(out var b) ? b : new ArraySegment<byte>(ms.ToArray());
+            return Deserialize(seg.AsSpan());
         }
-        catch (JsonException ex)
+        finally
         {
-            logger.LogWarning(ex, "Discarding malformed message");
-            return new ErrorMessage(null, "Malformed message"); // dispatched → ignored
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        IMessage? Deserialize(ReadOnlySpan<byte> utf8)
+        {
+            try
+            {
+                return JsonSerializer.Deserialize(utf8, KnockBoxProtocolContext.Default.IMessage);
+            }
+            catch (JsonException ex)
+            {
+                logger.LogWarning(ex, "Discarding malformed message");
+                return new ErrorMessage(null, "Malformed message"); // dispatched → ignored
+            }
         }
     }
 }

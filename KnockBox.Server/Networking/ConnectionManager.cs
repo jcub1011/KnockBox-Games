@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using KnockBox.Contracts;
+using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Networking;
 
@@ -16,9 +17,6 @@ namespace KnockBox.Server.Networking;
 /// </summary>
 public sealed class ConnectionManager
 {
-    /// <summary>camelCase + case-insensitive, matching the wire shapes in <see cref="Message"/>.</summary>
-    public static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
-
     private readonly ConcurrentDictionary<string, Connection> _byPlayer = new();      // control role
     private readonly ConcurrentDictionary<string, Connection> _gameByPlayer = new();  // data role
 
@@ -34,11 +32,11 @@ public sealed class ConnectionManager
     public void AddGame(Connection c) => _gameByPlayer[c.PlayerId] = c;
     public void RemoveGame(Connection c) => _gameByPlayer.TryRemove(KeyValuePair.Create(c.PlayerId, c));
 
-    public static byte[] Serialize(Message message) =>
-        JsonSerializer.SerializeToUtf8Bytes(message, SerializerOptions);
+    public static byte[] Serialize(IMessage message) =>
+        JsonSerializer.SerializeToUtf8Bytes(message, KnockBoxProtocolContext.Default.IMessage);
 
     /// <summary>Send a message to a single player's control connection if connected.</summary>
-    public void SendTo(string playerId, Message message)
+    public void SendTo(string playerId, IMessage message)
     {
         if (_byPlayer.TryGetValue(playerId, out var c))
             c.Send(Serialize(message));

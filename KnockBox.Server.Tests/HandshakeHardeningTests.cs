@@ -1,13 +1,14 @@
-using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using KnockBox.Server.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
 using Xunit;
 
 namespace KnockBox.Server.Tests;
@@ -54,7 +55,7 @@ public class HandshakeHardeningTests
         await NewHandler(Defaults).HandleAsync(socket, "http://game.local", cts.Token);
 
         var error = Assert.IsType<ErrorMessage>(
-            JsonSerializer.Deserialize<Message>(Assert.Single(socket.Sent), ConnectionManager.SerializerOptions));
+            JsonSerializer.Deserialize(Assert.Single(socket.Sent), KnockBoxProtocolContext.Default.IMessage));
         Assert.Contains("protocol", error.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(WebSocketCloseStatus.PolicyViolation, socket.OutputClosedWith);
     }
@@ -68,7 +69,7 @@ public class HandshakeHardeningTests
         await NewHandler(Defaults).HandleAsync(socket, "http://game.local", cts.Token);
 
         var welcome = Assert.IsType<WelcomeMessage>(
-            JsonSerializer.Deserialize<Message>(socket.Sent[0], ConnectionManager.SerializerOptions));
+            JsonSerializer.Deserialize(socket.Sent[0], KnockBoxProtocolContext.Default.IMessage));
         Assert.Equal(KnockBoxProtocol.Version, welcome.Proto);
         Assert.Null(socket.OutputClosedWith); // graceful end-of-script close, not a rejection
     }
@@ -91,7 +92,7 @@ public class HandshakeHardeningTests
         await NewHandler(limits).HandleAsync(socket, "http://game.local", cts.Token);
 
         var received = socket.Sent
-            .Select(b => JsonSerializer.Deserialize<Message>(b, ConnectionManager.SerializerOptions))
+            .Select(b => JsonSerializer.Deserialize(b, KnockBoxProtocolContext.Default.IMessage))
             .ToList();
         Assert.Contains(received, m => m is ErrorMessage { Reason: "rate_limited" });
         // 1008 — the SDKs treat it as terminal and stop reconnecting.
@@ -101,21 +102,14 @@ public class HandshakeHardeningTests
 
     /// <summary>Replays scripted inbound frames, captures outbound frames and the close status.
     /// Optionally hangs (cancellable) when the script runs out, to exercise the handshake deadline.</summary>
-    private sealed class ScriptedSocket : WebSocket
+    private sealed class ScriptedSocket(IEnumerable<byte[]>? inbound = null, bool hangWhenEmpty = false) : WebSocket
     {
-        private readonly Queue<byte[]> _inbound;
-        private readonly bool _hangWhenEmpty;
+        private readonly Queue<byte[]> _inbound = new(inbound ?? []);
         private WebSocketState _state = WebSocketState.Open;
 
-        public List<byte[]> Sent { get; } = new();
+        public List<byte[]> Sent { get; } = [];
         public WebSocketCloseStatus? OutputClosedWith { get; private set; }
         public string? OutputClosedReason { get; private set; }
-
-        public ScriptedSocket(IEnumerable<byte[]>? inbound = null, bool hangWhenEmpty = false)
-        {
-            _inbound = new Queue<byte[]>(inbound ?? []);
-            _hangWhenEmpty = hangWhenEmpty;
-        }
 
         public override WebSocketState State => _state;
         public override WebSocketCloseStatus? CloseStatus => null;
@@ -126,7 +120,7 @@ public class HandshakeHardeningTests
         {
             if (_inbound.Count == 0)
             {
-                if (_hangWhenEmpty) await Task.Delay(Timeout.Infinite, ct);
+                if (hangWhenEmpty) await Task.Delay(Timeout.Infinite, ct);
                 if (_state == WebSocketState.Open) _state = WebSocketState.CloseReceived;
                 return new WebSocketReceiveResult(0, WebSocketMessageType.Close, true);
             }
@@ -137,7 +131,7 @@ public class HandshakeHardeningTests
 
         public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken ct)
         {
-            Sent.Add(buffer.ToArray());
+            Sent.Add([.. buffer]);
             return Task.CompletedTask;
         }
 

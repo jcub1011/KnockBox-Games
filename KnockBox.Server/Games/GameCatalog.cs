@@ -1,5 +1,6 @@
 using System.Text.Json;
 using KnockBox.Contracts;
+using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Games;
 
@@ -11,8 +12,6 @@ namespace KnockBox.Server.Games;
 /// </summary>
 public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     // Swapped atomically by Discover(). Readers take the reference once and enumerate a stable
     // snapshot, so a concurrent rebuild can never expose a half-built catalog (no lock needed).
     private volatile IReadOnlyDictionary<string, GameManifest> _games =
@@ -20,11 +19,14 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
 
     private FileSystemWatcher? _watcher;
     private Timer? _debounce;
-    private readonly object _debounceGate = new();
+    private readonly Lock _debounceGate = new();
+    private bool _disposed;
     private Timer? _poll;
-    private string _pollFingerprint = "";
+    // Written by the poll timer thread and (once) by the startup thread; volatile guarantees the
+    // timer callback sees the seeded value on weakly-ordered architectures (ARM).
+    private volatile string _pollFingerprint = "";
 
-    public IReadOnlyCollection<GameManifest> Games => _games.Values.ToArray();
+    public IReadOnlyCollection<GameManifest> Games => [.. _games.Values];
 
     public bool TryGet(string id, out GameManifest manifest) => _games.TryGetValue(id, out manifest!);
 
@@ -47,7 +49,7 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
 
             try
             {
-                var manifest = JsonSerializer.Deserialize<GameManifest>(File.ReadAllText(manifestPath), JsonOptions);
+                var manifest = JsonSerializer.Deserialize(File.ReadAllText(manifestPath), KnockBoxProtocolContext.Default.GameManifest);
                 if (manifest is null || string.IsNullOrWhiteSpace(manifest.Id))
                 {
                     logger.LogWarning("Skipping {Path}: empty or invalid manifest.", manifestPath);
@@ -84,7 +86,8 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
                 }
 
                 next[manifest.Id] = manifest;
-                logger.LogInformation("Discovered game '{Id}' ({Name}) from {Dir}", manifest.Id, manifest.Name, dir);
+                if (logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation("Discovered game '{Id}' ({Name}) from {Dir}", manifest.Id, manifest.Name, dir);
             }
             catch (Exception ex)
             {
@@ -93,7 +96,8 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
         }
 
         _games = next; // atomic publish
-        logger.LogInformation("Game catalog ready: {Count} game(s) [{Ids}]", next.Count, string.Join(", ", next.Keys));
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Game catalog ready: {Count} game(s) [{Ids}]", next.Count, string.Join(", ", next.Keys));
     }
 
     /// <summary>
@@ -111,7 +115,7 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
             EnableRaisingEvents = true,
         };
 
-        FileSystemEventHandler onChange = (_, _) => ScheduleRescan();
+        void onChange(object _, FileSystemEventArgs __) => ScheduleRescan();
         _watcher.Created += onChange;
         _watcher.Changed += onChange;
         _watcher.Deleted += onChange;
@@ -123,7 +127,9 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
             logger.LogWarning(e.GetException(), "Game folder watcher error; forcing a rescan.");
             ScheduleRescan();
         };
-        logger.LogInformation("Watching {Path} for game changes (hot-reload enabled).", gamesRoot);
+
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Watching {Path} for game changes (hot-reload enabled).", gamesRoot);
     }
 
     /// <summary>
@@ -153,7 +159,8 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
                 logger.LogError(ex, "Games folder poll failed.");
             }
         }, null, interval, interval);
-        logger.LogInformation("Polling {Path} every {Interval} for game changes (bind-mount-safe hot-reload).",
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Polling {Path} every {Interval} for game changes (bind-mount-safe hot-reload).",
             gamesRoot, interval);
     }
 
@@ -176,6 +183,7 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
     {
         lock (_debounceGate)
         {
+            if (_disposed) return; // don't resurrect the debounce timer during/after shutdown
             _debounce ??= new Timer(_ =>
             {
                 try { Discover(); }
@@ -188,7 +196,13 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
     public void Dispose()
     {
         _watcher?.Dispose();
-        _debounce?.Dispose();
+        // Dispose the debounce timer under the same gate that creates it, so a rescan scheduled
+        // concurrently with shutdown can't leak a freshly-created timer past Dispose.
+        lock (_debounceGate)
+        {
+            _disposed = true;
+            _debounce?.Dispose();
+        }
         _poll?.Dispose();
     }
 }

@@ -1,12 +1,13 @@
-using System.Net.WebSockets;
-using System.Text.Json;
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using KnockBox.Server.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Net.WebSockets;
+using System.Text.Json;
 using Xunit;
 
 namespace KnockBox.Server.Tests;
@@ -52,11 +53,11 @@ public class KickFlowTests
 
         // Drive the HOST's data socket: Attach with a valid ticket, then send KickPlayer{guest}.
         var ticket = tokens.IssueTicket("host", lobby.Id, "g");
-        var hostDataSock = new FakeWebSocket(new[]
-        {
+        var hostDataSock = new FakeWebSocket(
+        [
             ConnectionManager.Serialize(new AttachMessage(ticket)),
             ConnectionManager.Serialize(new KickPlayerMessage("guest")),
-        });
+        ]);
         await handler.HandleAsync(hostDataSock, "http://game.local", ct);
 
         // Flush the guest control send loop, then inspect what it received.
@@ -65,7 +66,7 @@ public class KickFlowTests
         await guestGameLoop;
 
         var received = guestCtrlSock.Sent
-            .Select(b => JsonSerializer.Deserialize<Message>(b, ConnectionManager.SerializerOptions))
+            .Select(b => JsonSerializer.Deserialize(b, KnockBoxProtocolContext.Default.IMessage))
             .ToList();
 
         Assert.Contains(received, m => m is KickedMessage k && k.LobbyId == lobby.Id);
@@ -75,13 +76,11 @@ public class KickFlowTests
     }
 
     /// <summary>Minimal in-memory WebSocket: replays scripted inbound frames, captures outbound ones.</summary>
-    private sealed class FakeWebSocket : WebSocket
+    private sealed class FakeWebSocket(IEnumerable<byte[]>? inbound = null) : WebSocket
     {
-        private readonly Queue<byte[]> _inbound;
-        public List<byte[]> Sent { get; } = new();
+        private readonly Queue<byte[]> _inbound = new(inbound ?? []);
+        public List<byte[]> Sent { get; } = [];
         private WebSocketState _state = WebSocketState.Open;
-
-        public FakeWebSocket(IEnumerable<byte[]>? inbound = null) => _inbound = new Queue<byte[]>(inbound ?? Array.Empty<byte[]>());
 
         public override WebSocketState State => _state;
         public override WebSocketCloseStatus? CloseStatus => null;
@@ -103,7 +102,7 @@ public class KickFlowTests
 
         public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken ct)
         {
-            Sent.Add(buffer.ToArray());
+            Sent.Add([.. buffer]);
             return Task.CompletedTask;
         }
 

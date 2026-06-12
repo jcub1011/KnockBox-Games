@@ -1,6 +1,8 @@
+using KnockBox.Server.Serialization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace KnockBox.Server.Security;
 
@@ -21,60 +23,48 @@ namespace KnockBox.Server.Security;
 /// and reconnecting tabs are transparently minted fresh ids. (Deliberately not configurable: a
 /// human-chosen secret would be weaker than 32 random bytes and would make tickets forgeable.)
 /// </summary>
-public sealed class TokenService
+public sealed class TokenService(IConfiguration config, TimeProvider clock, ILogger<TokenService> logger)
 {
-    private readonly byte[] _secret;
-    private readonly TimeProvider _clock;
-    private readonly ILogger<TokenService> _logger;
-    private readonly TimeSpan _identityTtl;
-    private readonly TimeSpan _ticketTtl;
-
-    public TokenService(IConfiguration config, TimeProvider clock, ILogger<TokenService> logger)
-    {
-        _clock = clock;
-        _logger = logger;
-        _secret = RandomNumberGenerator.GetBytes(32);
-
-        _identityTtl = TimeSpan.FromHours(config.GetValue("KnockBox:IdentityTokenTtlHours", 720.0)); // 30 days
-        _ticketTtl = TimeSpan.FromHours(config.GetValue("KnockBox:GameTicketTtlHours", 12.0));        // a play session
-    }
+    private readonly byte[] _secret = RandomNumberGenerator.GetBytes(32);
+    private readonly TimeSpan _identityTtl = TimeSpan.FromHours(config.GetValue("KnockBox:IdentityTokenTtlHours", 720.0));
+    private readonly TimeSpan _ticketTtl = TimeSpan.FromHours(config.GetValue("KnockBox:GameTicketTtlHours", 12.0));
 
     // ── Identity token: base64url(json{playerId,exp}).<sig> ──────────────────
-    private sealed record IdentityPayload(string PlayerId, long Exp);
+    public sealed record IdentityPayload(string PlayerId, long Exp);
 
     public string IssueIdentity(string playerId) =>
-        Encode(new IdentityPayload(playerId, ExpiresAt(_identityTtl)));
+        Encode(new IdentityPayload(playerId, ExpiresAt(_identityTtl)), KnockBoxProtocolContext.Default.IdentityPayload);
 
     public bool TryVerifyIdentity(string? token, out string playerId)
     {
         playerId = "";
-        if (!TryDecode<IdentityPayload>(token, out var p) || IsExpired(p!.Exp)) return false;
+        if (!TryDecode(token, out var p, KnockBoxProtocolContext.Default.IdentityPayload) || IsExpired(p!.Exp)) return false;
         playerId = p.PlayerId;
         return true;
     }
 
     // ── Game ticket: base64url(json{playerId,lobbyId,gameId,exp}).<sig> ───────
-    private sealed record TicketPayload(string PlayerId, string LobbyId, string GameId, long Exp);
+    public sealed record TicketPayload(string PlayerId, string LobbyId, string GameId, long Exp);
 
     public string IssueTicket(string playerId, string lobbyId, string gameId) =>
-        Encode(new TicketPayload(playerId, lobbyId, gameId, ExpiresAt(_ticketTtl)));
+        Encode(new TicketPayload(playerId, lobbyId, gameId, ExpiresAt(_ticketTtl)), KnockBoxProtocolContext.Default.TicketPayload);
 
     public bool TryVerifyTicket(string? ticket, out string playerId, out string lobbyId, out string gameId)
     {
-        playerId = lobbyId = gameId = "";
-        if (!TryDecode<TicketPayload>(ticket, out var t) || IsExpired(t!.Exp)) return false;
+        playerId = lobbyId = gameId = string.Empty;
+        if (!TryDecode(ticket, out var t, KnockBoxProtocolContext.Default.TicketPayload) || IsExpired(t!.Exp)) return false;
         (playerId, lobbyId, gameId) = (t.PlayerId, t.LobbyId, t.GameId);
         return true;
     }
 
     // ── Encode / decode ──────────────────────────────────────────────────────
-    private string Encode<T>(T payload)
+    private string Encode<T>(T payload, JsonTypeInfo<T> typeInfo)
     {
-        var body = Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload));
+        var body = Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload, typeInfo));
         return $"{body}.{Sign(body)}";
     }
 
-    private bool TryDecode<T>(string? token, out T? payload) where T : class
+    private bool TryDecode<T>(string? token, out T? payload, JsonTypeInfo<T> payloadTypeInfo) where T : class
     {
         payload = null;
         if (string.IsNullOrEmpty(token)) return false;
@@ -87,20 +77,21 @@ public sealed class TokenService
 
         try
         {
-            payload = JsonSerializer.Deserialize<T>(Base64UrlDecode(body));
+            payload = JsonSerializer.Deserialize<T>(Base64UrlDecode(body), payloadTypeInfo);
             return payload is not null;
         }
         catch (Exception ex) when (ex is JsonException or FormatException)
         {
             // Signature already verified above, so a malformed body here is unusual (corruption or a
             // forged-but-correctly-signed token). Not Error-worthy, but worth an audit trail.
-            _logger.LogDebug(ex, "Discarding token with a valid signature but an undecodable {Payload} payload.", typeof(T).Name);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(ex, "Discarding token with a valid signature but an undecodable {Payload} payload.", typeof(T).Name);
             return false;
         }
     }
 
-    private long ExpiresAt(TimeSpan ttl) => _clock.GetUtcNow().Add(ttl).ToUnixTimeSeconds();
-    private bool IsExpired(long exp) => _clock.GetUtcNow().ToUnixTimeSeconds() >= exp;
+    private long ExpiresAt(TimeSpan ttl) => clock.GetUtcNow().Add(ttl).ToUnixTimeSeconds();
+    private bool IsExpired(long exp) => clock.GetUtcNow().ToUnixTimeSeconds() >= exp;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
     private string Sign(string data)

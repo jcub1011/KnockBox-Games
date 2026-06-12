@@ -77,10 +77,10 @@ dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop
 # → KnockBox.Server/bin/publish/win-x64/
 ```
 
-Copy that folder anywhere and run `KnockBox.Server.exe`. Layout:
+Copy that folder anywhere and run `KnockBox.Server.exe`. Layout (the publish folder is `win-x64/`):
 
 ```
-KnockBoxServer/
+win-x64/
 ├─ KnockBox.Server.exe
 ├─ appsettings.json      # optional config (KnockBox:* keys)
 ├─ web/                  # platform shell (baked in by publish)
@@ -90,7 +90,8 @@ KnockBoxServer/
 
 - Default ports are Kestrel's unless configured; set them with the `ASPNETCORE_URLS` environment
   variable or `appsettings.json` (e.g. `"Urls": "http://0.0.0.0:5114;http://0.0.0.0:5115"` with
-  `KnockBox:GamesPort: 5115`).
+  `KnockBox:GamesPort: 5115`). (The Docker image instead uses `ASPNETCORE_HTTP_PORTS="8080;8081"`
+  — same effect, the newer port-only form; either works for its respective deployment.)
 - For LAN play, allow the two ports through Windows Firewall and have players open
   `http://<your-LAN-IP>:5114` — the games origin is derived from the same host automatically.
 - To use a games folder elsewhere (e.g. a NAS share), set `KnockBox:GamesRoot` to its path.

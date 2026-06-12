@@ -24,19 +24,16 @@ internal static class ConfigFactory
 /// every frame written and can be told to block forever on send (to simulate a stuck socket so the
 /// outbound channel fills).
 /// </summary>
-internal sealed class FakeWebSocket : WebSocket
+internal sealed class FakeWebSocket(bool blockSends = false) : WebSocket
 {
-    private readonly bool _blockSends;
     private readonly TaskCompletionSource _blockForever = new();
     public List<byte[]> Sent { get; } = [];
-
-    public FakeWebSocket(bool blockSends = false) => _blockSends = blockSends;
 
     public override async Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType,
         bool endOfMessage, CancellationToken cancellationToken)
     {
-        if (_blockSends) await _blockForever.Task.WaitAsync(cancellationToken);
-        Sent.Add(buffer.ToArray());
+        if (blockSends) await _blockForever.Task.WaitAsync(cancellationToken);
+        Sent.Add([.. buffer]);
     }
 
     public override WebSocketState State => WebSocketState.Open;

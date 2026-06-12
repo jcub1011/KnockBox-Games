@@ -65,6 +65,9 @@ jobs:
         run: |
           cp -r games/tictactoe /tmp/kb-games/
           for i in $(seq 1 30); do
+            # Fail fast (with logs) if the container died, instead of spinning the full 30s.
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
             docker logs kb 2>&1 | grep -q "Discovered game 'tictactoe'" && break
             sleep 1
           done
@@ -72,6 +75,14 @@ jobs:
           # ...and its assets serve from the game origin.
           curl -fsS http://localhost:8081/games/tictactoe/GAME.json >/dev/null
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
+
+      - name: Shell origin exposes only the thumbnail, never the full game build
+        run: |
+          # Isolation guarantee: the untrusted build must NOT be reachable on the shell origin (8080),
+          # or it could run there and read the identity token. Only the declared thumbnail is allowed.
+          curl -fsS http://localhost:8080/games/tictactoe/thumb.svg >/dev/null
+          ! curl -fsS http://localhost:8080/games/tictactoe/index.html >/dev/null
+          ! curl -fsS http://localhost:8080/games/tictactoe/GAME.json >/dev/null
 
       - name: Startup logs are sane (no blank-site error, roots resolved)
         run: |

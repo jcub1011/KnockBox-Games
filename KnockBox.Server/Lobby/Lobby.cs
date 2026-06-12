@@ -12,21 +12,29 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
     // Players the host has kicked. A kick is permanent for this lobby: kicked ids are refused by
     // TryAdd so they cannot rejoin (rejoin otherwise bypasses the Open/membership checks).
     private readonly HashSet<string> _kicked = [];
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
 
     public string Id { get; } = id;
     public string GameId { get; } = gameId;
     public string HostId { get; } = hostId;
     public int MaxPlayers { get; } = maxPlayers;
 
+    private bool _open = true;
+
     /// <summary>
     /// Whether the lobby accepts new joins. The game owns this (the host sets it via
     /// <c>SetLobbyOpen</c>); the server never changes it. Open lobbies are listed and joinable;
     /// closed ones are hidden from the browser and reject new joins. Defaults to open on create.
+    /// Guarded by <c>_gate</c> like the rest of the lobby state: it's written on the host's thread
+    /// and read on joiners' threads.
     /// </summary>
-    public bool Open { get; set; } = true;
+    public bool Open
+    {
+        get { lock (_gate) return _open; }
+        set { lock (_gate) _open = value; }
+    }
 
-    public IReadOnlyList<Player> Players { get { lock (_gate) return _players.ToArray(); } }
+    public IReadOnlyList<Player> Players { get { lock (_gate) return [.. _players]; } }
 
     public int Count { get { lock (_gate) return _players.Count; } }
 

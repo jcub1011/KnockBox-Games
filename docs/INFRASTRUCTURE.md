@@ -75,7 +75,9 @@ All are registered as singletons in `Program.cs`.
 5. **Game origin** (the games port): serve `/games/{id}/…` and `/knockbox.js`, applying per-game
    COOP/COEP for `crossOriginIsolated` games. `/ws` is excluded so the shared socket endpoint is
    reachable here too.
-6. **Shell origin** (the default port): serve `web/` at root and `/games/{id}/…` (for thumbnails).
+6. **Shell origin** (the default port): serve `web/` at root and, under `/games/{id}/…`, **only each
+   game's declared thumbnail** — never the full build, so untrusted game code can't run on the shell
+   origin and read the identity token.
 
 ---
 
@@ -208,7 +210,7 @@ ever holds a lobby-scoped ticket.
 | URL (origin) | Source | Notes |
 |---|---|---|
 | `/`, `/shell.js`, `/knockbox.js` (shell origin) | `web/` | Platform shell + SDK. |
-| `/games/{id}/thumb…` (shell origin) | `games/{id}/…` | Thumbnails for the lobby browser. |
+| `/games/{id}/<thumbnail>` (shell origin) | `games/{id}/<thumbnail>` | **Only** the manifest's declared thumbnail for the lobby browser; every other `/games/*` path 404s here (the full build is reachable only on the game origin). |
 | `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
 
 Files are read from disk per request, and the catalog hot-reloads, so adding/editing a game needs no
@@ -232,7 +234,6 @@ Intentionally **not** built (future work):
 - Multi-server scale-out (today all state is single-process; would need sticky lobby routing + a
   backplane). Binary wire format (protobuf) for high-tick games.
 - Server-authoritative game logic / anti-cheat; host migration; persistent match history.
-- **Server-authoritative game logic / anti-cheat; host migration; persistent match history.**
 
 ### Cross-origin isolation for threaded engine exports
 

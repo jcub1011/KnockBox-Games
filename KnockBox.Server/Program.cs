@@ -253,8 +253,10 @@ app.MapWhen(
     });
 
 // ── Shell origin (default port / apex host) ────────────────────────────────────
-// Platform shell + SDK at the site root; game thumbnails under /games for the lobby browser.
-// Optionally cross-origin isolate the shell so it can host threaded engine exports (see IsolateShell).
+// Platform shell + SDK at the site root. The ONLY game asset the shell needs is each game's
+// thumbnail for the lobby browser — the full (untrusted) build must load solely from the isolated
+// game origin, never here, or it could run in the shell origin and read the identity token in
+// sessionStorage. Optionally cross-origin isolate the shell so it can host threaded engine exports.
 if (isolateShell)
     app.Use(async (ctx, next) =>
     {
@@ -267,6 +269,22 @@ if (isolateShell)
 
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
 app.UseStaticFiles(WebStaticOptions());
+
+// Gate /games/* on the shell origin to each game's declared thumbnail only; everything else 404s,
+// so untrusted game HTML/JS/WASM is unreachable here (it serves from the game origin). The static
+// middleware below still handles content-type/ETag/caching for the allowed thumbnail.
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path.Value;
+    if (path is not null
+        && path.StartsWith("/games/", StringComparison.OrdinalIgnoreCase)
+        && !IsAllowedThumbnail(path, catalog))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+    await next();
+});
 app.UseStaticFiles(GamesStaticOptions());
 
 // app.Run() blocks for the server's lifetime. Guard it so an unhandled exception that would
@@ -303,4 +321,18 @@ static void ApplyCrossOriginIsolation(HttpContext ctx, GameCatalog catalog)
     ctx.Response.Headers["Cross-Origin-Opener-Policy"] = "same-origin";
     ctx.Response.Headers["Cross-Origin-Embedder-Policy"] = "require-corp";
     ctx.Response.Headers["Cross-Origin-Resource-Policy"] = "cross-origin";
+}
+
+// True only for "/games/{id}/{thumb}" where {thumb} exactly equals game {id}'s declared thumbnail.
+// The exact-string whitelist is the control; PhysicalFileProvider also blocks any traversal.
+static bool IsAllowedThumbnail(string path, GameCatalog catalog)
+{
+    var rest = path["/games/".Length..];
+    var slash = rest.IndexOf('/');
+    if (slash < 0) return false;
+    var id = rest[..slash];
+    var file = rest[(slash + 1)..];
+    return catalog.TryGet(id, out var manifest)
+        && !string.IsNullOrEmpty(manifest.Thumbnail)
+        && string.Equals(file, manifest.Thumbnail, StringComparison.Ordinal);
 }

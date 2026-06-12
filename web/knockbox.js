@@ -37,6 +37,11 @@ import {
   const ticket = launch.ticket;
   const endpoint = launch.endpoint || defaultEndpoint(location.protocol, location.host);
 
+  // The ticket/endpoint are now captured in memory; scrub them from the address bar so they don't
+  // linger in browser history or stay readable via location.hash by anything that loads later
+  // (analytics, third-party scripts). replaceState keeps the fragment out of the history entry.
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+
   const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [] };
   let ready = false;
   let ws = null;

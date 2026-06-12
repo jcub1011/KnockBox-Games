@@ -10,9 +10,9 @@
 # Runtime base: ports, mount points, and the non-root user.
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 WORKDIR /app
-# /games is the games mount point; /app/logs must be writable by the non-root app user. Both are
-# prepared while still root, then ownership is handed to $APP_UID.
-RUN mkdir -p /games /app/logs && chown $APP_UID /games /app/logs
+# /games is the (read-only) mount point — the server only reads it, so it needs no ownership change.
+# /app/logs must be writable by the non-root app user, so hand it to $APP_UID while still root.
+RUN mkdir -p /games /app/logs && chown $APP_UID /app/logs
 USER $APP_UID
 # Two plain-HTTP ports keep the two-origin model working with no proxy: 8080 = shell, 8081 = games
 # origin. Map them 1:1 on the host (or set KnockBox__GamesOrigin) — the server advertises its

@@ -215,6 +215,9 @@ publish/
 # Note: Comment the next line if you want to checkin your web deploy settings,
 # but database connection strings (with potential passwords) will be unencrypted
 *.pubxml
+# The desktop publish profile carries no secrets (FileSystem, self-contained) and is the documented
+# `dotnet publish -p:PublishProfile=win-x64-desktop` mechanism, so keep it tracked.
+!**/PublishProfiles/win-x64-desktop.pubxml
 *.publishproj
 
 # Microsoft Azure Web App publish settings. Comment the next line if you want to

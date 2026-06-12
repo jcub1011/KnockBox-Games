@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -24,12 +24,13 @@ import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, rosterAdd, rosterRemove
 let playerId = null;                                  // assigned by the server (Welcome)
 let token = sessionStorage.getItem('kb.token');       // signed identity token (anti-spoof), per-tab
 let displayName = localStorage.getItem('kb.displayName') || '';   // read once; empty until named
-let gameOrigin = location.origin;                     // where game iframes/sockets live (from Welcome)
+let gameOrigin = null;                                // where game iframes/sockets live (set by Welcome)
 
 const el = (id) => document.getElementById(id);
 
 // Current session state.
 let ws = null;
+let reconnectAttempt = 0;       // 0-based; drives exponential backoff, reset once a session is confirmed
 let games = new Map();          // gameId -> manifest
 let lobby = null;               // { lobbyId, gameId, hostId, players: [] } once in a game
 const pending = new Map();      // cid -> resolver
@@ -47,8 +48,10 @@ function connect() {
     send({ type: 'Hello', displayName, token, proto: PROTOCOL_VERSION });
   };
   ws.onclose = () => {
+    // Back off exponentially (matching the SDK's data socket) so a server restart doesn't get
+    // hammered at 1 Hz by every connected browser. Reset on a confirmed session (Welcome).
     el('conn').textContent = 'offline — reconnecting…';
-    setTimeout(connect, 1000);
+    setTimeout(connect, reconnectDelay(reconnectAttempt++));
   };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
 }
@@ -86,7 +89,8 @@ function handle(msg) {
       playerId = msg.playerId;
       token = msg.token;
       sessionStorage.setItem('kb.token', token);
-      gameOrigin = msg.gameOrigin || gameOrigin;
+      gameOrigin = msg.gameOrigin || location.origin;
+      reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
       tryRejoin();
       refreshGames();
       break;
@@ -279,9 +283,16 @@ function showLobbyView() {
 
 function renderRoster() {
   if (!lobby) return;
-  el('roster').innerHTML = lobby.players
-    .map((p) => `<span class="${p.id === lobby.hostId ? 'host' : ''}">${p.displayName}</span>`)
-    .join('');
+  // Build with textContent, never innerHTML: displayName is player-controlled and would otherwise be
+  // an XSS vector in the shell origin (where the identity token lives).
+  const host = el('roster');
+  host.innerHTML = '';
+  for (const p of lobby.players) {
+    const span = document.createElement('span');
+    if (p.id === lobby.hostId) span.className = 'host';
+    span.textContent = p.displayName;
+    host.appendChild(span);
+  }
 }
 
 // ── Transient error toast ─────────────────────────────────────────────────────
@@ -318,7 +329,9 @@ nameInput.addEventListener('input', () => {
 // expired, or lobby gone — so we leave the game view even if the control-plane push was missed.
 // This only fires on a terminal socket close, never on a normal game-over (the data socket stays up).
 window.addEventListener('message', (e) => {
-  if (e.origin !== gameOrigin) return;            // only trust the game origin
+  // Only trust the game origin, and never before Welcome has set it (until then gameOrigin is null,
+  // so a same-origin message sent during initial load can't spoof a session-ended).
+  if (!gameOrigin || e.origin !== gameOrigin) return;
   if (e.data && e.data.kb === 'session-ended' && lobby) {
     sessionStorage.removeItem('kb.lobbyId');
     showLobbyView();
