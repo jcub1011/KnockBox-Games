@@ -90,12 +90,16 @@ win-x64/
 └─ logs/                 # daily rolling logs
 ```
 
-- Default ports are Kestrel's unless configured; set them with the `ASPNETCORE_URLS` environment
-  variable or `appsettings.json` (e.g. `"Urls": "http://0.0.0.0:5114;http://0.0.0.0:5115"` with
-  `KnockBox:GamesPort: 5115`). (The Docker image instead uses `ASPNETCORE_HTTP_PORTS="8080;8081"`
-  — same effect, the newer port-only form; either works for its respective deployment.)
-- For LAN play, allow the two ports through Windows Firewall and have players open
-  `http://<your-LAN-IP>:5114` — the games origin is derived from the same host automatically.
+- With no configuration the exe serves the shell at `http://localhost:5114` and the games origin at
+  `http://localhost:5115` — open `http://localhost:5114`. (Both origins must be served for games to
+  load; the exe binds both automatically when you haven't set ports yourself.)
+- To change the ports, set `ASPNETCORE_URLS` (e.g. `http://0.0.0.0:5114;http://0.0.0.0:5115`) together
+  with `KnockBox:GamesPort` so the games origin matches. (The Docker image instead uses
+  `ASPNETCORE_HTTP_PORTS="8080;8081"` — same effect, the newer port-only form.) Any explicit setting
+  takes over from the built-in default above.
+- For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow both ports through Windows
+  Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is derived from the
+  same host automatically.
 - To use a games folder elsewhere (e.g. a NAS share), set `KnockBox:GamesRoot` to its path.
 
 ---

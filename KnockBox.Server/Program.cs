@@ -61,6 +61,19 @@ var gamesPort = builder.Configuration.GetValue("KnockBox:GamesPort", 5115);
 // handed to the shell work behind a reverse proxy where every request shares one local port.
 var gamesHost = builder.Configuration["KnockBox:GamesHost"];           // e.g. "games.knockbox.example"
 var gamesOrigin = builder.Configuration["KnockBox:GamesOrigin"];       // explicit override, e.g. "https://games.knockbox.example"
+
+// launchSettings (dev) and ASPNETCORE_HTTP_PORTS (Docker) tell Kestrel which ports to bind; a bare
+// published exe gets neither, so Kestrel would bind only the single framework default and the games
+// origin (GamesPort) would refuse connections. When the host wasn't told what to bind, bind BOTH
+// origins ourselves so the exe works out of the box. Anything explicit (URLS/HTTP_PORTS/Kestrel
+// endpoints) wins and we stay out of the way — so dev and Docker are unaffected.
+var portsConfigured =
+    !string.IsNullOrEmpty(builder.Configuration["urls"])          // ASPNETCORE_URLS / --urls
+    || !string.IsNullOrEmpty(builder.Configuration["http_ports"]) // ASPNETCORE_HTTP_PORTS
+    || builder.Configuration.GetSection("Kestrel:Endpoints").Exists();
+if (!portsConfigured)
+    builder.WebHost.UseUrls("http://localhost:5114", $"http://localhost:{gamesPort}");
+
 // When true, the shell page itself is served cross-origin isolated (COOP/COEP) so threaded engine
 // exports embedded in a cross-origin iframe can use SharedArrayBuffer. Off by default — single-
 // threaded games don't need it and it constrains what the shell can embed.
