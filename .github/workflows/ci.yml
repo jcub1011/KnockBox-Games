@@ -17,6 +17,21 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet test KnockBox-Games.slnx --nologo
 
+  aot:
+    name: Native AOT publish (warnings gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      # Native AOT compiles to a native object and links it via clang against zlib; the SDK doesn't
+      # ship the toolchain (mirrors the Dockerfile's build stage).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+      # The full ILC compile is the only thing that surfaces trim/AOT (ILxxxx) warnings; /warnaserror
+      # fails the build on any new one, so the app stays AOT-clean as code and dependencies change.
+      - run: dotnet publish KnockBox.Server -r linux-x64 -c Release /warnaserror
+
   web:
     name: Web (shell + SDK) tests
     runs-on: ubuntu-latest
@@ -27,7 +42,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
