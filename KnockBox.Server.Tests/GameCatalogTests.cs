@@ -59,6 +59,26 @@ public class GameCatalogTests : IDisposable
     }
 
     [Fact]
+    public async Task Polling_rescans_when_a_manifest_appears()
+    {
+        // The polling fallback exists for environments where FileSystemWatcher never fires (Docker
+        // bind mounts) — so this test uses ONLY StartPolling, never StartWatching.
+        using var catalog = NewCatalog();
+        catalog.Discover();
+        Assert.Empty(catalog.Games);
+        catalog.StartPolling(TimeSpan.FromMilliseconds(50));
+
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "minPlayers": 2, "maxPlayers": 2 }""");
+
+        // Poll tick (≤50ms) + debounce (~500ms); generous deadline to absorb CI scheduling noise.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && !catalog.TryGet("ttt", out _))
+            await Task.Delay(50);
+
+        Assert.True(catalog.TryGet("ttt", out _));
+    }
+
+    [Fact]
     public void Rediscovery_drops_a_removed_game_via_atomic_swap()
     {
         WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "minPlayers": 2, "maxPlayers": 2 }""");

@@ -44,11 +44,14 @@ public abstract record Message;
 // The signed Token makes the anonymous, per-tab playerId unforgeable: the client resends it on
 // reconnect and the server only honours a claimed PlayerId whose Token verifies. The token never
 // leaves the shell origin — games authenticate with a scoped ticket instead (see RequestGameTicket).
-public sealed record HelloMessage(string? PlayerId, string DisplayName, string? Token = null) : Message;
+// Proto declares the wire-protocol version the client speaks (see KnockBoxProtocol); 0 means a
+// pre-versioning client and is treated as version 1.
+public sealed record HelloMessage(string? PlayerId, string DisplayName, string? Token = null, int Proto = 0) : Message;
 // GameOrigin is the separate origin (scheme://host:gamesPort) the shell uses to embed game iframes
 // and that a game's data socket connects back to. The server derives it from the request, so a
 // manager changing the games port needs no client edits.
-public sealed record WelcomeMessage(string PlayerId, string Token, string GameOrigin) : Message;
+public sealed record WelcomeMessage(string PlayerId, string Token, string GameOrigin,
+    int Proto = KnockBoxProtocol.Version) : Message;
 
 // The display name is bound at Hello time; the player can rename themselves later (e.g. after typing
 // a name on the home page) by sending this on the control socket — no reconnect needed. It updates
@@ -97,8 +100,9 @@ public sealed record GameStartingMessage(
 // membership, binds the connection to (playerId, lobbyId), and replies Ready. After that the game
 // only sends GameMessage{to, payload} — it never names a lobby; the server resolves routing from
 // the bound connection. To ∈ { "host", "all", "<playerId>" }; From is stamped on the way out.
-public sealed record AttachMessage(string Ticket) : Message;
-public sealed record ReadyMessage(string PlayerId, IReadOnlyList<Player> Players, bool IsHost) : Message;
+public sealed record AttachMessage(string Ticket, int Proto = 0) : Message;
+public sealed record ReadyMessage(string PlayerId, IReadOnlyList<Player> Players, bool IsHost,
+    int Proto = KnockBoxProtocol.Version) : Message;
 public sealed record GameMessage(string To, JsonElement Payload, string? From = null) : Message;
 // Game → server control (data role): the host sets whether the lobby accepts new joins. The server
 // owns no "started" concept — the game decides this. Open lobbies are listed/joinable; closed ones

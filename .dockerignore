@@ -23,6 +23,13 @@
 **/values.dev.yaml
 LICENSE
 README.md
+# Not part of the image: games are volume-mounted, the rest is dev-only.
+games
+logs
+docs
+clients
+KnockBox.Server.Tests
+KnockBox.Contracts.Tests
 !**/.gitignore
 !.git/HEAD
 !.git/config

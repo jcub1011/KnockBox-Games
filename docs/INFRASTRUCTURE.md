@@ -86,6 +86,12 @@ chosen by its **first frame**. Messages are UTF-8 **JSON envelopes** discriminat
 field (`System.Text.Json` polymorphism; camelCase on the wire). Request/response ops carry a
 client-generated `cid`.
 
+The first frame also carries a **protocol version** (`"proto"`, see `KnockBoxProtocol.Version` —
+currently `1`). SDKs get copied into games and can outlive server upgrades, so the server accepts
+anything up to its own version (a missing field is a pre-versioning client, treated as `1`) and
+terminally rejects (`1008`) anything newer — a too-new SDK fails loudly instead of being silently
+misrouted. `Welcome`/`Ready` echo the server's version back.
+
 ### Control role (the shell) — first frame `Hello`
 
 ```jsonc
@@ -265,8 +271,18 @@ into `games/` and it appears within a second or two — no restart.
 | `TokenSecret` | random per process | HMAC secret. Set it to keep identity tokens valid across restarts. |
 | `IdentityTokenTtlHours` | `720` (30d) | Identity-token lifetime (anti-spoof, per-tab id). |
 | `GameTicketTtlHours` | `12` | Game-ticket lifetime. Long enough for a play session + reconnects; live lobby membership is the primary check. |
+| `WebRoot` / `GamesRoot` / `LogsRoot` | auto | Where the shell / games / logs live. Precedence per root: explicit config → repo discovery (dev) → the app's own directory (published exe / container). Relative paths resolve against the content root. See `Hosting/ContentPaths.cs`. |
+| `GamesPollSeconds` | `0` (off) | Polling fallback for games hot-reload where `FileSystemWatcher` doesn't fire (Docker bind mounts). The Docker image sets `10`. |
 | `GamesPort` | `5115` | Dev: the port the game origin is served on. |
 | `GamesHost` | — | Prod: the games subdomain (e.g. `games.knockbox.example`); routes by `Host` header behind a proxy where every request shares one port. |
 | `GamesOrigin` | — | Prod: explicit origin the shell embeds games from (overrides `GamesHost`/`GamesPort`). |
+| `ForwardedHeaders` | `false` | Trust `X-Forwarded-For/Proto/Host` from a fronting reverse proxy so the game origin resolves to `https`/`wss` and per-IP limits see real client IPs. Opt-in: only enable behind a trusted proxy. |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist (defense-in-depth; the token/ticket is the real auth). An empty `Origin` is always allowed — native engine clients send none. |
 | `IsolateShell` | `false` | Serve the shell cross-origin isolated (COOP/COEP) for threaded engine exports — see §8. |
+| `HandshakeTimeoutSeconds` | `10` | A `/ws` socket must send its first frame (`Hello`/`Attach`) within this deadline or it is closed (anti socket-squatting). `0` disables. |
+| `MaxConnectionsPerIp` | `32` | Concurrent `/ws` sockets per client IP (a player holds 2 per tab: control + game). `0` disables. |
+| `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection token bucket on inbound data-role frames (each relayed frame fans out O(lobby size)). Sustained violation → `Error{rate_limited}` + terminal close `1008`. `0` disables. |
+| `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
+| `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
+
+Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

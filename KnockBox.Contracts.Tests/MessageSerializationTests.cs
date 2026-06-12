@@ -77,6 +77,30 @@ public class MessageSerializationTests
         Assert.Equal("ABCD", back.LobbyId);
     }
 
+    [Fact]
+    public void Missing_proto_reads_as_zero_for_pre_versioning_clients()
+    {
+        var hello = Assert.IsType<HelloMessage>(JsonSerializer.Deserialize<Message>(
+            """{ "type": "Hello", "displayName": "Ann" }""", Options));
+        var attach = Assert.IsType<AttachMessage>(JsonSerializer.Deserialize<Message>(
+            """{ "type": "Attach", "ticket": "t" }""", Options));
+
+        Assert.Equal(0, hello.Proto);
+        Assert.Equal(0, attach.Proto);
+    }
+
+    [Fact]
+    public void Server_replies_echo_the_protocol_version()
+    {
+        var welcome = JsonSerializer.Serialize<Message>(new WelcomeMessage("p1", "tok", "https://games.example"), Options);
+        var ready = JsonSerializer.Serialize<Message>(new ReadyMessage("p1", [], IsHost: true), Options);
+
+        using var w = JsonDocument.Parse(welcome);
+        using var r = JsonDocument.Parse(ready);
+        Assert.Equal(KnockBoxProtocol.Version, w.RootElement.GetProperty("proto").GetInt32());
+        Assert.Equal(KnockBoxProtocol.Version, r.RootElement.GetProperty("proto").GetInt32());
+    }
+
     [Theory]
     [InlineData(typeof(AttachMessage))]
     [InlineData(typeof(ReadyMessage))]

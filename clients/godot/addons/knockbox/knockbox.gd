@@ -168,7 +168,8 @@ func _process(_delta: float) -> void:
 			if not _attached:
 				# First frame on the data plane: authenticate with the lobby-scoped ticket.
 				# sort_keys=false so the "type" discriminator stays first (see _send).
-				_socket.send_text(JSON.stringify({"type": "Attach", "ticket": _ticket}, "", false))
+				_socket.send_text(JSON.stringify(
+					{"type": "Attach", "ticket": _ticket, "proto": KBCore.PROTOCOL_VERSION}, "", false))
 				_attached = true
 			_flush_pending()
 			while _socket.get_available_packet_count() > 0:

@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { buildGameSrc, gameWsEndpoint, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -44,7 +44,7 @@ function connect() {
     el('conn').textContent = 'online';
     // Hello carries the current name (restored from sessionStorage or just typed), so the server
     // is in sync from the first frame and after any reconnect.
-    send({ type: 'Hello', displayName, token });
+    send({ type: 'Hello', displayName, token, proto: PROTOCOL_VERSION });
   };
   ws.onclose = () => {
     el('conn').textContent = 'offline — reconnecting…';

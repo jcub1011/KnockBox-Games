@@ -6,9 +6,23 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>0128e03a-678d-4724-8fcd-5802f2a124f7</UserSecretsId>
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <!-- The Dockerfile builds from the repo root (web/ must be in the build context). -->
+    <DockerfileContext>..\</DockerfileContext>
     <RootNamespace>KnockBox.Server</RootNamespace>
     <AssemblyName>KnockBox.Server</AssemblyName>
   </PropertyGroup>
+
+  <!-- Bake the platform shell + SDK into the publish output (web/ next to the binary), so a
+       published exe or container serves the shell with no repo checkout. Dev is unaffected
+       (CopyToOutputDirectory=Never): `dotnet run` serves the live repo web/ via repo discovery.
+       games/ is deliberately NOT published — it is external content (volume / next to the exe). -->
+  <ItemGroup>
+    <Content Include="..\web\**"
+             Exclude="..\web\node_modules\**;..\web\__tests__\**;..\web\package.json;..\web\package-lock.json"
+             LinkBase="web"
+             CopyToOutputDirectory="Never"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />

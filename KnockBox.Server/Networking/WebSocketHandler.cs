@@ -24,6 +24,8 @@ public sealed class WebSocketHandler(
     LobbyManager lobbies,
     GameCatalog catalog,
     TokenService tokens,
+    ServerLimits limits,
+    TimeProvider time,
     ILoggerFactory loggerFactory,
     ILogger<WebSocketHandler> logger)
 {
@@ -35,9 +37,36 @@ public sealed class WebSocketHandler(
     {
         try
         {
-            var first = await ReceiveMessageAsync(socket, ct);
+            // The first frame must arrive within the handshake deadline — an accepted socket that
+            // never speaks would otherwise hold its slot (and an IP-gate slot) indefinitely.
+            Message? first;
+            using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                if (limits.HandshakeTimeout > TimeSpan.Zero) handshake.CancelAfter(limits.HandshakeTimeout);
+                try
+                {
+                    first = await ReceiveMessageAsync(socket, handshake.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    logger.LogWarning("Closing connection: no handshake frame within {Timeout}.", limits.HandshakeTimeout);
+                    await socket.CloseOutputAsync(WebSocketCloseStatus.ProtocolError, "Handshake timeout", CancellationToken.None);
+                    return;
+                }
+            }
+
             switch (first)
             {
+                // A client speaking a NEWER protocol than this server fails loudly and terminally
+                // (1008 stops SDK reconnects) instead of being silently misrouted. Missing/0 means a
+                // pre-versioning client and is accepted as version 1.
+                case HelloMessage { Proto: > KnockBoxProtocol.Version } or AttachMessage { Proto: > KnockBoxProtocol.Version }:
+                    logger.LogWarning("Rejecting client speaking a protocol newer than {Version}.", KnockBoxProtocol.Version);
+                    await socket.SendAsync(
+                        ConnectionManager.Serialize(new ErrorMessage(null, $"Unsupported protocol version; server speaks {KnockBoxProtocol.Version}")),
+                        WebSocketMessageType.Text, endOfMessage: true, ct);
+                    await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Unsupported protocol version", ct);
+                    break;
                 case HelloMessage hello:
                     await RunControlAsync(socket, hello, gameOrigin, ct);
                     break;
@@ -72,13 +101,24 @@ public sealed class WebSocketHandler(
             new WelcomeMessage(playerId, tokens.IssueIdentity(playerId), gameOrigin)));
         logger.LogInformation("Player {PlayerId} ({Name}) connected (control)", playerId, displayName);
 
+        // Control traffic is rare (lobby ops); sustained spam past the burst is hostile or a bug —
+        // either way, terminate. Lobby creation gets its own slower bucket (codes are a shared,
+        // guessable namespace) but only rejects the op, it doesn't kill the connection.
+        var inboundBucket = new TokenBucket(limits.ControlMessagesPerSecond, limits.ControlMessagesBurst, time);
+        var lobbyCreateBucket = new TokenBucket(limits.LobbyCreatesPerMinute / 60.0, limits.LobbyCreatesPerMinute, time);
+
         try
         {
             while (socket.State == WebSocketState.Open)
             {
                 var message = await ReceiveMessageAsync(socket, ct);
                 if (message is null) break; // close frame
-                SafeDispatch(connection, message, () => DispatchControl(connection, message));
+                if (!inboundBucket.TryTake())
+                {
+                    await CloseRateLimitedAsync(connection, sendLoop, socket);
+                    break;
+                }
+                SafeDispatch(connection, message, () => DispatchControl(connection, message, lobbyCreateBucket));
             }
         }
         catch (OperationCanceledException) { }
@@ -110,7 +150,24 @@ public sealed class WebSocketHandler(
         }
     }
 
-    private void DispatchControl(Connection conn, Message message)
+    // Sends a final rate_limited error, drains it, then closes 1008 (PolicyViolation) — terminal for
+    // the SDKs, so a spamming client doesn't immediately reconnect and resume. The send loop must be
+    // drained BEFORE the close frame (a WebSocket forbids concurrent sends); CloseOutputAsync rather
+    // than CloseAsync so a hostile client that never acks the close can't pin the handler.
+    private async Task CloseRateLimitedAsync(Connection conn, Task sendLoop, WebSocket socket)
+    {
+        logger.LogWarning("Rate limit exceeded by {PlayerId}; closing connection.", conn.PlayerId);
+        conn.Send(ConnectionManager.Serialize(new ErrorMessage(null, "rate_limited")));
+        conn.CompleteOutbound();
+        await sendLoop;
+        try
+        {
+            await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "rate_limited", CancellationToken.None);
+        }
+        catch (WebSocketException) { /* already dropped */ }
+    }
+
+    private void DispatchControl(Connection conn, Message message, TokenBucket lobbyCreates)
     {
         switch (message)
         {
@@ -123,6 +180,12 @@ public sealed class WebSocketHandler(
                 break;
 
             case CreateLobbyMessage m:
+                if (!lobbyCreates.TryTake())
+                {
+                    logger.LogWarning("Lobby-create rate limit hit by {PlayerId}.", conn.PlayerId);
+                    conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "rate_limited")));
+                    break;
+                }
                 HandleCreateLobby(conn, m);
                 break;
 
@@ -338,12 +401,21 @@ public sealed class WebSocketHandler(
             new ReadyMessage(playerId, lobby.Players, IsHost: playerId == lobby.HostId)));
         logger.LogInformation("Player {PlayerId} attached game socket to lobby {LobbyId}", playerId, lobbyId);
 
+        // Every relayed frame fans out O(lobby size), so inbound spam multiplies on the way out.
+        // The burst absorbs legitimate spikes (a host re-syncing several joiners at once).
+        var inboundBucket = new TokenBucket(limits.GameMessagesPerSecond, limits.GameMessagesBurst, time);
+
         try
         {
             while (socket.State == WebSocketState.Open)
             {
                 var message = await ReceiveMessageAsync(socket, ct);
                 if (message is null) break;
+                if (!inboundBucket.TryTake())
+                {
+                    await CloseRateLimitedAsync(connection, sendLoop, socket);
+                    break;
+                }
                 SafeDispatch(connection, message, () =>
                 {
                     if (message is GameMessage gm) HandleGameMessage(connection, gm);

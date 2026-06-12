@@ -1,30 +1,45 @@
-# See https://aka.ms/customizecontainer to learn how to customize your debug container and how Visual Studio uses this Dockerfile to build your images for faster debugging.
+# KnockBox server image. Build context must be the REPO ROOT (web/ is baked into the publish
+# output):
+#   docker build -f KnockBox.Server/Dockerfile -t knockbox .
+# or simply `docker compose up --build` (the compose file sets the context).
+#
+# Games are NOT in the image: bind-mount any stable host directory onto /games (read-only is
+# fine — the server only reads it). It survives image updates and container recreation, and can
+# be shared by several instances. See docs/HOSTING.md.
 
-# This stage is used when running from VS in fast mode (Default for Debug configuration)
+# Runtime base: ports, mount points, and the non-root user.
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
-USER $APP_UID
 WORKDIR /app
+# /games is the games mount point; /app/logs must be writable by the non-root app user. Both are
+# prepared while still root, then ownership is handed to $APP_UID.
+RUN mkdir -p /games /app/logs && chown $APP_UID /games /app/logs
+USER $APP_UID
+# Two plain-HTTP ports keep the two-origin model working with no proxy: 8080 = shell, 8081 = games
+# origin. Map them 1:1 on the host (or set KnockBox__GamesOrigin) — the server advertises its
+# INTERNAL games port to browsers. TLS belongs to a fronting proxy (set KnockBox__ForwardedHeaders).
+ENV KnockBox__GamesRoot=/games \
+    KnockBox__LogsRoot=/app/logs \
+    KnockBox__GamesPort=8081 \
+    KnockBox__GamesPollSeconds=10 \
+    ASPNETCORE_HTTP_PORTS="8080;8081"
 EXPOSE 8080
 EXPOSE 8081
 
-
-# This stage is used to build the service project
+# Build + publish. The solution file is deliberately NOT copied: its absence inside the image is
+# what makes the server's path resolution fall through to the app directory (see ContentPaths).
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
-COPY ["Server/Server.csproj", "Server/"]
-RUN dotnet restore "./Server/Server.csproj"
-COPY . .
-WORKDIR "/src/Server"
-RUN dotnet build "./Server.csproj" -c $BUILD_CONFIGURATION -o /app/build
+COPY KnockBox.Contracts/KnockBox.Contracts.csproj KnockBox.Contracts/
+COPY KnockBox.Server/KnockBox.Server.csproj KnockBox.Server/
+RUN dotnet restore KnockBox.Server/KnockBox.Server.csproj
+COPY KnockBox.Contracts/ KnockBox.Contracts/
+COPY KnockBox.Server/ KnockBox.Server/
+# web/ must be present before publish — the csproj bakes it into the output as content.
+COPY web/ web/
+RUN dotnet publish KnockBox.Server/KnockBox.Server.csproj -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
 
-# This stage is used to publish the service project to be copied to the final stage
-FROM build AS publish
-ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./Server.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
-
-# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
 FROM base AS final
 WORKDIR /app
-COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "Server.dll"]
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "KnockBox.Server.dll"]

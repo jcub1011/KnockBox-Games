@@ -9,6 +9,12 @@
 ## having built the global-class cache first.
 extends RefCounted
 
+## Wire-protocol version this addon speaks, declared in the first frame (Attach). The server
+## accepts anything up to its own version and terminally rejects anything newer, so an addon
+## that outpaces an old server fails loudly instead of being silently misrouted. Mirrors
+## KnockBoxProtocol.Version in KnockBox.Contracts (and PROTOCOL_VERSION in web/kb-core.js).
+const PROTOCOL_VERSION := 1
+
 ## Server close code used for terminal rejections (WebSocketCloseStatus.PolicyViolation):
 ## an invalid ticket or an expired lobby membership. There is no point reconnecting — the
 ## credential won't work.

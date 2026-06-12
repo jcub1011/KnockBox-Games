@@ -21,6 +21,8 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
     private FileSystemWatcher? _watcher;
     private Timer? _debounce;
     private readonly object _debounceGate = new();
+    private Timer? _poll;
+    private string _pollFingerprint = "";
 
     public IReadOnlyCollection<GameManifest> Games => _games.Values.ToArray();
 
@@ -124,6 +126,52 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
         logger.LogInformation("Watching {Path} for game changes (hot-reload enabled).", gamesRoot);
     }
 
+    /// <summary>
+    /// Polling safety net for environments where <see cref="FileSystemWatcher"/> is unreliable —
+    /// chiefly Docker bind mounts on Docker Desktop, where host file events never reach the
+    /// container. Each tick fingerprints the manifests (<c>games/*/GAME.json</c> path + mtime +
+    /// size) and only triggers the normal debounced rescan when the fingerprint changed, so an idle
+    /// folder costs one cheap directory enumeration per tick and produces no log noise. Runs
+    /// alongside the watcher, which keeps its sub-second latency where it does work.
+    /// </summary>
+    public void StartPolling(TimeSpan interval)
+    {
+        if (_poll is not null || interval <= TimeSpan.Zero) return;
+
+        _pollFingerprint = ComputeFingerprint();
+        _poll = new Timer(_ =>
+        {
+            try
+            {
+                var fingerprint = ComputeFingerprint();
+                if (fingerprint == _pollFingerprint) return;
+                _pollFingerprint = fingerprint;
+                ScheduleRescan();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Games folder poll failed.");
+            }
+        }, null, interval, interval);
+        logger.LogInformation("Polling {Path} every {Interval} for game changes (bind-mount-safe hot-reload).",
+            gamesRoot, interval);
+    }
+
+    // Only manifests are fingerprinted: assets are read from disk per request anyway, so only a
+    // manifest add/remove/edit needs rediscovery.
+    private string ComputeFingerprint()
+    {
+        if (!Directory.Exists(gamesRoot)) return "";
+        var sb = new System.Text.StringBuilder();
+        foreach (var dir in Directory.EnumerateDirectories(gamesRoot).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            var manifest = new FileInfo(Path.Combine(dir, "GAME.json"));
+            if (!manifest.Exists) continue;
+            sb.Append(dir).Append('|').Append(manifest.LastWriteTimeUtc.Ticks).Append('|').Append(manifest.Length).Append('\n');
+        }
+        return sb.ToString();
+    }
+
     private void ScheduleRescan()
     {
         lock (_debounceGate)
@@ -141,5 +189,6 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
     {
         _watcher?.Dispose();
         _debounce?.Dispose();
+        _poll?.Dispose();
     }
 }

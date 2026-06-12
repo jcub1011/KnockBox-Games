@@ -23,6 +23,7 @@
 // jslib package speaks the same JSON protocol: send {type:"Attach",ticket}; then exchange
 // {type:"Game",to,payload} frames; read {type:"Ready",...} / {type:"GamePlayerJoined|Left",...}.
 import {
+  PROTOCOL_VERSION,
   parseLaunchParams,
   defaultEndpoint,
   reconnectDelay,
@@ -82,7 +83,7 @@ import {
     if (!ticket) { console.error('[KnockBox] missing kbTicket — cannot attach.'); return; }
     ws = new WebSocket(endpoint);
 
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'Attach', ticket }));
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'Attach', ticket, proto: PROTOCOL_VERSION }));
     ws.onmessage = (e) => handle(JSON.parse(e.data));
     ws.onerror = () => { /* a failed connect surfaces as a close; reconnect is handled there */ };
     ws.onclose = (e) => {

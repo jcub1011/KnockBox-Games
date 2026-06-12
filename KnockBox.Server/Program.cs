@@ -5,6 +5,7 @@ using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
@@ -12,15 +13,24 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Resolve the repo root (holds web/ and games/ at the flat top level) by walking up from the
-// content root until we find the solution file. Robust for `dotnet run` and a published exe alike.
-var repoRoot = FindRepoRoot(builder.Environment.ContentRootPath);
-var webRoot = Path.Combine(repoRoot, "web");
-var gamesRoot = Path.Combine(repoRoot, "games");
-var logsRoot = Path.Combine(repoRoot, "logs");
-Directory.CreateDirectory(webRoot);
-Directory.CreateDirectory(gamesRoot);
-Directory.CreateDirectory(logsRoot);
+// Where web/, games/, and logs/ live: explicit config wins, else repo discovery (dev), else the
+// app base directory (published exe / container — publish bakes web/ in, games/ sits alongside or
+// is volume-mounted). See ContentPaths for the precedence rules.
+var (webRoot, gamesRoot, logsRoot) = ContentPaths.Resolve(
+    builder.Configuration["KnockBox:WebRoot"],
+    builder.Configuration["KnockBox:GamesRoot"],
+    builder.Configuration["KnockBox:LogsRoot"],
+    builder.Environment.ContentRootPath,
+    AppContext.BaseDirectory);
+
+// Best-effort: a read-only games mount (recommended in Docker) or a root-owned parent must not
+// crash startup — GameCatalog and the static-file setup below both tolerate a missing directory.
+var directoryWarnings = new List<string>();
+foreach (var dir in new[] { webRoot, gamesRoot, logsRoot })
+{
+    try { Directory.CreateDirectory(dir); }
+    catch (Exception ex) { directoryWarnings.Add($"Could not create '{dir}': {ex.Message}"); }
+}
 
 // Persist logs to a file that rolls once per day (knockbox-YYYYMMDD.log) while still echoing to the
 // console for dev. Daily files are retained for KnockBox:LogRetentionDays days (default 31); because
@@ -56,7 +66,17 @@ var isolateShell = builder.Configuration.GetValue("KnockBox:IsolateShell", false
 // Empty ⇒ allow all (dev convenience) with a startup warning to configure it for production.
 var allowedOrigins = builder.Configuration.GetSection("KnockBox:AllowedOrigins").Get<string[]>() ?? [];
 
+// Behind a TLS-terminating reverse proxy the request Scheme/Host are the proxy's, which would
+// break the game origin (http instead of https → ws instead of wss) and GamesHost routing. Opt-in
+// (KnockBox:ForwardedHeaders=true) because trusting X-Forwarded-* from arbitrary clients lets them
+// spoof their IP past the per-IP connection cap.
+var forwardedHeaders = builder.Configuration.GetValue("KnockBox:ForwardedHeaders", false);
+
+// Abuse-protection limits (handshake deadline, per-connection rate limits, per-IP connection cap).
+var limits = ServerLimits.FromConfiguration(builder.Configuration);
+
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(limits);
 builder.Services.AddSingleton(sp =>
     new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>()));
 builder.Services.AddSingleton<TokenService>();
@@ -83,11 +103,44 @@ builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = Compre
 
 var app = builder.Build();
 
+// The resolved roots are the first thing an admin needs when "my games don't show up".
+app.Logger.LogInformation("Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}",
+    webRoot, gamesRoot, logsRoot);
+foreach (var warning in directoryWarnings)
+    app.Logger.LogWarning("{Warning}", warning);
+// A web root without the shell means a blank site — make the misconfiguration loud and diagnosable
+// instead of silently serving nothing.
+if (!File.Exists(Path.Combine(webRoot, "index.html")))
+    app.Logger.LogError(
+        "Web root {WebRoot} has no index.html — the platform shell will serve a blank site. " +
+        "Set KnockBox:WebRoot to the folder containing the shell, or verify the install/publish output.",
+        webRoot);
+
+// Must run before anything that reads Request.Scheme/Host (the /ws map, OriginRouting.IsGameOrigin).
+if (forwardedHeaders)
+{
+    var fho = new ForwardedHeadersOptions
+    {
+        ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+                         | ForwardedHeaders.XForwardedHost,
+    };
+    // The proxy's address isn't knowable here (it differs per deployment); the explicit opt-in flag
+    // is the admin's statement that a trusted proxy fronts this server.
+    fho.KnownIPNetworks.Clear();
+    fho.KnownProxies.Clear();
+    app.UseForwardedHeaders(fho);
+    app.Logger.LogInformation("ForwardedHeaders enabled — trusting X-Forwarded-For/Proto/Host from the fronting proxy.");
+}
+
 // Discover games at startup, then watch the folder so dropping in (or removing) a game needs no
 // restart — server managers add games with no code and no downtime.
 var catalog = app.Services.GetRequiredService<GameCatalog>();
 catalog.Discover();
 catalog.StartWatching();
+// Polling safety net for bind mounts where file events don't propagate (Docker Desktop). 0 = off.
+var gamesPollSeconds = builder.Configuration.GetValue("KnockBox:GamesPollSeconds", 0);
+if (gamesPollSeconds > 0)
+    catalog.StartPolling(TimeSpan.FromSeconds(gamesPollSeconds));
 
 if (allowedOrigins.Length == 0)
     app.Logger.LogWarning("KnockBox:AllowedOrigins is empty — /ws accepts any Origin. Set it for production.");
@@ -96,8 +149,10 @@ if (allowedOrigins.Length == 0)
 app.UseResponseCompression();
 app.UseWebSockets();
 
-var webFiles = new PhysicalFileProvider(webRoot);
-var gamesFiles = new PhysicalFileProvider(gamesRoot);
+// PhysicalFileProvider throws when its root is missing; if directory creation failed above, fall
+// back to an empty provider so the server still starts (the LogError above tells the admin why).
+IFileProvider webFiles = Directory.Exists(webRoot) ? new PhysicalFileProvider(webRoot) : new NullFileProvider();
+IFileProvider gamesFiles = Directory.Exists(gamesRoot) ? new PhysicalFileProvider(gamesRoot) : new NullFileProvider();
 
 // `.wasm` is built in (application/wasm — REQUIRED for streaming WebAssembly compilation); keep
 // the explicit `.pck`/`.data` mappings for clarity. Everything else falls through to the
@@ -134,6 +189,9 @@ StaticFileOptions WebStaticOptions() => new()
 
 // The single real-time transport (both origins/ports). The connection's role is decided by its
 // first frame: Hello = control (shell), Attach = data (game). See WebSocketHandler.
+// One machine gets a bounded number of concurrent sockets — a player legitimately holds two
+// (control + game) per tab, so the cap is per-IP, generous, and released with the connection.
+var ipGate = new IpConnectionGate(limits.MaxConnectionsPerIp);
 app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
 {
     var origin = ctx.Request.Headers.Origin.ToString();
@@ -148,19 +206,31 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
         return;
     }
 
-    // The game origin the shell should use to embed iframes (subdomain in prod, games port in dev).
-    var gameOrigin = OriginRouting.ResolveGameOrigin(
-        ctx.Request.Scheme, ctx.Request.Host.Host, gamesPort, gamesHost, gamesOrigin);
+    var clientIp = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    if (!ipGate.TryEnter(clientIp))
+    {
+        app.Logger.LogWarning("Refusing /ws connection from {Ip}: per-IP connection cap reached.", clientIp);
+        ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        return;
+    }
 
-    using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
     try
     {
+        // The game origin the shell should use to embed iframes (subdomain in prod, games port in dev).
+        var gameOrigin = OriginRouting.ResolveGameOrigin(
+            ctx.Request.Scheme, ctx.Request.Host.Host, gamesPort, gamesHost, gamesOrigin);
+
+        using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
         await handler.HandleAsync(socket, gameOrigin, ctx.RequestAborted);
     }
     catch (OperationCanceledException) { }
     catch (Exception ex)
     {
         app.Logger.LogError(ex, "Unhandled error on /ws connection.");
+    }
+    finally
+    {
+        ipGate.Exit(clientIp);
     }
 });
 
@@ -233,12 +303,4 @@ static void ApplyCrossOriginIsolation(HttpContext ctx, GameCatalog catalog)
     ctx.Response.Headers["Cross-Origin-Opener-Policy"] = "same-origin";
     ctx.Response.Headers["Cross-Origin-Embedder-Policy"] = "require-corp";
     ctx.Response.Headers["Cross-Origin-Resource-Policy"] = "cross-origin";
-}
-
-static string FindRepoRoot(string start)
-{
-    for (var dir = new DirectoryInfo(start); dir is not null; dir = dir.Parent)
-        if (File.Exists(Path.Combine(dir.FullName, "KnockBox-Games.slnx")))
-            return dir.FullName;
-    return start;
 }

@@ -28,7 +28,9 @@ public class KickFlowTests
         var lobbies = new LobbyManager();
         var catalog = new GameCatalog(Path.GetTempPath(), NullLogger<GameCatalog>.Instance); // no Discover needed
         var tokens = new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance);
-        var handler = new WebSocketHandler(connections, lobbies, catalog, tokens, NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
+        var limits = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
+        var handler = new WebSocketHandler(connections, lobbies, catalog, tokens, limits, TimeProvider.System,
+            NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
 
         // A lobby with a host and a guest.
         Assert.True(lobbies.TryCreate("g", "host", 4, out var lobby));
