@@ -70,14 +70,16 @@ the watcher works natively and discovery is sub-second; polling stays on as a ha
 
 ## 2. Desktop app (no Docker, no .NET install)
 
-Publish a self-contained build:
+Publish a self-contained build (a Native AOT compile — needs the MSVC C++ build tools, i.e. Visual
+Studio's "Desktop development with C++" workload):
 
 ```bash
 dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop
 # → KnockBox.Server/bin/publish/win-x64/
 ```
 
-Copy that folder anywhere and run `KnockBox.Server.exe`. Layout (the publish folder is `win-x64/`):
+`KnockBox.Server.exe` is a native binary (no managed runtime alongside it). Copy that folder anywhere
+and run it. Layout (the publish folder is `win-x64/`):
 
 ```
 win-x64/

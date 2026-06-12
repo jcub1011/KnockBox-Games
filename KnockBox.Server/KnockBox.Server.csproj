@@ -11,6 +11,13 @@
     <RootNamespace>KnockBox.Server</RootNamespace>
     <AssemblyName>KnockBox.Server</AssemblyName>
     <PublishAot>True</PublishAot>
+    <!-- Serilog core emits an IL2104 trim roll-up for its reflective object-destructuring path. We only
+         log scalar structured properties (ids, names, counts) and never @-destructure objects, so that
+         path is never executed under AOT. The real risk — Serilog.Settings.Configuration's assembly
+         scanning — is removed (levels are configured in code, see Program.cs). All first-party code and
+         other dependencies analyze clean, so this is the only suppressed warning; revisit if new
+         non-AOT-clean dependencies are added. -->
+    <NoWarn>$(NoWarn);IL2104</NoWarn>
   </PropertyGroup>
 
   <!-- Bake the platform shell + SDK into the publish output (web/ next to the binary), so a

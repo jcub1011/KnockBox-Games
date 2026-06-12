@@ -37,8 +37,12 @@ foreach (var dir in new[] { webRoot, gamesRoot, logsRoot })
 // we roll once per day, the retained-file count equals the retained-day count. All existing
 // ILogger<T> usage routes through this unchanged.
 var logRetentionDays = builder.Configuration.GetValue("KnockBox:LogRetentionDays", 31);
+// Levels are configured in code, NOT via ReadFrom.Configuration: that pulls in
+// Serilog.Settings.Configuration, whose assembly scanning (DependencyContext / Assembly.Location) is
+// not Native-AOT-safe and emits IL2104/IL3002/IL3053 at publish. ReadFrom.Services is DI-only and fine.
 builder.Host.UseSerilog((context, services, config) => config
-    .ReadFrom.Configuration(context.Configuration)
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
     .ReadFrom.Services(services)
     .Enrich.FromLogContext()
     .WriteTo.Console()
