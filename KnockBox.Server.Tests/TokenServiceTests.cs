@@ -9,11 +9,10 @@ public class TokenServiceTests
     private static readonly DateTimeOffset T0 = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     private static (TokenService svc, MutableTimeProvider clock) Make(
-        string secret = "test-secret", double identityTtlHours = 720, double ticketTtlHours = 12)
+        double identityTtlHours = 720, double ticketTtlHours = 12)
     {
         var clock = new MutableTimeProvider(T0);
         var config = ConfigFactory.FromPairs(
-            ("KnockBox:TokenSecret", secret),
             ("KnockBox:IdentityTokenTtlHours", identityTtlHours.ToString()),
             ("KnockBox:GameTicketTtlHours", ticketTtlHours.ToString()));
         return (new TokenService(config, clock, NullLogger<TokenService>.Instance), clock);
@@ -65,10 +64,12 @@ public class TokenServiceTests
     }
 
     [Fact]
-    public void Token_signed_with_a_different_secret_is_rejected()
+    public void Token_from_another_instance_is_rejected()
     {
-        var (a, _) = Make(secret: "secret-A");
-        var (b, _) = Make(secret: "secret-B");
+        // The secret is random per process/instance by design (identities are ephemeral), so a
+        // token issued by one server instance never verifies on another — or after a restart.
+        var (a, _) = Make();
+        var (b, _) = Make();
         var token = a.IssueIdentity("p1");
 
         Assert.False(b.TryVerifyIdentity(token, out _));

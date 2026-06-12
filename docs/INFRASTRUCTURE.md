@@ -59,7 +59,7 @@ All are registered as singletons in `Program.cs`.
 | Component | File | Responsibility |
 |---|---|---|
 | **GameCatalog** | `Games/GameCatalog.cs` | Scans `games/*/GAME.json`, validates each entry file, registers manifests by `Id`. **Hot-reloads** via a debounced `FileSystemWatcher`; rebuilds into a local dictionary and **atomically swaps** it so readers never see a half-built catalog. |
-| **TokenService** | `Security/TokenService.cs` | HMAC-signs/verifies the **identity token** (anti-spoof, per-tab playerId) and the **game ticket** (scoped `playerId+lobbyId+gameId` credential for the data socket). Per-process secret (or `KnockBox:TokenSecret`). |
+| **TokenService** | `Security/TokenService.cs` | HMAC-signs/verifies the **identity token** (anti-spoof, per-tab playerId) and the **game ticket** (scoped `playerId+lobbyId+gameId` credential for the data socket). The secret is always random per process — identities are ephemeral by design, so restart-invalidated tokens are intended. |
 | **LobbyManager** | `Lobbies/LobbyManager.cs` | Tracks active lobbies in a `ConcurrentDictionary`. Short 4-char codes; the creator becomes the **host**. |
 | **Lobby** | `Lobbies/Lobby.cs` | Membership for one lobby. Thread-safe add/remove; `Players` returns a snapshot under lock so broadcasts can't race join/leave. |
 | **Connection** | `Networking/Connection.cs` | Wraps one `WebSocket`. Outbound frames go through a **bounded** single-reader channel drained by one writer task (a `WebSocket` forbids concurrent sends), preserving order without locks and bounding memory for a stuck socket. |
@@ -268,7 +268,6 @@ into `games/` and it appears within a second or two — no restart.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `TokenSecret` | random per process | HMAC secret. Set it to keep identity tokens valid across restarts. |
 | `IdentityTokenTtlHours` | `720` (30d) | Identity-token lifetime (anti-spoof, per-tab id). |
 | `GameTicketTtlHours` | `12` | Game-ticket lifetime. Long enough for a play session + reconnects; live lobby membership is the primary check. |
 | `WebRoot` / `GamesRoot` / `LogsRoot` | auto | Where the shell / games / logs live. Precedence per root: explicit config → repo discovery (dev) → the app's own directory (published exe / container). Relative paths resolve against the content root. See `Hosting/ContentPaths.cs`. |

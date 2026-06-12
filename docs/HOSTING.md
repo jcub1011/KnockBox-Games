@@ -28,15 +28,14 @@ to `docker-compose.yml`:
 
 ```bash
 KNOCKBOX_GAMES_DIR=/srv/knockbox/games
-KNOCKBOX_TOKEN_SECRET=<a long random string>
 ```
 
 The directory is mounted **read-only** (`:ro`) — the server never writes to it — so several server
 instances can safely share one game library. `docker-compose.yml` contains a commented-out second
 instance showing exactly that pattern.
 
-Set `KNOCKBOX_TOKEN_SECRET` for any real deployment: it keeps player identity tokens valid across
-container restarts (without it, a restart logs everyone out of their anonymous identities).
+There are no secrets to configure. Player identities are anonymous, per-tab, and ephemeral by
+design: a restart mints fresh ids, which is expected — in-memory lobbies drop on restart anyway.
 
 ### Port-mapping foot-gun
 
@@ -106,7 +105,6 @@ separators (`KnockBox__GamesRoot`). The full table is in
 
 | Key | Default | Purpose |
 |---|---|---|
-| `TokenSecret` | random per process | Set it so identities survive restarts. |
 | `WebRoot` / `GamesRoot` / `LogsRoot` | auto-resolved | Override where the shell / games / logs live. Relative paths resolve against the app's content root. |
 | `GamesPollSeconds` | `0` (off; `10` in Docker) | Polling fallback for games hot-reload where file watching doesn't work (bind mounts). |
 | `GamesPort` / `GamesHost` / `GamesOrigin` | `5115` / — / — | How the separate game origin is addressed (port in dev, subdomain or explicit origin in prod). |

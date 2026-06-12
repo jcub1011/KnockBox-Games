@@ -49,7 +49,6 @@ jobs:
             -p 8080:8080 -p 8081:8081 \
             -v /tmp/kb-games:/games:ro \
             -e KnockBox__GamesPollSeconds=2 \
-            -e KnockBox__TokenSecret=ci-smoke-secret \
             knockbox:ci
 
       - name: Shell serves from the baked-in web root

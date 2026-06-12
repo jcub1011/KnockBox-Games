@@ -16,8 +16,10 @@ namespace KnockBox.Server.Security;
 /// (so reconnects work) and until it expires — the live membership check in the handler is the
 /// primary control; expiry is defence-in-depth.</item>
 /// </list>
-/// The secret is random per process unless <c>KnockBox:TokenSecret</c> is configured; a restart then
-/// invalidates all tokens, which is harmless because in-memory lobbies are dropped on restart too.
+/// The secret is always random per process: identities are anonymous, per-tab, and ephemeral by
+/// design, so a restart invalidating all tokens is intended — in-memory lobbies drop on restart too,
+/// and reconnecting tabs are transparently minted fresh ids. (Deliberately not configurable: a
+/// human-chosen secret would be weaker than 32 random bytes and would make tickets forgeable.)
 /// </summary>
 public sealed class TokenService
 {
@@ -31,10 +33,7 @@ public sealed class TokenService
     {
         _clock = clock;
         _logger = logger;
-        var configured = config["KnockBox:TokenSecret"];
-        _secret = string.IsNullOrWhiteSpace(configured)
-            ? RandomNumberGenerator.GetBytes(32)
-            : Encoding.UTF8.GetBytes(configured);
+        _secret = RandomNumberGenerator.GetBytes(32);
 
         _identityTtl = TimeSpan.FromHours(config.GetValue("KnockBox:IdentityTokenTtlHours", 720.0)); // 30 days
         _ticketTtl = TimeSpan.FromHours(config.GetValue("KnockBox:GameTicketTtlHours", 12.0));        // a play session

@@ -3,7 +3,6 @@
 #   1. (Recommended) Create a `.env` file next to this one:
 #        KNOCKBOX_GAMES_DIR=/srv/knockbox/games        # any stable folder you own — survives
 #                                                      # image updates and container recreation
-#        KNOCKBOX_TOKEN_SECRET=<a long random string>  # keeps player identities across restarts
 #   2. docker compose up -d --build
 #   3. Open http://localhost:8080 — drop game folders into your games dir; they hot-reload.
 #
@@ -25,7 +24,8 @@ services:
       # Uncomment to keep logs on the host too:
       # - ${KNOCKBOX_LOGS_DIR:-./logs}:/app/logs
     environment:
-      KnockBox__TokenSecret: ${KNOCKBOX_TOKEN_SECRET:-change-me-to-a-long-random-string}
+      # No token secret to configure: player identities are anonymous, per-tab, and ephemeral by
+      # design — a restart mints fresh ids (in-memory lobbies drop on restart anyway).
       # Hot-reload safety net: file events don't cross Docker Desktop bind mounts, so poll.
       KnockBox__GamesPollSeconds: "5"
       # ── Behind a TLS reverse proxy ────────────────────────────────────────────
@@ -42,7 +42,7 @@ services:
 
   # ── Second instance sharing the SAME games folder ─────────────────────────────
   # The server only reads /games, so any number of instances can serve one game library.
-  # Uncomment, give it its own ports/secret, and pin GamesOrigin (host ports differ from the
+  # Uncomment, give it its own ports, and pin GamesOrigin (host ports differ from the
   # container's internal 8081 here, so the dev fallback would advertise the wrong port).
   # knockbox-2:
   #   build:
@@ -54,7 +54,6 @@ services:
   #   volumes:
   #     - ${KNOCKBOX_GAMES_DIR:-./games}:/games:ro
   #   environment:
-  #     KnockBox__TokenSecret: ${KNOCKBOX_TOKEN_SECRET_2:-another-long-random-string}
   #     KnockBox__GamesPollSeconds: "5"
   #     KnockBox__GamesOrigin: "http://localhost:8091"
   #   restart: unless-stopped
