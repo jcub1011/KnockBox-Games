@@ -1,0 +1,14 @@
+{
+  "name": "knockbox-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "KnockBox platform shell + game SDK (browser). Tests cover the pure client logic in kb-core.js.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}

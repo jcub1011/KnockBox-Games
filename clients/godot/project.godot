@@ -1,0 +1,20 @@
+; Minimal Godot 4 project so the KnockBox addon can be opened, compiled, and tested in
+; place — it is NOT a sample game. Open this folder in Godot 4 to verify the addon, or run
+; the headless helper:  godot --headless --script res://test_kb_core.gd
+;
+; Consumers copy `addons/knockbox/` into their own project and enable the plugin there.
+
+config_version=5
+
+[application]
+
+config/name="KnockBox Addon (dev/test harness)"
+config/features=PackedStringArray("4.6")
+
+[autoload]
+
+KnockBox="*res://addons/knockbox/knockbox.gd"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/knockbox/plugin.gd")

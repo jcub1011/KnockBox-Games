@@ -1,0 +1,6 @@
+# Godot 4 editor/import cache — regenerated on open, never committed.
+.godot/
+
+# Mono/.NET build artifacts (this is a Mono Godot build).
+.mono/
+data_*/

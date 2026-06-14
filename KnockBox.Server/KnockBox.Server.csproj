@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>0128e03a-678d-4724-8fcd-5802f2a124f7</UserSecretsId>
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <!-- The Dockerfile builds from the repo root (web/ must be in the build context). -->
+    <DockerfileContext>..\</DockerfileContext>
+    <RootNamespace>KnockBox.Server</RootNamespace>
+    <AssemblyName>KnockBox.Server</AssemblyName>
+    <PublishAot>True</PublishAot>
+    <!-- Serilog core emits an IL2104 trim roll-up for its reflective object-destructuring path. We only
+         log scalar structured properties (ids, names, counts) and never @-destructure objects, so that
+         path is never executed under AOT. The real risk — Serilog.Settings.Configuration's assembly
+         scanning — is removed (levels are configured in code, see Program.cs). All first-party code and
+         other dependencies analyze clean, so this is the only suppressed warning; revisit if new
+         non-AOT-clean dependencies are added. -->
+    <NoWarn>$(NoWarn);IL2104</NoWarn>
+  </PropertyGroup>
+
+  <!-- Bake the platform shell + SDK into the publish output (web/ next to the binary), so a
+       published exe or container serves the shell with no repo checkout. Dev is unaffected
+       (CopyToOutputDirectory=Never): `dotnet run` serves the live repo web/ via repo discovery.
+       games/ is deliberately NOT published — it is external content (volume / next to the exe). -->
+  <ItemGroup>
+    <Content Include="..\web\**" Exclude="..\web\node_modules\**;..\web\__tests__\**;..\web\package.json;..\web\package-lock.json" LinkBase="web" CopyToOutputDirectory="Never" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
+    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KnockBox.Contracts\KnockBox.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

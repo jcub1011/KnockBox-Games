@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  dotnet:
+    name: .NET build & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test KnockBox-Games.slnx --nologo
+
+  aot:
+    name: Native AOT publish (warnings gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      # Native AOT compiles to a native object and links it via clang against zlib; the SDK doesn't
+      # ship the toolchain (mirrors the Dockerfile's build stage).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+      # The full ILC compile is the only thing that surfaces trim/AOT (ILxxxx) warnings; /warnaserror
+      # fails the build on any new one, so the app stays AOT-clean as code and dependencies change.
+      - run: dotnet publish KnockBox.Server -r linux-x64 -c Release /warnaserror
+
+  web:
+    name: Web (shell + SDK) tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  docker:
+    name: Docker image build & smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build -f KnockBox.Server/Dockerfile -t knockbox:ci .
+
+      - name: Start container with an empty mounted games dir
+        run: |
+          mkdir -p /tmp/kb-games
+          docker run -d --name kb \
+            -p 8080:8080 -p 8081:8081 \
+            -v /tmp/kb-games:/games:ro \
+            -e KnockBox__GamesPollSeconds=2 \
+            knockbox:ci
+
+      - name: Shell serves from the baked-in web root
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8080/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8080/ | grep -qi '<html'
+          curl -fsS http://localhost:8080/shell.js >/dev/null
+          curl -fsS http://localhost:8081/knockbox.js >/dev/null
+
+      - name: Hot drop-in — game appears via the polling fallback
+        run: |
+          cp -r games/tictactoe /tmp/kb-games/
+          for i in $(seq 1 30); do
+            # Fail fast (with logs) if the container died, instead of spinning the full 30s.
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Discovered game 'tictactoe'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'tictactoe'"
+          # ...and its assets serve from the game origin.
+          curl -fsS http://localhost:8081/games/tictactoe/GAME.json >/dev/null
+          curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
+
+      - name: Shell origin exposes only the thumbnail, never the full game build
+        run: |
+          # Isolation guarantee: the untrusted build must NOT be reachable on the shell origin (8080),
+          # or it could run there and read the identity token. Only the declared thumbnail is allowed.
+          curl -fsS http://localhost:8080/games/tictactoe/thumb.svg >/dev/null
+          ! curl -fsS http://localhost:8080/games/tictactoe/index.html >/dev/null
+          ! curl -fsS http://localhost:8080/games/tictactoe/GAME.json >/dev/null
+
+      - name: Startup logs are sane (no blank-site error, roots resolved)
+        run: |
+          docker logs kb 2>&1 | grep -q "Content roots"
+          ! docker logs kb 2>&1 | grep -q "has no index.html"
+
+      - name: Dump container logs
+        if: always()
+        run: docker logs kb 2>&1 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f kb || true

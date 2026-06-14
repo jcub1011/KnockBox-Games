@@ -1,0 +1,59 @@
+# KnockBox server — admin quick start:
+#
+#   1. (Recommended) Create a `.env` file next to this one:
+#        KNOCKBOX_GAMES_DIR=/srv/knockbox/games        # any stable folder you own — survives
+#                                                      # image updates and container recreation
+#   2. docker compose up -d --build
+#   3. Open http://localhost:8080 — drop game folders into your games dir; they hot-reload.
+#
+# PORT-MAPPING FOOT-GUN: the server tells browsers to load games from its *internal* games port
+# (8081), so host:container mappings must stay 1:1 — or set KnockBox__GamesOrigin explicitly
+# (see the second-instance example below).
+services:
+  knockbox:
+    build:
+      context: .
+      dockerfile: KnockBox.Server/Dockerfile
+    ports:
+      - "8080:8080"   # shell — players open this
+      - "8081:8081"   # game origin — iframes + game data sockets
+    volumes:
+      # The server only READS the games dir (hence :ro), so it can be any stable host path and
+      # can be shared by multiple instances.
+      - ${KNOCKBOX_GAMES_DIR:-./games}:/games:ro
+      # Uncomment to keep logs on the host too:
+      # - ${KNOCKBOX_LOGS_DIR:-./logs}:/app/logs
+    environment:
+      # No token secret to configure: player identities are anonymous, per-tab, and ephemeral by
+      # design — a restart mints fresh ids (in-memory lobbies drop on restart anyway).
+      # Hot-reload safety net: file events don't cross Docker Desktop bind mounts, so poll.
+      KnockBox__GamesPollSeconds: "5"
+      # ── Behind a TLS reverse proxy ────────────────────────────────────────────
+      # Trust X-Forwarded-* so the game origin resolves to https/wss:
+      # KnockBox__ForwardedHeaders: "true"
+      # Single-port mode: route the game origin by subdomain instead of port 8081:
+      # KnockBox__GamesHost: "games.example.com"
+      # Or pin the game origin explicitly (required when host ports differ from 8080/8081):
+      # KnockBox__GamesOrigin: "https://games.example.com"
+      # Lock /ws to your real origins in production:
+      # KnockBox__AllowedOrigins__0: "https://play.example.com"
+      # KnockBox__AllowedOrigins__1: "https://games.example.com"
+    restart: unless-stopped
+
+  # ── Second instance sharing the SAME games folder ─────────────────────────────
+  # The server only reads /games, so any number of instances can serve one game library.
+  # Uncomment, give it its own ports, and pin GamesOrigin (host ports differ from the
+  # container's internal 8081 here, so the dev fallback would advertise the wrong port).
+  # knockbox-2:
+  #   build:
+  #     context: .
+  #     dockerfile: KnockBox.Server/Dockerfile
+  #   ports:
+  #     - "8090:8080"
+  #     - "8091:8081"
+  #   volumes:
+  #     - ${KNOCKBOX_GAMES_DIR:-./games}:/games:ro
+  #   environment:
+  #     KnockBox__GamesPollSeconds: "5"
+  #     KnockBox__GamesOrigin: "http://localhost:8091"
+  #   restart: unless-stopped

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KnockBox Games</title>
+  <link rel="stylesheet" href="/home.css" />
+</head>
+<body>
+  <!-- ── Home view ─────────────────────────────────────────────────────── -->
+  <section id="lobby-view" class="home-container">
+    <div class="hero-banner">
+      <div class="hero-ribbon" aria-hidden="true">
+        <div class="hero-ribbon-track">
+          <div class="hero-ribbon-tile"></div>
+          <div class="hero-ribbon-tile"></div>
+        </div>
+      </div>
+      <div class="hero">
+        <h1 class="title">
+          <span class="title-letter" aria-hidden="true">K</span>
+          <span class="title-letter" aria-hidden="true">N</span>
+          <span class="title-letter" aria-hidden="true">O</span>
+          <span class="title-letter" aria-hidden="true">C</span>
+          <span class="title-letter" aria-hidden="true">K</span>
+          <span class="title-letter" aria-hidden="true">B</span>
+          <span class="title-letter" aria-hidden="true">O</span>
+          <span class="title-letter" aria-hidden="true">X</span>
+          <span class="sr-only">KnockBox</span>
+        </h1>
+      </div>
+    </div>
+    <p class="hero-tagline">Imagine Jackbox, but worse.</p>
+
+    <form id="join-form" autocomplete="off">
+      <div class="join-section">
+        <div class="join-card">
+          <label class="join-label" for="player-name-input">Player Name</label>
+          <input id="player-name-input"
+                 placeholder="Enter a name to start playing!"
+                 type="text" maxlength="20" name="player-name" />
+        </div>
+
+        <div class="join-card">
+          <label class="join-label" for="room-code-input">Room Code</label>
+          <div class="join-code-row">
+            <input id="room-code-input"
+                   placeholder="AB12"
+                   type="text" maxlength="4" name="room-code"
+                   autocapitalize="characters" autocorrect="off" spellcheck="false" />
+            <button type="submit" id="join-btn" class="join-btn" disabled>Join</button>
+          </div>
+        </div>
+      </div>
+    </form>
+
+    <div class="home-main">
+      <div class="games-section">
+        <h2 class="games-heading">Host a Game</h2>
+        <div id="games" class="game-grid"></div>
+      </div>
+
+      <aside class="home-playlog">
+        <section class="pl-panel" aria-label="Recently played games">
+          <h2 class="pl-heading">Recently Played</h2>
+          <div class="pl-state pl-empty" role="status">
+            <span class="pl-state-icon" aria-hidden="true">&#127922;</span>
+            <span class="pl-empty-title">No games played yet</span>
+            <span class="pl-empty-sub">Your match history will show up here.</span>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ── In-game / waiting view ────────────────────────────────────────── -->
+  <section id="game-view">
+    <div class="game-shell">
+      <header class="game-header">
+        <span class="game-header-title" id="game-title"></span>
+        <div class="header-actions">
+          <button type="button" class="room-code-btn" id="room-code-btn" title="Hover to reveal the room code">
+            <span class="room-code-label">Room</span>
+            <span class="room-code-value" id="lobby-code"></span>
+          </button>
+          <button class="leave-session-btn" id="leave">Leave</button>
+        </div>
+      </header>
+      <div class="game-body">
+        <div class="roster" id="roster"></div>
+        <div id="waiting"></div>
+        <div id="frame-host"></div>
+      </div>
+    </div>
+  </section>
+
+  <span id="conn" hidden>connecting…</span>
+
+  <script type="module" src="/shell.js?v=2"></script>
+</body>
+</html>

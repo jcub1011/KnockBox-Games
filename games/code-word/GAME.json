@@ -1,0 +1,8 @@
+{
+  "id": "code-word",
+  "name": "Code Word",
+  "entry": "index.html",
+  "thumbnail": "thumb.svg",
+  "maxPlayers": 8,
+  "crossOriginIsolated": false
+}
