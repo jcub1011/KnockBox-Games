@@ -78,6 +78,16 @@ describe('buildGameSrc', () => {
     expect(params.get('kbTicket')).toBe('tok+/=');
     expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
   });
+
+  it('percent-encodes the gameId so a hostile id cannot inject path/scheme', () => {
+    const src = buildGameSrc('http://localhost:5115', '../../evil', 'index.html', 't', 'ws://x/ws');
+    expect(src.startsWith('http://localhost:5115/games/..%2F..%2Fevil/index.html#')).toBe(true);
+  });
+
+  it('encodes each entry segment but preserves nested paths', () => {
+    const src = buildGameSrc('http://localhost:5115', 'g', 'build/a b.html', 't', 'ws://x/ws');
+    expect(src.startsWith('http://localhost:5115/games/g/build/a%20b.html#')).toBe(true);
+  });
 });
 
 describe('roster reducers', () => {

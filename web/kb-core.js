@@ -41,7 +41,12 @@ export function gameWsEndpoint(gameOrigin) {
 
 // Builds the iframe src for an embedded game, with credentials in the fragment (see parseLaunchParams).
 export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
-  const base = `${gameOrigin}/games/${gameId}/${entry}`;
+  // Encode path segments: gameId/entry arrive in a server message, so they must not be able to
+  // inject a scheme, path traversal, or extra path into the iframe's navigation URL. (entry may
+  // legitimately contain '/', so encode each segment rather than the whole string.)
+  const safeGameId = encodeURIComponent(gameId);
+  const safeEntry = entry.split('/').map(encodeURIComponent).join('/');
+  const base = `${gameOrigin}/games/${safeGameId}/${safeEntry}`;
   const frag = `kbTicket=${encodeURIComponent(ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
   return `${base}#${frag}`;
 }

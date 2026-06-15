@@ -240,7 +240,10 @@ function updateWaiting() {
 
 // ── In-game: embed the game on its own origin and hand it a scoped ticket ─────
 async function enterGame(starting) {
+  // Only launch games discovered in our catalog (the allowlist refreshGames built). This rejects a
+  // GameStarting for an unknown id instead of feeding a server-supplied id straight into the iframe URL.
   const manifest = games.get(starting.gameId);
+  if (!manifest) { showError('Unknown game.'); return; }
   lobby = {
     lobbyId: starting.lobbyId,
     gameId: starting.gameId,
@@ -248,7 +251,7 @@ async function enterGame(starting) {
     players: starting.players.slice(),
   };
 
-  el('game-title').textContent = manifest ? manifest.name : starting.gameId;
+  el('game-title').textContent = manifest.name;
   el('lobby-code').textContent = starting.lobbyId;
   renderRoster();
 
@@ -256,7 +259,7 @@ async function enterGame(starting) {
   const reply = await request('RequestGameTicket', { lobbyId: starting.lobbyId });
   if (reply.type !== 'GameTicket') { showError(reply.reason || 'Could not start game.'); return; }
 
-  const entry = manifest ? manifest.entry : 'index.html';
+  const entry = manifest.entry;
   // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.
   const src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
 
