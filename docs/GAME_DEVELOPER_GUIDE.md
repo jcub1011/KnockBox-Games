@@ -71,6 +71,27 @@ Show your own "waiting for players" UI and decide when play begins. You control 
 The catalog **hot-reloads**: drop in, edit, or remove a game folder and the change is picked up
 within a second or two — **no server restart**.
 
+### Packaging your game
+
+You can hand-assemble the folder above, but the repo ships a packer that does it for you and
+**validates your manifest against the same rules the server enforces** — so a bad `id`, a missing
+`entry`, or a thumbnail typo fails immediately instead of being silently skipped at runtime.
+
+```sh
+# Vite/Phaser: build, then package dist/ straight into games/ (hot-reloads)
+node tools/pack-game/pack-game.mjs --build "npm run build" --in dist --manifest export/GAME.json
+
+# Godot/Unity: export from the editor first, then package the export folder
+node tools/pack-game/pack-game.mjs --in build/web --manifest GAME.json
+
+# Hand-written: the files are already the build
+node tools/pack-game/pack-game.mjs --in . --manifest GAME.json
+```
+
+The output folder is named after your `id`, and the manifest/thumbnail may live outside the build
+(e.g. an `export/` folder). See [`tools/pack-game/README.md`](../tools/pack-game/README.md) for all
+options. Pass `--out dist-game` for a local inspect build that doesn't touch the platform.
+
 ---
 
 ## 3. Load the SDK

@@ -69,6 +69,22 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  pack-game:
+    name: pack-game tool tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/pack-game
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/pack-game/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   docker:
     name: Docker image build & smoke test
     runs-on: ubuntu-latest
