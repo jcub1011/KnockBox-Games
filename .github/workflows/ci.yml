@@ -48,6 +48,22 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  clients-phaser:
+    name: Phaser client tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/phaser
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/phaser/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   docker:
     name: Docker image build & smoke test
     runs-on: ubuntu-latest
