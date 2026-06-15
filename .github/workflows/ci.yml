@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default for GITHUB_TOKEN: every job only checks out and builds/tests —
+# none push images, comment on PRs, or create releases — so read-only contents is sufficient.
+permissions:
+  contents: read
+
 jobs:
   dotnet:
     name: .NET build & tests
