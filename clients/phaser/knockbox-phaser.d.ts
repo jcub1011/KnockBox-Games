@@ -194,17 +194,19 @@ export function _resetLocalHubs(): void;
 // ── Host-authoritative helper ─────────────────────────────────────────────────────────────────
 
 /**
- * The model a game supplies to KBAuthority. In the default broadcast mode, implement
- * applyIntent/applyPatch/snapshot()/applySnapshot. In per-recipient mode, implement
- * snapshot(forPlayerId) and applyIntent (applyPatch/applySnapshot are unused).
+ * The model a game supplies to KBAuthority. All members are optional because the required set
+ * depends on the mode and the player's role:
+ *   • Default (broadcast) mode: implement applyIntent + applyPatch + snapshot() + applySnapshot.
+ *   • Per-recipient mode, HOST: implement applyIntent + snapshot(forPlayerId).
+ *   • Per-recipient mode, GUEST: no methods are used — pass `{}` and render `currentView`.
  */
 export interface KBModel {
-  /** Host only. Mutate state; return a patch to broadcast, or null to reject/no-op. */
-  applyIntent(fromId: string, action: any): any;
+  /** Host only. Mutate state; return a patch to broadcast, or null to reject/no-op. (Unused on per-recipient guests.) */
+  applyIntent?(fromId: string, action: any): any;
   /** Every client applies a broadcast delta. (Unused in per-recipient mode.) */
   applyPatch?(patch: any): void;
-  /** Full state for sync/join/reconnect. In per-recipient mode, the view projected for forPlayerId. */
-  snapshot(forPlayerId?: string): any;
+  /** Full state for sync/join/reconnect. In per-recipient mode, the view projected for forPlayerId. (Unused on per-recipient guests.) */
+  snapshot?(forPlayerId?: string): any;
   /** Every client adopts a full snapshot. (Unused in per-recipient mode.) */
   applySnapshot?(state: any): void;
 }

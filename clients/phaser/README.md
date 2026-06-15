@@ -139,6 +139,12 @@ authority.sendIntent({ kind: 'point' });  // call from any client
 Guests automatically request a snapshot on join/reconnect; the host answers and re-broadcasts on
 roster changes, so late joiners converge.
 
+> **Return absolute patches, not relative ones.** A late joiner requests a snapshot, but a delta
+> broadcast to everyone can race ahead of that point-to-point snapshot over a real socket. Convergence
+> relies on re-applying state being safe, so `applyIntent` should return absolute values
+> (`{ score: 5 }`) rather than relative ones (`{ delta: +1 }`), which would double-count or land on
+> stale state. The counter above is correct because it returns the new absolute score.
+
 ### Hidden-information games (per-recipient mode)
 
 For games where each player must see a *different* view (secret roles, hands, votes-before-reveal),

@@ -143,7 +143,10 @@
   };
 
   KBAuthority.prototype._handleRosterChanged = function () {
-    // Host re-broadcasts the full state so newcomers (and everyone) converge.
+    // Host re-broadcasts the full state on ANY roster change — joins AND leaves. This is deliberate:
+    // it's the simplest way to keep everyone converged (a newcomer gets the truth; a leave re-pushes
+    // per-recipient projections that may now reveal/hide info). The extra send on a leave is cheap
+    // and keeps this path single-purpose rather than special-casing join vs. leave.
     if (this._net.isHost) this._broadcastState();
     this.events.emit('state-changed');
   };
@@ -182,6 +185,11 @@
             // Re-project a fresh per-player snapshot to everyone (patch is just an accept signal).
             this._broadcastState();
           } else {
+            // The patch must carry ABSOLUTE (idempotent) values, not relative ones. A late joiner
+            // requests a snapshot, but a delta broadcast to "all" can race ahead of the host's
+            // point-to-point snapshot over a real socket — the snapshot then corrects state only if
+            // re-applying it is safe. Absolute patches (e.g. { score: 5 }) are; relative ones
+            // (e.g. { delta: +1 }) would double-count or land on stale state.
             var delta = {};
             delta[ENVELOPE] = 'delta';
             delta.patch = patch;
@@ -195,6 +203,9 @@
         break;
       case 'delta':
         if (this._net.isHost) return; // already applied via applyIntent; the echo is for guests
+        // applyPatch must be safe to apply even out-of-order vs. a snapshot (see _handleMessage's
+        // 'intent' branch): patches carry absolute values, so a snapshot landing after a delta —
+        // or vice versa — still converges.
         this._model.applyPatch(payload.patch);
         this.events.emit('state-changed');
         break;
