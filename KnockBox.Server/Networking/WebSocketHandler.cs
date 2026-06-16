@@ -359,11 +359,34 @@ public sealed class WebSocketHandler(
         if (m.Level == LogLevel.None || !Enum.IsDefined(m.Level)) return;
         if (!_gameLogger.IsEnabled(m.Level)) return; // e.g. game Trace/Debug below the sink's minimum
 
-        var text = m.Message ?? string.Empty;
-        if (text.Length > MaxGameLogLength) text = text[..MaxGameLogLength];
-
         _gameLogger.Log(m.Level, "Game {GameId} lobby {LobbyId} player {PlayerId}: {GameMessage}",
-            lobby.GameId, conn.LobbyId, conn.PlayerId, text);
+            lobby.GameId, conn.LobbyId, conn.PlayerId, CleanLogText(m.Message));
+    }
+
+    // The game's log message is untrusted. Clamp it to a bounded size (without splitting a surrogate
+    // pair) and strip control characters — notably CR/LF — so a game can't inject extra lines into the
+    // sink and forge entries that look like the server's own. Tab is left as ordinary whitespace.
+    internal static string CleanLogText(string? message)
+    {
+        if (string.IsNullOrEmpty(message)) return string.Empty;
+
+        var text = message;
+        if (text.Length > MaxGameLogLength)
+        {
+            var cut = MaxGameLogLength;
+            if (char.IsHighSurrogate(text[cut - 1])) cut--; // don't slice through a surrogate pair
+            text = text[..cut];
+        }
+
+        char[]? buffer = null; // allocate only if there's actually something to strip (common case: none)
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (!char.IsControl(c) || c == '\t') continue;
+            buffer ??= text.ToCharArray();
+            buffer[i] = ' ';
+        }
+        return buffer is null ? text : new string(buffer);
     }
 
     private void HandleKickPlayer(Connection conn, KickPlayerMessage m)

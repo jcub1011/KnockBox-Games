@@ -38,4 +38,10 @@
     <ProjectReference Include="..\KnockBox.Contracts\KnockBox.Contracts.csproj" />
   </ItemGroup>
 
+  <!-- Let the test project exercise internal helpers (e.g. WebSocketHandler.CleanLogText) directly,
+       without widening their public surface. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="KnockBox.Server.Tests" />
+  </ItemGroup>
+
 </Project>
