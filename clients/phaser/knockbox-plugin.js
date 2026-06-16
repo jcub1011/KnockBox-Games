@@ -227,6 +227,7 @@
   };
 
   KnockBoxPlugin.prototype._handle = function (msg) {
+    if (typeof msg.type !== 'string') return; // malformed frame — no type to dispatch on
     switch (msg.type) {
       case 'Ready':
         this.playerId = msg.playerId;
@@ -248,6 +249,13 @@
       case 'GamePlayerLeft':
         this.players = KBCore.rosterRemove(this.players, msg.playerId);
         this.events.emit('player-left', msg.playerId);
+        break;
+      default:
+        // Unknown frame type — drop it. A newer server may send frames this client
+        // doesn't model yet; ignoring keeps forward-compatibility, but note it for debugging.
+        if (typeof console !== 'undefined' && console.debug) {
+          console.debug('[KnockBox] ignoring unknown frame type:', msg.type);
+        }
         break;
     }
   };
