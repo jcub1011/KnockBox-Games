@@ -116,6 +116,9 @@ import {
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'Attach', ticket, proto: PROTOCOL_VERSION }));
+      // `attached` means "Attach SENT", not "Attach accepted" — we flush optimistically. If the
+      // ticket is rejected the server simply discards these frames and closes 1008, so flushing
+      // before validation is harmless (and avoids gating every send on a round-trip).
       attached = true;
       flushPendingLogs();
     };

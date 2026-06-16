@@ -47,6 +47,10 @@
     throw new Error('[KnockBox] kb-core.js must be loaded before knockbox-plugin.js');
   }
 
+  // Cap on logs queued before Attach (drop-oldest). Logging is best-effort, so a game logging while
+  // disconnected can't grow the queue without bound — and logs never displace queued game frames.
+  var MAX_PENDING_LOGS = 100;
+
   // We subclass BasePlugin (global plugin) and emit through an internal EventEmitter so a game can
   // do `this.knockbox.events.on(...)`. Using a dedicated emitter (rather than making the plugin the
   // emitter) keeps the plugin's public API surface clean and matches the Godot addon's signal set.
@@ -69,13 +73,15 @@
     this._hasSession = false; // a 'ready' has fired at least once (=> next one is a reconnect)
     this._attempt = 0;        // consecutive transient connects, for backoff
     this._stopped = false;    // set on terminal close / destroy — don't reconnect
-    this._pending = [];       // frames queued before the socket is open & attached
+    this._pending = [];       // game/control frames queued before the socket is open & attached
+    this._pendingLogs = [];   // logs queued before attach — kept separate so it can be bounded
     this._reconnectTimer = null;
 
     // Console-like logging to the SERVER: log.info / warn / error / debug / trace / critical. Routed
-    // through _sendFrame, so a log emitted before Attach is queued and flushed alongside game frames.
+    // through _sendLog, so a log emitted before Attach is queued (bounded, drop-oldest) and flushed
+    // on attach — logs use their own queue so they never displace eager game frames in _pending.
     var self = this;
-    this.log = KBCore.makeLogger(function (frame) { self._sendFrame(frame); });
+    this.log = KBCore.makeLogger(function (frame) { self._sendLog(frame); });
   };
 
   KnockBoxPlugin.prototype = Object.create(Phaser.Plugins.BasePlugin.prototype);
@@ -161,10 +167,28 @@
     }
   };
 
+  // Best-effort log send: ship now if open & attached, otherwise queue with a drop-oldest cap so a
+  // game logging while disconnected can't grow the queue without bound. Logs must never block game
+  // state or displace queued game frames, hence the separate bounded queue.
+  KnockBoxPlugin.prototype._sendLog = function (frame) {
+    var json = JSON.stringify(frame);
+    if (this._ws && this._attached && this._ws.readyState === 1 /* OPEN */) {
+      this._ws.send(json);
+      return;
+    }
+    this._pendingLogs.push(json);
+    if (this._pendingLogs.length > MAX_PENDING_LOGS) this._pendingLogs.shift();
+  };
+
   KnockBoxPlugin.prototype._flushPending = function () {
-    if (!this._pending.length) return;
-    for (var i = 0; i < this._pending.length; i++) this._ws.send(this._pending[i]);
-    this._pending = [];
+    if (this._pending.length) {
+      for (var i = 0; i < this._pending.length; i++) this._ws.send(this._pending[i]);
+      this._pending = [];
+    }
+    if (this._pendingLogs.length) {
+      for (var j = 0; j < this._pendingLogs.length; j++) this._ws.send(this._pendingLogs[j]);
+      this._pendingLogs = [];
+    }
   };
 
   KnockBoxPlugin.prototype._connect = function () {
@@ -205,6 +229,7 @@
       if (terminal) {
         // The ticket is invalid or our lobby membership ended — retrying is pointless.
         self._stopped = true;
+        self._pendingLogs = []; // give up — these logs will never send
         console.warn('[KnockBox] data socket closed permanently:', e.reason || e.code);
         return;
       }
@@ -230,6 +255,7 @@
     }
     this._attached = false;
     this._pending = [];
+    this._pendingLogs = [];
   };
 
   KnockBoxPlugin.prototype._handle = function (msg) {

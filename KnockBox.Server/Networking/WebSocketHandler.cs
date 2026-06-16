@@ -40,7 +40,8 @@ public sealed class WebSocketHandler(
 
     // Cap on a single game log line, so a game can't flood the sink with one enormous string. The
     // data plane's token bucket already bounds the RATE of frames; this bounds the SIZE of each.
-    private const int MaxGameLogLength = 2000;
+    // Internal so the sanitization tests reference it directly rather than mirroring the value.
+    internal const int MaxGameLogLength = 2000;
 
     public async Task HandleAsync(WebSocket socket, string gameOrigin, CancellationToken ct)
     {
@@ -366,6 +367,8 @@ public sealed class WebSocketHandler(
     // The game's log message is untrusted. Clamp it to a bounded size (without splitting a surrogate
     // pair) and strip control characters — notably CR/LF — so a game can't inject extra lines into the
     // sink and forge entries that look like the server's own. Tab is left as ordinary whitespace.
+    // Any unpaired surrogate (from malformed input or the size cut) is replaced so the result is
+    // always valid UTF-16.
     internal static string CleanLogText(string? message)
     {
         if (string.IsNullOrEmpty(message)) return string.Empty;
@@ -382,7 +385,12 @@ public sealed class WebSocketHandler(
         for (var i = 0; i < text.Length; i++)
         {
             var c = text[i];
-            if (!char.IsControl(c) || c == '\t') continue;
+            bool strip;
+            if (char.IsControl(c)) strip = c != '\t';
+            else if (char.IsHighSurrogate(c)) strip = i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1]);
+            else if (char.IsLowSurrogate(c)) strip = i == 0 || !char.IsHighSurrogate(text[i - 1]);
+            else strip = false;
+            if (!strip) continue;
             buffer ??= text.ToCharArray();
             buffer[i] = ' ';
         }
