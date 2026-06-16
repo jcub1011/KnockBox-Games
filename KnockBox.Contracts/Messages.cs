@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -37,6 +38,7 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(KickPlayerMessage), "KickPlayer")]
 [JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
+[JsonDerivedType(typeof(LogMessage), "Log")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
 public interface IMessage;
 
@@ -114,6 +116,14 @@ public sealed record SetLobbyOpenMessage(bool Open) : IMessage;
 public sealed record KickPlayerMessage(string TargetPlayerId) : IMessage;
 public sealed record GamePlayerJoinedMessage(Player Player) : IMessage;
 public sealed record GamePlayerLeftMessage(string PlayerId) : IMessage;
+// Game → server diagnostic (data role): the game emits a log line that lands in the server's log
+// sink so operators can observe deployed games (the player only ever sees their own console). Level
+// is the shared Microsoft.Extensions.Logging.LogLevel; it serializes as its NAME on the wire (e.g.
+// "Warning") via the string-enum converter so the JS clients can send a readable level, and reads
+// case-insensitively. The server stamps the game/lobby/player context — the game supplies only this.
+public sealed record LogMessage(
+    [property: JsonConverter(typeof(JsonStringEnumConverter<LogLevel>))] LogLevel Level,
+    string Message) : IMessage;
 
 // ── Errors / rejections ──────────────────────────────────────────────────────
 public sealed record ErrorMessage(string? Cid, string Reason) : IMessage;

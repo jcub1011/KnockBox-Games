@@ -8,6 +8,8 @@ const {
   reconnectDelay,
   parseLaunchParams,
   defaultEndpoint,
+  LOG_LEVELS,
+  makeLogger,
   rosterAdd,
   rosterRemove,
 } = KBCore;
@@ -70,6 +72,35 @@ describe('defaultEndpoint', () => {
   it('chooses ws/wss from the page protocol', () => {
     expect(defaultEndpoint('http:', 'localhost:5115')).toBe('ws://localhost:5115/ws');
     expect(defaultEndpoint('https:', 'games.example')).toBe('wss://games.example/ws');
+  });
+});
+
+describe('makeLogger', () => {
+  it('emits a Log frame per console-like method, mapping to the wire LogLevel name', () => {
+    const frames = [];
+    const log = makeLogger((f) => frames.push(f));
+
+    log.info('hello');
+    log.warn('careful');
+    log.error('boom');
+
+    expect(frames).toEqual([
+      { type: 'Log', level: 'Information', message: 'hello' },
+      { type: 'Log', level: 'Warning', message: 'careful' },
+      { type: 'Log', level: 'Error', message: 'boom' },
+    ]);
+  });
+
+  it('exposes exactly the six level methods (identical to the web SDK) and stringifies the message', () => {
+    const frames = [];
+    const log = makeLogger((f) => frames.push(f));
+    expect(Object.keys(log).sort()).toEqual(
+      ['critical', 'debug', 'error', 'info', 'trace', 'warn'],
+    );
+    expect(Object.values(LOG_LEVELS)).toContain('Critical');
+
+    log.trace(42);
+    expect(frames[0]).toEqual({ type: 'Log', level: 'Trace', message: '42' });
   });
 });
 

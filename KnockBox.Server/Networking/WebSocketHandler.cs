@@ -34,6 +34,14 @@ public sealed class WebSocketHandler(
     // Per-connection Connection instances are created with `new` (not DI), so they get their logger
     // category from this shared factory.
     private readonly ILogger _connectionLogger = loggerFactory.CreateLogger<Connection>();
+    // Game-emitted log lines get their own category ("KnockBox.GameLog") so an operator can filter
+    // or re-level untrusted game output independently of the server's own diagnostics.
+    private readonly ILogger _gameLogger = loggerFactory.CreateLogger("KnockBox.GameLog");
+
+    // Cap on a single game log line, so a game can't flood the sink with one enormous string. The
+    // data plane's token bucket already bounds the RATE of frames; this bounds the SIZE of each.
+    // Internal so the sanitization tests reference it directly rather than mirroring the value.
+    internal const int MaxGameLogLength = 2000;
 
     public async Task HandleAsync(WebSocket socket, string gameOrigin, CancellationToken ct)
     {
@@ -340,6 +348,55 @@ public sealed class WebSocketHandler(
             logger.LogInformation("Lobby {LobbyId} set {State} by host", lobby.Id, m.Open ? "open" : "closed");
     }
 
+    // A game asked to write a diagnostic to the server log. The server doesn't trust the content, so
+    // it stamps its own context (game/lobby/player), clamps the size, and ignores a meaningless level.
+    private void HandleLogMessage(Connection conn, LogMessage m)
+    {
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
+        if (lobby is null) return;
+
+        // None means "log nothing"; an out-of-range value is a malformed/forged frame — drop both.
+        if (m.Level == LogLevel.None || !Enum.IsDefined(m.Level)) return;
+        if (!_gameLogger.IsEnabled(m.Level)) return; // e.g. game Trace/Debug below the sink's minimum
+
+        _gameLogger.Log(m.Level, "Game {GameId} lobby {LobbyId} player {PlayerId}: {GameMessage}",
+            lobby.GameId, conn.LobbyId, conn.PlayerId, CleanLogText(m.Message));
+    }
+
+    // The game's log message is untrusted. Clamp it to a bounded size (without splitting a surrogate
+    // pair) and strip control characters — notably CR/LF — so a game can't inject extra lines into the
+    // sink and forge entries that look like the server's own. Tab is left as ordinary whitespace.
+    // Any unpaired surrogate (from malformed input or the size cut) is replaced so the result is
+    // always valid UTF-16.
+    internal static string CleanLogText(string? message)
+    {
+        if (string.IsNullOrEmpty(message)) return string.Empty;
+
+        var text = message;
+        if (text.Length > MaxGameLogLength)
+        {
+            var cut = MaxGameLogLength;
+            if (char.IsHighSurrogate(text[cut - 1])) cut--; // don't slice through a surrogate pair
+            text = text[..cut];
+        }
+
+        char[]? buffer = null; // allocate only if there's actually something to strip (common case: none)
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            bool strip;
+            if (char.IsControl(c)) strip = c != '\t';
+            else if (char.IsHighSurrogate(c)) strip = i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1]);
+            else if (char.IsLowSurrogate(c)) strip = i == 0 || !char.IsHighSurrogate(text[i - 1]);
+            else strip = false;
+            if (!strip) continue;
+            buffer ??= text.ToCharArray();
+            buffer[i] = ' ';
+        }
+        return buffer is null ? text : new string(buffer);
+    }
+
     private void HandleKickPlayer(Connection conn, KickPlayerMessage m)
     {
         if (conn.LobbyId is null) return;
@@ -449,6 +506,7 @@ public sealed class WebSocketHandler(
                     if (message is GameMessage gm) HandleGameMessage(connection, gm);
                     else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
                     else if (message is KickPlayerMessage kp) HandleKickPlayer(connection, kp);
+                    else if (message is LogMessage log) HandleLogMessage(connection, log);
                 });
             }
         }

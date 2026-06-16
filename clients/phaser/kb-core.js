@@ -52,6 +52,32 @@
     return (protocol === 'https:' ? 'wss' : 'ws') + '://' + host + '/ws';
   }
 
+  // Game → server logging. Maps the friendly, console-like method names the client exposes to the
+  // Microsoft.Extensions.Logging.LogLevel NAMES the server's LogMessage expects on the wire (the
+  // server parses them case-insensitively). info→Information and warn→Warning match console habits.
+  var LOG_LEVELS = {
+    trace: 'Trace',
+    debug: 'Debug',
+    info: 'Information',
+    warn: 'Warning',
+    error: 'Error',
+    critical: 'Critical',
+  };
+
+  // Builds a console-like logger object ({ trace, debug, info, warn, error, critical }) whose methods
+  // each hand a { type:'Log', level, message } frame to the supplied transport. `sendFrame` is the
+  // only client-specific bit, so this stays pure and every client emits identical frames.
+  function makeLogger(sendFrame) {
+    var api = {};
+    Object.keys(LOG_LEVELS).forEach(function (method) {
+      var level = LOG_LEVELS[method];
+      api[method] = function (message) {
+        sendFrame({ type: 'Log', level: level, message: String(message) });
+      };
+    });
+    return api;
+  }
+
   // Roster reducers (immutable): add is idempotent by id; remove drops by id.
   function rosterAdd(players, player) {
     return players.some(function (p) { return p.id === player.id; })
@@ -70,6 +96,8 @@
     reconnectDelay: reconnectDelay,
     parseLaunchParams: parseLaunchParams,
     defaultEndpoint: defaultEndpoint,
+    LOG_LEVELS: LOG_LEVELS,
+    makeLogger: makeLogger,
     rosterAdd: rosterAdd,
     rosterRemove: rosterRemove,
   };

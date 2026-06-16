@@ -16,6 +16,7 @@
 //   KnockBox.sendToHost(payload)        // -> the authoritative host (intent)
 //   KnockBox.sendToAll(payload)         // -> everyone incl. self (state)
 //   KnockBox.sendTo(playerId, payload)  // -> one specific player
+//   KnockBox.log.info('message')        // -> the SERVER log (also warn/error/debug/trace/critical)
 //
 // After onReady fires, KnockBox.playerId / players / isHost are populated.
 //
@@ -28,6 +29,7 @@ import {
   defaultEndpoint,
   reconnectDelay,
   isTerminalClose,
+  makeLogger,
   rosterAdd,
   rosterRemove,
 } from './kb-core.js';
@@ -47,6 +49,9 @@ import {
   let ws = null;
   let attempt = 0;        // consecutive failed/transient connects, for backoff
   let stopped = false;    // set on a terminal close — don't reconnect
+  let attached = false;          // Attach sent on the live socket — data frames are accepted now
+  const pendingLogs = [];        // logs emitted before Attach; flushed on attach (best-effort, bounded)
+  const MAX_PENDING_LOGS = 100;  // cap so a game logging while disconnected can't grow this unbounded
 
   const KnockBox = {
     playerId: null,
@@ -68,6 +73,13 @@ import {
       if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'SetLobbyOpen', open: !!open }));
     },
+
+    // Console-like logging to the SERVER (not the player's console): log.info / warn / error /
+    // debug / trace / critical. Lines land in the server's log sink with the game/lobby/player
+    // context stamped on. A log emitted before the socket attaches (or while reconnecting) is
+    // queued and flushed on attach — bounded (drop-oldest) so it can't grow without limit. Logging
+    // is best-effort: it must never block game state, and the queue is dropped on a terminal close.
+    log: makeLogger(sendLog),
   };
 
   function snapshot() {
@@ -76,6 +88,20 @@ import {
 
   function send(to, payload) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'Game', to, payload }));
+  }
+
+  function sendLog(frame) {
+    const json = JSON.stringify(frame);
+    if (ws && attached && ws.readyState === WebSocket.OPEN) { ws.send(json); return; }
+    // Not attached (initial connect or reconnecting): queue, dropping the OLDEST at the cap.
+    // Logging is best-effort — it must never grow without bound or block game state.
+    pendingLogs.push(json);
+    if (pendingLogs.length > MAX_PENDING_LOGS) pendingLogs.shift();
+  }
+
+  function flushPendingLogs() {
+    for (let i = 0; i < pendingLogs.length; i++) ws.send(pendingLogs[i]);
+    pendingLogs.length = 0;
   }
 
   function scheduleReconnect() {
@@ -88,13 +114,22 @@ import {
     if (!ticket) { console.error('[KnockBox] missing kbTicket — cannot attach.'); return; }
     ws = new WebSocket(endpoint);
 
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'Attach', ticket, proto: PROTOCOL_VERSION }));
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'Attach', ticket, proto: PROTOCOL_VERSION }));
+      // `attached` means "Attach SENT", not "Attach accepted" — we flush optimistically. If the
+      // ticket is rejected the server simply discards these frames and closes 1008, so flushing
+      // before validation is harmless (and avoids gating every send on a round-trip).
+      attached = true;
+      flushPendingLogs();
+    };
     ws.onmessage = (e) => handle(JSON.parse(e.data));
     ws.onerror = () => { /* a failed connect surfaces as a close; reconnect is handled there */ };
     ws.onclose = (e) => {
+      attached = false;
       if (isTerminalClose(e.code)) {
         // The ticket is invalid or our lobby membership ended — retrying is pointless.
         stopped = true;
+        pendingLogs.length = 0; // give up — these logs will never send
         console.warn('[KnockBox] data socket closed permanently:', e.reason || e.code);
         return;
       }

@@ -8,4 +8,11 @@
     <AssemblyName>KnockBox.Contracts</AssemblyName>
   </PropertyGroup>
 
+  <!-- The only dependency this otherwise wire-only package takes: the abstractions package gives us
+       the shared LogLevel enum (carried by LogMessage) without pulling in a logging implementation.
+       It's trim/AOT-safe, in line with the Server's Native AOT migration. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
 </Project>

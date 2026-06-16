@@ -51,6 +51,30 @@ export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
   return `${base}#${frag}`;
 }
 
+// Game → server logging. Maps the friendly, console-like method names the SDK exposes to the
+// Microsoft.Extensions.Logging.LogLevel NAMES the server's LogMessage expects on the wire (the
+// server parses them case-insensitively). info→Information and warn→Warning match console habits.
+export const LOG_LEVELS = {
+  trace: 'Trace',
+  debug: 'Debug',
+  info: 'Information',
+  warn: 'Warning',
+  error: 'Error',
+  critical: 'Critical',
+};
+
+// Builds a console-like logger object ({ trace, debug, info, warn, error, critical }) whose methods
+// each hand a { type:'Log', level, message } frame to the supplied transport. `sendFrame` is the
+// only client-specific bit, so this stays pure and the web and Phaser SDKs emit identical frames.
+export function makeLogger(sendFrame) {
+  const api = {};
+  for (const method in LOG_LEVELS) {
+    const level = LOG_LEVELS[method];
+    api[method] = (message) => sendFrame({ type: 'Log', level, message: String(message) });
+  }
+  return api;
+}
+
 // Roster reducers (immutable): add is idempotent by id; remove drops by id.
 export function rosterAdd(players, player) {
   return players.some((p) => p.id === player.id) ? players : [...players, player];

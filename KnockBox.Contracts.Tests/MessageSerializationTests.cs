@@ -1,5 +1,6 @@
 using System.Text.Json;
 using KnockBox.Contracts;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace KnockBox.Contracts.Tests;
@@ -78,6 +79,38 @@ public class MessageSerializationTests
     }
 
     [Fact]
+    public void Log_message_serializes_its_level_as_a_name_round_trip()
+    {
+        IMessage original = new LogMessage(LogLevel.Warning, "something happened");
+
+        var json = JsonSerializer.Serialize(original, Options);
+
+        using (var doc = JsonDocument.Parse(json))
+        {
+            Assert.Equal("Log", doc.RootElement.GetProperty("type").GetString());
+            // The level is the readable enum NAME on the wire (not the numeric 3), so a JS client can
+            // send "Warning" rather than a magic number.
+            Assert.Equal("Warning", doc.RootElement.GetProperty("level").GetString());
+            Assert.Equal("something happened", doc.RootElement.GetProperty("message").GetString());
+        }
+
+        var back = Assert.IsType<LogMessage>(JsonSerializer.Deserialize<IMessage>(json, Options));
+        Assert.Equal(LogLevel.Warning, back.Level);
+        Assert.Equal("something happened", back.Message);
+    }
+
+    [Fact]
+    public void Log_message_reads_a_level_name_case_insensitively()
+    {
+        // The JS clients send a level name; accept casing variations rather than rejecting the frame.
+        var back = Assert.IsType<LogMessage>(JsonSerializer.Deserialize<IMessage>(
+            """{ "type": "Log", "level": "error", "message": "boom" }""", Options));
+
+        Assert.Equal(LogLevel.Error, back.Level);
+        Assert.Equal("boom", back.Message);
+    }
+
+    [Fact]
     public void Missing_proto_reads_as_zero_for_pre_versioning_clients()
     {
         var hello = Assert.IsType<HelloMessage>(JsonSerializer.Deserialize<IMessage>(
@@ -110,6 +143,7 @@ public class MessageSerializationTests
     [InlineData(typeof(GamePlayerLeftMessage))]
     [InlineData(typeof(KickPlayerMessage))]
     [InlineData(typeof(KickedMessage))]
+    [InlineData(typeof(LogMessage))]
     public void Every_new_message_type_has_a_registered_discriminator(Type messageType)
     {
         // Constructing each is overkill; we only assert the polymorphism attribute knows the subtype,

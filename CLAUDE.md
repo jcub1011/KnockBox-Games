@@ -101,7 +101,9 @@ configurable and disabled with `0`.
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
 `players`, `isHost`; callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`; send
-methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, and host-only `setLobbyOpen`.
+methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`, and
+`log.{info,warn,error,debug,trace,critical}(message)` (console-like logging to the server, relayed
+as a `LogMessage` and written under the `KnockBox.GameLog` category).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested
 protocol helpers (reconnect/backoff, fragment parsing, roster reducers). Close code **1008**
 is terminal (no reconnect); other closes back off exponentially.
