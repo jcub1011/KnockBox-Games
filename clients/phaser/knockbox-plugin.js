@@ -21,6 +21,7 @@
 //   this.knockbox.sendToAll({ kind: 'move', x, y });   // -> everyone incl. self (state)
 //   this.knockbox.sendToHost({ kind: 'tap' });         // -> the authoritative host (intent)
 //   this.knockbox.sendTo(playerId, { secret: 1 });     // -> one specific player
+//   this.knockbox.log.info('message');                 // -> the SERVER log (also warn/error/debug/trace/critical)
 //
 // After 'ready' fires, knockbox.playerId / players / isHost are populated.
 //
@@ -70,6 +71,11 @@
     this._stopped = false;    // set on terminal close / destroy — don't reconnect
     this._pending = [];       // frames queued before the socket is open & attached
     this._reconnectTimer = null;
+
+    // Console-like logging to the SERVER: log.info / warn / error / debug / trace / critical. Routed
+    // through _sendFrame, so a log emitted before Attach is queued and flushed alongside game frames.
+    var self = this;
+    this.log = KBCore.makeLogger(function (frame) { self._sendFrame(frame); });
   };
 
   KnockBoxPlugin.prototype = Object.create(Phaser.Plugins.BasePlugin.prototype);

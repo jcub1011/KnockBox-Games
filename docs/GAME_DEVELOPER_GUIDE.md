@@ -157,6 +157,32 @@ A lobby is **open** when created. The platform never opens or closes it for you 
 (e.g. close once the match is full or has begun, reopen if someone leaves). Calls from non-host players
 are ignored.
 
+### Logging to the server
+
+`console.log` only reaches the player's own browser — an operator running a deployed instance never
+sees it. To surface a diagnostic in the **server's** log, use the console-like `KnockBox.log`:
+
+```js
+KnockBox.log.info('match started');
+KnockBox.log.warn('player sent an unexpected action');
+KnockBox.log.error('failed to apply patch');
+```
+
+| Method | Level (Microsoft.Extensions.Logging.LogLevel) |
+|---|---|
+| `KnockBox.log.trace(msg)` | `Trace` |
+| `KnockBox.log.debug(msg)` | `Debug` |
+| `KnockBox.log.info(msg)` | `Information` |
+| `KnockBox.log.warn(msg)` | `Warning` |
+| `KnockBox.log.error(msg)` | `Error` |
+| `KnockBox.log.critical(msg)` | `Critical` |
+
+Lines land under the `KnockBox.GameLog` category with your game id, lobby, and player id stamped on by
+the server (the message itself is never trusted — it's capped in length). Logging is **best-effort**:
+a line sent before the socket is ready, or after a drop, is silently discarded — never use it for game
+state. By default the server logs at `Information` and above, so `trace`/`debug` lines are filtered
+unless an operator lowers the level.
+
 ---
 
 ## 5. The host-authoritative model (the contract)

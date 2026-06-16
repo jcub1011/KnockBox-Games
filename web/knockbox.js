@@ -16,6 +16,7 @@
 //   KnockBox.sendToHost(payload)        // -> the authoritative host (intent)
 //   KnockBox.sendToAll(payload)         // -> everyone incl. self (state)
 //   KnockBox.sendTo(playerId, payload)  // -> one specific player
+//   KnockBox.log.info('message')        // -> the SERVER log (also warn/error/debug/trace/critical)
 //
 // After onReady fires, KnockBox.playerId / players / isHost are populated.
 //
@@ -28,6 +29,7 @@ import {
   defaultEndpoint,
   reconnectDelay,
   isTerminalClose,
+  makeLogger,
   rosterAdd,
   rosterRemove,
 } from './kb-core.js';
@@ -68,6 +70,14 @@ import {
       if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'SetLobbyOpen', open: !!open }));
     },
+
+    // Console-like logging to the SERVER (not the player's console): log.info / warn / error /
+    // debug / trace / critical. Lines land in the server's log sink with the game/lobby/player
+    // context stamped on. A log before the socket is open (or after a drop) is simply dropped —
+    // logging is best-effort and must never block or queue game state.
+    log: makeLogger((frame) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+    }),
   };
 
   function snapshot() {

@@ -31,6 +31,19 @@ export interface KBClosed {
   terminal: boolean;
 }
 
+/**
+ * Console-like logger that ships lines to the SERVER log (not the player's console). Each method
+ * mirrors a Microsoft.Extensions.Logging.LogLevel: info → Information, warn → Warning, etc.
+ */
+export interface KnockBoxLogger {
+  trace(message: string): void;
+  debug(message: string): void;
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+  critical(message: string): void;
+}
+
 /** Maps each KnockBox event name to its listener signature. */
 export interface KnockBoxEvents {
   ready: (info: KBReadyInfo) => void;
@@ -76,6 +89,9 @@ export class KnockBoxPlugin {
 
   /** Subscribe to networking events here, e.g. `plugin.events.on('message', cb)`. */
   events: KBEmitter<KnockBoxEvents>;
+
+  /** Console-like logging to the server, e.g. `plugin.log.info('started')`. */
+  log: KnockBoxLogger;
 
   /** Phaser lifecycle — called by the plugin manager. */
   init(data?: KnockBoxPluginData): void;
@@ -140,6 +156,9 @@ export class KnockBoxLocalPeer {
 
   events: KBEmitter<KnockBoxEvents>;
 
+  /** Logs to the dev console locally (no server), with the same shape as the real plugin's logger. */
+  log: KnockBoxLogger;
+
   /** Begin the session (connect to the in-process hub / BroadcastChannel, or fire solo ready). */
   start(): void;
   /** End the session and release the transport. */
@@ -172,6 +191,7 @@ export class KnockBoxLocalPlugin {
   readonly players: KBPlayer[];
   readonly isHost: boolean;
   readonly reconnected: boolean;
+  readonly log: KnockBoxLogger;
 
   events: KBEmitter<KnockBoxEvents>;
 

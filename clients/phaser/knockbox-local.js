@@ -354,6 +354,17 @@
     this._pending = [];  // outbound sends queued until ready
     this._inbox = [];    // inbound messages that arrived before our own ready
     this._transport = makeTransport(this);
+
+    // There's no server to receive logs locally, so mirror them to the dev console (API parity with
+    // the real plugin's log.info / warn / error / …). Level name → the closest console method.
+    this.log = KBCore.makeLogger(function (frame) {
+      if (typeof console === 'undefined') return;
+      var fn = frame.level === 'Warning' ? console.warn
+        : (frame.level === 'Error' || frame.level === 'Critical') ? console.error
+        : (frame.level === 'Trace' || frame.level === 'Debug') ? (console.debug || console.log)
+        : (console.info || console.log);
+      fn.call(console, '[KnockBox][' + frame.level + '] ' + frame.message);
+    });
   }
 
   KnockBoxLocalPeer.prototype.start = function () {
@@ -449,8 +460,8 @@
     ['sendToHost', 'sendToAll', 'sendTo', 'setLobbyOpen', 'kickPlayer', 'setLaunchParams'].forEach(function (m) {
       KnockBoxLocalPlugin.prototype[m] = function () { return this._peer[m].apply(this._peer, arguments); };
     });
-    // Mirror the peer's state as read-only properties.
-    ['playerId', 'players', 'isHost', 'reconnected'].forEach(function (prop) {
+    // Mirror the peer's state as read-only properties (log is the peer's console-like logger object).
+    ['playerId', 'players', 'isHost', 'reconnected', 'log'].forEach(function (prop) {
       Object.defineProperty(KnockBoxLocalPlugin.prototype, prop, {
         get: function () { return this._peer ? this._peer[prop] : undefined; },
         enumerable: true,

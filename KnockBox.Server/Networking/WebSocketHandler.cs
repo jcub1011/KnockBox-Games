@@ -34,6 +34,13 @@ public sealed class WebSocketHandler(
     // Per-connection Connection instances are created with `new` (not DI), so they get their logger
     // category from this shared factory.
     private readonly ILogger _connectionLogger = loggerFactory.CreateLogger<Connection>();
+    // Game-emitted log lines get their own category ("KnockBox.GameLog") so an operator can filter
+    // or re-level untrusted game output independently of the server's own diagnostics.
+    private readonly ILogger _gameLogger = loggerFactory.CreateLogger("KnockBox.GameLog");
+
+    // Cap on a single game log line, so a game can't flood the sink with one enormous string. The
+    // data plane's token bucket already bounds the RATE of frames; this bounds the SIZE of each.
+    private const int MaxGameLogLength = 2000;
 
     public async Task HandleAsync(WebSocket socket, string gameOrigin, CancellationToken ct)
     {
@@ -340,6 +347,25 @@ public sealed class WebSocketHandler(
             logger.LogInformation("Lobby {LobbyId} set {State} by host", lobby.Id, m.Open ? "open" : "closed");
     }
 
+    // A game asked to write a diagnostic to the server log. The server doesn't trust the content, so
+    // it stamps its own context (game/lobby/player), clamps the size, and ignores a meaningless level.
+    private void HandleLogMessage(Connection conn, LogMessage m)
+    {
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
+        if (lobby is null) return;
+
+        // None means "log nothing"; an out-of-range value is a malformed/forged frame — drop both.
+        if (m.Level == LogLevel.None || !Enum.IsDefined(m.Level)) return;
+        if (!_gameLogger.IsEnabled(m.Level)) return; // e.g. game Trace/Debug below the sink's minimum
+
+        var text = m.Message ?? string.Empty;
+        if (text.Length > MaxGameLogLength) text = text[..MaxGameLogLength];
+
+        _gameLogger.Log(m.Level, "Game {GameId} lobby {LobbyId} player {PlayerId}: {GameMessage}",
+            lobby.GameId, conn.LobbyId, conn.PlayerId, text);
+    }
+
     private void HandleKickPlayer(Connection conn, KickPlayerMessage m)
     {
         if (conn.LobbyId is null) return;
@@ -449,6 +475,7 @@ public sealed class WebSocketHandler(
                     if (message is GameMessage gm) HandleGameMessage(connection, gm);
                     else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
                     else if (message is KickPlayerMessage kp) HandleKickPlayer(connection, kp);
+                    else if (message is LogMessage log) HandleLogMessage(connection, log);
                 });
             }
         }

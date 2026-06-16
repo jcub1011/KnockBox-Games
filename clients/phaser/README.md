@@ -103,7 +103,15 @@ After `ready` fires, `net.playerId`, `net.players`, and `net.isHost` are populat
 | `sendTo(playerId, payload)` | Send to one specific player. |
 | `setLobbyOpen(open)` | **Host only.** Open/close the lobby to new joins. |
 | `kickPlayer(playerId)` | **Host only.** Remove a player (barred from rejoining). |
+| `log.info(msg)` (also `trace`/`debug`/`warn`/`error`/`critical`) | Log a line to the **server** (not the player's console). Best-effort; see below. |
 | `setLaunchParams(ticket, endpoint?)` | Supply credentials manually for local/editor testing. |
+
+`this.knockbox.log.*` ships a diagnostic to the server's log (each method maps to a
+`Microsoft.Extensions.Logging.LogLevel`: `info`→`Information`, `warn`→`Warning`, …). The server
+stamps your game/lobby/player context and logs under the `KnockBox.GameLog` category at `Information`
+and above by default. It's best-effort — a line sent before attach is queued with your other frames,
+but logging must never carry game state. Locally (`knockbox-local.js`) `log.*` prints to the dev
+console for parity.
 
 Sends issued before the socket is ready are queued and flushed once authenticated, so an eager send
 in your `ready` handler is never dropped. Transient drops reconnect automatically with capped
