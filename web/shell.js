@@ -536,23 +536,27 @@ function closeCodeModal() {
 }
 
 const rc = el('room-code-btn');
-let clickTimer = null;
 let longPressTimer = null;
 let longPressed = false;
+let lastClickAt = 0;
+const DBL_MS = 250;
 
-// Single click toggles the crossfade, but defer it briefly so a double-click can cancel it and
-// open the modal instead (otherwise the two clicks of a dbl-click would toggle back to start).
+// Single click toggles the crossfade immediately (instant feedback). The second click of a
+// double-click lands within DBL_MS — we skip its toggle so dblclick can open the modal without
+// reverting the reveal first.
 rc.addEventListener('click', () => {
   if (longPressed) return; // a long-press already handled this gesture
-  if (clickTimer) return;  // second click of a dbl-click; let dblclick handle it
-  clickTimer = setTimeout(() => {
-    clickTimer = null;
-    rc.classList.toggle('revealed');
-  }, 220);
+  const now = performance.now();
+  if (now - lastClickAt < DBL_MS) { // second click of a dbl-click; let dblclick handle it
+    lastClickAt = 0;
+    return;
+  }
+  lastClickAt = now;
+  rc.classList.toggle('revealed');
 });
 
 rc.addEventListener('dblclick', () => {
-  if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+  rc.classList.remove('revealed'); // reset to "Room Code" behind the modal so it's hidden on close
   openCodeModal();
 });
 
