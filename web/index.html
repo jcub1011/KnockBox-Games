@@ -77,25 +77,38 @@
   <section id="game-view">
     <div class="game-shell">
       <header class="game-header">
-        <span class="game-header-title" id="game-title"></span>
+        <a class="game-header-title" id="game-title" href="/"></a>
         <div class="header-actions">
-          <button type="button" class="room-code-btn" id="room-code-btn" title="Hover to reveal the room code">
-            <span class="room-code-label">Room</span>
-            <span class="room-code-value" id="lobby-code"></span>
+          <button type="button" class="room-code-btn" id="room-code-btn" title="Click to reveal · double-click to enlarge · right-click/long-press to copy · middle-click to join in a new tab">
+            <span class="room-code-face room-code-label">Room Code</span>
+            <span class="room-code-face room-code-value" id="lobby-code"></span>
           </button>
           <button class="leave-session-btn" id="leave">Leave</button>
         </div>
       </header>
       <div class="game-body">
-        <div class="roster" id="roster"></div>
         <div id="waiting"></div>
         <div id="frame-host"></div>
       </div>
     </div>
   </section>
 
+  <!-- ── Room code modal (double-click / mobile-friendly large view) ─────────── -->
+  <div class="rc-modal" id="rc-modal" hidden role="dialog" aria-modal="true" aria-labelledby="rc-modal-title">
+    <div class="rc-modal-backdrop" data-rc-close></div>
+    <div class="rc-modal-card">
+      <button type="button" class="rc-modal-close" id="rc-modal-close" aria-label="Close" data-rc-close>×</button>
+      <p class="rc-modal-heading" id="rc-modal-title">Room Code</p>
+      <p class="rc-modal-code" id="rc-modal-code"></p>
+      <div class="rc-modal-actions">
+        <button type="button" class="rc-modal-copy" id="rc-modal-copy">Copy code</button>
+        <button type="button" class="rc-modal-copy secondary" id="rc-modal-copy-link">Copy Join Link</button>
+      </div>
+    </div>
+  </div>
+
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module" src="/shell.js?v=2"></script>
+  <script type="module" src="/shell.js?v=5"></script>
 </body>
 </html>

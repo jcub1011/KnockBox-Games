@@ -217,6 +217,80 @@ Rules that keep this correct and consistent:
 
 ---
 
+## 5a. Working with replicated state (real-time, prediction, per-player state)
+
+§5 is the contract. This section is the **failure mode** that contract doesn't spell out, and it bites
+games of every genre — action, real-time, social, turn-based. Read it if your game has *anything*
+beyond "click → host updates → everyone re-renders": timers, animation, movement, prediction, or
+per-player state.
+
+> **Skip this if your game isn't host-authoritative.** It assumes one client owns the truth and the
+> rest hold render copies. (You can also build non-authoritative games on the raw `KnockBox` sends.)
+
+**The core idea.** In single-player, three things are one object you mutate in one loop:
+
+1. the **authoritative state** (the truth),
+2. what you **render** (a copy of the truth), and
+3. the **per-frame loop** that advances time/animation.
+
+On KnockBox they are *separate things across a network*: the truth lives on the host; every other
+client holds a **replicated render copy** updated only when a message arrives; and each client runs
+its own frame loop. Bugs come from code that silently assumed these were still one object. The cruel
+part: **this class of bug doesn't throw and passes single-player** — you only see it once there are
+real peers and latency.
+
+Three rules that prevent almost all of it:
+
+**1 — A replicated copy does not update itself between messages.** Anything continuous — a countdown,
+an animation, interpolated/predicted positions, dead-reckoning, smoothing — must be advanced by *your
+own per-frame loop on every client*. Owning authority does **not** make the host's render copy
+refresh for free: the host needs the same frame loop as everyone else. (An FPS interpolating remote
+players and a party game ticking a timer hit this identically. With `KBAuthority`, note `state-changed`
+fires on messages, **not per frame** — so it can't drive a smooth display by itself.)
+
+**2 — Effects on shared state are decided by the authority, not by a local event.** A reaction wired
+to a *local* event (a click, a tween finishing, a displayed timer reaching zero) can't deterministically
+order against, or arrive before, the host's own update across the wire — so it loses, silently. Route
+anything that changes shared state through an **intent** the host resolves. If the host needs client
+input to make a time- or event-based decision, the client must send that input *before* the decision
+point. (How you keep client and server in step is genre's choice — buffered inputs, client prediction +
+server reconciliation, interpolation delay — KnockBox mandates none of them.)
+
+**3 — Model per-participant state explicitly.** "This player did X" is not "everyone did X." Votes,
+ready-checks, "locked in", per-player resources — store them keyed by player id and fire a group
+transition only when the condition holds for *all* relevant participants (often with a timeout
+fallback). Single-player has one participant, so this conflation is invisible until peers exist.
+
+**A design check for any new feature:** *if the authority ran on another machine and ticked separately
+from this client, would this still work?* If the feature reacts to a local event, mutates the render
+copy, or assumes the host sees changes the instant it makes them — it won't.
+
+**One small illustration (a value that changes over time).** Say a turn has a countdown. Do it like
+this — and note it's *one* illustration of rules 1 & 2, not a prescribed pattern:
+
+```jsonc
+// Authority OWNS the clock and decides what expiry means. The snapshot carries the deadline,
+// not a per-frame number — every client derives the displayed value itself.
+// host → all:  { "kind":"state", "turn":"<pid>", "deadlineMs": 1718500000000, ...rest }
+
+// Every client (HOST INCLUDED) computes the displayed remaining each frame from the last snapshot:
+//   const remaining = Math.max(0, state.deadlineMs - now());   // in your render/update loop
+// Nothing here mutates shared state; it's pure display.
+
+// If expiry needs client input (e.g. "submit whatever I've typed"), the client streams that input
+// AHEAD of the deadline as an intent, so the host can act on it when ITS clock expires:
+//   guest → host:  { "kind":"draft", "text": "<in-progress>" }
+// The host — not the client's display — detects expiry and resolves the turn, then broadcasts.
+```
+
+The wrong version (works solo, fails live): let each client watch its *own* displayed timer and, when
+it hits zero, send the move. Over the wire the host's clock already expired and moved on, so the
+client's late intent is rejected or applies to the wrong turn — and nothing errors.
+
+See §11 for how to catch all of this before you ship.
+
+---
+
 ## 6. Designing your messages
 
 You own the `payload` schema entirely. A simple, robust convention:
@@ -451,6 +525,27 @@ Static files are read per request, so editing your game and reloading the tabs i
 **press Play in the editor**. The built-in loopback gives you a solo host session, so UI and host
 logic run with no server, ticket, or export.
 
+**Test with peers, not just solo (see §5a).** A single tab/solo session never exercises a real
+replicated copy, so the bugs in §5a stay hidden. Two ways to surface them:
+
+- **Manual:** open two tabs (above) and actually play across them — watch that *continuous* state
+  (timers, motion, animation) advances every frame on **both** the host and the guest, not only when
+  a message lands.
+- **Automated:** drive several peers in one process with the local-testing client and assert they
+  converge. The web SDK ships `KnockBoxLocalPeer` (`mode:'process'`) plus `_resetLocalHubs()` to clear
+  the in-process relay between tests:
+
+  ```js
+  import { KnockBoxLocalPeer, _resetLocalHubs } from './knockbox-local.js';
+  const host  = new KnockBoxLocalPeer({ mode:'process', channel:'t', playerId:'h' });
+  const guest = new KnockBoxLocalPeer({ mode:'process', channel:'t', playerId:'g' });
+  // wire each to your model/KBAuthority, start both, send intents, then assert host & guest agree.
+  ```
+
+  If you use `KBAuthority` in per-recipient mode, its **dev checks** (on by default under the local
+  client) deep-freeze `currentView`, so a stray mutation of the rendered copy throws right here
+  instead of silently diverging in production — see the Phaser client README.
+
 ---
 
 ## 12. Rules & gotchas
@@ -464,3 +559,12 @@ logic run with no server, ticket, or export.
   connection.
 - **No server persistence.** Design state messages to be self-contained so reconnect/late-join just
   works.
+- **A replicated copy doesn't tick itself.** Continuous state (timers, motion, animation, prediction)
+  must be advanced by your own per-frame loop on *every* client — the host included (§5a).
+- **Decide shared-state effects on the authority, not on a local event.** A local reaction can't beat
+  the host's update over the wire; route it through an intent, and send any input the host will need
+  *before* the deadline (§5a).
+- **Model per-participant state per id.** One player's action isn't the whole group's; fire a group
+  transition only when it holds for everyone relevant (§5a).
+- **This class of bug passes single-player and never throws** — test with real peers (§11), not just
+  solo.

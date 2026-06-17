@@ -4,6 +4,18 @@
 // `phaser` is installed with its type definitions. If Phaser's types are present, KnockBoxPlugin is
 // assignable where a Phaser.Plugins.BasePlugin is expected.
 
+/**
+ * Recursively marks a value immutable. Used to type a replicated render copy (a guest's adopted
+ * snapshot, `KBAuthority.currentView`) so accidentally mutating it is a compile error — mutate
+ * authoritative state via intents instead. `DeepReadonly<any>` is `any`, so games that don't
+ * parameterize the view type are unaffected.
+ */
+export type DeepReadonly<T> = T extends (infer U)[]
+  ? ReadonlyArray<DeepReadonly<U>>
+  : T extends object
+    ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+    : T;
+
 /** A member of the lobby roster. */
 export interface KBPlayer {
   id: string;
@@ -153,6 +165,8 @@ export class KnockBoxLocalPeer {
   players: KBPlayer[];
   isHost: boolean;
   reconnected: boolean;
+  /** Always true on the local-testing client; lets KBAuthority auto-enable its dev checks. */
+  isLocal: boolean;
 
   events: KBEmitter<KnockBoxEvents>;
 
@@ -191,6 +205,8 @@ export class KnockBoxLocalPlugin {
   readonly players: KBPlayer[];
   readonly isHost: boolean;
   readonly reconnected: boolean;
+  /** Always true on the local-testing client; lets KBAuthority auto-enable its dev checks. */
+  readonly isLocal: boolean;
   readonly log: KnockBoxLogger;
 
   events: KBEmitter<KnockBoxEvents>;
@@ -220,15 +236,15 @@ export function _resetLocalHubs(): void;
  *   • Per-recipient mode, HOST: implement applyIntent + snapshot(forPlayerId).
  *   • Per-recipient mode, GUEST: no methods are used — pass `{}` and render `currentView`.
  */
-export interface KBModel {
+export interface KBModel<TView = any, TPatch = any> {
   /** Host only. Mutate state; return a patch to broadcast, or null to reject/no-op. (Unused on per-recipient guests.) */
-  applyIntent?(fromId: string, action: any): any;
+  applyIntent?(fromId: string, action: any): TPatch | null;
   /** Every client applies a broadcast delta. (Unused in per-recipient mode.) */
-  applyPatch?(patch: any): void;
+  applyPatch?(patch: TPatch): void;
   /** Full state for sync/join/reconnect. In per-recipient mode, the view projected for forPlayerId. (Unused on per-recipient guests.) */
-  snapshot?(forPlayerId?: string): any;
+  snapshot?(forPlayerId?: string): TView;
   /** Every client adopts a full snapshot. (Unused in per-recipient mode.) */
-  applySnapshot?(state: any): void;
+  applySnapshot?(state: TView): void;
 }
 
 export interface KBAuthorityEvents {
@@ -239,14 +255,25 @@ export interface KBAuthorityEvents {
 export interface KBAuthorityOptions {
   /** Per-player projected snapshots for hidden-information games. Default false. */
   perRecipient?: boolean;
+  /**
+   * Deep-freeze the replicated render copy this helper hands you (a guest's adopted snapshot/delta
+   * and `currentView`) so accidentally mutating it throws. Defaults to the transport's `isLocal`
+   * flag — on under the local-testing client (dev), off in production. Set `false` to disable even
+   * locally (e.g. a high-frequency game that doesn't want to freeze large per-frame state).
+   */
+  devChecks?: boolean;
 }
 
-/** Optional host-authoritative glue layer on top of a KnockBoxPlugin. */
-export class KBAuthority {
-  constructor(net: KnockBoxPlugin, model: KBModel, options?: KBAuthorityOptions);
+/**
+ * Optional host-authoritative glue layer on top of a KnockBoxPlugin. Parameterize `TView` with your
+ * snapshot/view type to have `currentView` typed as a `DeepReadonly` render copy (mutating it becomes
+ * a compile error); leave it as the default `any` to opt out.
+ */
+export class KBAuthority<TView = any, TPatch = any> {
+  constructor(net: KnockBoxPlugin, model: KBModel<TView, TPatch>, options?: KBAuthorityOptions);
 
   /** In per-recipient mode, the local player's latest projected view (null until first arrives). */
-  currentView: any;
+  readonly currentView: DeepReadonly<TView> | null;
 
   /** Subscribe to 'state-changed' here. */
   events: KBEmitter<KBAuthorityEvents>;

@@ -631,6 +631,27 @@ body.in-game::after {
 
 .home-error-icon { font-size: 1.2rem; }
 
+/* Neutral/success variant of the error toast, reused for clipboard confirmations. */
+.home-copy-toast {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--trietary-color);
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(33, 137, 126, 0.4);
+    z-index: 20000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-primary);
+    font-weight: 600;
+    animation: home-toast-slide 3s ease-in-out forwards;
+    pointer-events: none;
+}
+
 @keyframes home-toast-slide {
     0%   { opacity: 0; transform: translateX(-50%) translateY(-20px); }
     10%  { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -644,23 +665,32 @@ body.in-game::after {
 .game-shell {
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
 }
 
 .game-header {
+    /* Defaults give the plain white header; shell.js overrides these per-game (themeHeader). */
+    --gh-bg: #fff;
+    --gh-fg: #000;
+    --gh-fg-muted: #555;
+    --gh-btn-bg: #f0f0f0;
+    --gh-btn-bg-hover: #e2e2e2;
+
     display: flex;
     flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    background-color: #fff;
-    color: #000;
+    background-color: var(--gh-bg);
+    color: var(--gh-fg);
     font-family: var(--font-primary);
     padding: 8px 16px;
     font-size: 1.75em;
     font-weight: 900;
-    box-shadow: 0px 6px 0px rgba(0, 0, 0, 0.6), 0px -12px 0px #fff;
+    box-shadow: 0px 6px 0px rgba(0, 0, 0, 0.6), 0px -12px 0px var(--gh-bg);
     z-index: 99;
+    transition: background-color 0.4s ease, color 0.4s ease;
     animation: header-enter 0.4s cubic-bezier(0.25, 1, 0.5, 1) both;
 }
 
@@ -674,7 +704,12 @@ body.in-game::after {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
 }
+
+.game-header-title:hover { text-decoration: underline; }
 
 .header-actions {
     display: flex;
@@ -686,38 +721,51 @@ body.in-game::after {
 }
 
 .room-code-btn {
+    position: relative;
     display: inline-flex;
-    align-items: baseline;
-    gap: 6px;
+    align-items: center;
+    justify-content: center;
+    min-width: 6em;
+    height: 40px;
     font-family: var(--font-primary);
-    font-size: 1rem;
     font-weight: 500;
     background: none;
     border: none;
-    color: #000;
+    color: var(--gh-fg);
     cursor: pointer;
-    padding: 4px 8px;
+    padding: 4px 10px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Two faces stacked in the same box; crossfade between them on .revealed. */
+.room-code-btn .room-code-face {
+    transition: opacity 0.12s ease-out;
 }
 
 .room-code-btn .room-code-label {
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    font-size: 0.7rem;
+    font-size: 0.85rem;
     font-weight: 700;
-    color: #555;
+    color: var(--gh-fg-muted);
 }
 
 .room-code-btn .room-code-value {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-family: var(--font-mono);
+    font-size: 1.35rem;
     font-weight: 700;
-    letter-spacing: 0.1em;
-    transition: filter 0.15s ease;
+    letter-spacing: 0.12em;
+    opacity: 0;
 }
 
-/* Hidden until hover/focus so a private code isn't shoulder-surfed. */
-.room-code-btn:not(.revealed) .room-code-value {
-    filter: blur(6px);
-}
+.room-code-btn.revealed .room-code-label { opacity: 0; }
+.room-code-btn.revealed .room-code-value { opacity: 1; }
 
 .leave-session-btn {
     display: flex;
@@ -726,9 +774,9 @@ body.in-game::after {
     height: 40px;
     padding: 0 14px;
     border-radius: 8px;
-    background: #f0f0f0;
+    background: var(--gh-btn-bg);
     cursor: pointer;
-    color: #000;
+    color: var(--gh-fg);
     border: none;
     font-size: 0.95rem;
     font-weight: 700;
@@ -737,14 +785,13 @@ body.in-game::after {
     letter-spacing: 0.06em;
 }
 
-.leave-session-btn:hover { background: #e2e2e2; }
+.leave-session-btn:hover { background: var(--gh-btn-bg-hover); }
 
 .game-body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    padding: 16px;
-    gap: 12px;
+    min-height: 0;
     animation: content-enter 0.5s cubic-bezier(0.25, 1, 0.5, 1) both;
 }
 
@@ -753,37 +800,129 @@ body.in-game::after {
     to   { opacity: 1; transform: translateY(0); }
 }
 
-.roster {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
+#waiting { color: var(--ink-soft); font-size: 0.95rem; padding: 16px; }
 
-.roster span {
-    display: inline-block;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid var(--canvas-card-border);
-    border-radius: 999px;
-    padding: 0.25rem 0.7rem;
-    font-size: 0.85rem;
-    color: var(--ink);
-}
-
-.roster span.host::after { content: " ★"; color: var(--tile-yellow); }
-
-#waiting { color: var(--ink-soft); font-size: 0.95rem; }
-
-#frame-host { flex: 1; display: flex; }
+#frame-host { flex: 1; display: flex; min-height: 0; }
 
 #frame-host iframe {
     width: 100%;
-    min-height: 540px;
+    height: 100%;
     flex: 1;
-    border: 5px solid #000;
-    border-radius: 16px;
-    box-shadow: var(--shadow-card-rest);
+    border: none;
+    display: block;
     background: #fff;
 }
+
+/* ── Room code modal ─────────────────────────────────────────────────────── */
+.rc-modal[hidden] { display: none; }
+
+.rc-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.rc-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.rc-modal-card {
+    position: relative;
+    background: var(--canvas-dark);
+    border: 1px solid var(--canvas-card-border);
+    border-radius: 20px;
+    box-shadow: var(--shadow-card-rest);
+    padding: 56px 72px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    min-width: min(440px, calc(100vw - 32px));
+    max-width: calc(100vw - 32px);
+    animation: rc-modal-enter 0.25s cubic-bezier(0.25, 1, 0.5, 1) both;
+}
+
+@keyframes rc-modal-enter {
+    from { opacity: 0; transform: scale(0.92); }
+    to   { opacity: 1; transform: scale(1); }
+}
+
+.rc-modal-close {
+    position: absolute;
+    top: 14px;
+    right: 18px;
+    background: none;
+    border: none;
+    color: var(--ink-soft);
+    font-size: 2rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px;
+}
+
+.rc-modal-close:hover { color: var(--ink); }
+
+.rc-modal-heading {
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--ink-soft);
+}
+
+.rc-modal-code {
+    margin: 0;
+    font-family: var(--font-mono);
+    /* Scale with viewport width so the code shrinks on narrow displays. */
+    font-size: clamp(3rem, 14vw, 5.5rem);
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    line-height: 1;
+    color: var(--ink);
+}
+
+.rc-modal-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+}
+
+.rc-modal-copy {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%; /* fill the actions column so both buttons align */
+    height: 52px;
+    padding: 0 28px;
+    border-radius: 10px;
+    background: var(--accent-color);
+    cursor: pointer;
+    color: #fff;
+    border: none;
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-family: var(--font-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.rc-modal-copy:hover { filter: brightness(1.1); }
+
+/* Secondary (outlined) styling for the join-link button — distinct from the primary "Copy code". */
+.rc-modal-copy.secondary {
+    background: transparent;
+    color: var(--accent-color);
+    border: 2px solid var(--accent-color);
+}
+
+.rc-modal-copy.secondary:hover { filter: none; background: var(--accent-color); color: #fff; }
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {

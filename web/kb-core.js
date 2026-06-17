@@ -29,6 +29,15 @@ export function parseLaunchParams(hash) {
   return { ticket: params.get('kbTicket'), endpoint: params.get('kbEndpoint') };
 }
 
+// Reads the auto-join room code from a URL query string ("?join=ABCD") — the middle-click
+// "open a test player in a new tab" entry point. Returns the trimmed, upper-cased code, or null
+// when absent/blank. Pure, so it's unit-tested alongside the other protocol helpers.
+export function parseJoinParam(search) {
+  const code = new URLSearchParams(search || '').get('join');
+  const trimmed = (code || '').trim().toUpperCase();
+  return trimmed || null;
+}
+
 // Default data-socket endpoint when the shell didn't supply one: this origin's /ws.
 export function defaultEndpoint(protocol, host) {
   return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}/ws`;

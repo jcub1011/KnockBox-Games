@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, parseJoinParam, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -25,6 +25,18 @@ let playerId = null;                                  // assigned by the server 
 let token = sessionStorage.getItem('kb.token');       // signed identity token (anti-spoof), per-tab
 let displayName = localStorage.getItem('kb.displayName') || '';   // read once; empty until named
 let gameOrigin = null;                                // where game iframes/sockets live (set by Welcome)
+
+// Auto-join (test convenience): a tab opened via middle-click on the room-code button carries
+// "?join=CODE". Such a tab must act as a DISTINCT player — but window.open copies the opener's
+// sessionStorage, so it would inherit the opener's identity token (and saved lobby). Clear them so
+// this tab gets a fresh server-minted identity; we join the code once connected (see Welcome).
+let pendingJoinCode = parseJoinParam(location.search);
+if (pendingJoinCode) {
+  sessionStorage.removeItem('kb.token');
+  sessionStorage.removeItem('kb.lobbyId');
+  token = null;
+  history.replaceState(null, '', location.pathname); // tidy URL so a refresh won't re-trigger
+}
 
 const el = (id) => document.getElementById(id);
 
@@ -91,20 +103,26 @@ function handle(msg) {
       sessionStorage.setItem('kb.token', token);
       gameOrigin = msg.gameOrigin || location.origin;
       reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
-      tryRejoin();
-      refreshGames();
+      // Load the game catalog FIRST, then (re)join. A GameStarting — from an auto-join or a rejoin —
+      // makes enterGame resolve the manifest from `games`, which must be populated by then. The
+      // server replies in order, so an un-gated JoinLobby/Rejoin would land its GameStarting before
+      // the ListGames reply and enterGame would reject it as "Unknown game".
+      refreshGames().then(() => {
+        // First connect of an auto-join tab joins the URL code; null it after so a later reconnect
+        // rejoins the now-saved lobby via tryRejoin() instead of re-running the auto-join.
+        if (pendingJoinCode) { const code = pendingJoinCode; pendingJoinCode = null; autoJoin(code); }
+        else tryRejoin();
+      });
       break;
     case 'PlayerJoined':
       if (lobby && msg.lobbyId === lobby.lobbyId) {
         lobby.players = rosterAdd(lobby.players, msg.player);
-        renderRoster();
         updateWaiting();
       }
       break;
     case 'PlayerLeft':
       if (lobby && msg.lobbyId === lobby.lobbyId) {
         lobby.players = rosterRemove(lobby.players, msg.playerId);
-        renderRoster();
         updateWaiting();
       }
       break;
@@ -217,6 +235,17 @@ function tryRejoin() {
   if (saved) request('Rejoin', { lobbyId: saved });
 }
 
+// Auto-join the lobby a middle-click "test player" tab was opened for, reusing the normal join path.
+function autoJoin(code) {
+  // Keep the player's saved name; only invent one when none is set, and never persist it (no
+  // localStorage write) so it stays a throwaway. The server makes the name unique within the lobby,
+  // so a test tab sharing the opener's name shows up as "Name (2)".
+  if (!displayName.trim()) displayName = `Tester ${1000 + Math.floor(Math.random() * 9000)}`;
+  el('player-name-input').value = displayName;
+  el('room-code-input').value = code;
+  joinByCode();
+}
+
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
 function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
@@ -224,8 +253,8 @@ function showRoom() {
   el('lobby-code').textContent = lobby.lobbyId;
   el('frame-host').innerHTML = ''; // no iframe until GameStarting
   el('waiting').style.display = 'block';
-  renderRoster();
   updateWaiting();
+  themeHeader(manifest);
   document.body.classList.add('in-game');
   el('game-view').style.display = 'block';
   el('lobby-view').style.display = 'none';
@@ -253,7 +282,7 @@ async function enterGame(starting) {
 
   el('game-title').textContent = manifest.name;
   el('lobby-code').textContent = starting.lobbyId;
-  renderRoster();
+  themeHeader(manifest);
 
   // Lobby-scoped credential for the game's own data socket. The game never sees our identity token.
   const reply = await request('RequestGameTicket', { lobbyId: starting.lobbyId });
@@ -278,24 +307,121 @@ async function enterGame(starting) {
 
 function showLobbyView() {
   lobby = null;
+  closeCodeModal();
+  resetHeaderTheme();
   el('frame-host').innerHTML = '';
   document.body.classList.remove('in-game');
   el('game-view').style.display = 'none';
   el('lobby-view').style.display = 'block';
 }
 
-function renderRoster() {
-  if (!lobby) return;
-  // Build with textContent, never innerHTML: displayName is player-controlled and would otherwise be
-  // an XSS vector in the shell origin (where the identity token lives).
-  const host = el('roster');
-  host.innerHTML = '';
-  for (const p of lobby.players) {
-    const span = document.createElement('span');
-    if (p.id === lobby.hostId) span.className = 'host';
-    span.textContent = p.displayName;
-    host.appendChild(span);
+// ── Per-game header tint ──────────────────────────────────────────────────────
+// Make the in-game chrome feel like part of the game: derive a header background from the game
+// (an explicit manifest themeColor, else the dominant color of its thumbnail) and a contrasting
+// text color (explicit themeTextColor, else auto black/white). Falls back to the default white
+// header when nothing resolves. All author-supplied colors are validated before use.
+let themeSeq = 0;
+
+async function themeHeader(manifest) {
+  const seq = ++themeSeq;
+  let bg = manifest && manifest.themeColor ? colorToRgb(manifest.themeColor) : null;
+  if (!bg && manifest && manifest.thumbnail) {
+    // The thumbnail is served same-origin (shell origin gates /games/* to it), so we can read its
+    // pixels off a canvas without a CORS taint. A plain await keeps enterGame's flow simple.
+    bg = await dominantColorFromImage(`/games/${manifest.id}/${manifest.thumbnail}`);
+    if (seq !== themeSeq) return; // left the game (or switched) while sampling — drop this result
   }
+  if (!bg) { resetHeaderTheme(); return; }
+
+  let fg = manifest && manifest.themeTextColor ? colorToRgb(manifest.themeTextColor) : null;
+  if (!fg) fg = luminance(bg) > 0.5 ? { r: 26, g: 26, b: 26 } : { r: 255, g: 255, b: 255 };
+  applyHeaderColors(bg, fg);
+}
+
+function applyHeaderColors(bg, fg) {
+  const h = document.querySelector('.game-header');
+  if (!h) return;
+  const rgb = (c) => `rgb(${c.r}, ${c.g}, ${c.b})`;
+  const rgba = (c, a) => `rgba(${c.r}, ${c.g}, ${c.b}, ${a})`;
+  h.style.setProperty('--gh-bg', rgb(bg));
+  h.style.setProperty('--gh-fg', rgb(fg));
+  h.style.setProperty('--gh-fg-muted', rgba(fg, 0.65));
+  h.style.setProperty('--gh-btn-bg', rgba(fg, 0.14));
+  h.style.setProperty('--gh-btn-bg-hover', rgba(fg, 0.26));
+}
+
+function resetHeaderTheme() {
+  themeSeq++; // cancel any in-flight thumbnail sampling
+  const h = document.querySelector('.game-header');
+  if (!h) return;
+  for (const p of ['--gh-bg', '--gh-fg', '--gh-fg-muted', '--gh-btn-bg', '--gh-btn-bg-hover']) {
+    h.style.removeProperty(p);
+  }
+}
+
+// Validate an author-supplied CSS color via the CSSOM (invalid values are rejected, never injected),
+// returning normalized {r,g,b} or null. Non-opaque values (e.g. `transparent`, which normalizes to
+// rgba(0,0,0,0)) are rejected too, so theming falls back to thumbnail sampling / the default header
+// instead of painting a wrong (black/translucent) tint.
+function colorToRgb(value) {
+  if (typeof value !== 'string' || !value) return null;
+  const probe = document.createElement('span');
+  probe.style.color = value; // CSSOM ignores anything that isn't a valid single color
+  if (!probe.style.color) return null;
+  probe.style.display = 'none';
+  document.body.appendChild(probe);
+  const norm = getComputedStyle(probe).color; // always rgb()/rgba()
+  probe.remove();
+  const m = norm.match(/\d+(?:\.\d+)?/g);
+  if (!m || m.length < 3) return null;
+  if (m.length >= 4 && +m[3] < 1) return null; // not fully opaque — treat as unset
+  return { r: +m[0], g: +m[1], b: +m[2] };
+}
+
+// WCAG relative luminance (0=black … 1=white) — used to choose contrasting header text.
+function luminance({ r, g, b }) {
+  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+// Pick a representative color from an image by drawing it small and bucketing pixels, weighting by
+// saturation so a game's vibrant accent wins over flat backgrounds. Skips transparent and the
+// near-white/near-black extremes that are usually padding. Resolves null on any failure.
+function dominantColorFromImage(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = 48, h = 48;
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+        const { data } = ctx.getImageData(0, 0, w, h);
+        const buckets = new Map();
+        let best = null;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] < 200) continue; // transparent
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+          const max = Math.max(r, g, b), min = Math.min(r, g, b);
+          if (max > 240 && min > 240) continue; // near-white
+          if (max < 18) continue;               // near-black
+          const sat = max === 0 ? 0 : (max - min) / max;
+          const weight = 1 + sat * 3;
+          const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3); // 5 bits/channel
+          let e = buckets.get(key);
+          if (!e) { e = { r: 0, g: 0, b: 0, w: 0 }; buckets.set(key, e); }
+          e.r += r * weight; e.g += g * weight; e.b += b * weight; e.w += weight;
+          if (!best || e.w > best.w) best = e;
+        }
+        resolve(best ? { r: Math.round(best.r / best.w), g: Math.round(best.g / best.w), b: Math.round(best.b / best.w) } : null);
+      } catch {
+        resolve(null); // tainted canvas / decode failure — fall back to default header
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
 }
 
 // ── Transient error toast ─────────────────────────────────────────────────────
@@ -313,6 +439,17 @@ function showError(message) {
   toast.append(icon, text);
   document.body.appendChild(toast);
   // Mirror the .home-error-toast CSS animation duration (3s) then remove.
+  setTimeout(() => toast.remove(), 3000);
+}
+
+// Brief positive confirmation, mirroring showError's lifecycle but with the success styling.
+function flashCopied() {
+  const prev = document.querySelector('.home-copy-toast');
+  if (prev) prev.remove();
+  const toast = document.createElement('div');
+  toast.className = 'home-copy-toast';
+  toast.textContent = 'Copied!';
+  document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 3000);
 }
 
@@ -344,20 +481,115 @@ window.addEventListener('message', (e) => {
 
 el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
 
-el('leave').onclick = () => {
+function leaveGame() {
   if (lobby) send({ type: 'LeaveLobby', lobbyId: lobby.lobbyId });
   sessionStorage.removeItem('kb.lobbyId');
   showLobbyView();
-};
+}
 
-// Room code is blurred until hovered/focused (shoulder-surf guard); click pins it open.
+el('leave').onclick = leaveGame;
+
+// The game name doubles as a "home" link: leave the session and return to the lobby view in-SPA.
+// href="/" is the no-JS fallback; we intercept so the control socket stays up.
+el('game-title').addEventListener('click', (e) => {
+  e.preventDefault();
+  leaveGame();
+});
+
+// ── Room code button: click crossfades the code; dbl-click opens a big modal; right-click and
+// mobile long-press copy to the clipboard. ───────────────────────────────────────────────────
+async function copyRoomCode() {
+  if (!lobby) return;
+  try {
+    await navigator.clipboard.writeText(lobby.lobbyId);
+    flashCopied();
+  } catch {
+    showError('Could not copy.');
+  }
+}
+
+// Shareable auto-join URL for this lobby: opening it lands a player straight in the lobby (see the
+// "?join=" handling at startup). Carries only the public room code — no identity token.
+function joinLink() {
+  return `${location.origin}/?join=${encodeURIComponent(lobby.lobbyId)}`;
+}
+
+async function copyJoinLink() {
+  if (!lobby) return;
+  try {
+    await navigator.clipboard.writeText(joinLink());
+    flashCopied();
+  } catch {
+    showError('Could not copy.');
+  }
+}
+
+function openCodeModal() {
+  if (!lobby) return;
+  el('rc-modal-code').textContent = lobby.lobbyId;
+  el('rc-modal').hidden = false;
+  el('rc-modal-copy').focus();
+}
+
+function closeCodeModal() {
+  el('rc-modal').hidden = true;
+}
+
 const rc = el('room-code-btn');
-rc.addEventListener('mouseenter', () => rc.classList.add('revealed'));
-rc.addEventListener('mouseleave', () => { if (!rc.dataset.pinned) rc.classList.remove('revealed'); });
-rc.addEventListener('focus', () => rc.classList.add('revealed'));
+let clickTimer = null;
+let longPressTimer = null;
+let longPressed = false;
+
+// Single click toggles the crossfade, but defer it briefly so a double-click can cancel it and
+// open the modal instead (otherwise the two clicks of a dbl-click would toggle back to start).
 rc.addEventListener('click', () => {
-  rc.dataset.pinned = rc.dataset.pinned ? '' : '1';
-  rc.classList.toggle('revealed', !!rc.dataset.pinned);
+  if (longPressed) return; // a long-press already handled this gesture
+  if (clickTimer) return;  // second click of a dbl-click; let dblclick handle it
+  clickTimer = setTimeout(() => {
+    clickTimer = null;
+    rc.classList.toggle('revealed');
+  }, 220);
+});
+
+rc.addEventListener('dblclick', () => {
+  if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+  openCodeModal();
+});
+
+rc.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (longPressed) return; // long-press already copied
+  copyRoomCode();
+});
+
+rc.addEventListener('touchstart', () => {
+  longPressed = false;
+  longPressTimer = setTimeout(() => {
+    longPressed = true;
+    copyRoomCode();
+  }, 500);
+}, { passive: true });
+
+const cancelLongPress = () => { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } };
+rc.addEventListener('touchend', cancelLongPress);
+rc.addEventListener('touchmove', cancelLongPress);
+rc.addEventListener('touchcancel', cancelLongPress);
+
+// Middle-click opens a new tab that auto-joins this lobby — a quick way to add a test player.
+rc.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
+rc.addEventListener('auxclick', (e) => {
+  if (e.button !== 1 || !lobby) return; // middle button only
+  e.preventDefault();
+  window.open(joinLink(), '_blank');
+});
+
+// Modal controls.
+el('rc-modal-copy').addEventListener('click', () => { copyRoomCode(); closeCodeModal(); });
+el('rc-modal-copy-link').addEventListener('click', () => { copyJoinLink(); closeCodeModal(); });
+el('rc-modal').querySelectorAll('[data-rc-close]').forEach((node) =>
+  node.addEventListener('click', closeCodeModal));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !el('rc-modal').hidden) closeCodeModal();
 });
 
 applyGate();
