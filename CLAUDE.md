@@ -21,6 +21,8 @@ Solution file is `KnockBox-Games.slnx` (modern `.slnx`, not legacy `.sln`). All 
 - Single .NET test: `dotnet test KnockBox.Server.Tests --filter "Name~SomeTestName"`
   (or `--filter "FullyQualifiedName~Namespace.Class.Method"`)
 - Web tests (Vitest, from `web/`): `npm ci && npm test` (watch: `npm run test:watch`)
+- Phaser client tests (from `clients/phaser/`): `npm ci && npm run lint && npm test`
+- pack-game tool tests (from `tools/pack-game/`): `npm ci && npm test`
 - Desktop publish (self-contained win-x64 exe): `dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop`
 
 The `web/` frontend is plain ES modules — **no build step**; it is served directly and baked
@@ -29,9 +31,15 @@ into publish/Docker output. Only `web/kb-core.js` (pure protocol logic) is unit-
 ## Docker / CI
 
 Docker does not build locally on this machine — verify container changes via GitHub Actions
-(`gh run watch`). CI (`.github/workflows/ci.yml`) runs three jobs: .NET tests, web tests,
-and a Docker image build + smoke test (boots the container, checks shell/SDK serving and
-hot-reload discovery). Build context is the repo root; `web/` must be present.
+(`gh run watch`). CI (`.github/workflows/ci.yml`) runs six jobs:
+- `dotnet` — .NET build & tests.
+- `aot` — Native AOT publish with `/warnaserror`; any new trim/AOT `ILxxxx` warning fails the
+  build (mirrors the Dockerfile build stage, needs clang + zlib). Keeps the server AOT-clean.
+- `web` — shell + SDK Vitest tests.
+- `clients-phaser` — Phaser client lint + tests.
+- `pack-game` — packer tool tests.
+- `docker` — image build + smoke test (boots the container, checks shell/SDK serving and
+  hot-reload discovery). Build context is the repo root; `web/` must be present.
 
 Deployment: the `games/` directory is mounted **read-only** from a stable host path
 **outside** the image, so it survives image updates (see `docs/HOSTING.md`). On bind mounts,
@@ -48,6 +56,13 @@ polling fallback for hot-reload.
   singletons (`Program.cs` wires `GameCatalog`, `TokenService`, `LobbyManager`,
   `ConnectionManager`, `WebSocketHandler`, `ServerLimits`, `TimeProvider`).
 - `KnockBox.Server.Tests` / `KnockBox.Contracts.Tests` — xUnit.
+
+Outside the .NET solution, two Node subprojects (each its own npm package, Vitest-tested):
+- `clients/phaser/` (`knockbox-phaser`) — networking client for Phaser. Ships `kb-core.js`
+  (pure protocol logic, same concept as `web/kb-core.js`), `knockbox-local.js` (server-less
+  local peer), and `kb-authority.js` (host-authoritative helper).
+- `tools/pack-game/` (`knockbox-pack-game`) — engine-agnostic CLI (`knockbox-pack`) that
+  assembles a drop-in `games/<id>/` folder.
 
 ### One `/ws` endpoint, two roles (the core idea)
 `/ws` is served on **both** the shell origin and the game origin. The **first frame** selects the role:
@@ -81,7 +96,25 @@ manifest `id`, and `entry` is path-traversal–checked to stay inside the game f
 catalog reference is swapped atomically — readers never see a half-built catalog.
 
 GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
-`crossOriginIsolated` (optional, for threaded engine exports).
+`crossOriginIsolated` (optional, for threaded engine exports), and `themeColor` /
+`themeTextColor` (optional CSS colors the shell tints the in-game header chrome with;
+shell-validated, so invalid values are ignored — no CSS injection).
+
+### Serving game assets & pre-compression
+Game builds are served with stock `UseStaticFiles` (ETag + `must-revalidate`, so unchanged
+assets — esp. the large `.wasm` — return `304`). To avoid re-compressing the same static bytes
+on every cold request, `Games/GameAssetPrecompressor.cs` keeps a derived cache of max-effort
+(`CompressionLevel.SmallestSize`) `.br`/`.gz` variants under `GamesCompressedRoot`
+(default sibling `games-compressed/`, **writable, outside the read-only `games/` mount**).
+Reconciliation is driven by `GameCatalog.Discovered` plus a periodic timer
+(`PrecompressReconcileSeconds`) — it (re)compresses changed files (mtime/length freshness),
+prunes orphaned variants, and removes directories for deleted games. A negotiation step on the
+game origin (`Program.cs`) rewrites a request to the `.br`/`.gz` variant when present and
+accepted (`Accept-Encoding`), serving it with `Content-Encoding`/`Vary` and the **decompressed**
+content-type; a miss falls through to the raw file. The on-the-fly `ResponseCompression`
+(Brotli/Gzip at `Fastest`) stays as the fallback for not-yet-warmed assets and the shell origin —
+it skips bodies that already carry `Content-Encoding`, so precompressed responses aren't
+re-compressed. Disable the whole cache with `Precompress=false`.
 
 ### Lobbies & connections
 - `Lobbies/Lobby.cs` / `LobbyManager.cs` — in-memory lobbies keyed by a 4-char human code;
@@ -101,18 +134,33 @@ configurable and disabled with `0`.
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
 `players`, `isHost`; callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`; send
-methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`, and
+methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
 `log.{info,warn,error,debug,trace,critical}(message)` (console-like logging to the server, relayed
-as a `LogMessage` and written under the `KnockBox.GameLog` category).
+as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPlay(metadata)` (a
+`<string,string>` bag sent as a `GameLogMessage`; the server stamps gameId/timestamp/isHost and
+forwards it to that player's **control** socket, where the shell persists the most-recent 50 in
+`localStorage` (`kb.playLog`) and renders them in the home-page Play Log).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested
-protocol helpers (reconnect/backoff, fragment parsing, roster reducers). Close code **1008**
-is terminal (no reconnect); other closes back off exponentially.
+protocol helpers (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
+`partitionPlayLogMetadata`, `ordinal`). Close code **1008** is terminal (no reconnect); other
+closes back off exponentially.
+
+### Logging (server side)
+Serilog is the host logger (`builder.Host.UseSerilog` in `Program.cs`): console + a **daily**
+rolling file at `LogsRoot/knockbox-YYYYMMDD.log`, retained for `KnockBox:LogRetentionDays`
+days (default 31). Game logs relayed via `LogMessage` land under the `KnockBox.GameLog`
+category so they're filterable. Crucially, levels/sinks are configured **in code, not** via
+`ReadFrom.Configuration`: that package's assembly scanning is not Native-AOT-safe and emits
+IL2104/IL3002/IL3053 at publish — `ReadFrom.Services` (DI-only) is used instead. Touch this
+setup carefully to keep the `aot` CI job green.
 
 ## Configuration
 
 All knobs use the `KnockBox:` prefix (env: `KnockBox__Key`, `__` for nesting). Full reference
 in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`LogsRoot`,
 `GamesPort`/`GamesHost`/`GamesOrigin` (origin routing), `GamesPollSeconds` (hot-reload
-fallback), `ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
+fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
+(pre-compressed game-asset cache), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
+`ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, and the rate-limit knobs (`*MessagesPerSecond/Burst`, `MaxConnectionsPerIp`,
 `LobbyCreatesPerMinute`).

@@ -150,6 +150,23 @@
     this._sendFrame({ type: 'KickPlayer', targetPlayerId: playerId });
   };
 
+  // Record a Play Log entry: an arbitrary { key: value } bag of match metadata (e.g.
+  // { placement: '1', playerCount: '4' }). The server stamps the game, a UTC timestamp, and whether
+  // this player was host, then routes it to the player's home-page Play Log. Values are coerced to
+  // strings. Best-effort and queued (drop-oldest) until attach, like log.* — never blocks game state.
+  KnockBoxPlugin.prototype.logPlay = function (metadata) {
+    var bag = {};
+    if (metadata && typeof metadata === 'object') {
+      for (var key in metadata) {
+        if (!Object.prototype.hasOwnProperty.call(metadata, key)) continue;
+        var value = metadata[key];
+        if (value === null || value === undefined) continue; // skip nullish — don't send "null"/"undefined"
+        bag[key] = String(value);
+      }
+    }
+    this._sendLog({ type: 'GameLog', metadata: bag });
+  };
+
   // ── Internals ─────────────────────────────────────────────────────────────────────────────────
 
   KnockBoxPlugin.prototype._send = function (to, payload) {

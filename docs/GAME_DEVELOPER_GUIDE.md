@@ -186,6 +186,40 @@ frames also count against the **same per-connection rate limit as your game mess
 chatty logger competes with gameplay sends for that budget. By default the server logs at
 `Information` and above, so `trace`/`debug` lines are filtered unless an operator lowers the level.
 
+### Recording Play Log entries
+
+Where `KnockBox.log.*` writes to the **server's** log (for operators), `KnockBox.logPlay(metadata)`
+writes to the **player's** home page. Each call records one entry in that player's **Play Log** — the
+"Recently Played" panel on the home screen — so a player can glance back at how their last games went.
+Call it at a natural milestone, e.g. when a match ends:
+
+```js
+KnockBox.logPlay({ placement: '1', playerCount: '4', result: 'win', score: '4200' });
+```
+
+`metadata` is an arbitrary `{ key: value }` bag; values are coerced to strings. The shell shows a
+**recognized set of standard keys** as dedicated chips and tucks everything else into a collapsible
+details table, so prefer these names when they fit:
+
+| Standard key | Rendered as | Example |
+|---|---|---|
+| `placement` | an ordinal chip | `"1"` → **1st** |
+| `playerCount` | a "{n} players" chip | `"4"` → **4 players** |
+| `score` | a chip | `"4200"` |
+| `result` | a chip | `"win"` |
+
+You do **not** supply the game, the time, or whether you were host — the **server stamps** those
+(`gameId`, a UTC `timestamp`, and `isHost`) as trusted, unforgeable context, and the shell shows them
+as the entry's game name, time, and a "Host" badge. Any keys you send named like those are still just
+ordinary metadata.
+
+Entries are stored **in the player's own browser** (most-recent 50, per browser — like the saved
+display name), never on the server, and are visible only to that player. Like `log.*`, `logPlay` is
+best-effort and queued until the socket attaches, shares the data-plane rate limit, and is never a
+place to keep game state. Metadata is untrusted: each key/value is length-capped and stripped of
+control characters, the entry count is bounded, and the shell renders every value as text (never
+markup).
+
 ---
 
 ## 5. The host-authoritative model (the contract)

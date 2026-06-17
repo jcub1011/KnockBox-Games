@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, parseJoinParam, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -49,7 +49,7 @@ const pending = new Map();      // cid -> resolver
 let cidSeq = 0;
 
 // ── WebSocket plumbing (control plane) ────────────────────────────────────────
-function connect() {
+export function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
@@ -88,7 +88,7 @@ function sendName() {
   }
 }
 
-function handle(msg) {
+export function handle(msg) {
   // Resolve any awaiting request first.
   if (msg.cid && pending.has(msg.cid)) {
     pending.get(msg.cid)(msg);
@@ -145,7 +145,123 @@ function handle(msg) {
       sessionStorage.removeItem('kb.lobbyId');
       showLobbyView();
       break;
+    case 'GameLog':
+      // A game we're playing recorded a Play Log entry; the server already stamped game/time/host
+      // and routed it back to us. Persist it (browser-local) and refresh the home-page panel.
+      recordPlayLog(msg);
+      break;
   }
+}
+
+// ── Play Log (home page) ───────────────────────────────────────────────────────
+// Games push entries via KnockBox.logPlay(); the server stamps gameId/timestamp/isHost and routes
+// them to this player's OWN control socket. We keep the most-recent PLAY_LOG_MAX in localStorage
+// (per browser, like the display name) and render them on the home page, newest first. Every
+// game-supplied string (metadata keys/values, resolved game name) is untrusted and written via
+// textContent — never innerHTML — so a game can't inject markup into the shell.
+const PLAYLOG_KEY = 'kb.playLog';
+
+function readPlayLog() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PLAYLOG_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function recordPlayLog(msg) {
+  const entry = {
+    gameId: msg.gameId || null,
+    timestamp: msg.timestamp || null,
+    isHost: !!msg.isHost,
+    metadata: msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {},
+  };
+  const next = appendPlayLog(readPlayLog(), entry);
+  try { localStorage.setItem(PLAYLOG_KEY, JSON.stringify(next)); } catch { /* storage full/blocked — skip */ }
+  renderPlayLog(); // the panel is hidden while in-game; re-rendering it then is harmless
+}
+
+function plChip(text, className) {
+  const span = document.createElement('span');
+  span.className = className ? `pl-chip ${className}` : 'pl-chip';
+  span.textContent = text;
+  return span;
+}
+
+// Render the stored UTC timestamp in the player's locale, keeping the ISO instant in the <time>
+// element's datetime/title for the exact value. Returns null for a missing/unparseable stamp.
+function playLogTime(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const t = document.createElement('time');
+  t.className = 'pl-item-time';
+  t.dateTime = iso;
+  t.title = iso;
+  t.textContent = d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  return t;
+}
+
+function playLogItem(entry) {
+  const li = document.createElement('li');
+  li.className = 'pl-item';
+
+  const head = document.createElement('div');
+  head.className = 'pl-item-head';
+  const name = document.createElement('span');
+  name.className = 'pl-item-game';
+  const manifest = entry.gameId ? games.get(entry.gameId) : null;
+  name.textContent = manifest ? manifest.name : (entry.gameId || 'Unknown game');
+  head.appendChild(name);
+  const time = playLogTime(entry.timestamp);
+  if (time) head.appendChild(time);
+  li.appendChild(head);
+
+  // Recognized standard keys become dedicated chips; everything else drops to the details table.
+  const { standard, extra } = partitionPlayLogMetadata(entry.metadata);
+  const chips = document.createElement('div');
+  chips.className = 'pl-chips';
+  if (entry.isHost) chips.appendChild(plChip('Host', 'pl-chip-host'));
+  for (const [key, value] of standard) {
+    if (key === 'placement') chips.appendChild(plChip(ordinal(value), 'pl-chip-placement'));
+    else if (key === 'playerCount') chips.appendChild(plChip(`${value} player${value === '1' ? '' : 's'}`, 'pl-chip-players'));
+    else chips.appendChild(plChip(`${key}: ${value}`));
+  }
+  if (chips.childElementCount) li.appendChild(chips);
+
+  if (extra.length) {
+    const details = document.createElement('details');
+    details.className = 'pl-details';
+    const summary = document.createElement('summary');
+    summary.textContent = `Details (${extra.length})`;
+    details.appendChild(summary);
+    const table = document.createElement('table');
+    table.className = 'pl-meta-table';
+    for (const [key, value] of extra) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = key;
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.append(th, td);
+      table.appendChild(tr);
+    }
+    details.appendChild(table);
+    li.appendChild(details);
+  }
+  return li;
+}
+
+export function renderPlayLog() {
+  const list = el('playlog-list');
+  const empty = el('playlog-empty');
+  if (!list || !empty) return; // panel markup not present (some test fixtures)
+  const entries = readPlayLog();
+  list.innerHTML = '';
+  const hasEntries = entries.length > 0;
+  empty.hidden = hasEntries;
+  list.hidden = !hasEntries;
+  for (const entry of entries) list.appendChild(playLogItem(entry));
 }
 
 // ── Home view: name gate, game tiles (host), join-by-code ─────────────────────
@@ -157,7 +273,7 @@ function applyGate() {
   document.querySelectorAll('#games .game-tile').forEach((b) => { b.disabled = !ok; });
 }
 
-async function refreshGames() {
+export async function refreshGames() {
   const reply = await request('ListGames');
   games = new Map((reply.games || []).map((g) => [g.id, g]));
   const host = el('games');
@@ -197,7 +313,7 @@ function fallbackSurface(name) {
   return div;
 }
 
-async function createLobby(gameId) {
+export async function createLobby(gameId) {
   if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
   sendName();
   const reply = await request('CreateLobby', { gameId });
@@ -210,7 +326,7 @@ async function createLobby(gameId) {
   }
 }
 
-async function joinByCode() {
+export async function joinByCode() {
   const code = (el('room-code-input').value || '').trim().toUpperCase();
   if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
   if (!code) { showError('Please enter a valid room code.'); return; }
@@ -230,7 +346,7 @@ async function joinByCode() {
   }
 }
 
-function tryRejoin() {
+export function tryRejoin() {
   const saved = sessionStorage.getItem('kb.lobbyId');
   if (saved) request('Rejoin', { lobbyId: saved });
 }
@@ -247,7 +363,7 @@ function autoJoin(code) {
 }
 
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
-function showRoom() {
+export function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
   el('game-title').textContent = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
   el('lobby-code').textContent = lobby.lobbyId;
@@ -268,7 +384,7 @@ function updateWaiting() {
 }
 
 // ── In-game: embed the game on its own origin and hand it a scoped ticket ─────
-async function enterGame(starting) {
+export async function enterGame(starting) {
   // Only launch games discovered in our catalog (the allowlist refreshGames built). This rejects a
   // GameStarting for an unknown id instead of feeding a server-supplied id straight into the iframe URL.
   const manifest = games.get(starting.gameId);
@@ -305,7 +421,7 @@ async function enterGame(starting) {
   el('lobby-view').style.display = 'none';
 }
 
-function showLobbyView() {
+export function showLobbyView() {
   lobby = null;
   closeCodeModal();
   resetHeaderTheme();
@@ -313,6 +429,7 @@ function showLobbyView() {
   document.body.classList.remove('in-game');
   el('game-view').style.display = 'none';
   el('lobby-view').style.display = 'block';
+  renderPlayLog();
 }
 
 // ── Per-game header tint ──────────────────────────────────────────────────────
@@ -322,7 +439,7 @@ function showLobbyView() {
 // header when nothing resolves. All author-supplied colors are validated before use.
 let themeSeq = 0;
 
-async function themeHeader(manifest) {
+export async function themeHeader(manifest) {
   const seq = ++themeSeq;
   let bg = manifest && manifest.themeColor ? colorToRgb(manifest.themeColor) : null;
   if (!bg && manifest && manifest.thumbnail) {
@@ -334,11 +451,11 @@ async function themeHeader(manifest) {
   if (!bg) { resetHeaderTheme(); return; }
 
   let fg = manifest && manifest.themeTextColor ? colorToRgb(manifest.themeTextColor) : null;
-  if (!fg) fg = luminance(bg) > 0.5 ? { r: 26, g: 26, b: 26 } : { r: 255, g: 255, b: 255 };
+  if (!fg) fg = pickContrastText(bg);
   applyHeaderColors(bg, fg);
 }
 
-function applyHeaderColors(bg, fg) {
+export function applyHeaderColors(bg, fg) {
   const h = document.querySelector('.game-header');
   if (!h) return;
   const rgb = (c) => `rgb(${c.r}, ${c.g}, ${c.b})`;
@@ -350,7 +467,7 @@ function applyHeaderColors(bg, fg) {
   h.style.setProperty('--gh-btn-bg-hover', rgba(fg, 0.26));
 }
 
-function resetHeaderTheme() {
+export function resetHeaderTheme() {
   themeSeq++; // cancel any in-flight thumbnail sampling
   const h = document.querySelector('.game-header');
   if (!h) return;
@@ -363,7 +480,7 @@ function resetHeaderTheme() {
 // returning normalized {r,g,b} or null. Non-opaque values (e.g. `transparent`, which normalizes to
 // rgba(0,0,0,0)) are rejected too, so theming falls back to thumbnail sampling / the default header
 // instead of painting a wrong (black/translucent) tint.
-function colorToRgb(value) {
+export function colorToRgb(value) {
   if (typeof value !== 'string' || !value) return null;
   const probe = document.createElement('span');
   probe.style.color = value; // CSSOM ignores anything that isn't a valid single color
@@ -372,22 +489,12 @@ function colorToRgb(value) {
   document.body.appendChild(probe);
   const norm = getComputedStyle(probe).color; // always rgb()/rgba()
   probe.remove();
-  const m = norm.match(/\d+(?:\.\d+)?/g);
-  if (!m || m.length < 3) return null;
-  if (m.length >= 4 && +m[3] < 1) return null; // not fully opaque — treat as unset
-  return { r: +m[0], g: +m[1], b: +m[2] };
+  return parseRgbComponents(norm); // numeric parse + opaque check (pure, in kb-core)
 }
 
-// WCAG relative luminance (0=black … 1=white) — used to choose contrasting header text.
-function luminance({ r, g, b }) {
-  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-// Pick a representative color from an image by drawing it small and bucketing pixels, weighting by
-// saturation so a game's vibrant accent wins over flat backgrounds. Skips transparent and the
-// near-white/near-black extremes that are usually padding. Resolves null on any failure.
-function dominantColorFromImage(url) {
+// Draw the thumbnail small, hand its pixels to the pure bucketing helper, and resolve the dominant
+// color (see dominantColorFromPixels in kb-core). Resolves null on any failure.
+export function dominantColorFromImage(url) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -398,23 +505,7 @@ function dominantColorFromImage(url) {
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, w, h);
         const { data } = ctx.getImageData(0, 0, w, h);
-        const buckets = new Map();
-        let best = null;
-        for (let i = 0; i < data.length; i += 4) {
-          if (data[i + 3] < 200) continue; // transparent
-          const r = data[i], g = data[i + 1], b = data[i + 2];
-          const max = Math.max(r, g, b), min = Math.min(r, g, b);
-          if (max > 240 && min > 240) continue; // near-white
-          if (max < 18) continue;               // near-black
-          const sat = max === 0 ? 0 : (max - min) / max;
-          const weight = 1 + sat * 3;
-          const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3); // 5 bits/channel
-          let e = buckets.get(key);
-          if (!e) { e = { r: 0, g: 0, b: 0, w: 0 }; buckets.set(key, e); }
-          e.r += r * weight; e.g += g * weight; e.b += b * weight; e.w += weight;
-          if (!best || e.w > best.w) best = e;
-        }
-        resolve(best ? { r: Math.round(best.r / best.w), g: Math.round(best.g / best.w), b: Math.round(best.b / best.w) } : null);
+        resolve(dominantColorFromPixels(data));
       } catch {
         resolve(null); // tainted canvas / decode failure — fall back to default header
       }
@@ -481,7 +572,7 @@ window.addEventListener('message', (e) => {
 
 el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
 
-function leaveGame() {
+export function leaveGame() {
   if (lobby) send({ type: 'LeaveLobby', lobbyId: lobby.lobbyId });
   sessionStorage.removeItem('kb.lobbyId');
   showLobbyView();
@@ -511,7 +602,7 @@ async function copyRoomCode() {
 // Shareable auto-join URL for this lobby: opening it lands a player straight in the lobby (see the
 // "?join=" handling at startup). Carries only the public room code — no identity token.
 function joinLink() {
-  return `${location.origin}/?join=${encodeURIComponent(lobby.lobbyId)}`;
+  return buildJoinLink(location.origin, lobby.lobbyId);
 }
 
 async function copyJoinLink() {
@@ -536,23 +627,30 @@ function closeCodeModal() {
 }
 
 const rc = el('room-code-btn');
-let clickTimer = null;
 let longPressTimer = null;
 let longPressed = false;
+let lastClickAt = 0;
+const DBL_MS = 250;
 
-// Single click toggles the crossfade, but defer it briefly so a double-click can cancel it and
-// open the modal instead (otherwise the two clicks of a dbl-click would toggle back to start).
+// Single click toggles the crossfade immediately (instant feedback). The second click of a
+// double-click lands within DBL_MS — we skip its toggle so dblclick can open the modal without
+// reverting the reveal first. DBL_MS is a fixed guess, independent of the OS double-click
+// interval: if that interval is longer than 250ms the second click toggles instead of being
+// skipped, but the dblclick handler then `remove('revealed')`s anyway, so the stray re-toggle is
+// never visible — the modal opens over a hidden code regardless.
 rc.addEventListener('click', () => {
   if (longPressed) return; // a long-press already handled this gesture
-  if (clickTimer) return;  // second click of a dbl-click; let dblclick handle it
-  clickTimer = setTimeout(() => {
-    clickTimer = null;
-    rc.classList.toggle('revealed');
-  }, 220);
+  const now = performance.now();
+  if (now - lastClickAt < DBL_MS) { // second click of a dbl-click; let dblclick handle it
+    lastClickAt = 0;
+    return;
+  }
+  lastClickAt = now;
+  rc.classList.toggle('revealed');
 });
 
 rc.addEventListener('dblclick', () => {
-  if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+  rc.classList.remove('revealed'); // reset to "Room Code" behind the modal so it's hidden on close
   openCodeModal();
 });
 
@@ -593,4 +691,28 @@ document.addEventListener('keydown', (e) => {
 });
 
 applyGate();
-connect();
+renderPlayLog(); // home view is shown by default on load — populate the Play Log from storage
+
+// Start the control socket. On a real page load index.html imports this module and calls bootstrap();
+// importing the module on its own no longer opens a socket, so the test suite can drive the exported
+// functions (and call connect() itself) without an auto-connect to suppress.
+export function bootstrap() {
+  applyRandomFavicon();
+  connect();
+}
+
+// Swap the page's favicon to a random cat on load (recreating the legacy server's per-render pick).
+// Reuses the static <link rel="icon"> seeded in index.html so we update one element rather than
+// appending a second; falls back to creating it if absent.
+function applyRandomFavicon() {
+  const href = pickRandomFavicon();
+  if (!href) return;
+  let link = document.head.querySelector('link[rel="icon"]');
+  if (!link) {
+    link = document.createElement('link');
+    link.rel = 'icon';
+    link.type = 'image/png';
+    document.head.appendChild(link);
+  }
+  link.href = href;
+}

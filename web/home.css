@@ -549,7 +549,7 @@ body.in-game::after {
     word-break: break-word;
 }
 
-/* ── Recently Played rail (placeholder only — no backend yet) ────────────── */
+/* ── Play Log rail ───────────────────────────────────────────────────────── */
 .pl-panel {
     display: flex;
     flex-direction: column;
@@ -607,6 +607,103 @@ body.in-game::after {
 }
 
 .pl-empty-sub { font-size: 0.8rem; }
+
+/* Populated list of entries (newest first), rendered by shell.js's renderPlayLog(). */
+.pl-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.pl-item {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border: 1px solid var(--canvas-card-border);
+    border-radius: 12px;
+    background: var(--canvas-card);
+}
+
+.pl-item-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.pl-item-game {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: var(--ink);
+    word-break: break-word;
+}
+
+.pl-item-time {
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.pl-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.pl-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--canvas-card-border);
+    color: var(--ink);
+    word-break: break-word;
+}
+
+.pl-chip-host { background: var(--accent-color); color: #fff; }
+.pl-chip-placement { background: #f5c451; color: #1a1a1a; }
+.pl-chip-players { background: #3a9bdc; color: #fff; }
+
+.pl-details {
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+}
+
+.pl-details > summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--ink-soft);
+    list-style-position: inside;
+}
+
+.pl-meta-table {
+    width: 100%;
+    margin-top: 6px;
+    border-collapse: collapse;
+}
+
+.pl-meta-table th,
+.pl-meta-table td {
+    text-align: left;
+    vertical-align: top;
+    padding: 2px 6px 2px 0;
+    word-break: break-word;
+}
+
+.pl-meta-table th {
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+}
 
 /* ── Error toast ─────────────────────────────────────────────────────────── */
 .home-error-toast {

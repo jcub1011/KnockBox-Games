@@ -1,10 +1,18 @@
 # KnockBox server — admin quick start:
 #
-#   1. (Recommended) Create a `.env` file next to this one:
+#   1. (Recommended) Create a `.env` file next to this one (copy `.env.example`):
 #        KNOCKBOX_GAMES_DIR=/srv/knockbox/games        # any stable folder you own — survives
 #                                                      # image updates and container recreation
+#        KNOCKBOX_COMPRESSED_DIR=/srv/knockbox/games-compressed   # optional; see below
 #   2. docker compose up -d --build
 #   3. Open http://localhost:8080 — drop game folders into your games dir; they hot-reload.
+#
+# PERSISTENT PRE-COMPRESSED CACHE: the server keeps a regenerable cache of .br/.gz game-asset
+# variants (built at max effort, the expensive part of a cold boot). By default it lives in the
+# `knockbox-compressed` named volume below, so it SURVIVES image updates and isn't re-built every
+# time. To put it on a host path instead (e.g. a TrueNAS dataset), set KNOCKBOX_COMPRESSED_DIR — the
+# same mount line then becomes a bind mount. A host path must be WRITABLE by the container's non-root
+# user (UID 1654); a named volume gets the right ownership automatically. Leaving it unset is fine.
 #
 # PORT-MAPPING FOOT-GUN: the server tells browsers to load games from its *internal* games port
 # (8081), so host:container mappings must stay 1:1 — or set KnockBox__GamesOrigin explicitly
@@ -21,6 +29,9 @@ services:
       # The server only READS the games dir (hence :ro), so it can be any stable host path and
       # can be shared by multiple instances.
       - ${KNOCKBOX_GAMES_DIR:-./games}:/games:ro
+      # Pre-compressed asset cache. Unset → the `knockbox-compressed` named volume (declared at the
+      # bottom of this file); set KNOCKBOX_COMPRESSED_DIR=/path → a writable host bind mount instead.
+      - ${KNOCKBOX_COMPRESSED_DIR:-knockbox-compressed}:/app/games-compressed
       # Uncomment to keep logs on the host too:
       # - ${KNOCKBOX_LOGS_DIR:-./logs}:/app/logs
     environment:
@@ -44,6 +55,8 @@ services:
   # The server only reads /games, so any number of instances can serve one game library.
   # Uncomment, give it its own ports, and pin GamesOrigin (host ports differ from the
   # container's internal 8081 here, so the dev fallback would advertise the wrong port).
+  # Give it its OWN games-compressed cache too — that cache is writable, and two instances
+  # reconciling the same directory would race; never share it.
   # knockbox-2:
   #   build:
   #     context: .
@@ -53,7 +66,15 @@ services:
   #     - "8091:8081"
   #   volumes:
   #     - ${KNOCKBOX_GAMES_DIR:-./games}:/games:ro
+  #     - knockbox-compressed-2:/app/games-compressed
   #   environment:
   #     KnockBox__GamesPollSeconds: "5"
   #     KnockBox__GamesOrigin: "http://localhost:8091"
   #   restart: unless-stopped
+
+# Docker-managed named volume for the regenerable pre-compressed cache. It survives image updates
+# and inherits the container's non-root ownership automatically. Overridden by a host bind mount
+# when KNOCKBOX_COMPRESSED_DIR is set (then this volume simply goes unused). Add knockbox-compressed-2
+# here if you enable the second instance above.
+volumes:
+  knockbox-compressed:

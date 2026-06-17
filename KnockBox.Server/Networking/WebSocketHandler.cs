@@ -43,6 +43,12 @@ public sealed class WebSocketHandler(
     // Internal so the sanitization tests reference it directly rather than mirroring the value.
     internal const int MaxGameLogLength = 2000;
 
+    // Bounds on a forwarded play-log entry (GameLogMessage). The metadata is untrusted game content
+    // rendered later in the shell DOM, so cap the number of entries and the size of each key/value.
+    internal const int MaxPlayLogEntries = 20;
+    internal const int MaxPlayLogKeyLength = 64;
+    internal const int MaxPlayLogValueLength = 512;
+
     public async Task HandleAsync(WebSocket socket, string gameOrigin, CancellationToken ct)
     {
         try
@@ -368,19 +374,49 @@ public sealed class WebSocketHandler(
             lobby.GameId, conn.LobbyId, conn.PlayerId, CleanLogText(m.Message));
     }
 
+    // A game recorded a play-log entry. The server doesn't trust the metadata, so it sanitizes every
+    // key/value (clamp size, strip control chars) and caps the entry count, then stamps the trusted
+    // context — GameId, server Timestamp, and whether the player was the host — and forwards it to the
+    // player's own CONTROL socket. The shell persists it in the browser and shows it on the home page.
+    private void HandleGameLogMessage(Connection conn, GameLogMessage m)
+    {
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
+        if (lobby is null || !lobby.Contains(conn.PlayerId)) return; // not a member; drop silently
+
+        var clean = new Dictionary<string, string>();
+        if (m.Metadata is not null)
+        {
+            foreach (var (key, value) in m.Metadata)
+            {
+                if (clean.Count >= MaxPlayLogEntries) break;
+                var cleanKey = CleanLogText(key, MaxPlayLogKeyLength);
+                if (string.IsNullOrWhiteSpace(cleanKey) || clean.ContainsKey(cleanKey)) continue;
+                clean[cleanKey] = CleanLogText(value, MaxPlayLogValueLength);
+            }
+        }
+
+        var enriched = new GameLogMessage(
+            clean,
+            GameId: lobby.GameId,
+            Timestamp: time.GetUtcNow(),
+            IsHost: conn.PlayerId == lobby.HostId);
+        connections.SendTo(conn.PlayerId, enriched);
+    }
+
     // The game's log message is untrusted. Clamp it to a bounded size (without splitting a surrogate
     // pair) and strip control characters — notably CR/LF — so a game can't inject extra lines into the
     // sink and forge entries that look like the server's own. Tab is left as ordinary whitespace.
     // Any unpaired surrogate (from malformed input or the size cut) is replaced so the result is
     // always valid UTF-16.
-    internal static string CleanLogText(string? message)
+    internal static string CleanLogText(string? message, int maxLength = MaxGameLogLength)
     {
         if (string.IsNullOrEmpty(message)) return string.Empty;
 
         var text = message;
-        if (text.Length > MaxGameLogLength)
+        if (text.Length > maxLength)
         {
-            var cut = MaxGameLogLength;
+            var cut = maxLength;
             if (char.IsHighSurrogate(text[cut - 1])) cut--; // don't slice through a surrogate pair
             text = text[..cut];
         }
@@ -511,6 +547,7 @@ public sealed class WebSocketHandler(
                     else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
                     else if (message is KickPlayerMessage kp) HandleKickPlayer(connection, kp);
                     else if (message is LogMessage log) HandleLogMessage(connection, log);
+                    else if (message is GameLogMessage gl) HandleGameLogMessage(connection, gl);
                 });
             }
         }

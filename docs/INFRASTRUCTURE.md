@@ -124,12 +124,20 @@ now", not a min-players threshold.
 → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }      // game sends
 ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }        // server stamps From
 → { "type": "SetLobbyOpen", "open": true|false }    // host-only: set the lobby's join policy
+→ { "type": "Log", "level": "Information", "message": "…" }   // → server log sink (KnockBox.GameLog)
+→ { "type": "GameLog", "metadata": { "placement": "1", … } } // → forwarded to this player's CONTROL socket
 ← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
 ```
 The server validates the ticket signature **and live lobby membership**, binds the connection to
 `(playerId, lobbyId)`, and resolves all routing from that binding — **the game never sends a lobby
 id.** `to` routing: `"all"` → every member (incl. sender), `"host"` → the lobby's host, `"<id>"` →
 that member only. A message from a non-member is dropped silently.
+
+`GameLog` is the one data-role frame the server **routes back to a control socket**: a game calls
+`KnockBox.logPlay(metadata)`, and the server sanitizes the untrusted metadata, stamps trusted context
+(`gameId`, a UTC `timestamp`, `isHost`), and sends the enriched `GameLog` to **that same player's**
+control socket. The shell persists the most-recent 50 in the browser and shows them in the home-page
+Play Log. (`Log`, by contrast, only lands in the server's log sink — it is never relayed.)
 
 `← { "type": "Error", "cid": "<cid|null>", "reason": "…" }` reports control-role failures.
 
@@ -273,6 +281,11 @@ into `games/` and it appears within a second or two — no restart.
 | `GameTicketTtlHours` | `12` | Game-ticket lifetime. Long enough for a play session + reconnects; live lobby membership is the primary check. |
 | `WebRoot` / `GamesRoot` / `LogsRoot` | auto | Where the shell / games / logs live. Precedence per root: explicit config → repo discovery (dev) → the app's own directory (published exe / container). Relative paths resolve against the content root. See `Hosting/ContentPaths.cs`. |
 | `GamesPollSeconds` | `0` (off) | Polling fallback for games hot-reload where `FileSystemWatcher` doesn't fire (Docker bind mounts). The Docker image sets `10`. |
+| `Precompress` | `true` | Pre-compress each game's assets once into `GamesCompressedRoot` and serve those variants via `Accept-Encoding` negotiation, instead of compressing every full-body response on the fly. `false` ⇒ the on-the-fly `ResponseCompression` fallback only. |
+| `GamesCompressedRoot` | auto (sibling `games-compressed`) | Where the pre-compressed `.br`/`.gz` cache lives. Same precedence as `GamesRoot`. **Must be writable and stay outside the read-only `games/` mount** — it is a regenerable cache, rebuilt from `games/` on boot and on change, so ephemeral storage is fine. In Docker, mount a named volume or host path here (`KNOCKBOX_COMPRESSED_DIR`) to persist it across image updates and skip the cold-boot re-compression — a bind-mounted host path must be writable by the container's UID `1654`. See [HOSTING.md](./HOSTING.md). |
+| `PrecompressGzip` | `true` | Also emit `.gz` alongside `.br` (for the rare client without Brotli). `false` ⇒ Brotli-only; existing `.gz` variants are pruned. |
+| `PrecompressMinBytes` | `1024` | Don't pre-compress files smaller than this (compression overhead outweighs the win). |
+| `PrecompressReconcileSeconds` | `60` | Periodic cache-reconcile interval. The discovery event already covers manifest add/remove/edit; this also catches **asset-only** edits under bind-mount polling (which fingerprints `GAME.json` only) and recovers from any missed event. `0` = off (rely on the discovery event). |
 | `GamesPort` | `5115` | Dev: the port the game origin is served on. |
 | `GamesHost` | — | Prod: the games subdomain (e.g. `games.knockbox.example`); routes by `Host` header behind a proxy where every request shares one port. |
 | `GamesOrigin` | — | Prod: explicit origin the shell embeds games from (overrides `GamesHost`/`GamesPort`). |

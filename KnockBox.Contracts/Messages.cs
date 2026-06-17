@@ -39,6 +39,7 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
 [JsonDerivedType(typeof(LogMessage), "Log")]
+[JsonDerivedType(typeof(GameLogMessage), "GameLog")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
 public interface IMessage;
 
@@ -124,6 +125,19 @@ public sealed record GamePlayerLeftMessage(string PlayerId) : IMessage;
 public sealed record LogMessage(
     [property: JsonConverter(typeof(JsonStringEnumConverter<LogLevel>))] LogLevel Level,
     string Message) : IMessage;
+
+// Game → server (data role): the game records a "play log" entry — an arbitrary <string,string>
+// bag of match metadata (e.g. placement, playerCount, score). Unlike LogMessage (which lands in the
+// server's log sink), the server FORWARDS this to the same player's CONTROL socket so the shell can
+// persist it in the browser and show it on the home page's Play Log. The game supplies only Metadata;
+// the server stamps the trusted, unforgeable context — GameId (resolved from the lobby), Timestamp
+// (server clock), and IsHost (was this player the lobby host). The shell treats a recognized set of
+// metadata keys ("placement", "playerCount", …) specially and shows the rest in a details table.
+public sealed record GameLogMessage(
+    Dictionary<string, string> Metadata,
+    string? GameId = null,
+    DateTimeOffset? Timestamp = null,
+    bool? IsHost = null) : IMessage;
 
 // ── Errors / rejections ──────────────────────────────────────────────────────
 public sealed record ErrorMessage(string? Cid, string Reason) : IMessage;
