@@ -517,7 +517,10 @@ const DBL_MS = 250;
 
 // Single click toggles the crossfade immediately (instant feedback). The second click of a
 // double-click lands within DBL_MS — we skip its toggle so dblclick can open the modal without
-// reverting the reveal first.
+// reverting the reveal first. DBL_MS is a fixed guess, independent of the OS double-click
+// interval: if that interval is longer than 250ms the second click toggles instead of being
+// skipped, but the dblclick handler then `remove('revealed')`s anyway, so the stray re-toggle is
+// never visible — the modal opens over a hidden code regardless.
 rc.addEventListener('click', () => {
   if (longPressed) return; // a long-press already handled this gesture
   const now = performance.now();
