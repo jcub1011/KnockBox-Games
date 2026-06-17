@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, parseJoinParam, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, parseJoinParam, parseRgbComponents, pickContrastText, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -49,7 +49,7 @@ const pending = new Map();      // cid -> resolver
 let cidSeq = 0;
 
 // ── WebSocket plumbing (control plane) ────────────────────────────────────────
-function connect() {
+export function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
@@ -88,7 +88,7 @@ function sendName() {
   }
 }
 
-function handle(msg) {
+export function handle(msg) {
   // Resolve any awaiting request first.
   if (msg.cid && pending.has(msg.cid)) {
     pending.get(msg.cid)(msg);
@@ -157,7 +157,7 @@ function applyGate() {
   document.querySelectorAll('#games .game-tile').forEach((b) => { b.disabled = !ok; });
 }
 
-async function refreshGames() {
+export async function refreshGames() {
   const reply = await request('ListGames');
   games = new Map((reply.games || []).map((g) => [g.id, g]));
   const host = el('games');
@@ -197,7 +197,7 @@ function fallbackSurface(name) {
   return div;
 }
 
-async function createLobby(gameId) {
+export async function createLobby(gameId) {
   if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
   sendName();
   const reply = await request('CreateLobby', { gameId });
@@ -210,7 +210,7 @@ async function createLobby(gameId) {
   }
 }
 
-async function joinByCode() {
+export async function joinByCode() {
   const code = (el('room-code-input').value || '').trim().toUpperCase();
   if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
   if (!code) { showError('Please enter a valid room code.'); return; }
@@ -230,7 +230,7 @@ async function joinByCode() {
   }
 }
 
-function tryRejoin() {
+export function tryRejoin() {
   const saved = sessionStorage.getItem('kb.lobbyId');
   if (saved) request('Rejoin', { lobbyId: saved });
 }
@@ -247,7 +247,7 @@ function autoJoin(code) {
 }
 
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
-function showRoom() {
+export function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
   el('game-title').textContent = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
   el('lobby-code').textContent = lobby.lobbyId;
@@ -268,7 +268,7 @@ function updateWaiting() {
 }
 
 // ── In-game: embed the game on its own origin and hand it a scoped ticket ─────
-async function enterGame(starting) {
+export async function enterGame(starting) {
   // Only launch games discovered in our catalog (the allowlist refreshGames built). This rejects a
   // GameStarting for an unknown id instead of feeding a server-supplied id straight into the iframe URL.
   const manifest = games.get(starting.gameId);
@@ -305,7 +305,7 @@ async function enterGame(starting) {
   el('lobby-view').style.display = 'none';
 }
 
-function showLobbyView() {
+export function showLobbyView() {
   lobby = null;
   closeCodeModal();
   resetHeaderTheme();
@@ -322,7 +322,7 @@ function showLobbyView() {
 // header when nothing resolves. All author-supplied colors are validated before use.
 let themeSeq = 0;
 
-async function themeHeader(manifest) {
+export async function themeHeader(manifest) {
   const seq = ++themeSeq;
   let bg = manifest && manifest.themeColor ? colorToRgb(manifest.themeColor) : null;
   if (!bg && manifest && manifest.thumbnail) {
@@ -334,11 +334,11 @@ async function themeHeader(manifest) {
   if (!bg) { resetHeaderTheme(); return; }
 
   let fg = manifest && manifest.themeTextColor ? colorToRgb(manifest.themeTextColor) : null;
-  if (!fg) fg = luminance(bg) > 0.5 ? { r: 26, g: 26, b: 26 } : { r: 255, g: 255, b: 255 };
+  if (!fg) fg = pickContrastText(bg);
   applyHeaderColors(bg, fg);
 }
 
-function applyHeaderColors(bg, fg) {
+export function applyHeaderColors(bg, fg) {
   const h = document.querySelector('.game-header');
   if (!h) return;
   const rgb = (c) => `rgb(${c.r}, ${c.g}, ${c.b})`;
@@ -350,7 +350,7 @@ function applyHeaderColors(bg, fg) {
   h.style.setProperty('--gh-btn-bg-hover', rgba(fg, 0.26));
 }
 
-function resetHeaderTheme() {
+export function resetHeaderTheme() {
   themeSeq++; // cancel any in-flight thumbnail sampling
   const h = document.querySelector('.game-header');
   if (!h) return;
@@ -363,7 +363,7 @@ function resetHeaderTheme() {
 // returning normalized {r,g,b} or null. Non-opaque values (e.g. `transparent`, which normalizes to
 // rgba(0,0,0,0)) are rejected too, so theming falls back to thumbnail sampling / the default header
 // instead of painting a wrong (black/translucent) tint.
-function colorToRgb(value) {
+export function colorToRgb(value) {
   if (typeof value !== 'string' || !value) return null;
   const probe = document.createElement('span');
   probe.style.color = value; // CSSOM ignores anything that isn't a valid single color
@@ -372,22 +372,12 @@ function colorToRgb(value) {
   document.body.appendChild(probe);
   const norm = getComputedStyle(probe).color; // always rgb()/rgba()
   probe.remove();
-  const m = norm.match(/\d+(?:\.\d+)?/g);
-  if (!m || m.length < 3) return null;
-  if (m.length >= 4 && +m[3] < 1) return null; // not fully opaque — treat as unset
-  return { r: +m[0], g: +m[1], b: +m[2] };
+  return parseRgbComponents(norm); // numeric parse + opaque check (pure, in kb-core)
 }
 
-// WCAG relative luminance (0=black … 1=white) — used to choose contrasting header text.
-function luminance({ r, g, b }) {
-  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-// Pick a representative color from an image by drawing it small and bucketing pixels, weighting by
-// saturation so a game's vibrant accent wins over flat backgrounds. Skips transparent and the
-// near-white/near-black extremes that are usually padding. Resolves null on any failure.
-function dominantColorFromImage(url) {
+// Draw the thumbnail small, hand its pixels to the pure bucketing helper, and resolve the dominant
+// color (see dominantColorFromPixels in kb-core). Resolves null on any failure.
+export function dominantColorFromImage(url) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -398,23 +388,7 @@ function dominantColorFromImage(url) {
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, w, h);
         const { data } = ctx.getImageData(0, 0, w, h);
-        const buckets = new Map();
-        let best = null;
-        for (let i = 0; i < data.length; i += 4) {
-          if (data[i + 3] < 200) continue; // transparent
-          const r = data[i], g = data[i + 1], b = data[i + 2];
-          const max = Math.max(r, g, b), min = Math.min(r, g, b);
-          if (max > 240 && min > 240) continue; // near-white
-          if (max < 18) continue;               // near-black
-          const sat = max === 0 ? 0 : (max - min) / max;
-          const weight = 1 + sat * 3;
-          const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3); // 5 bits/channel
-          let e = buckets.get(key);
-          if (!e) { e = { r: 0, g: 0, b: 0, w: 0 }; buckets.set(key, e); }
-          e.r += r * weight; e.g += g * weight; e.b += b * weight; e.w += weight;
-          if (!best || e.w > best.w) best = e;
-        }
-        resolve(best ? { r: Math.round(best.r / best.w), g: Math.round(best.g / best.w), b: Math.round(best.b / best.w) } : null);
+        resolve(dominantColorFromPixels(data));
       } catch {
         resolve(null); // tainted canvas / decode failure — fall back to default header
       }
@@ -481,7 +455,7 @@ window.addEventListener('message', (e) => {
 
 el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
 
-function leaveGame() {
+export function leaveGame() {
   if (lobby) send({ type: 'LeaveLobby', lobbyId: lobby.lobbyId });
   sessionStorage.removeItem('kb.lobbyId');
   showLobbyView();
@@ -511,7 +485,7 @@ async function copyRoomCode() {
 // Shareable auto-join URL for this lobby: opening it lands a player straight in the lobby (see the
 // "?join=" handling at startup). Carries only the public room code — no identity token.
 function joinLink() {
-  return `${location.origin}/?join=${encodeURIComponent(lobby.lobbyId)}`;
+  return buildJoinLink(location.origin, lobby.lobbyId);
 }
 
 async function copyJoinLink() {
@@ -597,4 +571,6 @@ document.addEventListener('keydown', (e) => {
 });
 
 applyGate();
-connect();
+// Auto-start the control socket on real page load. Under test (`globalThis.__KB_TEST__`), the suite
+// imports this module to drive its exported functions and owns when/how to connect, so skip it.
+if (!globalThis.__KB_TEST__) connect();

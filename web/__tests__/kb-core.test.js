@@ -8,6 +8,11 @@ import {
   defaultEndpoint,
   gameWsEndpoint,
   buildGameSrc,
+  buildJoinLink,
+  luminance,
+  pickContrastText,
+  dominantColorFromPixels,
+  parseRgbComponents,
   LOG_LEVELS,
   makeLogger,
   rosterAdd,
@@ -156,5 +161,91 @@ describe('roster reducers', () => {
     const after = rosterRemove(before, 'p1');
     expect(after).toEqual([bob]);
     expect(before).toEqual([ann, bob]); // original untouched
+  });
+});
+
+// ── Header-theming color math (pure; shell.js delegates the heavy lifting here) ──
+
+describe('luminance', () => {
+  it('is 0 for black and 1 for white', () => {
+    expect(luminance({ r: 0, g: 0, b: 0 })).toBe(0);
+    expect(luminance({ r: 255, g: 255, b: 255 })).toBeCloseTo(1, 5);
+  });
+
+  it('weights green more heavily than red or blue (WCAG coefficients)', () => {
+    const green = luminance({ r: 0, g: 255, b: 0 });
+    const red = luminance({ r: 255, g: 0, b: 0 });
+    const blue = luminance({ r: 0, g: 0, b: 255 });
+    expect(green).toBeGreaterThan(red);
+    expect(red).toBeGreaterThan(blue);
+  });
+});
+
+describe('pickContrastText', () => {
+  it('uses near-black text on light backgrounds', () => {
+    expect(pickContrastText({ r: 255, g: 255, b: 255 })).toEqual({ r: 26, g: 26, b: 26 });
+  });
+
+  it('uses white text on dark backgrounds', () => {
+    expect(pickContrastText({ r: 0, g: 0, b: 0 })).toEqual({ r: 255, g: 255, b: 255 });
+  });
+});
+
+describe('dominantColorFromPixels', () => {
+  // Build a flat RGBA array (the shape of canvas getImageData().data) from [r,g,b,a?] tuples.
+  const pixels = (...rgba) => rgba.flatMap(([r, g, b, a = 255]) => [r, g, b, a]);
+
+  it('returns null when nothing usable remains', () => {
+    expect(dominantColorFromPixels([])).toBeNull();
+    expect(dominantColorFromPixels(pixels([200, 0, 0, 0]))).toBeNull();      // transparent
+    expect(dominantColorFromPixels(pixels([255, 250, 248, 255]))).toBeNull(); // near-white
+    expect(dominantColorFromPixels(pixels([5, 2, 0, 255]))).toBeNull();       // near-black
+  });
+
+  it('lets a vibrant accent outweigh more numerous flat-gray pixels', () => {
+    // Three gray pixels (saturation 0 → weight 1 each = 3) vs one pure-red pixel (saturation 1 →
+    // weight 4). The red bucket wins despite being outnumbered.
+    const data = pixels(
+      [128, 128, 128], [128, 128, 128], [128, 128, 128],
+      [255, 0, 0],
+    );
+    expect(dominantColorFromPixels(data)).toEqual({ r: 255, g: 0, b: 0 });
+  });
+
+  it('averages pixels that fall in the same 5-bit bucket', () => {
+    // 255,0,0 and 250,2,1 share a bucket (top 5 bits per channel match); result is their weighted mean.
+    const out = dominantColorFromPixels(pixels([255, 0, 0], [250, 2, 1]));
+    expect(out.r).toBeGreaterThan(248);
+    expect(out.r).toBeLessThanOrEqual(255);
+    expect(out.g).toBeLessThan(3);
+  });
+});
+
+describe('parseRgbComponents', () => {
+  it('parses rgb() and fully-opaque rgba() into numeric channels', () => {
+    expect(parseRgbComponents('rgb(255, 0, 128)')).toEqual({ r: 255, g: 0, b: 128 });
+    expect(parseRgbComponents('rgba(10, 20, 30, 1)')).toEqual({ r: 10, g: 20, b: 30 });
+  });
+
+  it('rejects non-opaque colors so theming falls back instead of painting a wrong tint', () => {
+    expect(parseRgbComponents('rgba(0, 0, 0, 0)')).toBeNull();   // transparent
+    expect(parseRgbComponents('rgba(10, 20, 30, 0.5)')).toBeNull();
+  });
+
+  it('returns null for garbage / missing channels', () => {
+    expect(parseRgbComponents('')).toBeNull();
+    expect(parseRgbComponents(null)).toBeNull();
+    expect(parseRgbComponents('not-a-color')).toBeNull();
+    expect(parseRgbComponents('rgb(1, 2)')).toBeNull();
+  });
+});
+
+describe('buildJoinLink', () => {
+  it('builds an auto-join URL from the origin and room code', () => {
+    expect(buildJoinLink('https://kb.example', 'AB12')).toBe('https://kb.example/?join=AB12');
+  });
+
+  it('percent-encodes the code', () => {
+    expect(buildJoinLink('http://localhost:5114', 'A B')).toBe('http://localhost:5114/?join=A%20B');
   });
 });

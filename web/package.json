@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "KnockBox platform shell + game SDK (browser). Tests cover the pure client logic in kb-core.js.",
+  "description": "KnockBox platform shell + game SDK (browser). Vitest tests cover the pure client logic (kb-core.js, Node env) and the shell + SDK orchestration (shell.js, knockbox.js, under jsdom).",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "jsdom": "^29.1.1",
     "vitest": "^4.1.8"
   }
 }

@@ -84,6 +84,66 @@ export function makeLogger(sendFrame) {
   return api;
 }
 
+// ── Header-theming helpers (pure color math) ──────────────────────────────────
+// Shared with shell.js, which derives the in-game header tint from a game's manifest color or
+// thumbnail. Kept here (DOM-free) so the math is unit-tested under Node; shell.js owns the CSSOM
+// probe and canvas plumbing that feed these.
+
+// WCAG relative luminance (0=black … 1=white) of an {r,g,b} (0–255) color — used to choose
+// contrasting header text.
+export function luminance({ r, g, b }) {
+  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+// Pick a contrasting text color for a background: near-black on light backgrounds, white on dark.
+export function pickContrastText(bg) {
+  return luminance(bg) > 0.5 ? { r: 26, g: 26, b: 26 } : { r: 255, g: 255, b: 255 };
+}
+
+// Pick a representative color from raw RGBA pixel data (a canvas getImageData `data` array) by
+// bucketing pixels and weighting by saturation so a game's vibrant accent wins over flat
+// backgrounds. Skips transparent and the near-white/near-black extremes that are usually padding.
+// Returns {r,g,b} or null when nothing usable remains. shell.js draws the thumbnail small and hands
+// the pixels here, keeping the loop pure and testable.
+export function dominantColorFromPixels(data) {
+  const buckets = new Map();
+  let best = null;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 200) continue; // transparent
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max > 240 && min > 240) continue; // near-white
+    if (max < 18) continue;               // near-black
+    const sat = max === 0 ? 0 : (max - min) / max;
+    const weight = 1 + sat * 3;
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3); // 5 bits/channel
+    let e = buckets.get(key);
+    if (!e) { e = { r: 0, g: 0, b: 0, w: 0 }; buckets.set(key, e); }
+    e.r += r * weight; e.g += g * weight; e.b += b * weight; e.w += weight;
+    if (!best || e.w > best.w) best = e;
+  }
+  return best ? { r: Math.round(best.r / best.w), g: Math.round(best.g / best.w), b: Math.round(best.b / best.w) } : null;
+}
+
+// Parse a CSSOM-normalized color string (always "rgb(...)" / "rgba(...)") into {r,g,b}, or null.
+// Non-opaque values (alpha < 1, e.g. `transparent` → rgba(0,0,0,0)) are rejected so theming falls
+// back instead of painting a wrong (black/translucent) tint. shell.js feeds this getComputedStyle's
+// output after validating the author value through a CSSOM probe.
+export function parseRgbComponents(normalized) {
+  const m = (normalized || '').match(/\d+(?:\.\d+)?/g);
+  if (!m || m.length < 3) return null;
+  if (m.length >= 4 && +m[3] < 1) return null; // not fully opaque — treat as unset
+  return { r: +m[0], g: +m[1], b: +m[2] };
+}
+
+// ── Shareable lobby link ───────────────────────────────────────────────────────
+// Auto-join URL for a lobby ("<origin>/?join=CODE"): opening it lands a player straight in the
+// lobby (see shell.js's "?join=" handling). Carries only the public room code — no identity token.
+export function buildJoinLink(origin, code) {
+  return `${origin}/?join=${encodeURIComponent(code)}`;
+}
+
 // Roster reducers (immutable): add is idempotent by id; remove drops by id.
 export function rosterAdd(players, player) {
   return players.some((p) => p.id === player.id) ? players : [...players, player];
