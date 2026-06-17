@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, sanitizeGameOrigin } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -101,7 +101,9 @@ export function handle(msg) {
       playerId = msg.playerId;
       token = msg.token;
       sessionStorage.setItem('kb.token', token);
-      gameOrigin = msg.gameOrigin || location.origin;
+      // Validate the server-supplied origin to an http(s) origin before it can flow into an iframe
+      // src; fall back to this origin when missing or invalid.
+      gameOrigin = sanitizeGameOrigin(msg.gameOrigin) || location.origin;
       reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
       // Load the game catalog FIRST, then (re)join. A GameStarting — from an auto-join or a rejoin —
       // makes enterGame resolve the manifest from `games`, which must be populated by then. The
@@ -406,7 +408,15 @@ export async function enterGame(starting) {
 
   const entry = manifest.entry;
   // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.
-  const src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
+  let src;
+  try {
+    src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
+  } catch {
+    // gameOrigin is sanitized at the source (Welcome), so this is defensive: surface it like every
+    // other enterGame failure rather than letting the rejection escape.
+    showError('Could not start game.');
+    return;
+  }
 
   el('waiting').style.display = 'none';
   el('frame-host').innerHTML = '';
