@@ -34,6 +34,30 @@ The directory is mounted **read-only** (`:ro`) — the server never writes to it
 instances can safely share one game library. `docker-compose.yml` contains a commented-out second
 instance showing exactly that pattern.
 
+> **Pre-compressed asset cache.** With `KnockBox__Precompress` on (the default), the server writes a
+> `games-compressed/` cache of `.br`/`.gz` variants (built at max effort — the slow part of a cold
+> boot) — it lives at `KnockBox__GamesCompressedRoot` (`/app/games-compressed` in the image), which
+> must be **writable** and therefore **outside** the read-only `games/` mount. It is fully
+> regenerable, so it *can* sit on container-local storage — but then it's wiped and rebuilt from
+> scratch on every image update. To make it **survive updates** (and skip that full re-compression),
+> the compose file mounts it on a volume: by default the Docker-managed `knockbox-compressed` named
+> volume, or set `KNOCKBOX_COMPRESSED_DIR` to a host path to keep it on a disk you choose:
+>
+> ```bash
+> KNOCKBOX_COMPRESSED_DIR=/srv/knockbox/games-compressed
+> ```
+>
+> A **host path** must be writable by the container's non-root user (UID `1654`) — `chown -R 1654`
+> the directory first, or the server can't write the cache and silently falls back to on-the-fly
+> compression. A **named volume** (the default) gets the right ownership automatically, no setup.
+> When several instances share one read-only library, give each its own compressed cache — it's
+> writable and concurrent reconcilers would race. Disable the whole thing with
+> `KnockBox__Precompress: "false"` to fall back to on-the-fly compression and write nothing.
+>
+> **On TrueNAS** (or any NAS), point both at datasets: `KNOCKBOX_GAMES_DIR` at a read-only games
+> dataset and `KNOCKBOX_COMPRESSED_DIR` at a separate **writable** dataset owned by UID `1654`. Both
+> then persist across app/image updates.
+
 There are no secrets to configure. Player identities are anonymous, per-tab, and ephemeral by
 design: a restart mints fresh ids, which is expected — in-memory lobbies drop on restart anyway.
 
@@ -87,6 +111,7 @@ win-x64/
 ├─ appsettings.json      # optional config (KnockBox:* keys)
 ├─ web/                  # platform shell (baked in by publish)
 ├─ games/                # auto-created on first run — drop game folders here
+├─ games-compressed/     # auto-created — regenerable .br/.gz asset cache (rebuilt from games/)
 └─ logs/                 # daily rolling logs
 ```
 
@@ -100,7 +125,18 @@ win-x64/
 - For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow both ports through Windows
   Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is derived from the
   same host automatically.
-- To use a games folder elsewhere (e.g. a NAS share), set `KnockBox:GamesRoot` to its path.
+- To store games (and/or the compressed cache) elsewhere — a data drive, a NAS share — set
+  `KnockBox:GamesRoot` and/or `KnockBox:GamesCompressedRoot` to your paths. Three interchangeable
+  ways to supply them (later wins): the `KnockBox` section of `appsettings.json` next to the exe —
+  ```json
+  "KnockBox": { "GamesRoot": "D:/KnockBoxData/games", "GamesCompressedRoot": "D:/KnockBoxData/games-compressed" }
+  ```
+  environment variables (`KnockBox__GamesRoot`, `KnockBox__GamesCompressedRoot`), or CLI args
+  (`KnockBox.Server.exe --KnockBox:GamesRoot=D:\KnockBoxData\games`). An **absolute** path is used
+  as-is; a **relative** one resolves against the exe's folder. Unlike Docker these are plain on-disk
+  folders, so they already survive app updates — relocate them only to put data on a chosen disk or
+  share. `games-compressed/` must be writable; it's regenerable, so deleting it just triggers a
+  rebuild. (Set `KnockBox:Precompress` to `false` to skip the cache entirely.)
 
 ---
 
@@ -113,6 +149,8 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | Key | Default | Purpose |
 |---|---|---|
 | `WebRoot` / `GamesRoot` / `LogsRoot` | auto-resolved | Override where the shell / games / logs live. Relative paths resolve against the app's content root. |
+| `Precompress` | `true` | Keep a `.br`/`.gz` cache of game assets and serve it via `Accept-Encoding`; `false` ⇒ on-the-fly compression only, writes nothing. |
+| `GamesCompressedRoot` | `/app/games-compressed` (Docker) | Where the pre-compressed cache lives. Must be **writable** and outside the read-only `games/` mount. Mount a volume / host path here to persist it across updates (see above). |
 | `GamesPollSeconds` | `0` (off; `10` in Docker) | Polling fallback for games hot-reload where file watching doesn't work (bind mounts). |
 | `GamesPort` / `GamesHost` / `GamesOrigin` | `5115` / — / — | How the separate game origin is addressed (port in dev, subdomain or explicit origin in prod). |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-*` from a fronting reverse proxy. |

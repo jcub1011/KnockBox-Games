@@ -13,14 +13,20 @@
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0 AS base
 WORKDIR /app
 # /games is the (read-only) mount point — the server only reads it, so it needs no ownership change.
-# /app/logs must be writable by the non-root app user, so hand it to $APP_UID while still root.
-RUN mkdir -p /games /app/logs && chown $APP_UID /app/logs
+# /app/logs and /app/games-compressed must be writable by the non-root app user, so hand them to
+# $APP_UID while still root. games-compressed is the regenerable pre-compressed asset cache — it must
+# stay OUT of the read-only /games mount. It defaults to this container-local dir (rebuilt from /games
+# on boot), but you can mount a named volume or host path onto it to PERSIST it across image updates
+# and skip re-compressing the whole library each boot (see docker-compose.yml / docs/HOSTING.md). A
+# bind-mounted host path must be writable by $APP_UID; a named volume inherits this dir's ownership.
+RUN mkdir -p /games /app/logs /app/games-compressed && chown $APP_UID /app/logs /app/games-compressed
 USER $APP_UID
 # Two plain-HTTP ports keep the two-origin model working with no proxy: 8080 = shell, 8081 = games
 # origin. Map them 1:1 on the host (or set KnockBox__GamesOrigin) — the server advertises its
 # INTERNAL games port to browsers. TLS belongs to a fronting proxy (set KnockBox__ForwardedHeaders).
 ENV KnockBox__GamesRoot=/games \
     KnockBox__LogsRoot=/app/logs \
+    KnockBox__GamesCompressedRoot=/app/games-compressed \
     KnockBox__GamesPort=8081 \
     KnockBox__GamesPollSeconds=10 \
     ASPNETCORE_HTTP_PORTS="8080;8081"
