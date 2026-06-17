@@ -35,6 +35,17 @@
 //
 // 'state-changed' fires whenever the local model may have changed (snapshot, delta, or a roster
 // change), so just re-render. Use the plugin's own 'ready' / players / isHost for lobby/roster UI.
+//
+// ── Dev guard (devChecks) ──
+// In per-recipient mode the helper OWNS the object guests render — `currentView` — and replaces it
+// wholesale on each snapshot. It's a render copy: mutating it just diverges from the host until the
+// next snapshot overwrites it. To catch that mistake early, this helper deep-freezes `currentView`
+// before firing 'state-changed' so an accidental write throws (modules run strict). It defaults ON
+// only under the local-testing transport (`net.isLocal`) — guarding local dev, off in production —
+// and can be forced with { devChecks: true | false }. Scope is deliberately narrow: it freezes only
+// `currentView` (which the SDK owns), never the host's authoritative model, and in broadcast mode the
+// game owns its own model object — so there the convention (don't mutate the render copy; see README
+// / guide §5a) and the TypeScript `DeepReadonly` view type carry the message instead.
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
     module.exports = factory(root.Phaser);
@@ -47,6 +58,16 @@
   'use strict';
 
   var ENVELOPE = '_kb'; // discriminator marking messages this helper owns (matches the Godot addon)
+
+  // Recursively freeze a plain-data value so an accidental write to a replicated render copy throws.
+  // Cheap and safe on the JSON-shaped state that travels over the wire; a no-op on primitives/null.
+  function deepFreeze(obj) {
+    if (obj === null || typeof obj !== 'object' || Object.isFrozen(obj)) return obj;
+    Object.freeze(obj);
+    var keys = Object.getOwnPropertyNames(obj);
+    for (var i = 0; i < keys.length; i++) deepFreeze(obj[keys[i]]);
+    return obj;
+  }
 
   // Minimal emitter fallback so this helper works even if Phaser isn't on the global (e.g. Node
   // tests). When Phaser is present we use its EventEmitter for consistency with the rest of the game.
@@ -75,6 +96,9 @@
     this._net = net;
     this._model = model;
     this._perRecipient = !!options.perRecipient;
+    // Deep-freeze the replicated render copy to catch accidental mutation. Defaults on under the
+    // local-testing transport (dev) and off in production; an explicit option always wins.
+    this._devChecks = (options.devChecks != null) ? !!options.devChecks : !!net.isLocal;
 
     // The local player's latest projected view in per-recipient mode (null until the first arrives).
     // Render from this instead of the model. Stays null in the default broadcast mode.
@@ -106,6 +130,11 @@
   // Convenience for the host's join policy: open/close the lobby to new players.
   KBAuthority.prototype.setOpen = function (open) { this._net.setLobbyOpen(open); };
 
+  // Wrap a replicated render copy: frozen when dev checks are on, untouched otherwise.
+  KBAuthority.prototype._replica = function (v) {
+    return this._devChecks ? deepFreeze(v) : v;
+  };
+
   // Detach all listeners. Call when tearing down the scene/owner of this helper.
   KBAuthority.prototype.destroy = function () {
     var net = this._net;
@@ -133,7 +162,7 @@
       this._net.sendToHost(sync);
     } else {
       // Host renders its own projected view; guests' views arrive via their sync responses.
-      if (this._perRecipient) this.currentView = this._model.snapshot(this._net.playerId);
+      if (this._perRecipient) this.currentView = this._replica(this._model.snapshot(this._net.playerId));
       // On a HOST reconnect, guests that already synced won't request again, so re-push the
       // authoritative state to everyone — covering anything that changed around the drop.
       if (this._net.reconnected) this._broadcastState();
@@ -160,7 +189,7 @@
       for (var i = 0; i < players.length; i++) {
         var pid = String((players[i] && players[i].id) || '');
         if (pid === this._net.playerId) {
-          this.currentView = this._model.snapshot(pid);
+          this.currentView = this._replica(this._model.snapshot(pid));
         } else {
           this._net.sendTo(pid, this._stateMsg(pid));
         }
@@ -212,7 +241,7 @@
       case 'state':
         if (this._net.isHost) return; // host is authoritative; never adopts a snapshot
         if (this._perRecipient) {
-          this.currentView = payload.state; // guests render this directly; no model needed
+          this.currentView = this._replica(payload.state); // guests render this directly; no model needed
         } else {
           this._model.applySnapshot(payload.state);
         }

@@ -346,6 +346,7 @@
     this.players = [];
     this.isHost = false;
     this.reconnected = false; // local sessions never reconnect
+    this.isLocal = true;      // marks the local-testing transport; KBAuthority auto-enables dev checks
 
     this.events = makeEmitter();
 
@@ -461,7 +462,7 @@
       KnockBoxLocalPlugin.prototype[m] = function () { return this._peer[m].apply(this._peer, arguments); };
     });
     // Mirror the peer's state as read-only properties (log is the peer's console-like logger object).
-    ['playerId', 'players', 'isHost', 'reconnected', 'log'].forEach(function (prop) {
+    ['playerId', 'players', 'isHost', 'reconnected', 'isLocal', 'log'].forEach(function (prop) {
       Object.defineProperty(KnockBoxLocalPlugin.prototype, prop, {
         get: function () { return this._peer ? this._peer[prop] : undefined; },
         enumerable: true,
