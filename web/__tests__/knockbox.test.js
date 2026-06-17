@@ -182,6 +182,15 @@ describe('logPlay', () => {
     kb.logPlay();
     expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([{ type: 'GameLog', metadata: {} }]);
   });
+
+  it('drops nullish values (no "null"/"undefined") but keeps falsy primitives', async () => {
+    const { kb, ws } = await importSdk();
+    ws._open();
+    kb.logPlay({ a: 1, b: null, c: undefined, d: 0 });
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
+      { type: 'GameLog', metadata: { a: '1', d: '0' } },
+    ]);
+  });
 });
 
 describe('reconnection', () => {

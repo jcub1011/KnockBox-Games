@@ -190,6 +190,15 @@ describe('send API & queueing', () => {
     plugin.logPlay();
     expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([{ type: 'GameLog', metadata: {} }]);
   });
+
+  it('logPlay drops nullish values (no "null"/"undefined") but keeps falsy primitives', async () => {
+    const { plugin, ws } = await makePlugin();
+    ws._open();
+    plugin.logPlay({ a: 1, b: null, c: undefined, d: 0 });
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
+      { type: 'GameLog', metadata: { a: '1', d: '0' } },
+    ]);
+  });
 });
 
 describe('close handling & teardown', () => {

@@ -158,7 +158,10 @@
     var bag = {};
     if (metadata && typeof metadata === 'object') {
       for (var key in metadata) {
-        if (Object.prototype.hasOwnProperty.call(metadata, key)) bag[key] = String(metadata[key]);
+        if (!Object.prototype.hasOwnProperty.call(metadata, key)) continue;
+        var value = metadata[key];
+        if (value === null || value === undefined) continue; // skip nullish — don't send "null"/"undefined"
+        bag[key] = String(value);
       }
     }
     this._sendLog({ type: 'GameLog', metadata: bag });

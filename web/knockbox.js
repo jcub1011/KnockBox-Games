@@ -90,7 +90,12 @@ import {
     logPlay(metadata) {
       const bag = {};
       if (metadata && typeof metadata === 'object') {
-        for (const key in metadata) bag[key] = String(metadata[key]);
+        for (const key in metadata) {
+          if (!Object.prototype.hasOwnProperty.call(metadata, key)) continue;
+          const value = metadata[key];
+          if (value === null || value === undefined) continue; // skip nullish — don't send "null"/"undefined"
+          bag[key] = String(value);
+        }
       }
       sendLog({ type: 'GameLog', metadata: bag });
     },
