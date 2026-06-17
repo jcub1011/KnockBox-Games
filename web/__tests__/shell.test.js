@@ -8,6 +8,7 @@
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, stubClipboard, tick } from './helpers.js';
+import { FAVICONS } from '../kb-core.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -84,6 +85,15 @@ describe('handshake & identity', () => {
     expect(FakeWebSocket.instances).toHaveLength(0); // importing wires the DOM but opens no socket
     shell.bootstrap();
     expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('sets the favicon to one of the cat icons on bootstrap', async () => {
+    await importShell();
+    shell.bootstrap();
+    const link = document.head.querySelector('link[rel="icon"]');
+    expect(link).not.toBeNull();
+    // jsdom resolves href to an absolute URL; assert the pathname matches a known favicon.
+    expect(FAVICONS).toContain(new URL(link.href).pathname);
   });
 });
 

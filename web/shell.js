@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -697,5 +697,22 @@ renderPlayLog(); // home view is shown by default on load — populate the Play 
 // importing the module on its own no longer opens a socket, so the test suite can drive the exported
 // functions (and call connect() itself) without an auto-connect to suppress.
 export function bootstrap() {
+  applyRandomFavicon();
   connect();
+}
+
+// Swap the page's favicon to a random cat on load (recreating the legacy server's per-render pick).
+// Reuses the static <link rel="icon"> seeded in index.html so we update one element rather than
+// appending a second; falls back to creating it if absent.
+function applyRandomFavicon() {
+  const href = pickRandomFavicon();
+  if (!href) return;
+  let link = document.head.querySelector('link[rel="icon"]');
+  if (!link) {
+    link = document.createElement('link');
+    link.rel = 'icon';
+    link.type = 'image/png';
+    document.head.appendChild(link);
+  }
+  link.href = href;
 }

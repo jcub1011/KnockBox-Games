@@ -21,6 +21,23 @@ export function reconnectDelay(attempt, base = 1000, max = 30000) {
   return Math.min(max, base * 2 ** n);
 }
 
+// The shell picks one of these cat icons at random on each page load (ported from the legacy
+// server's per-render favicon pick). Paths are relative to the shell origin root; the files live
+// under web/favicons/ and are served by the shell origin's static middleware.
+export const FAVICONS = [
+  '/favicons/cat-orange.png',
+  '/favicons/cat-brown.png',
+  '/favicons/cat-cream.png',
+  '/favicons/cat-gray.png',
+  '/favicons/cat-sketch.png',
+];
+
+// Pure (testable) random pick. rand defaults to Math.random so tests can inject a deterministic stub.
+export function pickRandomFavicon(favicons = FAVICONS, rand = Math.random) {
+  if (!favicons || favicons.length === 0) return null;
+  return favicons[Math.floor(rand() * favicons.length)];
+}
+
 // The shell hands the game its credentials in the URL FRAGMENT (not the query string) so they are
 // never sent in a Referer header or written to server/proxy logs. Parses "#kbTicket=…&kbEndpoint=…".
 export function parseLaunchParams(hash) {

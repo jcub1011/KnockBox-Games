@@ -22,6 +22,8 @@ import {
   PLAY_LOG_STANDARD_KEYS,
   partitionPlayLogMetadata,
   ordinal,
+  FAVICONS,
+  pickRandomFavicon,
 } from '../kb-core.js';
 
 describe('isTerminalClose', () => {
@@ -51,6 +53,25 @@ describe('reconnectDelay', () => {
 
   it('clamps negative/garbage attempts to the base', () => {
     expect(reconnectDelay(-5)).toBe(1000);
+  });
+});
+
+describe('pickRandomFavicon', () => {
+  it('maps the random value across the list (0 → first, ~1 → last)', () => {
+    expect(pickRandomFavicon(FAVICONS, () => 0)).toBe(FAVICONS[0]);
+    expect(pickRandomFavicon(FAVICONS, () => 0.99)).toBe(FAVICONS[FAVICONS.length - 1]);
+  });
+
+  it('always returns a member of the list', () => {
+    for (let i = 0; i < FAVICONS.length; i++) {
+      const picked = pickRandomFavicon(FAVICONS, () => i / FAVICONS.length);
+      expect(FAVICONS).toContain(picked);
+    }
+  });
+
+  it('returns null for an empty/missing list', () => {
+    expect(pickRandomFavicon([], () => 0)).toBeNull();
+    expect(pickRandomFavicon(null, () => 0)).toBeNull();
   });
 });
 
