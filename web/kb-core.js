@@ -129,11 +129,16 @@ export function dominantColorFromPixels(data) {
 // Parse a CSSOM-normalized color string (always "rgb(...)" / "rgba(...)") into {r,g,b}, or null.
 // Non-opaque values (alpha < 1, e.g. `transparent` → rgba(0,0,0,0)) are rejected so theming falls
 // back instead of painting a wrong (black/translucent) tint. shell.js feeds this getComputedStyle's
-// output after validating the author value through a CSSOM probe.
+// output after validating the author value through a CSSOM probe. Alpha may arrive as a 0–1 number
+// (`rgba(…, 0.5)`) or, in the modern space-separated form, as a percentage (`rgb(… / 50%)`) — both
+// are normalized before the opaque check.
 export function parseRgbComponents(normalized) {
-  const m = (normalized || '').match(/\d+(?:\.\d+)?/g);
+  const m = (normalized || '').match(/-?\d*\.?\d+%?/g);
   if (!m || m.length < 3) return null;
-  if (m.length >= 4 && +m[3] < 1) return null; // not fully opaque — treat as unset
+  if (m.length >= 4) {
+    const a = m[3].endsWith('%') ? parseFloat(m[3]) / 100 : parseFloat(m[3]);
+    if (a < 1) return null; // not fully opaque — treat as unset
+  }
   return { r: +m[0], g: +m[1], b: +m[2] };
 }
 

@@ -571,6 +571,10 @@ document.addEventListener('keydown', (e) => {
 });
 
 applyGate();
-// Auto-start the control socket on real page load. Under test (`globalThis.__KB_TEST__`), the suite
-// imports this module to drive its exported functions and owns when/how to connect, so skip it.
-if (!globalThis.__KB_TEST__) connect();
+
+// Start the control socket. On a real page load index.html imports this module and calls bootstrap();
+// importing the module on its own no longer opens a socket, so the test suite can drive the exported
+// functions (and call connect() itself) without an auto-connect to suppress.
+export function bootstrap() {
+  connect();
+}

@@ -232,6 +232,13 @@ describe('parseRgbComponents', () => {
     expect(parseRgbComponents('rgba(10, 20, 30, 0.5)')).toBeNull();
   });
 
+  it('handles the modern space-separated rgb(r g b / a) form, including percentage alpha', () => {
+    expect(parseRgbComponents('rgb(255 0 128 / 50%)')).toBeNull();  // 50% → non-opaque
+    expect(parseRgbComponents('rgb(255 0 128 / 0.5)')).toBeNull();  // 0.5 → non-opaque
+    expect(parseRgbComponents('rgb(255 0 128 / 100%)')).toEqual({ r: 255, g: 0, b: 128 });
+    expect(parseRgbComponents('rgb(255 0 128)')).toEqual({ r: 255, g: 0, b: 128 });
+  });
+
   it('returns null for garbage / missing channels', () => {
     expect(parseRgbComponents('')).toBeNull();
     expect(parseRgbComponents(null)).toBeNull();

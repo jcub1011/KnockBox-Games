@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 //
-// Integration coverage for web/shell.js. The shell is a side-effecting module (it wires the DOM and
-// would open the control socket at import), so each test loads the real index.html markup, installs
-// a FakeWebSocket, sets `globalThis.__KB_TEST__` (which suppresses the auto-connect), then imports a
-// fresh copy of the module and drives it through (a) the exported functions and (b) the WebSocket
-// protocol + DOM events. Assertions read observable state: sent frames, DOM text/visibility, storage.
+// Integration coverage for web/shell.js. The shell is a side-effecting module (it wires the DOM at
+// import but does not open the control socket — that happens in bootstrap(), which index.html calls).
+// So each test loads the real index.html markup, installs a FakeWebSocket, imports a fresh copy of
+// the module, and drives it through (a) the exported functions (connect/bootstrap and friends) and
+// (b) the WebSocket protocol + DOM events. Assertions read observable state: sent frames, DOM
+// text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, stubClipboard, tick } from './helpers.js';
 
@@ -41,7 +42,6 @@ async function createLobbySuccess(ws, { gameId = 'ttt', lobbyId = 'AB12' } = {})
 
 beforeEach(() => {
   vi.resetModules();
-  globalThis.__KB_TEST__ = true;
   localStorage.clear();
   sessionStorage.clear();
   loadShellDom();
@@ -52,7 +52,6 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  delete globalThis.__KB_TEST__;
 });
 
 describe('handshake & identity', () => {
@@ -80,9 +79,11 @@ describe('handshake & identity', () => {
     expect(el('games').querySelectorAll('.game-tile')).toHaveLength(1);
   });
 
-  it('does not auto-connect at import under the test flag', async () => {
+  it('does not connect on import; bootstrap() opens the control socket', async () => {
     await importShell();
-    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(FakeWebSocket.instances).toHaveLength(0); // importing wires the DOM but opens no socket
+    shell.bootstrap();
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });
 
