@@ -7,6 +7,7 @@ import {
   parseJoinParam,
   defaultEndpoint,
   gameWsEndpoint,
+  sanitizeGameOrigin,
   buildGameSrc,
   buildJoinLink,
   luminance,
@@ -118,7 +119,34 @@ describe('endpoint helpers', () => {
   });
 });
 
+describe('sanitizeGameOrigin', () => {
+  it('returns the normalized origin for valid http(s) URLs', () => {
+    expect(sanitizeGameOrigin('http://localhost:5115')).toBe('http://localhost:5115');
+    expect(sanitizeGameOrigin('https://games.example.com')).toBe('https://games.example.com');
+    // Strips any path/query/fragment down to the bare origin.
+    expect(sanitizeGameOrigin('https://games.example.com/foo?x=1#y')).toBe('https://games.example.com');
+  });
+
+  it('rejects non-http(s) schemes that could become an XSS/redirect sink', () => {
+    expect(sanitizeGameOrigin('javascript:alert(1)')).toBeNull();
+    expect(sanitizeGameOrigin('data:text/html,<script>1</script>')).toBeNull();
+    expect(sanitizeGameOrigin('file:///etc/passwd')).toBeNull();
+  });
+
+  it('rejects malformed / empty values', () => {
+    expect(sanitizeGameOrigin('not a url')).toBeNull();
+    expect(sanitizeGameOrigin('')).toBeNull();
+    expect(sanitizeGameOrigin(null)).toBeNull();
+    expect(sanitizeGameOrigin(undefined)).toBeNull();
+  });
+});
+
 describe('buildGameSrc', () => {
+  it('throws on an origin that is not a valid http(s) origin (XSS/redirect guard)', () => {
+    expect(() => buildGameSrc('javascript:alert(1)', 'g', 'index.html', 't', 'ws://x/ws')).toThrow();
+    expect(() => buildGameSrc('not a url', 'g', 'index.html', 't', 'ws://x/ws')).toThrow();
+  });
+
   it('puts the ticket in the fragment, not the query string', () => {
     const src = buildGameSrc('http://localhost:5115', 'ttt', 'index.html', 'tok+/=', 'ws://localhost:5115/ws');
     expect(src.startsWith('http://localhost:5115/games/ttt/index.html#')).toBe(true);

@@ -65,14 +65,32 @@ export function gameWsEndpoint(gameOrigin) {
   return gameOrigin.replace(/^http/, 'ws') + '/ws';
 }
 
+// Validates a game-origin string (server-supplied, via the Welcome message) and returns its
+// normalized http(s) origin, or null if it isn't a valid web origin. The explicit scheme allowlist
+// is the guard that stops a hostile/unexpected value (e.g. "javascript:…") from ever reaching an
+// iframe navigation as XSS or an open redirect.
+export function sanitizeGameOrigin(value) {
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
 // Builds the iframe src for an embedded game, with credentials in the fragment (see parseLaunchParams).
 export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
+  // The origin is server-supplied; reject anything that isn't a real http(s) origin so the iframe
+  // src can never become a javascript:/data: navigation or point off to an arbitrary host.
+  const safeOrigin = sanitizeGameOrigin(gameOrigin);
+  if (!safeOrigin) throw new Error('Invalid game origin');
   // Encode path segments: gameId/entry arrive in a server message, so they must not be able to
   // inject a scheme, path traversal, or extra path into the iframe's navigation URL. (entry may
   // legitimately contain '/', so encode each segment rather than the whole string.)
   const safeGameId = encodeURIComponent(gameId);
   const safeEntry = entry.split('/').map(encodeURIComponent).join('/');
-  const base = `${gameOrigin}/games/${safeGameId}/${safeEntry}`;
+  const base = `${safeOrigin}/games/${safeGameId}/${safeEntry}`;
   const frag = `kbTicket=${encodeURIComponent(ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
   return `${base}#${frag}`;
 }
