@@ -360,7 +360,9 @@ function resetHeaderTheme() {
 }
 
 // Validate an author-supplied CSS color via the CSSOM (invalid values are rejected, never injected),
-// returning normalized {r,g,b} or null.
+// returning normalized {r,g,b} or null. Non-opaque values (e.g. `transparent`, which normalizes to
+// rgba(0,0,0,0)) are rejected too, so theming falls back to thumbnail sampling / the default header
+// instead of painting a wrong (black/translucent) tint.
 function colorToRgb(value) {
   if (typeof value !== 'string' || !value) return null;
   const probe = document.createElement('span');
@@ -371,7 +373,9 @@ function colorToRgb(value) {
   const norm = getComputedStyle(probe).color; // always rgb()/rgba()
   probe.remove();
   const m = norm.match(/\d+(?:\.\d+)?/g);
-  return m && m.length >= 3 ? { r: +m[0], g: +m[1], b: +m[2] } : null;
+  if (!m || m.length < 3) return null;
+  if (m.length >= 4 && +m[3] < 1) return null; // not fully opaque — treat as unset
+  return { r: +m[0], g: +m[1], b: +m[2] };
 }
 
 // WCAG relative luminance (0=black … 1=white) — used to choose contrasting header text.

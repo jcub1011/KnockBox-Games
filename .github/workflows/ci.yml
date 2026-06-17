@@ -67,6 +67,7 @@ jobs:
           cache: npm
           cache-dependency-path: clients/phaser/package-lock.json
       - run: npm ci
+      - run: npm run lint
       - run: npm test
 
   pack-game:
