@@ -100,6 +100,22 @@ GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
 `themeTextColor` (optional CSS colors the shell tints the in-game header chrome with;
 shell-validated, so invalid values are ignored — no CSS injection).
 
+### Serving game assets & pre-compression
+Game builds are served with stock `UseStaticFiles` (ETag + `must-revalidate`, so unchanged
+assets — esp. the large `.wasm` — return `304`). To avoid re-compressing the same static bytes
+on every cold request, `Games/GameAssetPrecompressor.cs` keeps a derived cache of max-effort
+(`CompressionLevel.SmallestSize`) `.br`/`.gz` variants under `GamesCompressedRoot`
+(default sibling `games-compressed/`, **writable, outside the read-only `games/` mount**).
+Reconciliation is driven by `GameCatalog.Discovered` plus a periodic timer
+(`PrecompressReconcileSeconds`) — it (re)compresses changed files (mtime/length freshness),
+prunes orphaned variants, and removes directories for deleted games. A negotiation step on the
+game origin (`Program.cs`) rewrites a request to the `.br`/`.gz` variant when present and
+accepted (`Accept-Encoding`), serving it with `Content-Encoding`/`Vary` and the **decompressed**
+content-type; a miss falls through to the raw file. The on-the-fly `ResponseCompression`
+(Brotli/Gzip at `Fastest`) stays as the fallback for not-yet-warmed assets and the shell origin —
+it skips bodies that already carry `Content-Encoding`, so precompressed responses aren't
+re-compressed. Disable the whole cache with `Precompress=false`.
+
 ### Lobbies & connections
 - `Lobbies/Lobby.cs` / `LobbyManager.cs` — in-memory lobbies keyed by a 4-char human code;
   membership is lock-guarded and `Players` is returned as a snapshot so broadcasts can't race
@@ -139,7 +155,8 @@ setup carefully to keep the `aot` CI job green.
 All knobs use the `KnockBox:` prefix (env: `KnockBox__Key`, `__` for nesting). Full reference
 in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`LogsRoot`,
 `GamesPort`/`GamesHost`/`GamesOrigin` (origin routing), `GamesPollSeconds` (hot-reload
-fallback), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
+fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
+(pre-compressed game-asset cache), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, and the rate-limit knobs (`*MessagesPerSecond/Burst`, `MaxConnectionsPerIp`,
 `LobbyCreatesPerMinute`).

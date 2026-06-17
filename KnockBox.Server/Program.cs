@@ -16,17 +16,33 @@ var builder = WebApplication.CreateBuilder(args);
 // Where web/, games/, and logs/ live: explicit config wins, else repo discovery (dev), else the
 // app base directory (published exe / container — publish bakes web/ in, games/ sits alongside or
 // is volume-mounted). See ContentPaths for the precedence rules.
-var (webRoot, gamesRoot, logsRoot) = ContentPaths.Resolve(
+var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot) = ContentPaths.Resolve(
     builder.Configuration["KnockBox:WebRoot"],
     builder.Configuration["KnockBox:GamesRoot"],
     builder.Configuration["KnockBox:LogsRoot"],
+    builder.Configuration["KnockBox:GamesCompressedRoot"],
     builder.Environment.ContentRootPath,
     AppContext.BaseDirectory);
+
+// Pre-compress game assets once into gamesCompressedRoot and serve those variants via Accept-Encoding
+// negotiation, instead of re-compressing every full-body response on the fly (see the ResponseCompression
+// note below). Master switch — off ⇒ exactly the on-the-fly behavior. The other Precompress* knobs and the
+// cache root are read by the precompressor/serving setup further down.
+var precompressEnabled = builder.Configuration.GetValue("KnockBox:Precompress", true);
+var precompressGzip = builder.Configuration.GetValue("KnockBox:PrecompressGzip", true);
+var precompressMinBytes = builder.Configuration.GetValue("KnockBox:PrecompressMinBytes", 1024);
+// Periodic reconcile interval. The Discovered event already covers manifest add/remove/edit; this is
+// the schedule that also catches asset-only edits under Docker bind-mount polling (the poll only
+// fingerprints GAME.json) and is a general safety net. 0 = off (rely on the Discovered event).
+var precompressReconcileSeconds = builder.Configuration.GetValue("KnockBox:PrecompressReconcileSeconds", 60);
 
 // Best-effort: a read-only games mount (recommended in Docker) or a root-owned parent must not
 // crash startup — GameCatalog and the static-file setup below both tolerate a missing directory.
 var directoryWarnings = new List<string>();
-foreach (var dir in new[] { webRoot, gamesRoot, logsRoot })
+var bootstrapDirs = precompressEnabled
+    ? new[] { webRoot, gamesRoot, logsRoot, gamesCompressedRoot }
+    : new[] { webRoot, gamesRoot, logsRoot };
+foreach (var dir in bootstrapDirs)
 {
     try { Directory.CreateDirectory(dir); }
     catch (Exception ex) { directoryWarnings.Add($"Could not create '{dir}': {ex.Message}"); }
@@ -96,6 +112,10 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
 builder.Services.AddSingleton(sp =>
     new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>()));
+if (precompressEnabled)
+    builder.Services.AddSingleton(sp => new GameAssetPrecompressor(
+        gamesRoot, gamesCompressedRoot, precompressGzip, precompressMinBytes,
+        sp.GetRequiredService<ILogger<GameAssetPrecompressor>>()));
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 builder.Services.AddSingleton<LobbyManager>();
@@ -121,8 +141,8 @@ builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = Compre
 var app = builder.Build();
 
 // The resolved roots are the first thing an admin needs when "my games don't show up".
-app.Logger.LogInformation("Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}",
-    webRoot, gamesRoot, logsRoot);
+app.Logger.LogInformation("Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} (precompress: {Precompress})",
+    webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled);
 foreach (var warning in directoryWarnings)
     app.Logger.LogWarning("{Warning}", warning);
 // A web root without the shell means a blank site — make the misconfiguration loud and diagnosable
@@ -152,12 +172,40 @@ if (forwardedHeaders)
 // Discover games at startup, then watch the folder so dropping in (or removing) a game needs no
 // restart — server managers add games with no code and no downtime.
 var catalog = app.Services.GetRequiredService<GameCatalog>();
+
+// Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
+// Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
+// background task because SmallestSize over a large .wasm is slow and must never block discovery
+// (it runs from FileSystemWatcher/poll callbacks) or startup.
+GameAssetPrecompressor? precompressor = precompressEnabled ? app.Services.GetRequiredService<GameAssetPrecompressor>() : null;
+if (precompressor is not null)
+    catalog.Discovered += games => Task.Run(() =>
+    {
+        try { precompressor.ReconcileAll(games); }
+        catch (Exception ex) { app.Logger.LogError(ex, "Pre-compression reconcile failed."); }
+    });
+
 catalog.Discover();
 catalog.StartWatching();
 // Polling safety net for bind mounts where file events don't propagate (Docker Desktop). 0 = off.
 var gamesPollSeconds = builder.Configuration.GetValue("KnockBox:GamesPollSeconds", 0);
 if (gamesPollSeconds > 0)
     catalog.StartPolling(TimeSpan.FromSeconds(gamesPollSeconds));
+
+// Periodic reconcile: the schedule the cache also relies on to catch asset-only edits (the poll
+// fingerprints GAME.json only) and to recover from any missed event. First tick is one interval out,
+// after the startup reconcile above. Disposed on shutdown.
+Timer? precompressTimer = null;
+if (precompressor is not null && precompressReconcileSeconds > 0)
+{
+    var interval = TimeSpan.FromSeconds(precompressReconcileSeconds);
+    precompressTimer = new Timer(_ =>
+    {
+        try { precompressor.ReconcileAll(catalog.Games); }
+        catch (Exception ex) { app.Logger.LogError(ex, "Scheduled pre-compression reconcile failed."); }
+    }, null, interval, interval);
+    app.Lifetime.ApplicationStopping.Register(() => precompressTimer.Dispose());
+}
 
 if (allowedOrigins.Length == 0)
     app.Logger.LogWarning("KnockBox:AllowedOrigins is empty — /ws accepts any Origin. Set it for production.");
@@ -170,6 +218,10 @@ app.UseWebSockets();
 // back to an empty provider so the server still starts (the LogError above tells the admin why).
 IFileProvider webFiles = Directory.Exists(webRoot) ? new PhysicalFileProvider(webRoot) : new NullFileProvider();
 IFileProvider gamesFiles = Directory.Exists(gamesRoot) ? new PhysicalFileProvider(gamesRoot) : new NullFileProvider();
+// The pre-compressed cache (.br/.gz siblings). NullFileProvider when precompression is off, so the
+// negotiation middleware below always misses and serving falls back to raw + on-the-fly compression.
+IFileProvider gamesCompressedFiles = precompressEnabled && Directory.Exists(gamesCompressedRoot)
+    ? new PhysicalFileProvider(gamesCompressedRoot) : new NullFileProvider();
 
 // `.wasm` is built in (application/wasm — REQUIRED for streaming WebAssembly compilation); keep
 // the explicit `.pck`/`.data` mappings for clarity. Everything else falls through to the
@@ -192,6 +244,30 @@ StaticFileOptions GamesStaticOptions() => new()
     DefaultContentType = "application/octet-stream",
     OnPrepareResponse = ctx =>
         ctx.Context.Response.Headers.CacheControl = "public, max-age=0, must-revalidate",
+};
+
+// Serves a pre-compressed variant after NegotiateGameAssetEncoding has rewritten the path to the
+// `.br`/`.gz` file and stashed the negotiated encoding + original content-type in HttpContext.Items.
+// We reuse StaticFileMiddleware (free ETag/304/range/Content-Length on the variant bytes) and just fix
+// up the headers in OnPrepareResponse: the body is the encoded representation, so we advertise
+// Content-Encoding (which also makes ResponseCompression skip it — no double-compression), Vary on
+// Accept-Encoding, and the DECOMPRESSED content-type (e.g. application/wasm, not octet-stream).
+StaticFileOptions GamesCompressedStaticOptions() => new()
+{
+    FileProvider = gamesCompressedFiles,
+    RequestPath = "/games",
+    ServeUnknownFileTypes = true,
+    DefaultContentType = "application/octet-stream",
+    OnPrepareResponse = ctx =>
+    {
+        var headers = ctx.Context.Response.Headers;
+        headers.CacheControl = "public, max-age=0, must-revalidate";
+        headers.Vary = "Accept-Encoding";
+        if (ctx.Context.Items[GameAssetNegotiation.EncodingItem] is string enc)
+            headers.ContentEncoding = enc;
+        if (ctx.Context.Items[GameAssetNegotiation.ContentTypeItem] is string contentType)
+            ctx.Context.Response.ContentType = contentType;
+    },
 };
 
 // Shell files (index.html, shell.js, home.css, knockbox.js) change between deploys and are tiny, so
@@ -265,6 +341,18 @@ app.MapWhen(
             ApplyCrossOriginIsolation(ctx, catalog);
             await next();
         });
+        // Pre-compressed content negotiation: if a `.br`/`.gz` variant exists and the client accepts it,
+        // rewrite to that path so the next middleware serves the cached, max-effort-compressed bytes
+        // (no per-request CPU). On a miss this is a no-op and serving falls through to the raw file.
+        if (precompressEnabled)
+        {
+            gameApp.Use(async (ctx, next) =>
+            {
+                NegotiateGameAssetEncoding(ctx, gamesCompressedFiles, gameContentTypes, precompressGzip);
+                await next();
+            });
+            gameApp.UseStaticFiles(GamesCompressedStaticOptions());
+        }
         gameApp.UseStaticFiles(WebStaticOptions());   // /knockbox.js
         gameApp.UseStaticFiles(GamesStaticOptions());
     });
@@ -352,4 +440,40 @@ static bool IsAllowedThumbnail(string path, GameCatalog catalog)
     return catalog.TryGet(id, out var manifest)
         && !string.IsNullOrEmpty(manifest.Thumbnail)
         && string.Equals(file, manifest.Thumbnail, StringComparison.Ordinal);
+}
+
+// For a GET/HEAD of /games/{id}/…, if a pre-compressed variant the client accepts exists in the cache,
+// rewrite the request to it and stash the negotiated encoding + the original (decompressed) content-type
+// so GamesCompressedStaticOptions can set the right headers. A miss leaves the request untouched.
+static void NegotiateGameAssetEncoding(
+    HttpContext ctx, IFileProvider compressedFiles,
+    Microsoft.AspNetCore.StaticFiles.IContentTypeProvider contentTypes, bool gzipEnabled)
+{
+    if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method)) return;
+    var path = ctx.Request.Path.Value;
+    if (string.IsNullOrEmpty(path)
+        || !path.StartsWith("/games/", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith('/')) return; // directory request — no single variant to serve
+
+    var encoding = GameAssetPrecompressor.NegotiateEncoding(ctx.Request.Headers.AcceptEncoding.ToString(), gzipEnabled);
+    if (encoding is null) return;
+
+    var ext = encoding == "br" ? ".br" : ".gz";
+    // PhysicalFileProvider.GetFileInfo is traversal-safe (blocks "..", rooted paths); the subpath is
+    // relative to the provider root, mirroring the "/games" RequestPath the static options use.
+    var variant = compressedFiles.GetFileInfo(path["/games".Length..] + ext);
+    if (!variant.Exists || variant.IsDirectory) return;
+
+    ctx.Items[GameAssetNegotiation.EncodingItem] = encoding;
+    ctx.Items[GameAssetNegotiation.ContentTypeItem] =
+        contentTypes.TryGetContentType(path, out var contentType) ? contentType : "application/octet-stream";
+    ctx.Request.Path = path + ext;
+}
+
+// HttpContext.Items keys passing negotiated state from NegotiateGameAssetEncoding to the static-file
+// OnPrepareResponse hook.
+internal static class GameAssetNegotiation
+{
+    public const string EncodingItem = "kb.precompressed.encoding";
+    public const string ContentTypeItem = "kb.precompressed.contentType";
 }

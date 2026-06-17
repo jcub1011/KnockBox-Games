@@ -436,3 +436,7 @@ FodyWeavers.xsd
 # step must place these into the game's folder; GAME.json and thumb.svg stay tracked.
 # Scoped per-game because tictactoe's index.html is hand-authored, not generated.
 /games/
+
+# Pre-compressed game-asset cache (.br/.gz built at runtime from /games). Regenerable on boot
+# and on change, so it is never committed.
+/games-compressed/

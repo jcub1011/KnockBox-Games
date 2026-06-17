@@ -26,6 +26,14 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
     // timer callback sees the seeded value on weakly-ordered architectures (ARM).
     private volatile string _pollFingerprint = "";
 
+    /// <summary>
+    /// Raised at the end of every successful <see cref="Discover"/>, after the atomic swap, with the
+    /// freshly-published catalog. Lets derived state (e.g. the pre-compressed asset cache) rebuild on
+    /// the same add/remove/edit signal the watcher and poll already drive — no second watcher needed.
+    /// Handlers must not throw and should offload heavy work to a background task.
+    /// </summary>
+    public event Action<IReadOnlyCollection<GameManifest>>? Discovered;
+
     public IReadOnlyCollection<GameManifest> Games => [.. _games.Values];
 
     public bool TryGet(string id, out GameManifest manifest) => _games.TryGetValue(id, out manifest!);
@@ -98,6 +106,11 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
         _games = next; // atomic publish
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Game catalog ready: {Count} game(s) [{Ids}]", next.Count, string.Join(", ", next.Keys));
+
+        // Notify after the swap so handlers see the published catalog. A misbehaving handler must not
+        // break hot-reload, so swallow and log — Discover() is itself called from timer callbacks.
+        try { Discovered?.Invoke(Games); }
+        catch (Exception ex) { logger.LogError(ex, "A Discovered handler threw; continuing."); }
     }
 
     /// <summary>

@@ -20,17 +20,22 @@ public static class ContentPaths
 {
     private const string RepoMarker = "KnockBox-Games.slnx";
 
-    public sealed record Resolved(string WebRoot, string GamesRoot, string LogsRoot);
+    // GamesCompressedRoot is a derived, regenerable cache (pre-compressed .br/.gz siblings of each
+    // game asset) — it must stay OUTSIDE the read-only games/ mount, so it gets its own root rather
+    // than living under GamesRoot. Default sibling "games-compressed".
+    public sealed record Resolved(string WebRoot, string GamesRoot, string LogsRoot, string GamesCompressedRoot);
 
     public static Resolved Resolve(
         string? webRootConfig, string? gamesRootConfig, string? logsRootConfig,
+        string? gamesCompressedRootConfig,
         string contentRoot, string baseDirectory)
     {
         var anchor = FindRepoRoot(contentRoot) ?? FindRepoRoot(baseDirectory) ?? baseDirectory;
         return new(
             ResolveOne(webRootConfig, "web", contentRoot, anchor),
             ResolveOne(gamesRootConfig, "games", contentRoot, anchor),
-            ResolveOne(logsRootConfig, "logs", contentRoot, anchor));
+            ResolveOne(logsRootConfig, "logs", contentRoot, anchor),
+            ResolveOne(gamesCompressedRootConfig, "games-compressed", contentRoot, anchor));
     }
 
     private static string ResolveOne(string? configured, string name, string contentRoot, string anchor) =>
