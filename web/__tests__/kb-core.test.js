@@ -125,6 +125,8 @@ describe('sanitizeGameOrigin', () => {
     expect(sanitizeGameOrigin('https://games.example.com')).toBe('https://games.example.com');
     // Strips any path/query/fragment down to the bare origin.
     expect(sanitizeGameOrigin('https://games.example.com/foo?x=1#y')).toBe('https://games.example.com');
+    // Strips userinfo when normalizing the origin.
+    expect(sanitizeGameOrigin('http://user:pass@games.example.com')).toBe('http://games.example.com');
   });
 
   it('rejects non-http(s) schemes that could become an XSS/redirect sink', () => {

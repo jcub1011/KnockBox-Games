@@ -408,7 +408,15 @@ export async function enterGame(starting) {
 
   const entry = manifest.entry;
   // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.
-  const src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
+  let src;
+  try {
+    src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
+  } catch {
+    // gameOrigin is sanitized at the source (Welcome), so this is defensive: surface it like every
+    // other enterGame failure rather than letting the rejection escape.
+    showError('Could not start game.');
+    return;
+  }
 
   el('waiting').style.display = 'none';
   el('frame-host').innerHTML = '';
