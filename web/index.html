@@ -61,13 +61,14 @@
       </div>
 
       <aside class="home-playlog">
-        <section class="pl-panel" aria-label="Recently played games">
-          <h2 class="pl-heading">Recently Played</h2>
-          <div class="pl-state pl-empty" role="status">
+        <section class="pl-panel" aria-label="Play Log">
+          <h2 class="pl-heading">Play Log</h2>
+          <div class="pl-state pl-empty" id="playlog-empty" role="status">
             <span class="pl-state-icon" aria-hidden="true">&#127922;</span>
             <span class="pl-empty-title">No games played yet</span>
-            <span class="pl-empty-sub">Your match history will show up here.</span>
+            <span class="pl-empty-sub">Your game activity will show up here.</span>
           </div>
+          <ul class="pl-list" id="playlog-list" hidden></ul>
         </section>
       </aside>
     </div>

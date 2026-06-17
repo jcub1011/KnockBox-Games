@@ -172,6 +172,24 @@ describe('send API & queueing', () => {
     expect(logs).toHaveLength(100);
     expect(logs[0].message).toBe('m1'); // m0 dropped
   });
+
+  it('logPlay sends a GameLog frame with stringified metadata (queued before attach)', async () => {
+    const { plugin, ws } = await makePlugin();
+    plugin.logPlay({ placement: 1, result: 'win' });
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toHaveLength(0); // queued, not dropped
+
+    ws._open();
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
+      { type: 'GameLog', metadata: { placement: '1', result: 'win' } },
+    ]);
+  });
+
+  it('logPlay tolerates a missing argument', async () => {
+    const { plugin, ws } = await makePlugin();
+    ws._open();
+    plugin.logPlay();
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([{ type: 'GameLog', metadata: {} }]);
+  });
 });
 
 describe('close handling & teardown', () => {

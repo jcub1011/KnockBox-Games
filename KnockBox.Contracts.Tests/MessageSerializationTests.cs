@@ -111,6 +111,43 @@ public class MessageSerializationTests
     }
 
     [Fact]
+    public void GameLog_round_trips_with_metadata_and_server_stamped_context()
+    {
+        IMessage original = new GameLogMessage(
+            new Dictionary<string, string> { ["placement"] = "1", ["playerCount"] = "4" },
+            GameId: "tic-tac-toe", Timestamp: DateTimeOffset.UnixEpoch, IsHost: true);
+
+        var json = JsonSerializer.Serialize(original, Options);
+
+        using (var doc = JsonDocument.Parse(json))
+        {
+            Assert.Equal("GameLog", doc.RootElement.GetProperty("type").GetString());
+            Assert.Equal("tic-tac-toe", doc.RootElement.GetProperty("gameId").GetString());
+            Assert.True(doc.RootElement.GetProperty("isHost").GetBoolean());
+            Assert.Equal("1", doc.RootElement.GetProperty("metadata").GetProperty("placement").GetString());
+        }
+
+        var back = Assert.IsType<GameLogMessage>(JsonSerializer.Deserialize<IMessage>(json, Options));
+        Assert.Equal("tic-tac-toe", back.GameId);
+        Assert.Equal(DateTimeOffset.UnixEpoch, back.Timestamp);
+        Assert.Equal(true, back.IsHost);
+        Assert.Equal("4", back.Metadata["playerCount"]);
+    }
+
+    [Fact]
+    public void GameLog_from_the_game_omits_the_server_stamped_fields()
+    {
+        // The game supplies only metadata; gameId/timestamp/isHost are null until the server stamps them.
+        var back = Assert.IsType<GameLogMessage>(JsonSerializer.Deserialize<IMessage>(
+            """{ "type": "GameLog", "metadata": { "result": "win" } }""", Options));
+
+        Assert.Null(back.GameId);
+        Assert.Null(back.Timestamp);
+        Assert.Null(back.IsHost);
+        Assert.Equal("win", back.Metadata["result"]);
+    }
+
+    [Fact]
     public void Missing_proto_reads_as_zero_for_pre_versioning_clients()
     {
         var hello = Assert.IsType<HelloMessage>(JsonSerializer.Deserialize<IMessage>(
@@ -144,6 +181,7 @@ public class MessageSerializationTests
     [InlineData(typeof(KickPlayerMessage))]
     [InlineData(typeof(KickedMessage))]
     [InlineData(typeof(LogMessage))]
+    [InlineData(typeof(GameLogMessage))]
     public void Every_new_message_type_has_a_registered_discriminator(Type messageType)
     {
         // Constructing each is overkill; we only assert the polymorphism attribute knows the subtype,

@@ -17,6 +17,7 @@
 //   KnockBox.sendToAll(payload)         // -> everyone incl. self (state)
 //   KnockBox.sendTo(playerId, payload)  // -> one specific player
 //   KnockBox.log.info('message')        // -> the SERVER log (also warn/error/debug/trace/critical)
+//   KnockBox.logPlay({ placement: '1' }) // -> the player's home-page Play Log (arbitrary metadata)
 //
 // After onReady fires, KnockBox.playerId / players / isHost are populated.
 //
@@ -80,6 +81,19 @@ import {
     // queued and flushed on attach — bounded (drop-oldest) so it can't grow without limit. Logging
     // is best-effort: it must never block game state, and the queue is dropped on a terminal close.
     log: makeLogger(sendLog),
+
+    // Record a Play Log entry: an arbitrary { key: value } bag of match metadata (e.g.
+    // { placement: '1', playerCount: '4' }). The server stamps the game, a UTC timestamp, and
+    // whether you were host, then routes it to your home page's Play Log. Values are coerced to
+    // strings. Like log.*, this is best-effort and queued (drop-oldest) until the socket attaches —
+    // it never blocks game state.
+    logPlay(metadata) {
+      const bag = {};
+      if (metadata && typeof metadata === 'object') {
+        for (const key in metadata) bag[key] = String(metadata[key]);
+      }
+      sendLog({ type: 'GameLog', metadata: bag });
+    },
   };
 
   function snapshot() {

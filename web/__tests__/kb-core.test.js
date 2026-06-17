@@ -17,6 +17,11 @@ import {
   makeLogger,
   rosterAdd,
   rosterRemove,
+  appendPlayLog,
+  PLAY_LOG_MAX,
+  PLAY_LOG_STANDARD_KEYS,
+  partitionPlayLogMetadata,
+  ordinal,
 } from '../kb-core.js';
 
 describe('isTerminalClose', () => {
@@ -254,5 +259,65 @@ describe('buildJoinLink', () => {
 
   it('percent-encodes the code', () => {
     expect(buildJoinLink('http://localhost:5114', 'A B')).toBe('http://localhost:5114/?join=A%20B');
+  });
+});
+
+describe('appendPlayLog', () => {
+  it('prepends the newest entry (most-recent-first)', () => {
+    const out = appendPlayLog([{ id: 1 }], { id: 2 });
+    expect(out).toEqual([{ id: 2 }, { id: 1 }]);
+  });
+
+  it('truncates to the cap, dropping the oldest', () => {
+    const list = Array.from({ length: PLAY_LOG_MAX }, (_, i) => ({ id: i }));
+    const out = appendPlayLog(list, { id: 'new' });
+    expect(out).toHaveLength(PLAY_LOG_MAX);
+    expect(out[0]).toEqual({ id: 'new' });
+    expect(out[out.length - 1]).toEqual({ id: PLAY_LOG_MAX - 2 }); // the last old one fell off
+  });
+
+  it('honours a custom max and treats a non-array list as empty', () => {
+    expect(appendPlayLog([{ a: 1 }, { a: 2 }], { a: 3 }, 2)).toEqual([{ a: 3 }, { a: 1 }]);
+    expect(appendPlayLog(null, { a: 1 })).toEqual([{ a: 1 }]);
+  });
+});
+
+describe('partitionPlayLogMetadata', () => {
+  it('splits recognized standard keys (in display order) from arbitrary extras', () => {
+    const { standard, extra } = partitionPlayLogMetadata({
+      foo: 'bar', playerCount: '4', placement: '1', zed: 'z',
+    });
+    // standard keys come back in PLAY_LOG_STANDARD_KEYS order, not insertion order
+    expect(standard).toEqual([['placement', '1'], ['playerCount', '4']]);
+    expect(extra).toEqual([['foo', 'bar'], ['zed', 'z']]);
+    expect(PLAY_LOG_STANDARD_KEYS).toContain('placement');
+  });
+
+  it('returns empty arrays for a missing/non-object bag', () => {
+    expect(partitionPlayLogMetadata(undefined)).toEqual({ standard: [], extra: [] });
+    expect(partitionPlayLogMetadata(null)).toEqual({ standard: [], extra: [] });
+  });
+});
+
+describe('ordinal', () => {
+  it('formats the common cases', () => {
+    expect(ordinal(1)).toBe('1st');
+    expect(ordinal(2)).toBe('2nd');
+    expect(ordinal(3)).toBe('3rd');
+    expect(ordinal(4)).toBe('4th');
+    expect(ordinal('1')).toBe('1st'); // numeric strings (the wire form) work too
+  });
+
+  it('handles the 11–13 exceptions', () => {
+    expect(ordinal(11)).toBe('11th');
+    expect(ordinal(12)).toBe('12th');
+    expect(ordinal(13)).toBe('13th');
+    expect(ordinal(21)).toBe('21st');
+    expect(ordinal(112)).toBe('112th');
+  });
+
+  it('returns non-numeric input unchanged', () => {
+    expect(ordinal('win')).toBe('win');
+    expect(ordinal('1.5')).toBe('1.5');
   });
 });

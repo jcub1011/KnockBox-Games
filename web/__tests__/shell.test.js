@@ -127,6 +127,74 @@ describe('game catalog rendering', () => {
   });
 });
 
+describe('Play Log', () => {
+  const sendEntry = (ws, extra = {}) => ws._recv({
+    type: 'GameLog',
+    gameId: 'ttt',
+    timestamp: '2026-06-17T12:00:00.000Z',
+    isHost: true,
+    metadata: { placement: '1', playerCount: '4', foo: 'bar' },
+    ...extra,
+  });
+
+  it('persists a received GameLog to localStorage and renders chips + details', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    sendEntry(ws);
+
+    // Persisted (most-recent-first), with the server-stamped context.
+    const stored = JSON.parse(localStorage.getItem('kb.playLog'));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ gameId: 'ttt', isHost: true, timestamp: '2026-06-17T12:00:00.000Z' });
+
+    // Empty-state hidden, list shown with one item.
+    expect(el('playlog-empty').hidden).toBe(true);
+    const items = el('playlog-list').querySelectorAll('.pl-item');
+    expect(items).toHaveLength(1);
+
+    // Game name resolved from the catalog; standard keys became dedicated chips.
+    expect(items[0].querySelector('.pl-item-game').textContent).toBe('Tic Tac Toe');
+    const chipText = [...items[0].querySelectorAll('.pl-chip')].map((c) => c.textContent);
+    expect(chipText).toEqual(expect.arrayContaining(['Host', '1st', '4 players']));
+
+    // Non-standard metadata lives in the collapsible details table.
+    const rows = items[0].querySelectorAll('.pl-meta-table tr');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].querySelector('th').textContent).toBe('foo');
+    expect(rows[0].querySelector('td').textContent).toBe('bar');
+  });
+
+  it('shows the newest entry on top', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    sendEntry(ws, { metadata: { result: 'first' } });
+    sendEntry(ws, { metadata: { result: 'second' } });
+
+    const stored = JSON.parse(localStorage.getItem('kb.playLog'));
+    expect(stored.map((e) => e.metadata.result)).toEqual(['second', 'first']);
+    const firstItemGame = el('playlog-list').querySelector('.pl-item .pl-item-game');
+    expect(firstItemGame.textContent).toBe('Tic Tac Toe');
+    expect(el('playlog-list').querySelectorAll('.pl-item')).toHaveLength(2);
+  });
+
+  it('renders untrusted metadata as text, never as markup', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    sendEntry(ws, { metadata: { evil: '<img src=x onerror=alert(1)>' } });
+
+    const td = el('playlog-list').querySelector('.pl-meta-table td');
+    expect(td.textContent).toBe('<img src=x onerror=alert(1)>');
+    expect(td.querySelector('img')).toBeNull(); // not parsed into an element
+  });
+
+  it('falls back to the gameId when the game is not in the catalog', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    sendEntry(ws, { gameId: 'mystery' });
+    expect(el('playlog-list').querySelector('.pl-item-game').textContent).toBe('mystery');
+  });
+});
+
 describe('name gate', () => {
   it('enables the Join button and game tiles only once a name is entered', async () => {
     await importShell();          // no saved name

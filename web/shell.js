@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, parseJoinParam, parseRgbComponents, pickContrastText, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -145,7 +145,123 @@ export function handle(msg) {
       sessionStorage.removeItem('kb.lobbyId');
       showLobbyView();
       break;
+    case 'GameLog':
+      // A game we're playing recorded a Play Log entry; the server already stamped game/time/host
+      // and routed it back to us. Persist it (browser-local) and refresh the home-page panel.
+      recordPlayLog(msg);
+      break;
   }
+}
+
+// ── Play Log (home page) ───────────────────────────────────────────────────────
+// Games push entries via KnockBox.logPlay(); the server stamps gameId/timestamp/isHost and routes
+// them to this player's OWN control socket. We keep the most-recent PLAY_LOG_MAX in localStorage
+// (per browser, like the display name) and render them on the home page, newest first. Every
+// game-supplied string (metadata keys/values, resolved game name) is untrusted and written via
+// textContent — never innerHTML — so a game can't inject markup into the shell.
+const PLAYLOG_KEY = 'kb.playLog';
+
+function readPlayLog() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PLAYLOG_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function recordPlayLog(msg) {
+  const entry = {
+    gameId: msg.gameId || null,
+    timestamp: msg.timestamp || null,
+    isHost: !!msg.isHost,
+    metadata: msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {},
+  };
+  const next = appendPlayLog(readPlayLog(), entry);
+  try { localStorage.setItem(PLAYLOG_KEY, JSON.stringify(next)); } catch { /* storage full/blocked — skip */ }
+  renderPlayLog(); // the panel is hidden while in-game; re-rendering it then is harmless
+}
+
+function plChip(text, className) {
+  const span = document.createElement('span');
+  span.className = className ? `pl-chip ${className}` : 'pl-chip';
+  span.textContent = text;
+  return span;
+}
+
+// Render the stored UTC timestamp in the player's locale, keeping the ISO instant in the <time>
+// element's datetime/title for the exact value. Returns null for a missing/unparseable stamp.
+function playLogTime(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const t = document.createElement('time');
+  t.className = 'pl-item-time';
+  t.dateTime = iso;
+  t.title = iso;
+  t.textContent = d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  return t;
+}
+
+function playLogItem(entry) {
+  const li = document.createElement('li');
+  li.className = 'pl-item';
+
+  const head = document.createElement('div');
+  head.className = 'pl-item-head';
+  const name = document.createElement('span');
+  name.className = 'pl-item-game';
+  const manifest = entry.gameId ? games.get(entry.gameId) : null;
+  name.textContent = manifest ? manifest.name : (entry.gameId || 'Unknown game');
+  head.appendChild(name);
+  const time = playLogTime(entry.timestamp);
+  if (time) head.appendChild(time);
+  li.appendChild(head);
+
+  // Recognized standard keys become dedicated chips; everything else drops to the details table.
+  const { standard, extra } = partitionPlayLogMetadata(entry.metadata);
+  const chips = document.createElement('div');
+  chips.className = 'pl-chips';
+  if (entry.isHost) chips.appendChild(plChip('Host', 'pl-chip-host'));
+  for (const [key, value] of standard) {
+    if (key === 'placement') chips.appendChild(plChip(ordinal(value), 'pl-chip-placement'));
+    else if (key === 'playerCount') chips.appendChild(plChip(`${value} player${value === '1' ? '' : 's'}`, 'pl-chip-players'));
+    else chips.appendChild(plChip(`${key}: ${value}`));
+  }
+  if (chips.childElementCount) li.appendChild(chips);
+
+  if (extra.length) {
+    const details = document.createElement('details');
+    details.className = 'pl-details';
+    const summary = document.createElement('summary');
+    summary.textContent = `Details (${extra.length})`;
+    details.appendChild(summary);
+    const table = document.createElement('table');
+    table.className = 'pl-meta-table';
+    for (const [key, value] of extra) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = key;
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.append(th, td);
+      table.appendChild(tr);
+    }
+    details.appendChild(table);
+    li.appendChild(details);
+  }
+  return li;
+}
+
+export function renderPlayLog() {
+  const list = el('playlog-list');
+  const empty = el('playlog-empty');
+  if (!list || !empty) return; // panel markup not present (some test fixtures)
+  const entries = readPlayLog();
+  list.innerHTML = '';
+  const hasEntries = entries.length > 0;
+  empty.hidden = hasEntries;
+  list.hidden = !hasEntries;
+  for (const entry of entries) list.appendChild(playLogItem(entry));
 }
 
 // ── Home view: name gate, game tiles (host), join-by-code ─────────────────────
@@ -313,6 +429,7 @@ export function showLobbyView() {
   document.body.classList.remove('in-game');
   el('game-view').style.display = 'none';
   el('lobby-view').style.display = 'block';
+  renderPlayLog();
 }
 
 // ── Per-game header tint ──────────────────────────────────────────────────────
@@ -574,6 +691,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 applyGate();
+renderPlayLog(); // home view is shown by default on load — populate the Play Log from storage
 
 // Start the control socket. On a real page load index.html imports this module and calls bootstrap();
 // importing the module on its own no longer opens a socket, so the test suite can drive the exported

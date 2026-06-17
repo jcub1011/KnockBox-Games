@@ -134,12 +134,16 @@ configurable and disabled with `0`.
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
 `players`, `isHost`; callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`; send
-methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`, and
+methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
 `log.{info,warn,error,debug,trace,critical}(message)` (console-like logging to the server, relayed
-as a `LogMessage` and written under the `KnockBox.GameLog` category).
+as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPlay(metadata)` (a
+`<string,string>` bag sent as a `GameLogMessage`; the server stamps gameId/timestamp/isHost and
+forwards it to that player's **control** socket, where the shell persists the most-recent 50 in
+`localStorage` (`kb.playLog`) and renders them in the home-page Play Log).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested
-protocol helpers (reconnect/backoff, fragment parsing, roster reducers). Close code **1008**
-is terminal (no reconnect); other closes back off exponentially.
+protocol helpers (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
+`partitionPlayLogMetadata`, `ordinal`). Close code **1008** is terminal (no reconnect); other
+closes back off exponentially.
 
 ### Logging (server side)
 Serilog is the host logger (`builder.Host.UseSerilog` in `Program.cs`): console + a **daily**

@@ -124,12 +124,20 @@ now", not a min-players threshold.
 → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }      // game sends
 ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }        // server stamps From
 → { "type": "SetLobbyOpen", "open": true|false }    // host-only: set the lobby's join policy
+→ { "type": "Log", "level": "Information", "message": "…" }   // → server log sink (KnockBox.GameLog)
+→ { "type": "GameLog", "metadata": { "placement": "1", … } } // → forwarded to this player's CONTROL socket
 ← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
 ```
 The server validates the ticket signature **and live lobby membership**, binds the connection to
 `(playerId, lobbyId)`, and resolves all routing from that binding — **the game never sends a lobby
 id.** `to` routing: `"all"` → every member (incl. sender), `"host"` → the lobby's host, `"<id>"` →
 that member only. A message from a non-member is dropped silently.
+
+`GameLog` is the one data-role frame the server **routes back to a control socket**: a game calls
+`KnockBox.logPlay(metadata)`, and the server sanitizes the untrusted metadata, stamps trusted context
+(`gameId`, a UTC `timestamp`, `isHost`), and sends the enriched `GameLog` to **that same player's**
+control socket. The shell persists the most-recent 50 in the browser and shows them in the home-page
+Play Log. (`Log`, by contrast, only lands in the server's log sink — it is never relayed.)
 
 `← { "type": "Error", "cid": "<cid|null>", "reason": "…" }` reports control-role failures.
 

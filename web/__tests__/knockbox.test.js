@@ -154,6 +154,36 @@ describe('server logging', () => {
   });
 });
 
+describe('logPlay', () => {
+  it('sends a GameLog frame with stringified metadata once attached', async () => {
+    const { kb, ws } = await importSdk();
+    ws._open();
+    kb.logPlay({ placement: 1, playerCount: 4, result: 'win' });
+
+    const entries = ws.sent.filter((f) => f.type === 'GameLog');
+    expect(entries).toEqual([
+      { type: 'GameLog', metadata: { placement: '1', playerCount: '4', result: 'win' } },
+    ]);
+  });
+
+  it('queues entries before attach and flushes them on open (same path as logs)', async () => {
+    const { kb, ws } = await importSdk();
+    kb.logPlay({ a: 1 });
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toHaveLength(0);
+    ws._open();
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
+      { type: 'GameLog', metadata: { a: '1' } },
+    ]);
+  });
+
+  it('tolerates a missing/non-object argument', async () => {
+    const { kb, ws } = await importSdk();
+    ws._open();
+    kb.logPlay();
+    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([{ type: 'GameLog', metadata: {} }]);
+  });
+});
+
 describe('reconnection', () => {
   it('stops permanently on a terminal close (1008)', async () => {
     vi.useFakeTimers();

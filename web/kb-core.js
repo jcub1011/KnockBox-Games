@@ -157,3 +157,50 @@ export function rosterAdd(players, player) {
 export function rosterRemove(players, playerId) {
   return players.filter((p) => p.id !== playerId);
 }
+
+// ── Play Log ────────────────────────────────────────────────────────────────────
+// Games push play-log entries via KnockBox.logPlay(metadata); the server stamps gameId/timestamp/
+// isHost and forwards them to the shell, which persists the most-recent few in the browser and
+// renders them on the home page. These helpers are the pure (storage/DOM-free) part of that.
+
+// Cap on how many play-log entries the shell keeps in the browser (most-recent-first).
+export const PLAY_LOG_MAX = 50;
+
+// Prepend `entry` to the play-log list and clamp to `max` (newest first). Immutable, like the
+// roster reducers. A non-array `list` (e.g. corrupt storage) is treated as empty.
+export function appendPlayLog(list, entry, max = PLAY_LOG_MAX) {
+  const base = Array.isArray(list) ? list : [];
+  return [entry, ...base].slice(0, Math.max(0, max));
+}
+
+// Recognized "standard library" metadata keys a game can put in its logPlay() bag. The shell shows
+// these in dedicated chips (in this display order); every other key falls through to the details
+// table. Grow this list as new well-known fields are introduced. (gameId/timestamp/isHost are NOT
+// here — those are stamped by the server as top-level fields, not metadata.)
+export const PLAY_LOG_STANDARD_KEYS = ['placement', 'playerCount', 'score', 'result'];
+
+// Split a metadata bag into the recognized standard keys (in PLAY_LOG_STANDARD_KEYS order) and the
+// leftover arbitrary pairs (in insertion order). Both are arrays of [key, value]. A missing/non-object
+// bag yields empty arrays.
+export function partitionPlayLogMetadata(metadata) {
+  const bag = metadata && typeof metadata === 'object' ? metadata : {};
+  const standard = [];
+  for (const key of PLAY_LOG_STANDARD_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(bag, key)) standard.push([key, bag[key]]);
+  }
+  const extra = Object.keys(bag)
+    .filter((k) => !PLAY_LOG_STANDARD_KEYS.includes(k))
+    .map((k) => [k, bag[k]]);
+  return { standard, extra };
+}
+
+// Format a placement number (or numeric string) as an English ordinal: 1→"1st", 2→"2nd", 3→"3rd",
+// 4→"4th", 11/12/13→"11th"/"12th"/"13th". Non-numeric input is returned unchanged (String()).
+export function ordinal(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num) || !Number.isInteger(num)) return String(n);
+  const abs = Math.abs(num) % 100;
+  const last = abs % 10;
+  const suffix = abs >= 11 && abs <= 13 ? 'th' : last === 1 ? 'st' : last === 2 ? 'nd' : last === 3 ? 'rd' : 'th';
+  return `${num}${suffix}`;
+}
