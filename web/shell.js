@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
+import { PROTOCOL_VERSION, buildGameSrc, gameWsEndpoint, parseJoinParam, reconnectDelay, rosterAdd, rosterRemove } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -25,6 +25,18 @@ let playerId = null;                                  // assigned by the server 
 let token = sessionStorage.getItem('kb.token');       // signed identity token (anti-spoof), per-tab
 let displayName = localStorage.getItem('kb.displayName') || '';   // read once; empty until named
 let gameOrigin = null;                                // where game iframes/sockets live (set by Welcome)
+
+// Auto-join (test convenience): a tab opened via middle-click on the room-code button carries
+// "?join=CODE". Such a tab must act as a DISTINCT player — but window.open copies the opener's
+// sessionStorage, so it would inherit the opener's identity token (and saved lobby). Clear them so
+// this tab gets a fresh server-minted identity; we join the code once connected (see Welcome).
+let pendingJoinCode = parseJoinParam(location.search);
+if (pendingJoinCode) {
+  sessionStorage.removeItem('kb.token');
+  sessionStorage.removeItem('kb.lobbyId');
+  token = null;
+  history.replaceState(null, '', location.pathname); // tidy URL so a refresh won't re-trigger
+}
 
 const el = (id) => document.getElementById(id);
 
@@ -91,8 +103,16 @@ function handle(msg) {
       sessionStorage.setItem('kb.token', token);
       gameOrigin = msg.gameOrigin || location.origin;
       reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
-      tryRejoin();
-      refreshGames();
+      // Load the game catalog FIRST, then (re)join. A GameStarting — from an auto-join or a rejoin —
+      // makes enterGame resolve the manifest from `games`, which must be populated by then. The
+      // server replies in order, so an un-gated JoinLobby/Rejoin would land its GameStarting before
+      // the ListGames reply and enterGame would reject it as "Unknown game".
+      refreshGames().then(() => {
+        // First connect of an auto-join tab joins the URL code; null it after so a later reconnect
+        // rejoins the now-saved lobby via tryRejoin() instead of re-running the auto-join.
+        if (pendingJoinCode) { const code = pendingJoinCode; pendingJoinCode = null; autoJoin(code); }
+        else tryRejoin();
+      });
       break;
     case 'PlayerJoined':
       if (lobby && msg.lobbyId === lobby.lobbyId) {
@@ -213,6 +233,17 @@ async function joinByCode() {
 function tryRejoin() {
   const saved = sessionStorage.getItem('kb.lobbyId');
   if (saved) request('Rejoin', { lobbyId: saved });
+}
+
+// Auto-join the lobby a middle-click "test player" tab was opened for, reusing the normal join path.
+function autoJoin(code) {
+  // Keep the player's saved name; only invent one when none is set, and never persist it (no
+  // localStorage write) so it stays a throwaway. The server makes the name unique within the lobby,
+  // so a test tab sharing the opener's name shows up as "Name (2)".
+  if (!displayName.trim()) displayName = `Tester ${1000 + Math.floor(Math.random() * 9000)}`;
+  el('player-name-input').value = displayName;
+  el('room-code-input').value = code;
+  joinByCode();
 }
 
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
@@ -473,6 +504,22 @@ async function copyRoomCode() {
   }
 }
 
+// Shareable auto-join URL for this lobby: opening it lands a player straight in the lobby (see the
+// "?join=" handling at startup). Carries only the public room code — no identity token.
+function joinLink() {
+  return `${location.origin}/?join=${encodeURIComponent(lobby.lobbyId)}`;
+}
+
+async function copyJoinLink() {
+  if (!lobby) return;
+  try {
+    await navigator.clipboard.writeText(joinLink());
+    flashCopied();
+  } catch {
+    showError('Could not copy.');
+  }
+}
+
 function openCodeModal() {
   if (!lobby) return;
   el('rc-modal-code').textContent = lobby.lobbyId;
@@ -524,8 +571,17 @@ rc.addEventListener('touchend', cancelLongPress);
 rc.addEventListener('touchmove', cancelLongPress);
 rc.addEventListener('touchcancel', cancelLongPress);
 
+// Middle-click opens a new tab that auto-joins this lobby — a quick way to add a test player.
+rc.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
+rc.addEventListener('auxclick', (e) => {
+  if (e.button !== 1 || !lobby) return; // middle button only
+  e.preventDefault();
+  window.open(joinLink(), '_blank');
+});
+
 // Modal controls.
 el('rc-modal-copy').addEventListener('click', () => { copyRoomCode(); closeCodeModal(); });
+el('rc-modal-copy-link').addEventListener('click', () => { copyJoinLink(); closeCodeModal(); });
 el('rc-modal').querySelectorAll('[data-rc-close]').forEach((node) =>
   node.addEventListener('click', closeCodeModal));
 document.addEventListener('keydown', (e) => {

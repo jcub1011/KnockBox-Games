@@ -79,7 +79,7 @@
       <header class="game-header">
         <a class="game-header-title" id="game-title" href="/"></a>
         <div class="header-actions">
-          <button type="button" class="room-code-btn" id="room-code-btn" title="Show room code">
+          <button type="button" class="room-code-btn" id="room-code-btn" title="Click to reveal · double-click to enlarge · right-click/long-press to copy · middle-click to join in a new tab">
             <span class="room-code-face room-code-label">Room Code</span>
             <span class="room-code-face room-code-value" id="lobby-code"></span>
           </button>
@@ -100,12 +100,15 @@
       <button type="button" class="rc-modal-close" id="rc-modal-close" aria-label="Close" data-rc-close>×</button>
       <p class="rc-modal-heading" id="rc-modal-title">Room Code</p>
       <p class="rc-modal-code" id="rc-modal-code"></p>
-      <button type="button" class="rc-modal-copy" id="rc-modal-copy">Copy code</button>
+      <div class="rc-modal-actions">
+        <button type="button" class="rc-modal-copy" id="rc-modal-copy">Copy code</button>
+        <button type="button" class="rc-modal-copy secondary" id="rc-modal-copy-link">Copy Join Link</button>
+      </div>
     </div>
   </div>
 
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module" src="/shell.js?v=3"></script>
+  <script type="module" src="/shell.js?v=5"></script>
 </body>
 </html>

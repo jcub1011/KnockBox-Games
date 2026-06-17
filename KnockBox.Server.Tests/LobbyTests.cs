@@ -36,6 +36,65 @@ public class LobbyTests
     }
 
     [Fact]
+    public void TryAddUnique_keeps_a_non_colliding_name()
+    {
+        var lobby = New(max: 4);
+        Assert.True(lobby.TryAddUnique("p1", "Ann", out var p1));
+        Assert.Equal("Ann", p1!.DisplayName);
+    }
+
+    [Fact]
+    public void TryAddUnique_disambiguates_colliding_names_with_an_ascending_suffix()
+    {
+        var lobby = New(max: 4);
+        Assert.True(lobby.TryAddUnique("p1", "Bob", out var p1));
+        Assert.True(lobby.TryAddUnique("p2", "Bob", out var p2));
+        Assert.True(lobby.TryAddUnique("p3", "Bob", out var p3));
+
+        Assert.Equal("Bob", p1!.DisplayName);
+        Assert.Equal("Bob (2)", p2!.DisplayName);
+        Assert.Equal("Bob (3)", p3!.DisplayName);
+    }
+
+    [Fact]
+    public void TryAddUnique_treats_collisions_case_insensitively()
+    {
+        var lobby = New(max: 4);
+        Assert.True(lobby.TryAddUnique("p1", "Bob", out _));
+        Assert.True(lobby.TryAddUnique("p2", "bob", out var p2));
+        Assert.Equal("bob (2)", p2!.DisplayName);
+    }
+
+    [Fact]
+    public void TryAddUnique_keeps_the_assigned_name_on_rejoin()
+    {
+        var lobby = New(max: 4);
+        lobby.TryAddUnique("p1", "Bob", out _);
+        Assert.True(lobby.TryAddUnique("p2", "Bob", out var first));
+        Assert.Equal("Bob (2)", first!.DisplayName);
+
+        // Same id rejoining with their normal name keeps the name assigned the first time — no compounding.
+        Assert.True(lobby.TryAddUnique("p2", "Bob", out var again));
+        Assert.Equal("Bob (2)", again!.DisplayName);
+        Assert.Equal(2, lobby.Count);
+    }
+
+    [Fact]
+    public void TryAddUnique_fails_with_null_when_full_or_kicked()
+    {
+        var lobby = New(max: 1);
+        Assert.True(lobby.TryAddUnique("p1", "Ann", out _));
+        Assert.False(lobby.TryAddUnique("p2", "Bob", out var full)); // full
+        Assert.Null(full);
+
+        var kickLobby = New(max: 4);
+        kickLobby.TryAddUnique("p1", "Ann", out _);
+        kickLobby.Kick("p1");
+        Assert.False(kickLobby.TryAddUnique("p1", "Ann", out var kicked)); // barred
+        Assert.Null(kicked);
+    }
+
+    [Fact]
     public void Remove_reports_whether_a_member_was_present()
     {
         var lobby = New();

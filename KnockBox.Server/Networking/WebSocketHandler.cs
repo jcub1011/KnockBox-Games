@@ -296,7 +296,10 @@ public sealed class WebSocketHandler(
         // is rare; the explicit join means leaving the old one is the intended outcome.
         LeaveOtherLobby(conn, lobby.Id);
 
-        if (!lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName)))
+        // Give the joiner a name unique within this lobby (e.g. "Bob (2)" when "Bob" is taken). The
+        // rename lives only on the stored Player — conn.DisplayName is untouched, so the player keeps
+        // their normal name when they leave and join another lobby.
+        if (!lobby.TryAddUnique(conn.PlayerId, conn.DisplayName, out var joined) || joined is null)
         {
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(cid, "Lobby is full")));
             return;
@@ -305,16 +308,17 @@ public sealed class WebSocketHandler(
         conn.LobbyId = lobby.Id;
         conn.Send(ConnectionManager.Serialize(new JoinedMessage(cid, lobby.Id)));
 
-        // Seed the joiner with the existing roster, then announce them to everyone else.
+        // Seed the joiner with the existing roster, then announce them to everyone else. Broadcast the
+        // stored Player (the possibly-disambiguated name), not conn.DisplayName, so peers see the same
+        // name the joiner's own game client gets from the GameStarting roster.
         if (!alreadyMember)
         {
             foreach (var member in lobby.Players.Where(p => p.Id != conn.PlayerId))
                 conn.Send(ConnectionManager.Serialize(new PlayerJoinedMessage(lobby.Id, member)));
 
-            var player = new Player(conn.PlayerId, conn.DisplayName);
-            Broadcast(lobby, new PlayerJoinedMessage(lobby.Id, player), exceptPlayerId: conn.PlayerId);
+            Broadcast(lobby, new PlayerJoinedMessage(lobby.Id, joined), exceptPlayerId: conn.PlayerId);
             // Mid-game joins: also tell the other members' game sockets so in-game rosters update.
-            BroadcastToGame(lobby, new GamePlayerJoinedMessage(player), exceptPlayerId: conn.PlayerId);
+            BroadcastToGame(lobby, new GamePlayerJoinedMessage(joined), exceptPlayerId: conn.PlayerId);
         }
 
         // Launch the game for the entering player only — existing members already have it running,

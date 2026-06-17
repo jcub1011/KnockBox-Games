@@ -57,6 +57,41 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
         }
     }
 
+    /// <summary>
+    /// Adds a player, assigning a display name unique within THIS lobby. If <paramref name="requestedName"/>
+    /// collides (case-insensitively) with an existing member, a " (n)" suffix (n = 2, 3, …) is appended.
+    /// The rename is lobby-scoped: only the stored <see cref="Player"/> carries it — the caller's own
+    /// name is never touched, so the player keeps their normal name in other lobbies. Idempotent for an
+    /// existing member (rejoin): returns the Player already on the roster, preserving the name assigned
+    /// when they first joined. Returns false (with a null player) if the lobby is full or the player was kicked.
+    /// </summary>
+    public bool TryAddUnique(string playerId, string requestedName, out Player? player)
+    {
+        lock (_gate)
+        {
+            if (_kicked.Contains(playerId)) { player = null; return false; }
+            var existing = _players.FirstOrDefault(p => p.Id == playerId);
+            if (existing is not null) { player = existing; return true; } // rejoin: keep assigned name
+            if (_players.Count >= MaxPlayers) { player = null; return false; }
+            player = new Player(playerId, UniqueName(requestedName));
+            _players.Add(player);
+            return true;
+        }
+    }
+
+    // Lowest non-colliding name: the request itself, else "<name> (n)" for n = 2,3,… Bounded by
+    // membership (k members ⇒ at most k taken names ⇒ a free one within k+1 tries). Call under _gate.
+    private string UniqueName(string requested)
+    {
+        bool Taken(string n) => _players.Any(p => string.Equals(p.DisplayName, n, StringComparison.OrdinalIgnoreCase));
+        if (!Taken(requested)) return requested;
+        for (var n = 2; ; n++)
+        {
+            var candidate = $"{requested} ({n})";
+            if (!Taken(candidate)) return candidate;
+        }
+    }
+
     public bool Remove(string playerId)
     {
         lock (_gate)

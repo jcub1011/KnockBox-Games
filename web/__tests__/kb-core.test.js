@@ -4,6 +4,7 @@ import {
   isTerminalClose,
   reconnectDelay,
   parseLaunchParams,
+  parseJoinParam,
   defaultEndpoint,
   gameWsEndpoint,
   buildGameSrc,
@@ -54,6 +55,23 @@ describe('parseLaunchParams', () => {
     expect(parseLaunchParams('kbTicket=xyz').ticket).toBe('xyz');
     expect(parseLaunchParams('').ticket).toBeNull();
     expect(parseLaunchParams(undefined).endpoint).toBeNull();
+  });
+});
+
+describe('parseJoinParam', () => {
+  it('reads and normalizes the auto-join code from the query string', () => {
+    expect(parseJoinParam('?join=ab12')).toBe('AB12');
+    expect(parseJoinParam('join=ab12')).toBe('AB12'); // leading "?" is optional for URLSearchParams
+    expect(parseJoinParam('?name=Bob&join=cd34')).toBe('CD34');
+    expect(parseJoinParam('?join=%20ab12%20')).toBe('AB12'); // trims surrounding space
+  });
+
+  it('returns null when the code is absent or blank', () => {
+    expect(parseJoinParam('')).toBeNull();
+    expect(parseJoinParam(undefined)).toBeNull();
+    expect(parseJoinParam('?foo=bar')).toBeNull();
+    expect(parseJoinParam('?join=')).toBeNull();
+    expect(parseJoinParam('?join=%20%20')).toBeNull();
   });
 });
 
