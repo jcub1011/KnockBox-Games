@@ -125,44 +125,97 @@ Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-
 
 ### Behind Cloudflare Tunnel (cloudflared)
 
-The game origin **must be its own hostname** — this isn't optional. The shell origin serves only
-game thumbnails (the full, untrusted build loads solely from the game origin so it can't read the
-shell's identity token), and Cloudflare's proxy can't terminate HTTPS on the internal games port
-(8081), so the two-port trick doesn't survive a tunnel. With a tunnel that second hostname is cheap:
-one extra ingress rule, and `cloudflared` auto-creates the DNS record.
+A complete, copy-paste way to serve KnockBox over HTTPS with a free Cloudflare Tunnel — no reverse
+proxy to install, no TLS certificates to manage, and no ports opened on your router or firewall.
 
-Run **single-port mode** — point both public hostnames at the **same** container port (8080) and let
-the server route the game origin by `Host` header:
+**What you'll end up with:** two HTTPS addresses on your domain —
+- `play.example.com` — the shell, where players go;
+- `games.example.com` — the game origin, which the shell loads game iframes from.
+
+**Why two?** KnockBox runs each (untrusted) game in an iframe on a *separate* web origin, so a game
+can't read players' identities or tamper with the shell. Origins are distinguished by hostname, so
+the game origin needs its own. It does **not** need its own server, port, or container — both
+hostnames point at the *same* KnockBox container, which tells them apart by hostname. (A single
+hostname cannot work: the shell hostname deliberately refuses to serve game files.)
+
+**Before you start** you need a domain managed by Cloudflare (free) and Docker installed. If you
+haven't added your domain to Cloudflare yet, do that first — start here:
+<https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/>
+
+#### 1. Pick your two hostnames
+
+Any two subdomains on your Cloudflare domain. Throughout this guide they're `play.example.com`
+(shell) and `games.example.com` (games) — substitute your own everywhere.
+
+#### 2. Create the tunnel and copy its token
+
+In the Cloudflare dashboard go to **Zero Trust → Networks → Tunnels → Create a tunnel** and choose
+the **Cloudflared** connector type. When it shows an installation command, you only need the long
+**tunnel token** from it (the value after `--token`). Keep it for the next step.
+
+The dashboard changes over time, so follow Cloudflare's current walkthrough:
+<https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/>
+
+#### 3. Start KnockBox and the tunnel together
+
+Save this as `docker-compose.yml`. KnockBox has **no `ports:`** — only the tunnel can reach it, so
+nothing is exposed to the internet directly.
 
 ```yaml
-# cloudflared config (ingress)
-ingress:
-  - hostname: games.example.com      # game origin — its own hostname
-    service: http://knockbox:8080     # SAME container + port as the shell
-  - hostname: play.example.com        # shell — players open this
-    service: http://knockbox:8080
-  - service: http_status:404
+services:
+  knockbox:
+    image: ghcr.io/jcub1011/knockbox-games:latest
+    environment:
+      KnockBox__ForwardedHeaders: "true"                          # serve https/wss behind the tunnel — REQUIRED
+      KnockBox__GamesHost: "games.example.com"                    # your GAMES hostname (no https://, no slash)
+      KnockBox__AllowedOrigins__0: "https://play.example.com"     # your SHELL hostname (with https://, no trailing slash)
+      KnockBox__AllowedOrigins__1: "https://games.example.com"    # your GAMES hostname (with https://, no trailing slash)
+      KnockBox__GamesPollSeconds: "10"
+    volumes:
+      - /srv/knockbox/games:/games:ro                 # your game folders (read-only)
+      - /srv/knockbox/games-compressed:/app/games-compressed
+      - /srv/knockbox/logs:/app/logs
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: "paste-your-tunnel-token-from-step-2"
+    restart: unless-stopped
 ```
 
-Adjust `knockbox:8080` to however `cloudflared` reaches the container (a service name on a shared
-Docker network, or `http://localhost:8080`). If the DNS record isn't created automatically, add it
-with `cloudflared tunnel route dns <tunnel> games.example.com`. WebSocket upgrade on `/ws` works
-through the tunnel out of the box.
+Create the host folders first and make them owned by UID `1654` (see the permissions notes earlier
+in this section). Common slip-ups: `GamesHost` must **exactly** equal your games hostname, and the
+two `AllowedOrigins` must have **no trailing slash**.
 
-Then on the container:
+#### 4. Point both hostnames at KnockBox
 
-```yaml
-environment:
-  KnockBox__ForwardedHeaders: "true"                     # trust X-Forwarded-Proto → https/wss
-  KnockBox__GamesHost: "games.example.com"               # this Host = the game origin
-  KnockBox__AllowedOrigins__0: "https://play.example.com"
-  KnockBox__AllowedOrigins__1: "https://games.example.com"
+Back in your tunnel's settings, add **two Public Hostnames**. The **Service** is identical for both
+— it's the KnockBox container's name and internal port from the compose file (they share a network,
+so Cloudflare's connector resolves `knockbox` by name):
+
+| Public hostname     | Service          |
+|---------------------|------------------|
+| `play.example.com`  | `HTTP` `knockbox:8080` |
+| `games.example.com` | `HTTP` `knockbox:8080` |
+
+Cloudflare creates the DNS records automatically, and WebSockets work with no extra setting.
+
+#### 5. Launch and check
+
+```bash
+docker compose up -d
 ```
 
-**Don't publish the container's ports to the host** (drop the `ports:` mapping, or bind to
-`127.0.0.1`). Only `cloudflared` should be able to reach it — with `ForwardedHeaders` on, the server
-trusts `X-Forwarded-*` from any caller, so a client reaching the container directly could spoof its
-IP past the per-IP connection cap. The internal games port (8081) goes unused in this mode.
+Open `https://play.example.com`, create a lobby, and start a game. To confirm it's healthy, open
+your browser's developer tools:
+- **Console:** no "Mixed Content" error, and the game loads.
+- **Network → WS:** the connection to `games.example.com/ws` shows **101 Switching Protocols**.
+- The game iframe's address starts with `https://games.example.com/games/…` (not `http://`, no `:8081`).
+
+If the home page shows a configuration warning instead of the lobby, it's almost always folder
+permissions — see "The home page shows a configuration warning" below.
 
 ### Hot-reload on Docker Desktop
 
