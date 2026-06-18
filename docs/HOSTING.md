@@ -123,11 +123,125 @@ Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-
 3. Lock down origins: `KnockBox__AllowedOrigins__0/1` to your two public origins.
 4. Make sure the proxy allows WebSocket upgrade on `/ws`.
 
+### Behind Cloudflare Tunnel (cloudflared)
+
+A complete, copy-paste way to serve KnockBox over HTTPS with a free Cloudflare Tunnel — no reverse
+proxy to install, no TLS certificates to manage, and no ports opened on your router or firewall.
+
+**What you'll end up with:** two HTTPS addresses on your domain —
+- `play.example.com` — the shell, where players go;
+- `games.example.com` — the game origin, which the shell loads game iframes from.
+
+**Why two?** KnockBox runs each (untrusted) game in an iframe on a *separate* web origin, so a game
+can't read players' identities or tamper with the shell. Origins are distinguished by hostname, so
+the game origin needs its own. It does **not** need its own server, port, or container — both
+hostnames point at the *same* KnockBox container, which tells them apart by hostname. (A single
+hostname cannot work: the shell hostname deliberately refuses to serve game files.)
+
+**Before you start** you need a domain managed by Cloudflare (free) and Docker installed. If you
+haven't added your domain to Cloudflare yet, do that first — start here:
+<https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/>
+
+#### 1. Pick your two hostnames
+
+Any two subdomains on your Cloudflare domain. Throughout this guide they're `play.example.com`
+(shell) and `games.example.com` (games) — substitute your own everywhere.
+
+#### 2. Create the tunnel and copy its token
+
+In the Cloudflare dashboard go to **Zero Trust → Networks → Tunnels → Create a tunnel** and choose
+the **Cloudflared** connector type. When it shows an installation command, you only need the long
+**tunnel token** from it (the value after `--token`). Keep it for the next step.
+
+The dashboard changes over time, so follow Cloudflare's current walkthrough:
+<https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/>
+
+#### 3. Start KnockBox and the tunnel together
+
+Save this as `docker-compose.yml`. KnockBox has **no `ports:`** — only the tunnel can reach it, so
+nothing is exposed to the internet directly.
+
+```yaml
+services:
+  knockbox:
+    image: ghcr.io/jcub1011/knockbox-games:latest
+    environment:
+      KnockBox__ForwardedHeaders: "true"                          # serve https/wss behind the tunnel — REQUIRED
+      KnockBox__GamesHost: "games.example.com"                    # your GAMES hostname (no https://, no slash)
+      KnockBox__AllowedOrigins__0: "https://play.example.com"     # your SHELL hostname (with https://, no trailing slash)
+      KnockBox__AllowedOrigins__1: "https://games.example.com"    # your GAMES hostname (with https://, no trailing slash)
+      KnockBox__GamesPollSeconds: "10"
+    volumes:
+      - /srv/knockbox/games:/games:ro                 # your game folders (read-only)
+      - /srv/knockbox/games-compressed:/app/games-compressed
+      - /srv/knockbox/logs:/app/logs
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: "paste-your-tunnel-token-from-step-2"
+    restart: unless-stopped
+```
+
+Create the host folders first and make them owned by UID `1654` (see the permissions notes earlier
+in this section). Common slip-ups: `GamesHost` must **exactly** equal your games hostname, and the
+two `AllowedOrigins` must have **no trailing slash**.
+
+#### 4. Point both hostnames at KnockBox
+
+Back in your tunnel's settings, add **two Public Hostnames**. The **Service** is identical for both
+— it's the KnockBox container's name and internal port from the compose file (they share a network,
+so Cloudflare's connector resolves `knockbox` by name):
+
+| Public hostname     | Service          |
+|---------------------|------------------|
+| `play.example.com`  | `HTTP` `knockbox:8080` |
+| `games.example.com` | `HTTP` `knockbox:8080` |
+
+Cloudflare creates the DNS records automatically, and WebSockets work with no extra setting.
+
+#### 5. Launch and check
+
+```bash
+docker compose up -d
+```
+
+Open `https://play.example.com`, create a lobby, and start a game. To confirm it's healthy, open
+your browser's developer tools:
+- **Console:** no "Mixed Content" error, and the game loads.
+- **Network → WS:** the connection to `games.example.com/ws` shows **101 Switching Protocols**.
+- The game iframe's address starts with `https://games.example.com/games/…` (not `http://`, no `:8081`).
+
+If the home page shows a configuration warning instead of the lobby, it's almost always folder
+permissions — see "The home page shows a configuration warning" below.
+
 ### Hot-reload on Docker Desktop
 
 File-change events don't cross Windows/macOS bind mounts, so the image enables a polling fallback
 (`KnockBox__GamesPollSeconds`, default 10 in the image; the compose file uses 5). On a Linux host
 the watcher works natively and discovery is sub-second; polling stays on as a harmless safety net.
+
+### The home page shows a configuration warning
+
+The server is deliberately resilient to file-access problems: an unreadable games mount, a missing
+shell, or an unwritable cache/log dir won't crash it. Instead it starts and **replaces the home page
+with a warning** listing exactly what's wrong, so a misconfiguration is obvious during setup rather
+than showing a blank or empty site. Almost always it's **permissions** — the container runs as
+**UID 1654**, so:
+
+- **Games folder not readable:** the mount must grant UID 1654 *read + execute*. `chown -R 1654`
+  the games dir (read-only mounts still need read access). This one clears automatically once fixed —
+  the games folder is re-checked continuously, no restart needed.
+- **Pre-compressed cache / logs not writable:** `chown -R 1654` those dirs (these are warnings, not
+  fatal — the server degrades to on-the-fly compression / console logging — but fix them for a proper
+  deployment). Applies on the next restart.
+- **Platform shell missing:** the web root has no `index.html`; verify the image/publish output or
+  set `KnockBox__WebRoot`.
+
+On TrueNAS, set ownership via **Datasets → Edit Permissions** if a plain `chown` doesn't stick (ACLs
+override POSIX mode).
 
 ---
 

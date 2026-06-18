@@ -79,6 +79,42 @@ public class GameCatalogTests : IDisposable
     }
 
     [Fact]
+    public void Missing_games_folder_is_benign_and_sets_no_scan_error()
+    {
+        Directory.Delete(_root, recursive: true);
+        var catalog = NewCatalog();
+
+        catalog.Discover(); // must not throw
+        Assert.Empty(catalog.Games);
+        Assert.Null(catalog.ScanError); // a missing folder is normal, not a misconfiguration to flag
+    }
+
+    [Fact]
+    public void Unreadable_games_folder_does_not_crash_and_is_reported()
+    {
+        if (OperatingSystem.IsWindows()) return; // POSIX permission bits only
+
+        File.SetUnixFileMode(_root, UnixFileMode.None);
+        try
+        {
+            // If enumeration still succeeds (e.g. the test runs as root, which bypasses perms), the
+            // scenario can't be exercised — skip rather than assert something untrue.
+            try { _ = Directory.EnumerateDirectories(_root).Any(); return; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* denied, as intended */ }
+
+            var catalog = NewCatalog();
+            catalog.Discover(); // must not throw despite the access denial
+            Assert.Empty(catalog.Games);
+            Assert.NotNull(catalog.ScanError);
+        }
+        finally
+        {
+            // Restore access so Dispose can clean the directory up.
+            File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
     public void Rediscovery_drops_a_removed_game_via_atomic_swap()
     {
         WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "minPlayers": 2, "maxPlayers": 2 }""");

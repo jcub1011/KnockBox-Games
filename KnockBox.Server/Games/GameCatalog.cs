@@ -26,6 +26,13 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
     // timer callback sees the seeded value on weakly-ordered architectures (ARM).
     private volatile string _pollFingerprint = "";
 
+    // Set when a scan fails because the games folder exists but can't be READ (e.g. a Docker mount
+    // the server's user has no read/execute on) — as opposed to simply missing or empty, which are
+    // benign. Surfaced to the deployment-warning home page; cleared on the next clean scan, so it
+    // reflects the live state and disappears once permissions are fixed.
+    private volatile string? _scanError;
+    public string? ScanError => _scanError;
+
     /// <summary>
     /// Raised at the end of every successful <see cref="Discover"/>, after the atomic swap, with the
     /// freshly-published catalog. Lets derived state (e.g. the pre-compressed asset cache) rebuild on
@@ -46,11 +53,31 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
         if (!Directory.Exists(gamesRoot))
         {
             logger.LogWarning("Games folder not found at {Path}; no games discovered.", gamesRoot);
+            _scanError = null; // a missing/not-yet-mounted folder is benign, not a misconfiguration to flag
             _games = next;
             return;
         }
 
-        foreach (var dir in Directory.EnumerateDirectories(gamesRoot))
+        // Materialize eagerly so an access failure throws HERE (and is caught) rather than mid-iteration.
+        // The folder exists but can't be read — e.g. a Docker mount the server's user (UID 1654) has no
+        // read/execute on. This must NOT crash startup (Discover() runs from Program.Main and from timer
+        // callbacks): serve no games, surface it for the warning page, and recover on the next rescan.
+        List<string> dirs;
+        try
+        {
+            dirs = [.. Directory.EnumerateDirectories(gamesRoot)];
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogError(ex, "Cannot read games folder {Path}; serving no games until access is restored.", gamesRoot);
+            _scanError = $"The games folder '{gamesRoot}' exists but could not be read ({ex.Message}). " +
+                "Ensure it is readable by the server — in Docker the container runs as UID 1654, so the " +
+                "mounted folder must grant that user read and execute.";
+            _games = next; // empty; atomic publish
+            return;
+        }
+
+        foreach (var dir in dirs)
         {
             var manifestPath = Path.Combine(dir, "GAME.json");
             if (!File.Exists(manifestPath)) continue;
@@ -103,6 +130,7 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
             }
         }
 
+        _scanError = null; // scan completed; clear any prior access error
         _games = next; // atomic publish
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Game catalog ready: {Count} game(s) [{Ids}]", next.Count, string.Join(", ", next.Keys));
