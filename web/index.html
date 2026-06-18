@@ -63,7 +63,10 @@
 
       <aside class="home-playlog">
         <section class="pl-panel" aria-label="Play Log">
-          <h2 class="pl-heading">Play Log</h2>
+          <div class="pl-header">
+            <h2 class="pl-heading">Play Log</h2>
+            <button type="button" class="pl-clear" id="playlog-clear" hidden>Clear</button>
+          </div>
           <div class="pl-state pl-empty" id="playlog-empty" role="status">
             <span class="pl-state-icon" aria-hidden="true">&#127922;</span>
             <span class="pl-empty-title">No games played yet</span>
@@ -105,6 +108,20 @@
       <div class="rc-modal-actions">
         <button type="button" class="rc-modal-copy" id="rc-modal-copy">Copy code</button>
         <button type="button" class="rc-modal-copy secondary" id="rc-modal-copy-link">Copy Join Link</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Clear Play Log confirmation modal ──────────────────────────────────── -->
+  <div class="rc-modal" id="pl-clear-modal" hidden role="dialog" aria-modal="true" aria-labelledby="pl-clear-title">
+    <div class="rc-modal-backdrop" data-pl-close></div>
+    <div class="rc-modal-card">
+      <button type="button" class="rc-modal-close" aria-label="Close" data-pl-close>×</button>
+      <p class="rc-modal-heading" id="pl-clear-title">Clear Play Log?</p>
+      <p class="pl-clear-text" id="pl-clear-text"></p>
+      <div class="rc-modal-actions">
+        <button type="button" class="rc-modal-copy secondary" data-pl-close>Cancel</button>
+        <button type="button" class="rc-modal-copy" id="pl-clear-confirm">Clear All</button>
       </div>
     </div>
   </div>

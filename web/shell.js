@@ -65,7 +65,12 @@ export function connect() {
     el('conn').textContent = 'offline — reconnecting…';
     setTimeout(connect, reconnectDelay(reconnectAttempt++));
   };
-  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  ws.onmessage = (e) => {
+    // The server is the only sender, so a bad frame is unexpected — but it must not throw uncaught
+    // out of the handler and silently wedge control-plane dispatch. Log and drop it.
+    try { handle(JSON.parse(e.data)); }
+    catch (err) { console.error('[KnockBox shell] discarding unparseable frame:', err); }
+  };
 }
 
 function send(msg) { ws.send(JSON.stringify(msg)); }
@@ -187,6 +192,11 @@ function recordPlayLog(msg) {
   renderPlayLog(); // the panel is hidden while in-game; re-rendering it then is harmless
 }
 
+function clearPlayLog() {
+  try { localStorage.removeItem(PLAYLOG_KEY); } catch { /* storage blocked — ignore */ }
+  renderPlayLog();
+}
+
 function plChip(text, className) {
   const span = document.createElement('span');
   span.className = className ? `pl-chip ${className}` : 'pl-chip';
@@ -204,7 +214,10 @@ function playLogTime(iso) {
   t.className = 'pl-item-time';
   t.dateTime = iso;
   t.title = iso;
-  t.textContent = d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  // dateStyle/timeStyle are supported on all current engines; the fallback covers very old ones
+  // (and any locale data gap) so a play-log row never renders blank or throws.
+  try { t.textContent = d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); }
+  catch { t.textContent = d.toLocaleString(); }
   return t;
 }
 
@@ -268,6 +281,8 @@ export function renderPlayLog() {
   const hasEntries = entries.length > 0;
   empty.hidden = hasEntries;
   list.hidden = !hasEntries;
+  const clearBtn = el('playlog-clear');
+  if (clearBtn) clearBtn.hidden = !hasEntries;
   for (const entry of entries) list.appendChild(playLogItem(entry));
 }
 
@@ -372,9 +387,15 @@ function autoJoin(code) {
 }
 
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
+function setDocumentTitle(gameName) {
+  document.title = gameName ? `KnockBox Games - ${gameName}` : 'KnockBox Games';
+}
+
 export function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
-  el('game-title').textContent = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
+  const displayName = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
+  el('game-title').textContent = displayName;
+  setDocumentTitle(displayName);
   el('lobby-code').textContent = lobby.lobbyId;
   el('frame-host').innerHTML = ''; // no iframe until GameStarting
   el('waiting').style.display = 'block';
@@ -406,6 +427,7 @@ export async function enterGame(starting) {
   };
 
   el('game-title').textContent = manifest.name;
+  setDocumentTitle(manifest.name);
   el('lobby-code').textContent = starting.lobbyId;
   themeHeader(manifest);
 
@@ -442,6 +464,7 @@ export function showLobbyView() {
   lobby = null;
   closeCodeModal();
   resetHeaderTheme();
+  setDocumentTitle(null);
   el('frame-host').innerHTML = '';
   document.body.classList.remove('in-game');
   el('game-view').style.display = 'none';
@@ -632,15 +655,56 @@ async function copyJoinLink() {
   }
 }
 
+// Shared dialog focus management for the .rc-modal overlays (room-code + clear-play-log). Both
+// declare aria-modal, so on open we remember the trigger and move focus in; on close we restore it
+// (a keyboard user lands back where they were, not at the top of the document); Tab is trapped
+// inside the open dialog by the keydown handler below.
+let lastFocused = null;   // control to restore focus to when the active modal closes
+let activeModal = null;   // the currently-open .rc-modal element, or null
+
+// Focusable controls inside a dialog card (buttons; the backdrop is not focusable). Exclude
+// anything inside a [hidden] subtree — correct in both jsdom and a real browser (offsetParent is
+// always null in jsdom, so it can't be used here).
+function modalFocusables(modal) {
+  return [...modal.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+    .filter((n) => !n.closest('[hidden]'));
+}
+
+function openModal(modal, initialFocus) {
+  lastFocused = document.activeElement;
+  modal.hidden = false;
+  activeModal = modal;
+  (initialFocus || modalFocusables(modal)[0])?.focus();
+}
+
+function closeModal(modal) {
+  modal.hidden = true;
+  if (activeModal === modal) activeModal = null;
+  if (lastFocused?.isConnected) lastFocused.focus(); // return focus to the trigger
+  lastFocused = null;
+}
+
 function openCodeModal() {
   if (!lobby) return;
   el('rc-modal-code').textContent = lobby.lobbyId;
-  el('rc-modal').hidden = false;
-  el('rc-modal-copy').focus();
+  openModal(el('rc-modal'), el('rc-modal-copy'));
 }
 
 function closeCodeModal() {
-  el('rc-modal').hidden = true;
+  closeModal(el('rc-modal'));
+}
+
+function openClearModal() {
+  const n = readPlayLog().length;
+  if (!n) return; // nothing to clear
+  el('pl-clear-text').textContent =
+    `This removes all ${n} ${n === 1 ? 'entry' : 'entries'} and can't be undone.`;
+  // default focus on the safe (Cancel) path
+  openModal(el('pl-clear-modal'), el('pl-clear-modal').querySelector('.rc-modal-copy.secondary'));
+}
+
+function closeClearModal() {
+  closeModal(el('pl-clear-modal'));
 }
 
 const rc = el('room-code-btn');
@@ -649,23 +713,28 @@ let longPressed = false;
 let lastClickAt = 0;
 const DBL_MS = 250;
 
-// Single click toggles the crossfade immediately (instant feedback). The second click of a
-// double-click lands within DBL_MS — we skip its toggle so dblclick can open the modal without
-// reverting the reveal first. DBL_MS is a fixed guess, independent of the OS double-click
-// interval: if that interval is longer than 250ms the second click toggles instead of being
-// skipped, but the dblclick handler then `remove('revealed')`s anyway, so the stray re-toggle is
-// never visible — the modal opens over a hidden code regardless.
+// Single click/tap toggles the crossfade immediately (instant feedback); a quick second click/tap
+// within DBL_MS opens the big modal. We detect the double from successive `click` events rather
+// than the native `dblclick` so the "mobile-friendly large view" is actually reachable on touch —
+// `dblclick` doesn't reliably fire on touch (and `contextmenu` for copy doesn't either; long-press
+// covers copy there). DBL_MS is a fixed guess independent of the OS double-click interval.
 rc.addEventListener('click', () => {
   if (longPressed) return; // a long-press already handled this gesture
+  if (!el('rc-modal').hidden) return; // never toggle the code behind an open modal
   const now = performance.now();
-  if (now - lastClickAt < DBL_MS) { // second click of a dbl-click; let dblclick handle it
+  if (now - lastClickAt < DBL_MS) { // second click/tap → open the large view
     lastClickAt = 0;
+    rc.classList.remove('revealed'); // reset to "Room Code" behind the modal so it's hidden on close
+    openCodeModal();
     return;
   }
   lastClickAt = now;
   rc.classList.toggle('revealed');
 });
 
+// Native double-click also opens the modal — robust on desktop (and the canonical signal). Touch,
+// where dblclick doesn't reliably fire, is covered by the click-based detection above. Both paths
+// call openCodeModal, which is idempotent, so a desktop double-click triggering both is harmless.
 rc.addEventListener('dblclick', () => {
   rc.classList.remove('revealed'); // reset to "Room Code" behind the modal so it's hidden on close
   openCodeModal();
@@ -703,8 +772,27 @@ el('rc-modal-copy').addEventListener('click', () => { copyRoomCode(); closeCodeM
 el('rc-modal-copy-link').addEventListener('click', () => { copyJoinLink(); closeCodeModal(); });
 el('rc-modal').querySelectorAll('[data-rc-close]').forEach((node) =>
   node.addEventListener('click', closeCodeModal));
+
+// Clear Play Log: the button only deletes after the confirmation modal's "Clear All".
+el('playlog-clear').addEventListener('click', openClearModal);
+el('pl-clear-confirm').addEventListener('click', () => { clearPlayLog(); closeClearModal(); });
+el('pl-clear-modal').querySelectorAll('[data-pl-close]').forEach((node) =>
+  node.addEventListener('click', closeClearModal));
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !el('rc-modal').hidden) closeCodeModal();
+  if (e.key === 'Escape') {
+    if (!el('rc-modal').hidden) closeCodeModal();
+    if (!el('pl-clear-modal').hidden) closeClearModal();
+    return;
+  }
+  // Trap Tab within the open dialog so focus can't wander to controls behind the overlay.
+  if (e.key === 'Tab' && activeModal) {
+    const f = modalFocusables(activeModal);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
 });
 
 applyGate();

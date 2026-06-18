@@ -141,7 +141,12 @@ import {
       attached = true;
       flushPendingLogs();
     };
-    ws.onmessage = (e) => handle(JSON.parse(e.data));
+    ws.onmessage = (e) => {
+      // A malformed frame must not throw uncaught out of the event handler (and the server is the
+      // only sender, so this is belt-and-suspenders): log and drop it, keeping the socket alive.
+      try { handle(JSON.parse(e.data)); }
+      catch (err) { console.error('[KnockBox] discarding unparseable frame:', err); }
+    };
     ws.onerror = () => { /* a failed connect surfaces as a close; reconnect is handled there */ };
     ws.onclose = (e) => {
       attached = false;
@@ -156,6 +161,17 @@ import {
     };
   }
 
+  // Invoke each registered game callback in isolation: a throwing handler is the GAME's bug, and it
+  // must not break sibling handlers or the SDK's own dispatch (roster updates happen before fire()).
+  function fire(list, arg) {
+    // Iterate a snapshot: a handler may register another during dispatch (onReady → onMessage),
+    // and that newcomer must not be invoked in this same pass.
+    for (const cb of [...list]) {
+      try { cb(arg); }
+      catch (err) { console.error('[KnockBox] error in game handler:', err); }
+    }
+  }
+
   function handle(msg) {
     switch (msg.type) {
       case 'Ready':
@@ -164,18 +180,18 @@ import {
         KnockBox.isHost = !!msg.isHost;
         ready = true;
         attempt = 0; // healthy connection — reset backoff
-        handlers.ready.forEach((cb) => cb(snapshot()));
+        fire(handlers.ready, snapshot());
         break;
       case 'Game':
-        handlers.message.forEach((cb) => cb({ from: msg.from, payload: msg.payload }));
+        fire(handlers.message, { from: msg.from, payload: msg.payload });
         break;
       case 'GamePlayerJoined':
         KnockBox.players = rosterAdd(KnockBox.players, msg.player);
-        handlers.playerJoined.forEach((cb) => cb(msg.player));
+        fire(handlers.playerJoined, msg.player);
         break;
       case 'GamePlayerLeft':
         KnockBox.players = rosterRemove(KnockBox.players, msg.playerId);
-        handlers.playerLeft.forEach((cb) => cb(msg.playerId));
+        fire(handlers.playerLeft, msg.playerId);
         break;
     }
   }

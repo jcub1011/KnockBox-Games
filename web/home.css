@@ -41,6 +41,7 @@ body {
     margin: 0;
     padding: 0;
     min-height: 100vh;
+    min-height: 100dvh; /* avoid mobile-Safari address-bar layout shift; 100vh is the fallback */
     width: 100%;
     font-family: var(--font-primary);
     font-optical-sizing: auto;
@@ -145,8 +146,10 @@ body.in-game::after {
     flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    padding: 24px 16px 48px 16px;
+    /* Honor the notch / Dynamic Island in landscape — keep the default 16px gutter otherwise. */
+    padding: 24px max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left));
     min-height: 100vh;
+    min-height: 100dvh; /* match .game-shell; 100vh is the fallback */
     gap: 0;
     overflow-x: clip;
 }
@@ -298,6 +301,7 @@ body.in-game::after {
 
 .join-card {
     flex: 1;
+    min-width: 0; /* let flex children shrink below content width — no horizontal overflow on ≤360px */
     padding: 18px 20px;
     background-color: rgba(255, 45, 110, 0.4);
     border: 1px solid rgba(255, 45, 110, 0.7);
@@ -558,6 +562,14 @@ body.in-game::after {
     color: var(--ink);
 }
 
+/* Heading row: title on the left, the (conditionally shown) Clear button on the right. */
+.pl-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
 .pl-heading {
     font-family: var(--font-display);
     font-size: 0.95rem;
@@ -569,6 +581,40 @@ body.in-game::after {
     padding-left: 1rem;
     padding-bottom: 10px;
     position: relative;
+}
+
+/* Unobtrusive text button; hidden until the log has entries (toggled in renderPlayLog). */
+.pl-clear {
+    flex: none;
+    appearance: none;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 2px 6px;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-soft);
+    border-radius: 6px;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.pl-clear:hover,
+.pl-clear:focus-visible {
+    color: var(--accent-color);
+    background: var(--canvas-card);
+}
+
+.pl-clear[hidden] { display: none; }
+
+/* Body copy inside the clear-confirmation modal (reuses the .rc-modal card chrome). */
+.pl-clear-text {
+    margin: 0 0 4px;
+    color: var(--ink-soft);
+    font-size: 0.9rem;
+    line-height: 1.4;
 }
 
 .pl-heading::after {
@@ -596,6 +642,12 @@ body.in-game::after {
     color: var(--ink-soft);
     font-size: 0.9rem;
 }
+
+/* renderPlayLog toggles these via the `hidden` attribute; the display rules above (flex) would
+   otherwise override the UA `[hidden] { display: none }`, leaving the empty state visible behind
+   the populated list. */
+.pl-state[hidden],
+.pl-list[hidden] { display: none; }
 
 .pl-state-icon { font-size: 1.6rem; line-height: 1; }
 
@@ -782,7 +834,8 @@ body.in-game::after {
     background-color: var(--gh-bg);
     color: var(--gh-fg);
     font-family: var(--font-primary);
-    padding: 8px 16px;
+    /* Honor the notch / Dynamic Island in landscape so the room-code/Leave buttons aren't occluded. */
+    padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
     font-size: 1.75em;
     font-weight: 900;
     box-shadow: 0px 6px 0px rgba(0, 0, 0, 0.6), 0px -12px 0px var(--gh-bg);
@@ -823,7 +876,7 @@ body.in-game::after {
     align-items: center;
     justify-content: center;
     min-width: 6em;
-    height: 40px;
+    min-height: 44px; /* comfortable touch target */
     font-family: var(--font-primary);
     font-weight: 500;
     background: none;
@@ -833,6 +886,7 @@ body.in-game::after {
     padding: 4px 10px;
     user-select: none;
     -webkit-user-select: none;
+    touch-action: manipulation; /* no double-tap-zoom delay — we use double-tap to open the modal */
 }
 
 /* Two faces stacked in the same box; crossfade between them on .revealed. */
@@ -868,11 +922,12 @@ body.in-game::after {
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 40px;
+    min-height: 44px; /* comfortable touch target */
     padding: 0 14px;
     border-radius: 8px;
     background: var(--gh-btn-bg);
     cursor: pointer;
+    touch-action: manipulation;
     color: var(--gh-fg);
     border: none;
     font-size: 0.95rem;
@@ -897,7 +952,7 @@ body.in-game::after {
     to   { opacity: 1; transform: translateY(0); }
 }
 
-#waiting { color: var(--ink-soft); font-size: 0.95rem; padding: 16px; }
+#waiting { color: var(--ink-soft); font-size: clamp(0.9rem, 2.5vw, 1.15rem); padding: 16px; }
 
 #frame-host { flex: 1; display: flex; min-height: 0; }
 
@@ -951,8 +1006,13 @@ body.in-game::after {
 
 .rc-modal-close {
     position: absolute;
-    top: 14px;
-    right: 18px;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;  /* comfortable touch target */
+    min-height: 44px;
     background: none;
     border: none;
     color: var(--ink-soft);
@@ -960,6 +1020,7 @@ body.in-game::after {
     line-height: 1;
     cursor: pointer;
     padding: 4px;
+    touch-action: manipulation;
 }
 
 .rc-modal-close:hover { color: var(--ink); }
@@ -1037,6 +1098,17 @@ body.in-game::after {
     .game-header { font-size: 1.3em; }
 }
 
+/* Narrow phones: the large modal padding would push the code/buttons off-screen. */
+@media (max-width: 500px) {
+    .rc-modal-card { padding: 36px 24px; gap: 20px; }
+    .header-actions { gap: 6px; }
+}
+
+/* Short viewports (landscape phones): trim the vertical padding so actions stay reachable. */
+@media (max-height: 600px) {
+    .rc-modal-card { padding: 24px 32px; gap: 16px; }
+}
+
 @media (hover: none) {
     .game-tile:nth-child(5n+1) { transform: rotate(-0.5deg); }
     .game-tile:nth-child(5n+2) { transform: rotate(0.2deg); }
@@ -1059,6 +1131,9 @@ body.in-game::after {
         transform: none;
     }
     .join-card, .game-tile, .game-tile-surface { transition: none; }
+    /* No hover lift/slide under reduced motion — keep only the (non-moving) shadow cue. */
+    .game-tile:hover:not(:disabled) { transform: none; }
+    .game-tile:hover:not(:disabled) > .game-tile-surface { transform: none; box-shadow: var(--shadow-card-lift); }
     .hero-ribbon-track { animation: none; }
     body:not(.in-game)::before,
     body:not(.in-game)::after { animation: none; }

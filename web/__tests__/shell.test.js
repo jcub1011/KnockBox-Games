@@ -203,6 +203,103 @@ describe('Play Log', () => {
     sendEntry(ws, { gameId: 'mystery' });
     expect(el('playlog-list').querySelector('.pl-item-game').textContent).toBe('mystery');
   });
+
+  describe('Clear', () => {
+    it('shows the Clear button only once the log has entries', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      expect(el('playlog-clear').hidden).toBe(true); // empty log → no Clear affordance
+      sendEntry(ws);
+      expect(el('playlog-clear').hidden).toBe(false);
+    });
+
+    it('clicking Clear opens a confirmation modal without deleting anything', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      el('playlog-clear').click();
+      expect(el('pl-clear-modal').hidden).toBe(false);
+      // Focus lands inside the dialog on the safe (Cancel) path, not on the unfocusable backdrop.
+      expect(document.activeElement).toBe(el('pl-clear-modal').querySelector('.rc-modal-copy.secondary'));
+      expect(el('pl-clear-text').textContent).toContain('1 entry'); // count reflected, singular
+      // Confirmation is required first: the stored log is still intact.
+      expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
+      expect(el('playlog-list').querySelectorAll('.pl-item')).toHaveLength(1);
+    });
+
+    it('confirming "Clear All" empties storage and restores the empty state', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+      sendEntry(ws, { metadata: { result: 'second' } });
+
+      el('playlog-clear').click();
+      expect(el('pl-clear-text').textContent).toContain('2 entries'); // plural
+      el('pl-clear-confirm').click();
+
+      expect(localStorage.getItem('kb.playLog')).toBeNull();
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(el('playlog-empty').hidden).toBe(false);
+      expect(el('playlog-list').hidden).toBe(true);
+      expect(el('playlog-list').querySelectorAll('.pl-item')).toHaveLength(0);
+      expect(el('playlog-clear').hidden).toBe(true);
+    });
+
+    it('Cancel and Escape close the modal without deleting anything', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      // Cancel button (a [data-pl-close] node) dismisses without clearing.
+      el('playlog-clear').click();
+      el('pl-clear-modal').querySelector('.rc-modal-copy.secondary').click();
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
+
+      // Escape also dismisses without clearing.
+      el('playlog-clear').click();
+      expect(el('pl-clear-modal').hidden).toBe(false);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
+    });
+
+    it('closing the modal restores focus to the trigger button', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      el('playlog-clear').focus(); // click alone doesn't move focus in jsdom — set it explicitly
+      el('playlog-clear').click();
+      expect(document.activeElement).not.toBe(el('playlog-clear')); // focus moved into the dialog
+
+      el('pl-clear-modal').querySelector('.rc-modal-copy.secondary').click(); // Cancel
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(document.activeElement).toBe(el('playlog-clear')); // focus returned to the trigger
+    });
+
+    it('traps Tab within the open dialog', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      el('playlog-clear').click();
+      const focusable = [...el('pl-clear-modal').querySelectorAll('button:not([disabled])')];
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      // Tab off the last control wraps to the first.
+      last.focus();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' }));
+      expect(document.activeElement).toBe(first);
+
+      // Shift+Tab off the first control wraps to the last.
+      first.focus();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true }));
+      expect(document.activeElement).toBe(last);
+    });
+  });
 });
 
 describe('name gate', () => {
@@ -532,6 +629,16 @@ describe('room-code button gestures', () => {
     el('room-code-btn').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(el('rc-modal').hidden).toBe(false);
     expect(el('rc-modal-code').textContent).toBe('AB12');
+  });
+
+  it('two rapid clicks open the modal (touch double-tap, where dblclick is unreliable)', async () => {
+    await enterRoom();
+    const btn = el('room-code-btn');
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); // within DBL_MS
+    expect(el('rc-modal').hidden).toBe(false);
+    expect(el('rc-modal-code').textContent).toBe('AB12');
+    expect(btn.classList.contains('revealed')).toBe(false); // reset behind the modal
   });
 
   it('right-click copies the code to the clipboard', async () => {
