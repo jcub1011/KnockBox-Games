@@ -192,6 +192,11 @@ function recordPlayLog(msg) {
   renderPlayLog(); // the panel is hidden while in-game; re-rendering it then is harmless
 }
 
+function clearPlayLog() {
+  try { localStorage.removeItem(PLAYLOG_KEY); } catch { /* storage blocked — ignore */ }
+  renderPlayLog();
+}
+
 function plChip(text, className) {
   const span = document.createElement('span');
   span.className = className ? `pl-chip ${className}` : 'pl-chip';
@@ -276,6 +281,8 @@ export function renderPlayLog() {
   const hasEntries = entries.length > 0;
   empty.hidden = hasEntries;
   list.hidden = !hasEntries;
+  const clearBtn = el('playlog-clear');
+  if (clearBtn) clearBtn.hidden = !hasEntries;
   for (const entry of entries) list.appendChild(playLogItem(entry));
 }
 
@@ -659,6 +666,19 @@ function closeCodeModal() {
   el('rc-modal').hidden = true;
 }
 
+function openClearModal() {
+  const n = readPlayLog().length;
+  if (!n) return; // nothing to clear
+  el('pl-clear-text').textContent =
+    `This removes all ${n} ${n === 1 ? 'entry' : 'entries'} and can't be undone.`;
+  el('pl-clear-modal').hidden = false;
+  el('pl-clear-modal').querySelector('[data-pl-close]').focus(); // default focus on the safe (Cancel) path
+}
+
+function closeClearModal() {
+  el('pl-clear-modal').hidden = true;
+}
+
 const rc = el('room-code-btn');
 let longPressTimer = null;
 let longPressed = false;
@@ -724,8 +744,17 @@ el('rc-modal-copy').addEventListener('click', () => { copyRoomCode(); closeCodeM
 el('rc-modal-copy-link').addEventListener('click', () => { copyJoinLink(); closeCodeModal(); });
 el('rc-modal').querySelectorAll('[data-rc-close]').forEach((node) =>
   node.addEventListener('click', closeCodeModal));
+
+// Clear Play Log: the button only deletes after the confirmation modal's "Clear All".
+el('playlog-clear').addEventListener('click', openClearModal);
+el('pl-clear-confirm').addEventListener('click', () => { clearPlayLog(); closeClearModal(); });
+el('pl-clear-modal').querySelectorAll('[data-pl-close]').forEach((node) =>
+  node.addEventListener('click', closeClearModal));
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !el('rc-modal').hidden) closeCodeModal();
+  if (e.key !== 'Escape') return;
+  if (!el('rc-modal').hidden) closeCodeModal();
+  if (!el('pl-clear-modal').hidden) closeClearModal();
 });
 
 applyGate();

@@ -562,6 +562,14 @@ body.in-game::after {
     color: var(--ink);
 }
 
+/* Heading row: title on the left, the (conditionally shown) Clear button on the right. */
+.pl-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
 .pl-heading {
     font-family: var(--font-display);
     font-size: 0.95rem;
@@ -573,6 +581,40 @@ body.in-game::after {
     padding-left: 1rem;
     padding-bottom: 10px;
     position: relative;
+}
+
+/* Unobtrusive text button; hidden until the log has entries (toggled in renderPlayLog). */
+.pl-clear {
+    flex: none;
+    appearance: none;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 2px 6px;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-soft);
+    border-radius: 6px;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.pl-clear:hover,
+.pl-clear:focus-visible {
+    color: var(--accent-color);
+    background: var(--canvas-card);
+}
+
+.pl-clear[hidden] { display: none; }
+
+/* Body copy inside the clear-confirmation modal (reuses the .rc-modal card chrome). */
+.pl-clear-text {
+    margin: 0 0 4px;
+    color: var(--ink-soft);
+    font-size: 0.9rem;
+    line-height: 1.4;
 }
 
 .pl-heading::after {
@@ -600,6 +642,12 @@ body.in-game::after {
     color: var(--ink-soft);
     font-size: 0.9rem;
 }
+
+/* renderPlayLog toggles these via the `hidden` attribute; the display rules above (flex) would
+   otherwise override the UA `[hidden] { display: none }`, leaving the empty state visible behind
+   the populated list. */
+.pl-state[hidden],
+.pl-list[hidden] { display: none; }
 
 .pl-state-icon { font-size: 1.6rem; line-height: 1; }
 

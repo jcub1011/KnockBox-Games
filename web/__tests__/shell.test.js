@@ -203,6 +203,66 @@ describe('Play Log', () => {
     sendEntry(ws, { gameId: 'mystery' });
     expect(el('playlog-list').querySelector('.pl-item-game').textContent).toBe('mystery');
   });
+
+  describe('Clear', () => {
+    it('shows the Clear button only once the log has entries', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      expect(el('playlog-clear').hidden).toBe(true); // empty log → no Clear affordance
+      sendEntry(ws);
+      expect(el('playlog-clear').hidden).toBe(false);
+    });
+
+    it('clicking Clear opens a confirmation modal without deleting anything', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      el('playlog-clear').click();
+      expect(el('pl-clear-modal').hidden).toBe(false);
+      expect(el('pl-clear-text').textContent).toContain('1 entry'); // count reflected, singular
+      // Confirmation is required first: the stored log is still intact.
+      expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
+      expect(el('playlog-list').querySelectorAll('.pl-item')).toHaveLength(1);
+    });
+
+    it('confirming "Clear All" empties storage and restores the empty state', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+      sendEntry(ws, { metadata: { result: 'second' } });
+
+      el('playlog-clear').click();
+      expect(el('pl-clear-text').textContent).toContain('2 entries'); // plural
+      el('pl-clear-confirm').click();
+
+      expect(localStorage.getItem('kb.playLog')).toBeNull();
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(el('playlog-empty').hidden).toBe(false);
+      expect(el('playlog-list').hidden).toBe(true);
+      expect(el('playlog-list').querySelectorAll('.pl-item')).toHaveLength(0);
+      expect(el('playlog-clear').hidden).toBe(true);
+    });
+
+    it('Cancel and Escape close the modal without deleting anything', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      // Cancel button (a [data-pl-close] node) dismisses without clearing.
+      el('playlog-clear').click();
+      el('pl-clear-modal').querySelector('.rc-modal-copy.secondary').click();
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
+
+      // Escape also dismisses without clearing.
+      el('playlog-clear').click();
+      expect(el('pl-clear-modal').hidden).toBe(false);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
+    });
+  });
 });
 
 describe('name gate', () => {
