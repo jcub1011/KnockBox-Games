@@ -195,13 +195,17 @@ public sealed class GameAssetPrecompressor(
         }
         finally
         {
-            if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best effort */ } }
+            // Best effort: a failed delete leaves a harmless orphan .tmp, retried on the next reconcile —
+            // nothing an operator can act on, so swallow rather than log noise.
+            if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best effort: orphan retried next reconcile */ } }
         }
     }
 
     private static void DeleteIfExists(string path)
     {
-        if (File.Exists(path)) { try { File.Delete(path); } catch { /* best effort */ } }
+        // Best effort: a failed delete leaves a harmless orphan variant, retried on the next reconcile —
+        // nothing an operator can act on, so swallow rather than log noise.
+        if (File.Exists(path)) { try { File.Delete(path); } catch { /* best effort: orphan retried next reconcile */ } }
     }
 
     // Deletes variants whose source file is gone, whose source should no longer be compressed, or whose

@@ -464,7 +464,11 @@ static string? ProbeWritable(string dir)
     }
     catch (Exception ex)
     {
-        try { File.Delete(probe); } catch { /* nothing to clean up if the write never landed */ }
+        // Best-effort cleanup of the zero-byte probe file; a failure here leaves a harmless orphan,
+        // nothing an operator can act on. The MEANINGFUL error — that the dir isn't writable — is not
+        // swallowed: it's returned below and surfaced/logged via the deployment diagnostics. (No logger
+        // exists yet anyway; this probe runs before Serilog is configured.)
+        try { File.Delete(probe); } catch { /* best effort: nothing to clean up if the write never landed */ }
         return ex.Message;
     }
 }
