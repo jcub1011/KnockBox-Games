@@ -264,6 +264,41 @@ describe('Play Log', () => {
       expect(el('pl-clear-modal').hidden).toBe(true);
       expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);
     });
+
+    it('closing the modal restores focus to the trigger button', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      el('playlog-clear').focus(); // click alone doesn't move focus in jsdom — set it explicitly
+      el('playlog-clear').click();
+      expect(document.activeElement).not.toBe(el('playlog-clear')); // focus moved into the dialog
+
+      el('pl-clear-modal').querySelector('.rc-modal-copy.secondary').click(); // Cancel
+      expect(el('pl-clear-modal').hidden).toBe(true);
+      expect(document.activeElement).toBe(el('playlog-clear')); // focus returned to the trigger
+    });
+
+    it('traps Tab within the open dialog', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      sendEntry(ws);
+
+      el('playlog-clear').click();
+      const focusable = [...el('pl-clear-modal').querySelectorAll('button:not([disabled])')];
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      // Tab off the last control wraps to the first.
+      last.focus();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' }));
+      expect(document.activeElement).toBe(first);
+
+      // Shift+Tab off the first control wraps to the last.
+      first.focus();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true }));
+      expect(document.activeElement).toBe(last);
+    });
   });
 });
 

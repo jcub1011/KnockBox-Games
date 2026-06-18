@@ -655,15 +655,43 @@ async function copyJoinLink() {
   }
 }
 
+// Shared dialog focus management for the .rc-modal overlays (room-code + clear-play-log). Both
+// declare aria-modal, so on open we remember the trigger and move focus in; on close we restore it
+// (a keyboard user lands back where they were, not at the top of the document); Tab is trapped
+// inside the open dialog by the keydown handler below.
+let lastFocused = null;   // control to restore focus to when the active modal closes
+let activeModal = null;   // the currently-open .rc-modal element, or null
+
+// Focusable controls inside a dialog card (buttons; the backdrop is not focusable). Exclude
+// anything inside a [hidden] subtree — correct in both jsdom and a real browser (offsetParent is
+// always null in jsdom, so it can't be used here).
+function modalFocusables(modal) {
+  return [...modal.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+    .filter((n) => !n.closest('[hidden]'));
+}
+
+function openModal(modal, initialFocus) {
+  lastFocused = document.activeElement;
+  modal.hidden = false;
+  activeModal = modal;
+  (initialFocus || modalFocusables(modal)[0])?.focus();
+}
+
+function closeModal(modal) {
+  modal.hidden = true;
+  if (activeModal === modal) activeModal = null;
+  if (lastFocused?.isConnected) lastFocused.focus(); // return focus to the trigger
+  lastFocused = null;
+}
+
 function openCodeModal() {
   if (!lobby) return;
   el('rc-modal-code').textContent = lobby.lobbyId;
-  el('rc-modal').hidden = false;
-  el('rc-modal-copy').focus();
+  openModal(el('rc-modal'), el('rc-modal-copy'));
 }
 
 function closeCodeModal() {
-  el('rc-modal').hidden = true;
+  closeModal(el('rc-modal'));
 }
 
 function openClearModal() {
@@ -671,12 +699,12 @@ function openClearModal() {
   if (!n) return; // nothing to clear
   el('pl-clear-text').textContent =
     `This removes all ${n} ${n === 1 ? 'entry' : 'entries'} and can't be undone.`;
-  el('pl-clear-modal').hidden = false;
-  el('pl-clear-modal').querySelector('.rc-modal-copy.secondary').focus(); // default focus on the safe (Cancel) path
+  // default focus on the safe (Cancel) path
+  openModal(el('pl-clear-modal'), el('pl-clear-modal').querySelector('.rc-modal-copy.secondary'));
 }
 
 function closeClearModal() {
-  el('pl-clear-modal').hidden = true;
+  closeModal(el('pl-clear-modal'));
 }
 
 const rc = el('room-code-btn');
@@ -752,9 +780,19 @@ el('pl-clear-modal').querySelectorAll('[data-pl-close]').forEach((node) =>
   node.addEventListener('click', closeClearModal));
 
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  if (!el('rc-modal').hidden) closeCodeModal();
-  if (!el('pl-clear-modal').hidden) closeClearModal();
+  if (e.key === 'Escape') {
+    if (!el('rc-modal').hidden) closeCodeModal();
+    if (!el('pl-clear-modal').hidden) closeClearModal();
+    return;
+  }
+  // Trap Tab within the open dialog so focus can't wander to controls behind the overlay.
+  if (e.key === 'Tab' && activeModal) {
+    const f = modalFocusables(activeModal);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
 });
 
 applyGate();
