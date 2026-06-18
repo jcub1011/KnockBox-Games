@@ -534,6 +534,16 @@ describe('room-code button gestures', () => {
     expect(el('rc-modal-code').textContent).toBe('AB12');
   });
 
+  it('two rapid clicks open the modal (touch double-tap, where dblclick is unreliable)', async () => {
+    await enterRoom();
+    const btn = el('room-code-btn');
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); // within DBL_MS
+    expect(el('rc-modal').hidden).toBe(false);
+    expect(el('rc-modal-code').textContent).toBe('AB12');
+    expect(btn.classList.contains('revealed')).toBe(false); // reset behind the modal
+  });
+
   it('right-click copies the code to the clipboard', async () => {
     const writeText = stubClipboard();
     await enterRoom();
