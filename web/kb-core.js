@@ -15,6 +15,21 @@ export function isTerminalClose(code) {
   return code === TERMINAL_CLOSE_CODE;
 }
 
+// Trailing-edge debounce: returns a wrapper that defers `fn` until `ms` have elapsed since the LAST
+// call, collapsing a burst into one invocation. Used to keep high-frequency input (e.g. typing a
+// name) from sending a control frame per keystroke and tripping the server rate limit. The returned
+// function carries a .cancel() so callers that send immediately on their own (create/join) can drop
+// a still-pending trailing send instead of letting it fire a redundant duplicate.
+export function debounce(fn, ms) {
+  let timer = null;
+  const debounced = (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(...args); }, ms);
+  };
+  debounced.cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  return debounced;
+}
+
 // Capped exponential backoff for transient drops. attempt is 0-based: 1s, 2s, 4s, … up to `max`.
 export function reconnectDelay(attempt, base = 1000, max = 30000) {
   const n = Math.max(0, attempt | 0);

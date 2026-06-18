@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   TERMINAL_CLOSE_CODE,
   isTerminalClose,
+  debounce,
   reconnectDelay,
   parseLaunchParams,
   parseJoinParam,
@@ -54,6 +55,69 @@ describe('reconnectDelay', () => {
 
   it('clamps negative/garbage attempts to the base', () => {
     expect(reconnectDelay(-5)).toBe(1000);
+  });
+});
+
+describe('debounce', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('collapses a burst of calls into one trailing invocation after the delay', () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const d = debounce(fn, 250);
+
+    d(); d(); d();
+    expect(fn).not.toHaveBeenCalled();      // nothing fires mid-burst
+    vi.advanceTimersByTime(249);
+    expect(fn).not.toHaveBeenCalled();      // still within the window
+    vi.advanceTimersByTime(1);
+    expect(fn).toHaveBeenCalledTimes(1);    // exactly one call after the delay
+  });
+
+  it('resets the timer on each call (only quiet time counts)', () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const d = debounce(fn, 250);
+
+    d();
+    vi.advanceTimersByTime(200);
+    d();                                    // restarts the 250ms window
+    vi.advanceTimersByTime(200);
+    expect(fn).not.toHaveBeenCalled();      // 400ms elapsed but never 250ms quiet
+    vi.advanceTimersByTime(50);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the latest arguments through to the wrapped fn', () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const d = debounce(fn, 250);
+
+    d('a'); d('b');
+    vi.advanceTimersByTime(250);
+    expect(fn).toHaveBeenCalledWith('b');
+  });
+
+  it('cancel() drops a pending invocation', () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const d = debounce(fn, 250);
+
+    d();
+    d.cancel();
+    vi.advanceTimersByTime(250);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('cancel() is safe when nothing is pending', () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const d = debounce(fn, 250);
+
+    expect(() => d.cancel()).not.toThrow();
+    d();
+    vi.advanceTimersByTime(250);
+    expect(fn).toHaveBeenCalledTimes(1);     // still works after a no-op cancel
   });
 });
 
