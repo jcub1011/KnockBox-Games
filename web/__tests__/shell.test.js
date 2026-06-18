@@ -220,6 +220,8 @@ describe('Play Log', () => {
 
       el('playlog-clear').click();
       expect(el('pl-clear-modal').hidden).toBe(false);
+      // Focus lands inside the dialog on the safe (Cancel) path, not on the unfocusable backdrop.
+      expect(document.activeElement).toBe(el('pl-clear-modal').querySelector('.rc-modal-copy.secondary'));
       expect(el('pl-clear-text').textContent).toContain('1 entry'); // count reflected, singular
       // Confirmation is required first: the stored log is still intact.
       expect(JSON.parse(localStorage.getItem('kb.playLog'))).toHaveLength(1);

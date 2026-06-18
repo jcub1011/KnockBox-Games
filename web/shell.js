@@ -672,7 +672,7 @@ function openClearModal() {
   el('pl-clear-text').textContent =
     `This removes all ${n} ${n === 1 ? 'entry' : 'entries'} and can't be undone.`;
   el('pl-clear-modal').hidden = false;
-  el('pl-clear-modal').querySelector('[data-pl-close]').focus(); // default focus on the safe (Cancel) path
+  el('pl-clear-modal').querySelector('.rc-modal-copy.secondary').focus(); // default focus on the safe (Cancel) path
 }
 
 function closeClearModal() {
