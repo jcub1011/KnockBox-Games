@@ -220,6 +220,47 @@ describe('name gate', () => {
     expect(el('games').querySelector('.game-tile').disabled).toBe(false);
     expect(localStorage.getItem('kb.displayName')).toBe('Bob');
   });
+
+  it('debounces the SetName send so a burst of keystrokes sends one frame, not one per key', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    vi.useFakeTimers();
+
+    const name = el('player-name-input');
+    for (const v of ['B', 'Bo', 'Bob', 'Bobb', 'Bobby']) {
+      name.value = v;
+      name.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // The gate and persistence update immediately on every keystroke...
+    expect(el('join-btn').disabled).toBe(false);
+    expect(localStorage.getItem('kb.displayName')).toBe('Bobby');
+    // ...but no SetName is sent until typing pauses (this is what kept us under the rate limit).
+    expect(ws.sent.filter((f) => f.type === 'SetName')).toHaveLength(0);
+
+    vi.advanceTimersByTime(250);
+    const setNames = ws.sent.filter((f) => f.type === 'SetName');
+    expect(setNames).toHaveLength(1);
+    expect(setNames[0].displayName).toBe('Bobby');
+  });
+
+  it('createLobby flushes the name immediately and cancels the pending debounced send', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    vi.useFakeTimers();
+
+    const name = el('player-name-input');
+    name.value = 'Carol';
+    name.dispatchEvent(new Event('input', { bubbles: true })); // schedules a debounced SetName
+
+    const p = shell.createLobby('ttt');                        // sends SetName now, cancels the pending one
+    const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+    ws._recv({ cid: frame.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+    await p;
+
+    vi.advanceTimersByTime(250);                               // the cancelled debounce must NOT fire
+    expect(ws.sent.filter((f) => f.type === 'SetName')).toHaveLength(1);
+  });
 });
 
 describe('createLobby', () => {

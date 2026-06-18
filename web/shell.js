@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, sanitizeGameOrigin } from './kb-core.js';
+import { PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, gameWsEndpoint, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, sanitizeGameOrigin } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -87,6 +87,11 @@ function sendName() {
     send({ type: 'SetName', displayName });
   }
 }
+
+// The name box fires `input` per keystroke; sending a SetName each time trips the control-plane
+// rate limit (5/sec) when typing fast. Debounce the network send so a burst collapses into one
+// frame — local UI (gate, localStorage) still updates immediately on every keystroke.
+const sendNameDebounced = debounce(sendName, 250);
 
 export function handle(msg) {
   // Resolve any awaiting request first.
@@ -317,6 +322,7 @@ function fallbackSurface(name) {
 
 export async function createLobby(gameId) {
   if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
+  sendNameDebounced.cancel();   // we send immediately below; drop any pending trailing send
   sendName();
   const reply = await request('CreateLobby', { gameId });
   if (reply.type === 'LobbyCreated') {
@@ -332,6 +338,7 @@ export async function joinByCode() {
   const code = (el('room-code-input').value || '').trim().toUpperCase();
   if (!displayName.trim()) { showError('Please enter a name to start playing!'); return; }
   if (!code) { showError('Please enter a valid room code.'); return; }
+  sendNameDebounced.cancel();   // we send immediately below; drop any pending trailing send
   sendName();
   // Track the target lobby so any PlayerJoined push that races ahead of GameStarting attaches, but
   // DON'T switch to the game view yet — a wrong code must not flash the waiting screen. On success
@@ -563,7 +570,7 @@ nameInput.addEventListener('input', () => {
   // other tabs write (no `storage` listener) — see the identity note above.
   localStorage.setItem('kb.displayName', displayName);
   applyGate();
-  sendName();
+  sendNameDebounced();
 });
 
 // A game iframe (on the game origin) can tell us its session ended terminally — kicked, ticket
