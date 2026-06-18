@@ -380,9 +380,15 @@ function autoJoin(code) {
 }
 
 // ── Waiting room (shown on create/join, before the game starts) ───────────────
+function setDocumentTitle(gameName) {
+  document.title = gameName ? `KnockBox Games - ${gameName}` : 'KnockBox Games';
+}
+
 export function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
-  el('game-title').textContent = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
+  const displayName = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
+  el('game-title').textContent = displayName;
+  setDocumentTitle(displayName);
   el('lobby-code').textContent = lobby.lobbyId;
   el('frame-host').innerHTML = ''; // no iframe until GameStarting
   el('waiting').style.display = 'block';
@@ -414,6 +420,7 @@ export async function enterGame(starting) {
   };
 
   el('game-title').textContent = manifest.name;
+  setDocumentTitle(manifest.name);
   el('lobby-code').textContent = starting.lobbyId;
   themeHeader(manifest);
 
@@ -450,6 +457,7 @@ export function showLobbyView() {
   lobby = null;
   closeCodeModal();
   resetHeaderTheme();
+  setDocumentTitle(null);
   el('frame-host').innerHTML = '';
   document.body.classList.remove('in-game');
   el('game-view').style.display = 'none';
