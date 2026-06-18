@@ -3,11 +3,14 @@ name: CI
 on:
   push:
     branches: [main, 'feat/**', 'fix/**']
+    # Release tags (v1.2.3) re-run the suite on the tagged commit and trigger the publish job.
+    tags: ['v*']
   pull_request:
     branches: [main]
 
-# Least-privilege default for GITHUB_TOKEN: every job only checks out and builds/tests —
-# none push images, comment on PRs, or create releases — so read-only contents is sufficient.
+# Least-privilege default for GITHUB_TOKEN: the test/build jobs only check out and build/test, so
+# read-only contents is sufficient. The lone exception is the `publish` job, which grants itself
+# `packages: write` at job level (below) to push images to GHCR — nothing else can write packages.
 permissions:
   contents: read
 
@@ -91,9 +94,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
 
+      # Build via buildx so the layers land in the gha cache that the publish job reuses — the
+      # published image is then a cache-hit rebuild of these exact, smoke-tested layers, not a
+      # separate build. `load` puts the image in the local daemon so the `docker run` smoke test
+      # below can use the `knockbox:ci` tag.
       - name: Build image
-        run: docker build -f KnockBox.Server/Dockerfile -t knockbox:ci .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: KnockBox.Server/Dockerfile
+          load: true
+          tags: knockbox:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start container with an empty mounted games dir
         run: |
@@ -149,3 +164,60 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker rm -f kb || true
+
+  publish:
+    name: Publish image to GHCR
+    runs-on: ubuntu-latest
+    # Only publish green commits: gate on every test/build job above.
+    needs: [dotnet, aot, web, clients-phaser, pack-game, docker]
+    # Publish only on main (→ :develop) and v* tags (→ :latest + version tags). Never on PRs or
+    # feature branches — those run the suite but produce no image.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Serialize publishes for a given ref so two quick main pushes can't race on the :develop tag.
+    # cancel-in-progress: false — never abort a push mid-flight; let it finish, then run the next.
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write   # push images to GHCR with the built-in GITHUB_TOKEN — no extra secrets
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compute tags from the trigger: main → :develop; a v* tag → :latest + :MAJOR.MINOR.PATCH +
+      # :MAJOR.MINOR. metadata-action lowercases the image name (jcub1011/KnockBox-Games →
+      # ghcr.io/jcub1011/knockbox-games), and `latest=auto` adds :latest ONLY on semver tag builds.
+      # Caveat: latest=auto only sees the current ref, not the registry — pushing an OLDER v* tag
+      # would move :latest backward, so push version tags in increasing order.
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: latest=auto
+
+      # Reuses the gha cache the `docker` smoke-test job warmed (this job `needs` it), so the
+      # pushed image is a cache-hit rebuild of the exact layers that were just smoke-tested — not a
+      # fresh, unvalidated build. Single-platform (linux-x64/amd64) matches the Dockerfile's
+      # `-r linux-x64` AOT publish — no QEMU/multi-arch needed — and the cache makes the slow AOT
+      # compile a no-op on the common path.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: KnockBox.Server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

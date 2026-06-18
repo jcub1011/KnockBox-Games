@@ -19,6 +19,10 @@
 # (see the second-instance example below).
 services:
   knockbox:
+    # To run a prebuilt image instead of building locally, comment out the `build:` block below and
+    # uncomment one of these (see docs/HOSTING.md → "Run a prebuilt image"):
+    # image: ghcr.io/jcub1011/knockbox-games:latest    # stable release
+    # image: ghcr.io/jcub1011/knockbox-games:develop   # pre-release test channel
     build:
       context: .
       dockerfile: KnockBox.Server/Dockerfile

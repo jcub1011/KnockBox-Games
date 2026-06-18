@@ -20,6 +20,45 @@ docker compose up -d --build
 Drop a game folder into `./games/` (or your configured games dir) and it appears in the lobby
 browser within a few seconds.
 
+### Run a prebuilt image
+
+Instead of building from source you can pull a published image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/jcub1011/knockbox-games:latest
+```
+
+Two tags are published:
+
+| Tag | Channel | Built from |
+|---|---|---|
+| `:latest` | **Stable release** — run this in production. | A git release tag (`v1.2.3`). Versioned tags (`:1.2.3`, `:1.2`) are published alongside it if you want to pin. `:latest` tracks the most recently pushed `v*` tag, so release in increasing version order. |
+| `:develop` | **Pre-release test build** — run an unstable build (e.g. to verify a deployment before promoting it to stable). | Every push to `main`. |
+
+Published images are `linux/amd64` only (the server is a Native AOT `linux-x64` build) — they
+will not run on ARM hosts.
+
+> **First publish is private.** New GHCR packages start private. A maintainer sets the visibility
+> to **Public** once — repo **Packages** → the package → **Package settings** → **Change
+> visibility** → *Public*. Visibility is per **package**, not per tag, so this single flip exposes
+> **both** `:latest` and `:develop` (and the version tags). That is intentional: a server admin who
+> wants to run an unstable build can pull `:develop` with no credentials, just like `:latest`.
+
+To use it with the compose file, comment out the `build:` block on the `knockbox` service and set
+an `image:` instead (the commented lines are already there):
+
+```yaml
+services:
+  knockbox:
+    image: ghcr.io/jcub1011/knockbox-games:latest   # or :develop for the test channel
+```
+
+> **TrueNAS** (or any OCI host): point a Custom App at `ghcr.io/jcub1011/knockbox-games:latest`
+> (or `:develop`). Once the package is public (see the one-time step above), no registry
+> credentials are needed. Mount your games
+> directory read-only at `/games` and a writable cache at `/app/games-compressed`, and map ports
+> `8080`/`8081` 1:1 (or pin `KnockBox__GamesOrigin`) — same as the compose setup below.
+
 ### Use a stable games directory
 
 Your games live **outside** the container, in any host directory you choose — they survive image
