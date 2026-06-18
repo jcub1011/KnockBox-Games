@@ -123,6 +123,47 @@ Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-
 3. Lock down origins: `KnockBox__AllowedOrigins__0/1` to your two public origins.
 4. Make sure the proxy allows WebSocket upgrade on `/ws`.
 
+### Behind Cloudflare Tunnel (cloudflared)
+
+The game origin **must be its own hostname** — this isn't optional. The shell origin serves only
+game thumbnails (the full, untrusted build loads solely from the game origin so it can't read the
+shell's identity token), and Cloudflare's proxy can't terminate HTTPS on the internal games port
+(8081), so the two-port trick doesn't survive a tunnel. With a tunnel that second hostname is cheap:
+one extra ingress rule, and `cloudflared` auto-creates the DNS record.
+
+Run **single-port mode** — point both public hostnames at the **same** container port (8080) and let
+the server route the game origin by `Host` header:
+
+```yaml
+# cloudflared config (ingress)
+ingress:
+  - hostname: games.example.com      # game origin — its own hostname
+    service: http://knockbox:8080     # SAME container + port as the shell
+  - hostname: play.example.com        # shell — players open this
+    service: http://knockbox:8080
+  - service: http_status:404
+```
+
+Adjust `knockbox:8080` to however `cloudflared` reaches the container (a service name on a shared
+Docker network, or `http://localhost:8080`). If the DNS record isn't created automatically, add it
+with `cloudflared tunnel route dns <tunnel> games.example.com`. WebSocket upgrade on `/ws` works
+through the tunnel out of the box.
+
+Then on the container:
+
+```yaml
+environment:
+  KnockBox__ForwardedHeaders: "true"                     # trust X-Forwarded-Proto → https/wss
+  KnockBox__GamesHost: "games.example.com"               # this Host = the game origin
+  KnockBox__AllowedOrigins__0: "https://play.example.com"
+  KnockBox__AllowedOrigins__1: "https://games.example.com"
+```
+
+**Don't publish the container's ports to the host** (drop the `ports:` mapping, or bind to
+`127.0.0.1`). Only `cloudflared` should be able to reach it — with `ForwardedHeaders` on, the server
+trusts `X-Forwarded-*` from any caller, so a client reaching the container directly could spoof its
+IP past the per-IP connection cap. The internal games port (8081) goes unused in this mode.
+
 ### Hot-reload on Docker Desktop
 
 File-change events don't cross Windows/macOS bind mounts, so the image enables a polling fallback
