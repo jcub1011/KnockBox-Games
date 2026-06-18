@@ -93,7 +93,12 @@ this is intentional (anonymous, no accounts).
 `Games/GameCatalog.cs` scans `games/*/GAME.json` at startup and on change (debounced
 `FileSystemWatcher`, plus the polling fallback above). The folder name **must equal** the
 manifest `id`, and `entry` is path-traversal–checked to stay inside the game folder. The
-catalog reference is swapped atomically — readers never see a half-built catalog.
+catalog reference is swapped atomically — readers never see a half-built catalog. A games dir
+that is missing OR present-but-unreadable (e.g. a Docker mount the UID-1654 user can't read) does
+**not** crash startup: `Discover()` catches the access error and exposes `GameCatalog.ScanError`,
+which `Hosting/DeploymentDiagnostics.cs` surfaces (with other file-access problems found at
+bootstrap) by replacing the shell home page with `Hosting/DeploymentWarningPage.cs` — see the
+home-page warning middleware in `Program.cs` and `docs/HOSTING.md`.
 
 GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
 `crossOriginIsolated` (optional, for threaded engine exports), and `themeColor` /

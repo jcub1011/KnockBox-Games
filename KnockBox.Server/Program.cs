@@ -36,16 +36,44 @@ var precompressMinBytes = builder.Configuration.GetValue("KnockBox:PrecompressMi
 // fingerprints GAME.json) and is a general safety net. 0 = off (rely on the Discovered event).
 var precompressReconcileSeconds = builder.Configuration.GetValue("KnockBox:PrecompressReconcileSeconds", 60);
 
-// Best-effort: a read-only games mount (recommended in Docker) or a root-owned parent must not
-// crash startup — GameCatalog and the static-file setup below both tolerate a missing directory.
-var directoryWarnings = new List<string>();
+// Best-effort: a read-only games mount (recommended in Docker) or a root-owned parent must not crash
+// startup. GameCatalog and the static-file setup below tolerate a directory that is missing OR exists
+// but is unreadable; any problem found here (and a live games-access probe) is collected in
+// DeploymentDiagnostics and surfaced on the shell home page so a misconfigured deployment is loud.
+var diagnostics = new DeploymentDiagnostics();
 var bootstrapDirs = precompressEnabled
     ? new[] { webRoot, gamesRoot, logsRoot, gamesCompressedRoot }
     : new[] { webRoot, gamesRoot, logsRoot };
 foreach (var dir in bootstrapDirs)
 {
     try { Directory.CreateDirectory(dir); }
-    catch (Exception ex) { directoryWarnings.Add($"Could not create '{dir}': {ex.Message}"); }
+    catch (Exception ex)
+    {
+        // No web root ⇒ blank shell; no games root ⇒ no games can ever load — both block. A missing
+        // logs/cache dir only degrades (the sinks tolerate it), so it's a non-blocking warning.
+        var blocking = dir == webRoot || dir == gamesRoot;
+        diagnostics.Report("A required directory could not be created",
+            $"'{dir}' is missing and could not be created ({ex.Message}). Check the mount and its permissions.",
+            blocking);
+    }
+}
+
+// Probe the directories the server must WRITE to (logs always; the pre-compressed cache when enabled).
+// An unwritable/wrong-owner mount here doesn't crash — the Serilog file sink and the precompressor both
+// degrade gracefully — but the admin should know, so surface it on the warning page.
+var writableDirs = precompressEnabled
+    ? new[] { (logsRoot, "Logs folder"), (gamesCompressedRoot, "Pre-compressed cache") }
+    : new[] { (logsRoot, "Logs folder") };
+foreach (var (dir, label) in writableDirs)
+{
+    if (!Directory.Exists(dir)) continue; // a create failure above already reported it
+    var writeError = ProbeWritable(dir);
+    if (writeError is not null)
+        // Non-blocking: the Serilog file sink and the precompressor both degrade gracefully, so this
+        // never blanks a working site — but it's logged below and shown on the warning page if one is
+        // already up for a blocking reason, so it gets fixed before a proper deployment.
+        diagnostics.Report($"{label} is not writable",
+            $"'{dir}' is not writable by the server ({writeError}). In Docker the container runs as UID 1654, so chown the mounted folder to that user.");
 }
 
 // Persist logs to a file that rolls once per day (knockbox-YYYYMMDD.log) while still echoing to the
@@ -143,15 +171,22 @@ var app = builder.Build();
 // The resolved roots are the first thing an admin needs when "my games don't show up".
 app.Logger.LogInformation("Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} (precompress: {Precompress})",
     webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled);
-foreach (var warning in directoryWarnings)
-    app.Logger.LogWarning("{Warning}", warning);
 // A web root without the shell means a blank site — make the misconfiguration loud and diagnosable
-// instead of silently serving nothing.
+// instead of silently serving nothing. (Blocking: surfaced on the home-page warning below.)
 if (!File.Exists(Path.Combine(webRoot, "index.html")))
-    app.Logger.LogError(
-        "Web root {WebRoot} has no index.html — the platform shell will serve a blank site. " +
-        "Set KnockBox:WebRoot to the folder containing the shell, or verify the install/publish output.",
-        webRoot);
+    diagnostics.Report("Platform shell is missing",
+        $"No index.html under the web root '{webRoot}', so the shell can't be served. Verify the install/publish output, or set KnockBox:WebRoot to the folder containing the shell.",
+        blocking: true);
+
+// Log every bootstrap problem so it's visible without opening the site: blocking ones as errors,
+// degraded-but-functional ones as warnings. (The live games-access error is logged by GameCatalog.)
+foreach (var issue in diagnostics.Current())
+{
+    if (issue.Blocking)
+        app.Logger.LogError("Deployment problem — {Title}: {Detail}", issue.Title, issue.Detail);
+    else
+        app.Logger.LogWarning("Deployment warning — {Title}: {Detail}", issue.Title, issue.Detail);
+}
 
 // Must run before anything that reads Request.Scheme/Host (the /ws map, OriginRouting.IsGameOrigin).
 if (forwardedHeaders)
@@ -172,6 +207,9 @@ if (forwardedHeaders)
 // Discover games at startup, then watch the folder so dropping in (or removing) a game needs no
 // restart — server managers add games with no code and no downtime.
 var catalog = app.Services.GetRequiredService<GameCatalog>();
+// Surface the games folder's live read state on the warning page: an unreadable mount no longer
+// crashes Discover() (below), it sets ScanError, which clears once a rescan succeeds.
+diagnostics.GamesAccessError = () => catalog.ScanError;
 
 // Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
 // Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
@@ -372,6 +410,11 @@ if (isolateShell)
         await next();
     });
 
+// Replace the shell home page with a diagnostic when a BLOCKING file-access problem is detected (see
+// DeploymentWarningMiddleware). Registered before UseDefaultFiles/UseStaticFiles so it wins over a
+// broken index.html.
+app.UseMiddleware<DeploymentWarningMiddleware>(diagnostics);
+
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
 app.UseStaticFiles(WebStaticOptions());
 
@@ -406,6 +449,24 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
+}
+
+// Best-effort writability check: create and delete a uniquely-named probe file. Returns null when the
+// directory is writable, else the failure message. Side-effect-free on success (the probe is removed).
+static string? ProbeWritable(string dir)
+{
+    var probe = Path.Combine(dir, $".kb-write-probe-{Guid.NewGuid():N}");
+    try
+    {
+        File.WriteAllBytes(probe, []);
+        File.Delete(probe);
+        return null;
+    }
+    catch (Exception ex)
+    {
+        try { File.Delete(probe); } catch { /* nothing to clean up if the write never landed */ }
+        return ex.Message;
+    }
 }
 
 // Sets cross-origin-isolation headers for a CrossOriginIsolated game's assets so threaded

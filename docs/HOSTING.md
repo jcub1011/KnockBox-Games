@@ -129,6 +129,26 @@ File-change events don't cross Windows/macOS bind mounts, so the image enables a
 (`KnockBox__GamesPollSeconds`, default 10 in the image; the compose file uses 5). On a Linux host
 the watcher works natively and discovery is sub-second; polling stays on as a harmless safety net.
 
+### The home page shows a configuration warning
+
+The server is deliberately resilient to file-access problems: an unreadable games mount, a missing
+shell, or an unwritable cache/log dir won't crash it. Instead it starts and **replaces the home page
+with a warning** listing exactly what's wrong, so a misconfiguration is obvious during setup rather
+than showing a blank or empty site. Almost always it's **permissions** — the container runs as
+**UID 1654**, so:
+
+- **Games folder not readable:** the mount must grant UID 1654 *read + execute*. `chown -R 1654`
+  the games dir (read-only mounts still need read access). This one clears automatically once fixed —
+  the games folder is re-checked continuously, no restart needed.
+- **Pre-compressed cache / logs not writable:** `chown -R 1654` those dirs (these are warnings, not
+  fatal — the server degrades to on-the-fly compression / console logging — but fix them for a proper
+  deployment). Applies on the next restart.
+- **Platform shell missing:** the web root has no `index.html`; verify the image/publish output or
+  set `KnockBox__WebRoot`.
+
+On TrueNAS, set ownership via **Datasets → Edit Permissions** if a plain `chown` doesn't stick (ACLs
+override POSIX mode).
+
 ---
 
 ## 2. Desktop app (no Docker, no .NET install)
