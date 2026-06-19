@@ -31,6 +31,10 @@ public sealed class LobbyManager
 
     public void Remove(string id) => _lobbies.TryRemove(id, out _);
 
+    /// <summary>Point-in-time snapshot of the active lobbies, so a caller (e.g. the reconnect-grace
+    /// reaper) can iterate and remove without mutating the dictionary mid-enumeration.</summary>
+    public IReadOnlyCollection<Lobby> Snapshot() => [.. _lobbies.Values];
+
     private static string NewId()
     {
         Span<char> buf = stackalloc char[4];

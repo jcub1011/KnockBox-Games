@@ -124,7 +124,14 @@ re-compressed. Disable the whole cache with `Precompress=false`.
 ### Lobbies & connections
 - `Lobbies/Lobby.cs` / `LobbyManager.cs` — in-memory lobbies keyed by a 4-char human code;
   membership is lock-guarded and `Players` is returned as a snapshot so broadcasts can't race
-  membership changes. Kicking bars rejoin for that lobby.
+  membership changes. Kicking bars rejoin for that lobby. A dropped **control** socket doesn't
+  remove the player immediately: with `DisconnectGraceSeconds` (default 60) set they're flagged
+  disconnected but kept in the lobby (so a tab refresh / blip survives — `PlayerDisconnected` /
+  `PlayerConnected` events tell peers), and a periodic reaper in `Program.cs` calling
+  `WebSocketHandler.ReapDisconnectedPlayers()` evicts those whose grace elapses. `0` = old
+  immediate-leave behavior. A lobby with no connected members left (empty, or all disconnected) is
+  closed immediately (`CloseLobbyIfDark`) rather than held — the grace only helps when someone's
+  still there. Explicit leaves (`LeaveLobby`) are always immediate.
 - `Networking/Connection.cs` — wraps one socket with a bounded single-reader outbound
   `Channel` drained by one writer task (preserves order). Overflow policy differs by role:
   control = `CloseOnFull` (events are precious), data = `DropOldest` (state is ephemeral).
@@ -138,7 +145,9 @@ configurable and disabled with `0`.
 
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
-`players`, `isHost`; callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`; send
+`players`, `isHost`; callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
+`onPlayerDisconnected`, `onPlayerConnected` (the last two: a peer's tab dropped but is held for the
+reconnect grace window, then returned — they stay in `players` throughout); send
 methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
 `log.{info,warn,error,debug,trace,critical}(message)` (console-like logging to the server, relayed
 as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPlay(metadata)` (a
@@ -167,5 +176,6 @@ in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`Log
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
-`*TokenTtlHours`, and the rate-limit knobs (`*MessagesPerSecond/Burst`, `MaxConnectionsPerIp`,
-`LobbyCreatesPerMinute`).
+`*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
+default 60; `0` = immediate), and the rate-limit knobs (`*MessagesPerSecond/Burst`,
+`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`).

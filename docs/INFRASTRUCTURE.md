@@ -111,9 +111,12 @@ anonymous id. The token is per-tab (sessionStorage) and **never leaves the shell
 → { "type": "RequestGameTicket", "cid": "c6", "lobbyId": "AB12" } ← { "type": "GameTicket", "cid":"c6", "ticket":"<scoped>" }
 → { "type": "LeaveLobby", "lobbyId": "AB12" }   // no response
 ```
-Push events (no `cid`): `PlayerJoined`, `PlayerLeft`. `GameStarting{lobbyId,gameId,hostId,players}`
-is sent to a single player when they enter a lobby (create/join/rejoin) — it means "load the game
-now", not a min-players threshold.
+Push events (no `cid`): `PlayerJoined`, `PlayerLeft`, and the reconnect-grace pair
+`PlayerDisconnected{lobbyId,playerId}` / `PlayerConnected{lobbyId,playerId}` (a member's shell
+socket dropped but they're held in the lobby for the grace window, then returned within it — they
+stay on the roster the whole time). `GameStarting{lobbyId,gameId,hostId,players}` is sent to a
+single player when they enter a lobby (create/join/rejoin) — it means "load the game now", not a
+min-players threshold.
 
 ### Data role (a game iframe's own socket) — first frame `Attach`
 
@@ -127,6 +130,7 @@ now", not a min-players threshold.
 → { "type": "Log", "level": "Information", "message": "…" }   // → server log sink (KnockBox.GameLog)
 → { "type": "GameLog", "metadata": { "placement": "1", … } } // → forwarded to this player's CONTROL socket
 ← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
+← { "type": "GamePlayerDisconnected", "playerId": "…" }   ← { "type": "GamePlayerConnected", "playerId": "…" }  // reconnect grace
 ```
 The server validates the ticket signature **and live lobby membership**, binds the connection to
 `(playerId, lobbyId)`, and resolves all routing from that binding — **the game never sends a lobby
@@ -177,8 +181,23 @@ The server is a blind pipe routing by the bound connection; the host's browser i
 truth.
 
 ### Disconnect & reconnect
-- Closing the **control** socket removes the player from its lobby, broadcasts `PlayerLeft` (and
-  `GamePlayerLeft` to game sockets), and deletes the lobby if empty.
+- Closing the **control** socket does **not** immediately remove the player. With a reconnect grace
+  window configured (`DisconnectGraceSeconds`, default 60), the player is flagged *disconnected* but
+  kept in the lobby (so the lobby stays alive and their game ticket stays valid); the server
+  broadcasts `PlayerDisconnected`/`GamePlayerDisconnected`. A reconnect within the window (a fresh
+  shell `Hello` + `Rejoin`) clears the flag and broadcasts `PlayerConnected`/`GamePlayerConnected`
+  with no roster churn. A background reaper (sweeping every ~5s) removes any member whose grace
+  elapses — broadcasting `PlayerLeft`/`GamePlayerLeft` and deleting the lobby if it empties; the
+  reaper re-checks for a live control socket first, so a player who reconnected is never evicted.
+  Setting the grace to `0` restores the old behaviour: a control-socket close leaves immediately.
+- A lobby is **closed immediately** the moment no member still holds a live control socket (it's
+  empty, or every remaining member is disconnected) — the grace only helps when someone is still
+  there to reconnect to, so a "dark" lobby isn't held. So a lone host who refreshes loses the lobby
+  (and recreates it), while a multiplayer refresh stays protected by the still-connected peers.
+  Explicit leaves (Leave / home button → `LeaveLobby`) are always immediate and unaffected by grace.
+- This is why a **tab refresh** is now survivable: the identity token (per-tab `sessionStorage`) and
+  saved lobby code persist across the reload, the shell auto-rejoins, and the grace window keeps the
+  lobby and membership alive in the gap.
 - The **data** socket reconnects on a *transient* drop with capped exponential backoff (1s→30s) and
   re-`Attach`es with the same ticket (re-validated against live membership). A **terminal** close
   (code `1008`: invalid ticket / membership ended) stops reconnection — no retry storm after a game
@@ -297,5 +316,6 @@ into `games/` and it appears within a second or two — no restart.
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection token bucket on inbound data-role frames (each relayed frame fans out O(lobby size)). Sustained violation → `Error{rate_limited}` + terminal close `1008`. `0` disables. |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
+| `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

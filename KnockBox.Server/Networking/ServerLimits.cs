@@ -14,7 +14,10 @@ public sealed record ServerLimits(
     double ControlMessagesPerSecond,
     double ControlMessagesBurst,
     int LobbyCreatesPerMinute,
-    int MaxConnectionsPerIp)
+    int MaxConnectionsPerIp,
+    // Grace window a member is kept in their lobby after their shell socket drops, so a tab refresh
+    // or brief network blip doesn't kick them out. 0 disables grace (immediate removal on drop).
+    TimeSpan DisconnectGrace)
 {
     public static ServerLimits FromConfiguration(IConfiguration config) => new(
         TimeSpan.FromSeconds(config.GetValue("KnockBox:HandshakeTimeoutSeconds", 10)),
@@ -23,5 +26,6 @@ public sealed record ServerLimits(
         config.GetValue("KnockBox:ControlMessagesPerSecond", 5.0),
         config.GetValue("KnockBox:ControlMessagesBurst", 10.0),
         config.GetValue("KnockBox:LobbyCreatesPerMinute", 10),
-        config.GetValue("KnockBox:MaxConnectionsPerIp", 32));
+        config.GetValue("KnockBox:MaxConnectionsPerIp", 32),
+        TimeSpan.FromSeconds(config.GetValue("KnockBox:DisconnectGraceSeconds", 60)));
 }

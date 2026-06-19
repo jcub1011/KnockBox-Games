@@ -78,6 +78,48 @@ public class MessageSerializationTests
         Assert.Equal("ABCD", back.LobbyId);
     }
 
+    [Theory]
+    [InlineData("PlayerDisconnected")]
+    [InlineData("PlayerConnected")]
+    public void Control_presence_messages_round_trip_with_lobby_and_player(string type)
+    {
+        IMessage original = type == "PlayerDisconnected"
+            ? new PlayerDisconnectedMessage("ABCD", "p7")
+            : new PlayerConnectedMessage("ABCD", "p7");
+
+        var json = JsonSerializer.Serialize(original, Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(type, doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("ABCD", doc.RootElement.GetProperty("lobbyId").GetString());
+        Assert.Equal("p7", doc.RootElement.GetProperty("playerId").GetString());
+
+        var back = JsonSerializer.Deserialize<IMessage>(json, Options);
+        var lobbyId = back switch
+        {
+            PlayerDisconnectedMessage d => d.LobbyId,
+            PlayerConnectedMessage c => c.LobbyId,
+            _ => null,
+        };
+        Assert.Equal("ABCD", lobbyId);
+    }
+
+    [Theory]
+    [InlineData("GamePlayerDisconnected")]
+    [InlineData("GamePlayerConnected")]
+    public void Game_presence_messages_round_trip_with_player(string type)
+    {
+        IMessage original = type == "GamePlayerDisconnected"
+            ? new GamePlayerDisconnectedMessage("p7")
+            : new GamePlayerConnectedMessage("p7");
+
+        var json = JsonSerializer.Serialize(original, Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(type, doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("p7", doc.RootElement.GetProperty("playerId").GetString());
+    }
+
     [Fact]
     public void Log_message_serializes_its_level_as_a_name_round_trip()
     {
@@ -178,6 +220,10 @@ public class MessageSerializationTests
     [InlineData(typeof(RequestGameTicketMessage))]
     [InlineData(typeof(GamePlayerJoinedMessage))]
     [InlineData(typeof(GamePlayerLeftMessage))]
+    [InlineData(typeof(GamePlayerDisconnectedMessage))]
+    [InlineData(typeof(GamePlayerConnectedMessage))]
+    [InlineData(typeof(PlayerDisconnectedMessage))]
+    [InlineData(typeof(PlayerConnectedMessage))]
     [InlineData(typeof(KickPlayerMessage))]
     [InlineData(typeof(KickedMessage))]
     [InlineData(typeof(LogMessage))]

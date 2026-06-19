@@ -138,6 +138,11 @@ export function handle(msg) {
         updateWaiting();
       }
       break;
+    case 'PlayerDisconnected':
+    case 'PlayerConnected':
+      // A member's shell dropped (or returned) within the reconnect grace window. They stay in the
+      // roster the whole time, so don't add/remove — a true departure arrives later as PlayerLeft.
+      break;
     case 'GameStarting':
       enterGame(msg);
       break;

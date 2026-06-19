@@ -130,6 +130,21 @@ describe('Ready & reconnected flag', () => {
     expect(plugin.players.map((p) => p.id)).toEqual(['me']);
   });
 
+  it('emits disconnect/connect events without mutating the roster', async () => {
+    const { plugin, ws } = await makePlugin();
+    const disconnected = record(plugin, 'player-disconnected');
+    const connected = record(plugin, 'player-connected');
+    ws._open();
+    ws._recv({ type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'p2' }], isHost: true });
+
+    ws._recv({ type: 'GamePlayerDisconnected', playerId: 'p2' });
+    ws._recv({ type: 'GamePlayerConnected', playerId: 'p2' });
+
+    expect(disconnected).toEqual(['p2']);
+    expect(connected).toEqual(['p2']);
+    expect(plugin.players.map((p) => p.id)).toEqual(['me', 'p2']); // roster unchanged
+  });
+
   it('ignores malformed JSON and unknown frame types', async () => {
     const { ws } = await makePlugin();
     ws._open();

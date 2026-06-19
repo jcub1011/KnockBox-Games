@@ -29,6 +29,8 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(GameTicketMessage), "GameTicket")]
 [JsonDerivedType(typeof(PlayerJoinedMessage), "PlayerJoined")]
 [JsonDerivedType(typeof(PlayerLeftMessage), "PlayerLeft")]
+[JsonDerivedType(typeof(PlayerDisconnectedMessage), "PlayerDisconnected")]
+[JsonDerivedType(typeof(PlayerConnectedMessage), "PlayerConnected")]
 [JsonDerivedType(typeof(KickedMessage), "Kicked")]
 [JsonDerivedType(typeof(GameStartingMessage), "GameStarting")]
 [JsonDerivedType(typeof(AttachMessage), "Attach")]
@@ -38,6 +40,8 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(KickPlayerMessage), "KickPlayer")]
 [JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
+[JsonDerivedType(typeof(GamePlayerDisconnectedMessage), "GamePlayerDisconnected")]
+[JsonDerivedType(typeof(GamePlayerConnectedMessage), "GamePlayerConnected")]
 [JsonDerivedType(typeof(LogMessage), "Log")]
 [JsonDerivedType(typeof(GameLogMessage), "GameLog")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
@@ -89,6 +93,12 @@ public sealed record GameTicketMessage(string Cid, string Ticket) : IMessage;
 // ── Lobby push events (server → client, no cid) ──────────────────────────────
 public sealed record PlayerJoinedMessage(string LobbyId, Player Player) : IMessage;
 public sealed record PlayerLeftMessage(string LobbyId, string PlayerId) : IMessage;
+// Pushed when a member's shell (control) socket drops but they're kept in the lobby for the
+// reconnect grace window (see KnockBox:DisconnectGraceSeconds) — and again when they reconnect
+// within it. The player stays in the roster the whole time; these only signal the transient state
+// so peers can show "reconnecting…". A grace that elapses without reconnect ends in PlayerLeft.
+public sealed record PlayerDisconnectedMessage(string LobbyId, string PlayerId) : IMessage;
+public sealed record PlayerConnectedMessage(string LobbyId, string PlayerId) : IMessage;
 // Pushed to a player's CONTROL socket when the host kicks them: the shell leaves the game and
 // returns home with a clear message (distinct from a transient drop or a "lobby full" rejection).
 public sealed record KickedMessage(string LobbyId) : IMessage;
@@ -117,6 +127,11 @@ public sealed record SetLobbyOpenMessage(bool Open) : IMessage;
 public sealed record KickPlayerMessage(string TargetPlayerId) : IMessage;
 public sealed record GamePlayerJoinedMessage(Player Player) : IMessage;
 public sealed record GamePlayerLeftMessage(string PlayerId) : IMessage;
+// Game-plane counterparts of PlayerDisconnected/PlayerConnected: pushed to the OTHER members' game
+// sockets so in-game clients (the SDK's onPlayerDisconnected/onPlayerConnected) can react to a peer
+// dropping and returning during the grace window. The player stays in the roster throughout.
+public sealed record GamePlayerDisconnectedMessage(string PlayerId) : IMessage;
+public sealed record GamePlayerConnectedMessage(string PlayerId) : IMessage;
 // Game → server diagnostic (data role): the game emits a log line that lands in the server's log
 // sink so operators can observe deployed games (the player only ever sees their own console). Level
 // is the shared Microsoft.Extensions.Logging.LogLevel; it serializes as its NAME on the wire (e.g.

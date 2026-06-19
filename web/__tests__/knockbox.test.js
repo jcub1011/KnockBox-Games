@@ -94,6 +94,23 @@ describe('Ready & roster', () => {
     expect(left).toEqual(['p2']);
     expect(kb.players.map((p) => p.id)).toEqual(['me']); // joined then left
   });
+
+  it('fires disconnect/connect callbacks without mutating the roster', async () => {
+    const { kb, ws } = await importSdk();
+    const disconnected = [], connected = [];
+    kb.onPlayerDisconnected((id) => disconnected.push(id));
+    kb.onPlayerConnected((id) => connected.push(id));
+    ws._open();
+    ws._recv({ type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'p2' }], isHost: true });
+
+    // A peer drops then returns within the grace window — they stay a member the whole time.
+    ws._recv({ type: 'GamePlayerDisconnected', playerId: 'p2' });
+    ws._recv({ type: 'GamePlayerConnected', playerId: 'p2' });
+
+    expect(disconnected).toEqual(['p2']);
+    expect(connected).toEqual(['p2']);
+    expect(kb.players.map((p) => p.id)).toEqual(['me', 'p2']); // roster unchanged
+  });
 });
 
 describe('send API', () => {

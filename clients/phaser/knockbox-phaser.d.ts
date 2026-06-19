@@ -62,6 +62,8 @@ export interface KnockBoxEvents {
   message: (msg: KBMessage) => void;
   'player-joined': (player: KBPlayer) => void;
   'player-left': (playerId: string) => void;
+  'player-disconnected': (playerId: string) => void;
+  'player-connected': (playerId: string) => void;
   closed: (info: KBClosed) => void;
   resumed: () => void;
 }

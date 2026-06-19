@@ -45,7 +45,7 @@ import {
   // (analytics, third-party scripts). replaceState keeps the fragment out of the history entry.
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 
-  const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [] };
+  const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [], playerDisconnected: [], playerConnected: [] };
   let ready = false;
   let ws = null;
   let attempt = 0;        // consecutive failed/transient connects, for backoff
@@ -63,6 +63,12 @@ import {
     onMessage(cb) { handlers.message.push(cb); },
     onPlayerJoined(cb) { handlers.playerJoined.push(cb); },
     onPlayerLeft(cb) { handlers.playerLeft.push(cb); },
+    // A peer's shell dropped (tab refresh/close, network blip) but they're held in the lobby for the
+    // reconnect grace window — and onPlayerConnected when they return within it. The player stays in
+    // `players` the whole time; these are just signals so a game can show "reconnecting…". If the
+    // window elapses without a reconnect, onPlayerLeft fires instead.
+    onPlayerDisconnected(cb) { handlers.playerDisconnected.push(cb); },
+    onPlayerConnected(cb) { handlers.playerConnected.push(cb); },
 
     sendToHost(payload) { send('host', payload); },
     sendToAll(payload) { send('all', payload); },
@@ -192,6 +198,14 @@ import {
       case 'GamePlayerLeft':
         KnockBox.players = rosterRemove(KnockBox.players, msg.playerId);
         fire(handlers.playerLeft, msg.playerId);
+        break;
+      // Transient presence: the peer is still a member (kept in `players` for the grace window),
+      // so don't touch the roster — just signal the state change.
+      case 'GamePlayerDisconnected':
+        fire(handlers.playerDisconnected, msg.playerId);
+        break;
+      case 'GamePlayerConnected':
+        fire(handlers.playerConnected, msg.playerId);
         break;
     }
   }
