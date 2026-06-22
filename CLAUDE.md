@@ -67,7 +67,7 @@ Outside the .NET solution, two Node subprojects (each its own npm package, Vites
 ### One `/ws` endpoint, two roles (the core idea)
 `/ws` is served on **both** the shell origin and the game origin. The **first frame** selects the role:
 - **Control role** (`HelloMessage`, the shell's socket): identity handshake, lobby ops
-  (list/create/join/leave), and `RequestGameTicket`. Handled by `RunControlAsync` in
+  (list/create/join/leave), and `RequestTicket`. Handled by `RunControlAsync` in
   `KnockBox.Server/Networking/WebSocketHandler.cs`.
 - **Data role** (`AttachMessage`, the game iframe's own socket): authenticates with a
   lobby-scoped ticket, then relays `Game{to, payload}` messages where `to` ∈
@@ -151,7 +151,7 @@ reconnect grace window, then returned — they stay in `players` throughout); se
 methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
 `log.{info,warn,error,debug,trace,critical}(message)` (console-like logging to the server, relayed
 as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPlay(metadata)` (a
-`<string,string>` bag sent as a `GameLogMessage`; the server stamps gameId/timestamp/isHost and
+`<string,string>` bag sent as a `PlayLogMessage`; the server stamps gameId/timestamp/isHost and
 forwards it to that player's **control** socket, where the shell persists the most-recent 50 in
 `localStorage` (`kb.playLog`) and renders them in the home-page Play Log).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested

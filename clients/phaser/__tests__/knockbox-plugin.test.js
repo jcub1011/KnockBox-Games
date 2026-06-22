@@ -188,14 +188,14 @@ describe('send API & queueing', () => {
     expect(logs[0].message).toBe('m1'); // m0 dropped
   });
 
-  it('logPlay sends a GameLog frame with stringified metadata (queued before attach)', async () => {
+  it('logPlay sends a PlayLog frame with stringified metadata (queued before attach)', async () => {
     const { plugin, ws } = await makePlugin();
     plugin.logPlay({ placement: 1, result: 'win' });
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toHaveLength(0); // queued, not dropped
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toHaveLength(0); // queued, not dropped
 
     ws._open();
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
-      { type: 'GameLog', metadata: { placement: '1', result: 'win' } },
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toEqual([
+      { type: 'PlayLog', metadata: { placement: '1', result: 'win' } },
     ]);
   });
 
@@ -203,15 +203,15 @@ describe('send API & queueing', () => {
     const { plugin, ws } = await makePlugin();
     ws._open();
     plugin.logPlay();
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([{ type: 'GameLog', metadata: {} }]);
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toEqual([{ type: 'PlayLog', metadata: {} }]);
   });
 
   it('logPlay drops nullish values (no "null"/"undefined") but keeps falsy primitives', async () => {
     const { plugin, ws } = await makePlugin();
     ws._open();
     plugin.logPlay({ a: 1, b: null, c: undefined, d: 0 });
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
-      { type: 'GameLog', metadata: { a: '1', d: '0' } },
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toEqual([
+      { type: 'PlayLog', metadata: { a: '1', d: '0' } },
     ]);
   });
 });

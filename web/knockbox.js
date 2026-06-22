@@ -103,7 +103,7 @@ import {
           bag[key] = String(value);
         }
       }
-      sendLog({ type: 'GameLog', metadata: bag });
+      sendLog({ type: 'PlayLog', metadata: bag });
     },
   };
 

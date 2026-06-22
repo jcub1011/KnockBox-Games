@@ -14,7 +14,7 @@ namespace KnockBox.Server.Tests;
 
 /// <summary>
 /// Drives the REAL <see cref="WebSocketHandler"/> over fake sockets to prove a game's
-/// <see cref="GameLogMessage"/> (sent on its DATA socket) is forwarded to the same player's CONTROL
+/// <see cref="PlayLogMessage"/> (sent on its DATA socket) is forwarded to the same player's CONTROL
 /// socket with the trusted context (gameId, server timestamp, isHost) stamped and the untrusted
 /// metadata sanitized. This is the server-side half of "logPlay() populates the home Play Log".
 /// </summary>
@@ -35,7 +35,7 @@ public class GameLogFlowTests
         return (handler, connections, lobbies, tokens);
     }
 
-    private static async Task<List<IMessage?>> DriveAsync(string senderId, GameLogMessage frame)
+    private static async Task<List<IMessage?>> DriveAsync(string senderId, PlayLogMessage frame)
     {
         var (handler, connections, lobbies, tokens) = BuildServer();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -51,7 +51,7 @@ public class GameLogFlowTests
         connections.Add(ctrl);
         var ctrlLoop = ctrl.SendLoopAsync(ct);
 
-        // Drive the sender's DATA socket: Attach then the game's GameLog frame.
+        // Drive the sender's DATA socket: Attach then the game's PlayLog frame.
         var ticket = tokens.IssueTicket(senderId, lobby.Id, "tic-tac-toe");
         var dataSock = new ScriptedWebSocket(
         [
@@ -71,11 +71,11 @@ public class GameLogFlowTests
     [Fact]
     public async Task Host_game_log_is_forwarded_to_control_with_context_stamped()
     {
-        var received = await DriveAsync("host", new GameLogMessage(
+        var received = await DriveAsync("host", new PlayLogMessage(
             new Dictionary<string, string> { ["placement"] = "1", ["foo"] = "bar" }));
 
-        var entry = Assert.IsType<GameLogMessage>(
-            Assert.Single(received, m => m is GameLogMessage));
+        var entry = Assert.IsType<PlayLogMessage>(
+            Assert.Single(received, m => m is PlayLogMessage));
         Assert.Equal("tic-tac-toe", entry.GameId);   // resolved from the lobby, not the game
         Assert.Equal(Now, entry.Timestamp);           // server clock, not the game's
         Assert.Equal(true, entry.IsHost);
@@ -86,10 +86,10 @@ public class GameLogFlowTests
     [Fact]
     public async Task Guest_game_log_is_stamped_is_host_false()
     {
-        var received = await DriveAsync("guest", new GameLogMessage(
+        var received = await DriveAsync("guest", new PlayLogMessage(
             new Dictionary<string, string> { ["result"] = "lost" }));
 
-        var entry = Assert.IsType<GameLogMessage>(Assert.Single(received, m => m is GameLogMessage));
+        var entry = Assert.IsType<PlayLogMessage>(Assert.Single(received, m => m is PlayLogMessage));
         Assert.Equal(false, entry.IsHost);
         Assert.Equal("lost", entry.Metadata["result"]);
     }
@@ -105,8 +105,8 @@ public class GameLogFlowTests
         };
         for (var i = 0; i < WebSocketHandler.MaxPlayLogEntries + 10; i++) bag[$"k{i}"] = "v";
 
-        var received = await DriveAsync("host", new GameLogMessage(bag));
-        var entry = Assert.IsType<GameLogMessage>(Assert.Single(received, m => m is GameLogMessage));
+        var received = await DriveAsync("host", new PlayLogMessage(bag));
+        var entry = Assert.IsType<PlayLogMessage>(Assert.Single(received, m => m is PlayLogMessage));
 
         Assert.True(entry.Metadata.Count <= WebSocketHandler.MaxPlayLogEntries);
         Assert.DoesNotContain(entry.Metadata.Keys, k => k.Contains('\n') || string.IsNullOrWhiteSpace(k));

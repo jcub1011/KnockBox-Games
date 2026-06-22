@@ -166,7 +166,7 @@
         bag[key] = String(value);
       }
     }
-    this._sendLog({ type: 'GameLog', metadata: bag });
+    this._sendLog({ type: 'PlayLog', metadata: bag });
   };
 
   // ── Internals ─────────────────────────────────────────────────────────────────────────────────

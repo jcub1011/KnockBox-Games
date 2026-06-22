@@ -43,7 +43,7 @@ public sealed class WebSocketHandler(
     // Internal so the sanitization tests reference it directly rather than mirroring the value.
     internal const int MaxGameLogLength = 2000;
 
-    // Bounds on a forwarded play-log entry (GameLogMessage). The metadata is untrusted game content
+    // Bounds on a forwarded play-log entry (PlayLogMessage). The metadata is untrusted game content
     // rendered later in the shell DOM, so cap the number of entries and the size of each key/value.
     internal const int MaxPlayLogEntries = 20;
     internal const int MaxPlayLogKeyLength = 64;
@@ -202,7 +202,7 @@ public sealed class WebSocketHandler(
                 break;
 
             case ListGamesMessage m:
-                conn.Send(ConnectionManager.Serialize(new GameListMessage(m.Cid, [.. catalog.Games])));
+                conn.Send(ConnectionManager.Serialize(new GameCatalogMessage(m.Cid, [.. catalog.Games])));
                 break;
 
             case CreateLobbyMessage m:
@@ -219,7 +219,7 @@ public sealed class WebSocketHandler(
                 HandleJoin(conn, m.Cid, m.LobbyId, rejoin: false);
                 break;
 
-            case RejoinMessage m:
+            case RejoinLobbyMessage m:
                 HandleJoin(conn, m.Cid, m.LobbyId, rejoin: true);
                 break;
 
@@ -227,8 +227,8 @@ public sealed class WebSocketHandler(
                 LeaveCurrentLobby(conn);
                 break;
 
-            case RequestGameTicketMessage m:
-                HandleRequestGameTicket(conn, m);
+            case RequestTicketMessage m:
+                HandleRequestTicket(conn, m);
                 break;
 
             default:
@@ -279,7 +279,7 @@ public sealed class WebSocketHandler(
         if (lobby is null)
         {
             conn.Send(ConnectionManager.Serialize(
-                rejoin ? new RejoinFailedMessage(cid) : new ErrorMessage(cid, $"Lobby '{lobbyId}' not found")));
+                rejoin ? new RejoinRejectedMessage(cid) : new ErrorMessage(cid, $"Lobby '{lobbyId}' not found")));
             return;
         }
 
@@ -288,7 +288,7 @@ public sealed class WebSocketHandler(
         if (lobby.IsKicked(conn.PlayerId))
         {
             conn.Send(ConnectionManager.Serialize(
-                rejoin ? new RejoinFailedMessage(cid) : new ErrorMessage(cid, "You were kicked from this lobby.")));
+                rejoin ? new RejoinRejectedMessage(cid) : new ErrorMessage(cid, "You were kicked from this lobby.")));
             return;
         }
 
@@ -316,7 +316,7 @@ public sealed class WebSocketHandler(
         }
 
         conn.LobbyId = lobby.Id;
-        conn.Send(ConnectionManager.Serialize(new JoinedMessage(cid, lobby.Id)));
+        conn.Send(ConnectionManager.Serialize(new LobbyJoinedMessage(cid, lobby.Id)));
 
         // If this is a returning member who was flagged disconnected (grace window), clear the flag
         // and announce the reconnect on both planes. They were never removed from the roster, so
@@ -329,7 +329,7 @@ public sealed class WebSocketHandler(
 
         // Seed the joiner with the existing roster, then announce them to everyone else. Broadcast the
         // stored Player (the possibly-disambiguated name), not conn.DisplayName, so peers see the same
-        // name the joiner's own game client gets from the GameStarting roster.
+        // name the joiner's own game client gets from the EnterGame roster.
         if (!alreadyMember)
         {
             foreach (var member in lobby.Players.Where(p => p.Id != conn.PlayerId))
@@ -341,7 +341,7 @@ public sealed class WebSocketHandler(
         }
 
         // Launch the game for the entering player only — existing members already have it running,
-        // and re-sending GameStarting would rebuild their iframe.
+        // and re-sending EnterGame would rebuild their iframe.
         SendEnterGame(conn, lobby);
     }
 
@@ -351,7 +351,7 @@ public sealed class WebSocketHandler(
     private static void SendEnterGame(Connection conn, Lobby lobby)
     {
         conn.Send(ConnectionManager.Serialize(
-            new GameStartingMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players)));
+            new EnterGameMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players)));
     }
 
     private void HandleSetLobbyOpen(Connection conn, SetLobbyOpenMessage m)
@@ -391,7 +391,7 @@ public sealed class WebSocketHandler(
     // key/value (clamp size, strip control chars) and caps the entry count, then stamps the trusted
     // context — GameId, server Timestamp, and whether the player was the host — and forwards it to the
     // player's own CONTROL socket. The shell persists it in the browser and shows it on the home page.
-    private void HandleGameLogMessage(Connection conn, GameLogMessage m)
+    private void HandlePlayLogMessage(Connection conn, PlayLogMessage m)
     {
         if (conn.LobbyId is null) return;
         var lobby = lobbies.Get(conn.LobbyId);
@@ -409,7 +409,7 @@ public sealed class WebSocketHandler(
             }
         }
 
-        var enriched = new GameLogMessage(
+        var enriched = new PlayLogMessage(
             clean,
             GameId: lobby.GameId,
             Timestamp: time.GetUtcNow(),
@@ -476,7 +476,7 @@ public sealed class WebSocketHandler(
             conn.PlayerId, m.TargetPlayerId, lobby.Id);
     }
 
-    private void HandleRequestGameTicket(Connection conn, RequestGameTicketMessage m)
+    private void HandleRequestTicket(Connection conn, RequestTicketMessage m)
     {
         // A ticket is only ever issued for the player's CURRENT lobby — enforce the one-lobby-at-a-time
         // invariant on this path rather than trusting the client-supplied id alone.
@@ -493,7 +493,7 @@ public sealed class WebSocketHandler(
         }
 
         var ticket = tokens.IssueTicket(conn.PlayerId, lobby.Id, lobby.GameId);
-        conn.Send(ConnectionManager.Serialize(new GameTicketMessage(m.Cid, ticket)));
+        conn.Send(ConnectionManager.Serialize(new TicketMessage(m.Cid, ticket)));
     }
 
     // ── Data role (a game iframe's own socket) ────────────────────────────────
@@ -560,7 +560,7 @@ public sealed class WebSocketHandler(
                     else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
                     else if (message is KickPlayerMessage kp) HandleKickPlayer(connection, kp);
                     else if (message is LogMessage log) HandleLogMessage(connection, log);
-                    else if (message is GameLogMessage gl) HandleGameLogMessage(connection, gl);
+                    else if (message is PlayLogMessage gl) HandlePlayLogMessage(connection, gl);
                 });
             }
         }

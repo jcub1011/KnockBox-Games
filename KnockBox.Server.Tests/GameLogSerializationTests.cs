@@ -46,17 +46,17 @@ public class GameLogSerializationTests
     }
 
     [Fact]
-    public void GameLog_round_trips_with_its_metadata_through_the_source_generated_context()
+    public void PlayLog_round_trips_with_its_metadata_through_the_source_generated_context()
     {
-        IMessage original = new GameLogMessage(
+        IMessage original = new PlayLogMessage(
             new Dictionary<string, string> { ["placement"] = "1" },
             GameId: "g", Timestamp: DateTimeOffset.UnixEpoch, IsHost: true);
 
         var bytes = JsonSerializer.SerializeToUtf8Bytes(original, KnockBoxProtocolContext.Default.IMessage);
         var json = Encoding.UTF8.GetString(bytes);
-        Assert.Contains("\"type\":\"GameLog\"", json);
+        Assert.Contains("\"type\":\"PlayLog\"", json);
 
-        var back = Assert.IsType<GameLogMessage>(
+        var back = Assert.IsType<PlayLogMessage>(
             JsonSerializer.Deserialize(bytes, KnockBoxProtocolContext.Default.IMessage));
         Assert.Equal("g", back.GameId);
         Assert.Equal(true, back.IsHost);
@@ -67,9 +67,9 @@ public class GameLogSerializationTests
     public void Incoming_game_log_frame_from_a_game_deserializes_via_the_context()
     {
         // What a game's SDK actually sends: just the metadata bag; the server stamps the rest.
-        var utf8 = Encoding.UTF8.GetBytes("""{ "type": "GameLog", "metadata": { "result": "win", "score": "42" } }""");
+        var utf8 = Encoding.UTF8.GetBytes("""{ "type": "PlayLog", "metadata": { "result": "win", "score": "42" } }""");
 
-        var back = Assert.IsType<GameLogMessage>(
+        var back = Assert.IsType<PlayLogMessage>(
             JsonSerializer.Deserialize(utf8, KnockBoxProtocolContext.Default.IMessage));
         Assert.Null(back.GameId);
         Assert.Equal("win", back.Metadata["result"]);

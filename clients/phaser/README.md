@@ -259,7 +259,7 @@ Peers `start()` asynchronously (deferred), so `await` a macrotask/microtask befo
 ### Real server from a standalone page
 
 To test against an actual running server without the shell, use the **real** `KnockBoxPlugin` and
-supply a ticket + endpoint via `data` (a ticket comes from the shell's `RequestGameTicket`):
+supply a ticket + endpoint via `data` (a ticket comes from the shell's `RequestTicket`):
 
 ```js
 plugins: {

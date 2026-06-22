@@ -73,7 +73,7 @@ public class ReconnectGraceTests
         var sock = new ScriptedWebSocket(
         [
             ConnectionManager.Serialize(new HelloMessage(null, playerId, tokens.IssueIdentity(playerId))),
-            ConnectionManager.Serialize(new RejoinMessage("c1", lobbyId)),
+            ConnectionManager.Serialize(new RejoinLobbyMessage("c1", lobbyId)),
         ]);
         return handler.HandleAsync(sock, GameOrigin, ct);
     }
@@ -193,7 +193,7 @@ public class ReconnectGraceTests
         var sock = new ScriptedWebSocket(
         [
             ConnectionManager.Serialize(new HelloMessage(null, "host", tokens.IssueIdentity("host"))),
-            ConnectionManager.Serialize(new RejoinMessage("c1", lobby.Id)),
+            ConnectionManager.Serialize(new RejoinLobbyMessage("c1", lobby.Id)),
             ConnectionManager.Serialize(new LeaveLobbyMessage(lobby.Id)),
         ]);
         await handler.HandleAsync(sock, GameOrigin, ct);

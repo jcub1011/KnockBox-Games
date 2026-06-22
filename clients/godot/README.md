@@ -140,7 +140,7 @@ Net.connect_with(my_ticket, "ws://localhost:5115/ws")   # or, on the raw transpo
 KnockBox.set_launch_params(my_ticket, "ws://localhost:5115/ws")
 ```
 
-Obtain `my_ticket` by driving the shell to a `GameStarting` and calling `RequestGameTicket`
+Obtain `my_ticket` by driving the shell to an `EnterGame` and calling `RequestTicket`
 (see the control-plane flow in `docs/INFRASTRUCTURE.md`).
 
 ### Headless unit tests

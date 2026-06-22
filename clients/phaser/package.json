@@ -1,6 +1,6 @@
 {
   "name": "knockbox-phaser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "KnockBox networking client for Phaser. Tests cover the pure protocol logic (kb-core.js), the server-less local peer (knockbox-local.js), and the host-authoritative helper (kb-authority.js).",
   "scripts": {
