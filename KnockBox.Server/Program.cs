@@ -247,13 +247,14 @@ if (precompressor is not null && precompressReconcileSeconds > 0)
 
 // Reconnect-grace reaper: a member whose shell socket drops is kept in their lobby for
 // limits.DisconnectGrace so a tab refresh/blip doesn't kick them out; this timer evicts the ones
-// who never came back. Sweep every 5s (well under the 60s default grace) so eviction latency is
-// small without a per-player timer. Disabled when grace is 0. Disposed on shutdown.
+// who never came back. Sweep frequently enough that eviction latency stays small without a
+// per-player timer: at most ~5s (cheap for the 60s default), but never tighter than 1s so a very
+// low configured grace doesn't spin a hot loop. Disabled when grace is 0. Disposed on shutdown.
 Timer? disconnectReaperTimer = null;
 if (limits.DisconnectGrace > TimeSpan.Zero)
 {
     var handler = app.Services.GetRequiredService<WebSocketHandler>();
-    var interval = TimeSpan.FromSeconds(5);
+    var interval = TimeSpan.FromSeconds(Math.Clamp(limits.DisconnectGrace.TotalSeconds, 1, 5));
     disconnectReaperTimer = new Timer(_ =>
     {
         try { handler.ReapDisconnectedPlayers(); }

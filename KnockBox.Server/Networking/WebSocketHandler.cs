@@ -246,7 +246,7 @@ public sealed class WebSocketHandler(
             return;
         }
 
-        LeaveCurrentLobby(conn); // one lobby at a time
+        LeaveLobbiesExcept(conn, null); // one lobby at a time (by membership, not just this connection's)
 
         if (!lobbies.TryCreate(game.Id, conn.PlayerId, game.MaxPlayers, out var lobby))
         {
@@ -304,7 +304,7 @@ public sealed class WebSocketHandler(
         // Leave any previous lobby BEFORE joining the new one so the player is never momentarily a
         // member of two (one-lobby-at-a-time), mirroring HandleCreateLobby. Switching to a full lobby
         // is rare; the explicit join means leaving the old one is the intended outcome.
-        LeaveOtherLobby(conn, lobby.Id);
+        LeaveLobbiesExcept(conn, lobby.Id);
 
         // Give the joiner a name unique within this lobby (e.g. "Bob (2)" when "Bob" is taken). The
         // rename lives only on the stored Player — conn.DisplayName is untouched, so the player keeps
@@ -322,10 +322,7 @@ public sealed class WebSocketHandler(
         // and announce the reconnect on both planes. They were never removed from the roster, so
         // this replaces the PlayerJoined/GamePlayerJoined a fresh join would send (skipped below).
         if (lobby.MarkConnected(conn.PlayerId))
-        {
-            Broadcast(lobby, new PlayerConnectedMessage(lobby.Id, conn.PlayerId), exceptPlayerId: conn.PlayerId);
-            BroadcastToGame(lobby, new GamePlayerConnectedMessage(conn.PlayerId), exceptPlayerId: conn.PlayerId);
-        }
+            AnnounceConnected(lobby, conn.PlayerId);
 
         // Seed the joiner with the existing roster, then announce them to everyone else. Broadcast the
         // stored Player (the possibly-disambiguated name), not conn.DisplayName, so peers see the same
@@ -620,6 +617,16 @@ public sealed class WebSocketHandler(
                 connections.SendRawToGame(p.Id, bytes);
     }
 
+    // Tell a lobby's other members that a previously-disconnected member is back (both planes). The
+    // returning player is excluded — they get the full roster via EnterGame, not a delta. Whoever
+    // clears the disconnect flag (HandleJoin on rejoin, or the reaper when it spots a live socket the
+    // in-flight RejoinLobby raced past) calls this, so peers always see exactly one PlayerConnected.
+    private void AnnounceConnected(Lobby lobby, string playerId)
+    {
+        Broadcast(lobby, new PlayerConnectedMessage(lobby.Id, playerId), exceptPlayerId: playerId);
+        BroadcastToGame(lobby, new GamePlayerConnectedMessage(playerId), exceptPlayerId: playerId);
+    }
+
     // Involuntary control-socket drop (tab refresh/close, network loss). With a grace window
     // configured, the player is KEPT in the lobby and only flagged disconnected — so the lobby
     // survives, their game ticket stays valid, and a reconnect within the window restores them with
@@ -673,8 +680,14 @@ public sealed class WebSocketHandler(
         {
             foreach (var pid in lobby.ExpiredDisconnects(cutoff))
             {
-                // Reconnected after all (a live control socket exists) — keep them, drop the flag.
-                if (connections.Get(pid) is not null) { lobby.MarkConnected(pid); continue; }
+                // Reconnected after all (a live control socket exists) — keep them, drop the flag, and
+                // announce the reconnect the in-flight RejoinLobby may have raced past (else peers stay
+                // stuck on "reconnecting…"). MarkConnected guards against a double PlayerConnected.
+                if (connections.Get(pid) is not null)
+                {
+                    if (lobby.MarkConnected(pid)) AnnounceConnected(lobby, pid);
+                    continue;
+                }
 
                 if (lobby.Remove(pid))
                 {
@@ -705,20 +718,23 @@ public sealed class WebSocketHandler(
         CloseLobbyIfDark(lobby);
     }
 
-    // Leave any lobby other than the one just joined (used when switching lobbies).
-    private void LeaveOtherLobby(Connection conn, string keepLobbyId)
+    // Enforce one-lobby-at-a-time by MEMBERSHIP, not just conn.LobbyId (used when switching lobbies).
+    // conn.LobbyId tracks only the CURRENT connection's lobby, but a member kept through the
+    // reconnect-grace window still belongs to the lobby their now-dead prior connection joined — and a
+    // fresh reconnect's LobbyId is null. A conn.LobbyId-only check would strand them there; the reaper
+    // then refuses to evict them (they hold a live socket in the new lobby), leaking a ghost membership
+    // that keeps the old lobby alive forever. Scanning by membership closes that hole.
+    private void LeaveLobbiesExcept(Connection conn, string? keepLobbyId)
     {
-        if (conn.LobbyId is null || conn.LobbyId == keepLobbyId) return;
-        var prev = conn.LobbyId;
-        conn.LobbyId = null;
-        var lobby = lobbies.Get(prev);
-        if (lobby is null) return;
-        if (lobby.Remove(conn.PlayerId))
+        if (conn.LobbyId is not null && conn.LobbyId != keepLobbyId) conn.LobbyId = null;
+        foreach (var lobby in lobbies.Snapshot())
         {
+            if (lobby.Id == keepLobbyId) continue;
+            if (!lobby.Remove(conn.PlayerId)) continue;
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
             BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
+            CloseLobbyIfDark(lobby);
         }
-        CloseLobbyIfDark(lobby);
     }
 
     // Display names are echoed into every roster/join broadcast, so a giant one lets a single client

@@ -249,6 +249,45 @@ public class ReconnectGraceTests
         Assert.False(lobby.Contains("guest"));
     }
 
+    [Fact]
+    public async Task Joining_another_lobby_while_held_in_grace_leaves_the_old_one()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var ct = cts.Token;
+        var (handler, connections, lobbies, tokens, time) = BuildServer();
+
+        // Guest is a member of lobby A and gets held in the grace window after a drop. A stays alive
+        // only because the host keeps a live control socket.
+        Assert.True(lobbies.TryCreate("g", "host", 4, out var lobbyA));
+        Assert.True(lobbyA.TryAdd(new Player("host", "Host")));
+        Assert.True(lobbyA.TryAdd(new Player("guest", "Guest")));
+        Observe(connections, "host", ct);
+        await DriveControlConnectThenDrop(handler, tokens, "guest", lobbyA.Id, ct);
+        Assert.True(lobbyA.Contains("guest")); // held in A
+
+        // A second lobby B exists; the guest reconnects (fresh connection, LobbyId null) and JOINS B
+        // rather than rejoining A. The old conn.LobbyId-based cleanup would miss A and strand them.
+        Assert.True(lobbies.TryCreate("g", "other", 4, out var lobbyB));
+        Assert.True(lobbyB.TryAdd(new Player("other", "Other")));
+        var sock = new ScriptedWebSocket(
+        [
+            ConnectionManager.Serialize(new HelloMessage(null, "guest", tokens.IssueIdentity("guest"))),
+            ConnectionManager.Serialize(new JoinLobbyMessage("c1", lobbyB.Id)),
+        ]);
+        await handler.HandleAsync(sock, GameOrigin, ct);
+
+        // The guest must be moved cleanly: gone from A, present in B — no ghost membership.
+        Assert.False(lobbyA.Contains("guest"));
+        Assert.True(lobbyB.Contains("guest"));
+
+        // And A holds nothing stale: even past the grace, the reaper finds no expired disconnect in A
+        // (the leak would have left one the reaper refuses to evict because the guest is live in B).
+        time.Advance(TimeSpan.FromSeconds(120));
+        handler.ReapDisconnectedPlayers();
+        Assert.NotNull(lobbies.Get(lobbyA.Id));                        // host still connected → A survives
+        Assert.Empty(lobbyA.ExpiredDisconnects(time.GetUtcNow()));     // no ghost left behind
+    }
+
     /// <summary>Minimal in-memory WebSocket: replays scripted inbound frames, captures outbound ones.</summary>
     private sealed class ScriptedWebSocket(IEnumerable<byte[]>? inbound = null) : WebSocket
     {

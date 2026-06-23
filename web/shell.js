@@ -115,7 +115,7 @@ export function handle(msg) {
       // src; fall back to this origin when missing or invalid.
       gameOrigin = sanitizeGameOrigin(msg.gameOrigin) || location.origin;
       reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
-      // Load the game catalog FIRST, then (re)join. A EnterGame — from an auto-join or a rejoin —
+      // Load the game catalog FIRST, then (re)join. An EnterGame — from an auto-join or a rejoin —
       // makes enterGame resolve the manifest from `games`, which must be populated by then. The
       // server replies in order, so an un-gated JoinLobby/Rejoin would land its EnterGame before
       // the ListGames reply and enterGame would reject it as "Unknown game".
