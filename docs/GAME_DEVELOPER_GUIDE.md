@@ -134,7 +134,9 @@ automatically — **don't strip the fragment** from your entry URL.
 | `KnockBox.onReady(cb)` | The data socket attached and the server handed you identity + roster. Start here. | `{ playerId, players, isHost }` |
 | `KnockBox.onMessage(cb)` | A relayed message arrives for you. | `{ from, payload }` |
 | `KnockBox.onPlayerJoined(cb)` | A player joins the lobby. | the new `player` |
-| `KnockBox.onPlayerLeft(cb)` | A player leaves/disconnects. | their `playerId` |
+| `KnockBox.onPlayerLeft(cb)` | A player leaves for good (or their reconnect grace elapsed). | their `playerId` |
+| `KnockBox.onPlayerDisconnected(cb)` | A player's tab dropped (refresh/close/network blip) but they're held in the lobby for the reconnect grace window. They stay in `players` — show a "reconnecting…" state. | their `playerId` |
+| `KnockBox.onPlayerConnected(cb)` | A previously-disconnected player reconnected within the grace window. | their `playerId` |
 
 ### Sending
 
@@ -395,8 +397,14 @@ The full file is in `games/tictactoe/` — copy it as a starting point.
   this with a **sync** message: on `onReady`, a non-host client asks the host for the current state
   (`sendToHost({kind:'sync'})`) and the host re-broadcasts (`sendToAll`). Because your state
   messages are self-contained, the rejoiner is immediately back in sync.
-- Decide what a `playerLeft` means for your game (pause, forfeit, end). Host migration is not
-  provided — if the host leaves, the session effectively ends.
+- A tab refresh, tab close, or network blip drops a player's shell socket, but the server now holds
+  them in the lobby for a grace window (default 60s) instead of removing them immediately. You learn
+  about this through `onPlayerDisconnected(playerId)` — the player **stays in `KnockBox.players`** the
+  whole time, so treat it as "reconnecting…", not a departure. If they return in time you get
+  `onPlayerConnected(playerId)`; if the window elapses you get the usual `onPlayerLeft(playerId)`.
+- Decide what a `playerLeft` means for your game (pause, forfeit, end). A `playerDisconnected` is
+  usually a softer signal — pause or show a spinner rather than forfeit. Host migration is not
+  provided — if the host leaves for good, the session effectively ends.
 
 ---
 

@@ -90,7 +90,9 @@ After `ready` fires, `net.playerId`, `net.players`, and `net.isHost` are populat
 | `ready` | `{ playerId, players, isHost }` | Authenticated and the roster is known. Re-fires after a reconnect. |
 | `message` | `{ from, payload }` | A game message was relayed to you (incl. your own `sendToAll`). |
 | `player-joined` | `player` | Someone joined the lobby. |
-| `player-left` | `playerId` | Someone left/disconnected. |
+| `player-left` | `playerId` | Someone left for good (or their reconnect grace elapsed). |
+| `player-disconnected` | `playerId` | A peer's shell dropped (tab refresh/blip) but they're held in the lobby for the reconnect grace window. They stay in `players` — show "reconnecting…". |
+| `player-connected` | `playerId` | A previously-disconnected peer reconnected within the grace window. |
 | `resumed` | — | `ready` fired again after a reconnect (`net.reconnected` is then `true`). |
 | `closed` | `{ terminal }` | The socket closed. `terminal: true` means it won't reconnect (bad ticket / ended membership). |
 
@@ -257,7 +259,7 @@ Peers `start()` asynchronously (deferred), so `await` a macrotask/microtask befo
 ### Real server from a standalone page
 
 To test against an actual running server without the shell, use the **real** `KnockBoxPlugin` and
-supply a ticket + endpoint via `data` (a ticket comes from the shell's `RequestGameTicket`):
+supply a ticket + endpoint via `data` (a ticket comes from the shell's `RequestTicket`):
 
 ```js
 plugins: {

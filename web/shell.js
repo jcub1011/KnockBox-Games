@@ -115,9 +115,9 @@ export function handle(msg) {
       // src; fall back to this origin when missing or invalid.
       gameOrigin = sanitizeGameOrigin(msg.gameOrigin) || location.origin;
       reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
-      // Load the game catalog FIRST, then (re)join. A GameStarting — from an auto-join or a rejoin —
+      // Load the game catalog FIRST, then (re)join. An EnterGame — from an auto-join or a rejoin —
       // makes enterGame resolve the manifest from `games`, which must be populated by then. The
-      // server replies in order, so an un-gated JoinLobby/Rejoin would land its GameStarting before
+      // server replies in order, so an un-gated JoinLobby/Rejoin would land its EnterGame before
       // the ListGames reply and enterGame would reject it as "Unknown game".
       refreshGames().then(() => {
         // First connect of an auto-join tab joins the URL code; null it after so a later reconnect
@@ -138,7 +138,12 @@ export function handle(msg) {
         updateWaiting();
       }
       break;
-    case 'GameStarting':
+    case 'PlayerDisconnected':
+    case 'PlayerConnected':
+      // A member's shell dropped (or returned) within the reconnect grace window. They stay in the
+      // roster the whole time, so don't add/remove — a true departure arrives later as PlayerLeft.
+      break;
+    case 'EnterGame':
       enterGame(msg);
       break;
     case 'Error':
@@ -153,11 +158,11 @@ export function handle(msg) {
         showError('You were kicked from the lobby.');
       }
       break;
-    case 'RejoinFailed':
+    case 'RejoinRejected':
       sessionStorage.removeItem('kb.lobbyId');
       showLobbyView();
       break;
-    case 'GameLog':
+    case 'PlayLog':
       // A game we're playing recorded a Play Log entry; the server already stamped game/time/host
       // and routed it back to us. Persist it (browser-local) and refresh the home-page panel.
       recordPlayLog(msg);
@@ -355,13 +360,13 @@ export async function joinByCode() {
   if (!code) { showError('Please enter a valid room code.'); return; }
   sendNameDebounced.cancel();   // we send immediately below; drop any pending trailing send
   sendName();
-  // Track the target lobby so any PlayerJoined push that races ahead of GameStarting attaches, but
+  // Track the target lobby so any PlayerJoined push that races ahead of EnterGame attaches, but
   // DON'T switch to the game view yet — a wrong code must not flash the waiting screen. On success
-  // we show the room; the GameStarting that follows swaps in the iframe (it lands after this reply's
+  // we show the room; the EnterGame that follows swaps in the iframe (it lands after this reply's
   // continuation, so it never clobbers showRoom).
   lobby = { lobbyId: code, gameId: null, hostId: null, players: [{ id: playerId, displayName }] };
   const reply = await request('JoinLobby', { lobbyId: code });
-  if (reply.type === 'Joined') {
+  if (reply.type === 'LobbyJoined') {
     sessionStorage.setItem('kb.lobbyId', reply.lobbyId);
     showRoom();
   } else {
@@ -372,7 +377,7 @@ export async function joinByCode() {
 
 export function tryRejoin() {
   const saved = sessionStorage.getItem('kb.lobbyId');
-  if (saved) request('Rejoin', { lobbyId: saved });
+  if (saved) request('RejoinLobby', { lobbyId: saved });
 }
 
 // Auto-join the lobby a middle-click "test player" tab was opened for, reusing the normal join path.
@@ -397,7 +402,7 @@ export function showRoom() {
   el('game-title').textContent = displayName;
   setDocumentTitle(displayName);
   el('lobby-code').textContent = lobby.lobbyId;
-  el('frame-host').innerHTML = ''; // no iframe until GameStarting
+  el('frame-host').innerHTML = ''; // no iframe until EnterGame
   el('waiting').style.display = 'block';
   updateWaiting();
   themeHeader(manifest);
@@ -416,7 +421,7 @@ function updateWaiting() {
 // ── In-game: embed the game on its own origin and hand it a scoped ticket ─────
 export async function enterGame(starting) {
   // Only launch games discovered in our catalog (the allowlist refreshGames built). This rejects a
-  // GameStarting for an unknown id instead of feeding a server-supplied id straight into the iframe URL.
+  // EnterGame for an unknown id instead of feeding a server-supplied id straight into the iframe URL.
   const manifest = games.get(starting.gameId);
   if (!manifest) { showError('Unknown game.'); return; }
   lobby = {
@@ -432,8 +437,8 @@ export async function enterGame(starting) {
   themeHeader(manifest);
 
   // Lobby-scoped credential for the game's own data socket. The game never sees our identity token.
-  const reply = await request('RequestGameTicket', { lobbyId: starting.lobbyId });
-  if (reply.type !== 'GameTicket') { showError(reply.reason || 'Could not start game.'); return; }
+  const reply = await request('RequestTicket', { lobbyId: starting.lobbyId });
+  if (reply.type !== 'Ticket') { showError(reply.reason || 'Could not start game.'); return; }
 
   const entry = manifest.entry;
   // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.

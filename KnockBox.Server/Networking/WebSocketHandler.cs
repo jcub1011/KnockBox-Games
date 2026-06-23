@@ -43,7 +43,7 @@ public sealed class WebSocketHandler(
     // Internal so the sanitization tests reference it directly rather than mirroring the value.
     internal const int MaxGameLogLength = 2000;
 
-    // Bounds on a forwarded play-log entry (GameLogMessage). The metadata is untrusted game content
+    // Bounds on a forwarded play-log entry (PlayLogMessage). The metadata is untrusted game content
     // rendered later in the shell DOM, so cap the number of entries and the size of each key/value.
     internal const int MaxPlayLogEntries = 20;
     internal const int MaxPlayLogKeyLength = 64;
@@ -147,8 +147,12 @@ public sealed class WebSocketHandler(
         catch (Exception ex) { logger.LogError(ex, "Unexpected error in control loop for {PlayerId}", playerId); }
         finally
         {
-            LeaveCurrentLobby(connection);
-            connections.Remove(connection);
+            // Unregister first: Remove only succeeds if THIS connection is still the registered one.
+            // If a reconnect (fresh tab) already replaced us, it returns false and we skip the
+            // disconnect handling entirely — otherwise this stale teardown would flag a player who
+            // is actually back as disconnected.
+            var wasRegistered = connections.Remove(connection);
+            if (wasRegistered) HandleControlDisconnect(connection);
             connection.CompleteOutbound();
             await sendLoop;
             if (logger.IsEnabled(LogLevel.Information))
@@ -198,7 +202,7 @@ public sealed class WebSocketHandler(
                 break;
 
             case ListGamesMessage m:
-                conn.Send(ConnectionManager.Serialize(new GameListMessage(m.Cid, [.. catalog.Games])));
+                conn.Send(ConnectionManager.Serialize(new GameCatalogMessage(m.Cid, [.. catalog.Games])));
                 break;
 
             case CreateLobbyMessage m:
@@ -215,7 +219,7 @@ public sealed class WebSocketHandler(
                 HandleJoin(conn, m.Cid, m.LobbyId, rejoin: false);
                 break;
 
-            case RejoinMessage m:
+            case RejoinLobbyMessage m:
                 HandleJoin(conn, m.Cid, m.LobbyId, rejoin: true);
                 break;
 
@@ -223,8 +227,8 @@ public sealed class WebSocketHandler(
                 LeaveCurrentLobby(conn);
                 break;
 
-            case RequestGameTicketMessage m:
-                HandleRequestGameTicket(conn, m);
+            case RequestTicketMessage m:
+                HandleRequestTicket(conn, m);
                 break;
 
             default:
@@ -242,7 +246,7 @@ public sealed class WebSocketHandler(
             return;
         }
 
-        LeaveCurrentLobby(conn); // one lobby at a time
+        LeaveLobbiesExcept(conn, null); // one lobby at a time (by membership, not just this connection's)
 
         if (!lobbies.TryCreate(game.Id, conn.PlayerId, game.MaxPlayers, out var lobby))
         {
@@ -275,7 +279,7 @@ public sealed class WebSocketHandler(
         if (lobby is null)
         {
             conn.Send(ConnectionManager.Serialize(
-                rejoin ? new RejoinFailedMessage(cid) : new ErrorMessage(cid, $"Lobby '{lobbyId}' not found")));
+                rejoin ? new RejoinRejectedMessage(cid) : new ErrorMessage(cid, $"Lobby '{lobbyId}' not found")));
             return;
         }
 
@@ -284,7 +288,7 @@ public sealed class WebSocketHandler(
         if (lobby.IsKicked(conn.PlayerId))
         {
             conn.Send(ConnectionManager.Serialize(
-                rejoin ? new RejoinFailedMessage(cid) : new ErrorMessage(cid, "You were kicked from this lobby.")));
+                rejoin ? new RejoinRejectedMessage(cid) : new ErrorMessage(cid, "You were kicked from this lobby.")));
             return;
         }
 
@@ -300,7 +304,7 @@ public sealed class WebSocketHandler(
         // Leave any previous lobby BEFORE joining the new one so the player is never momentarily a
         // member of two (one-lobby-at-a-time), mirroring HandleCreateLobby. Switching to a full lobby
         // is rare; the explicit join means leaving the old one is the intended outcome.
-        LeaveOtherLobby(conn, lobby.Id);
+        LeaveLobbiesExcept(conn, lobby.Id);
 
         // Give the joiner a name unique within this lobby (e.g. "Bob (2)" when "Bob" is taken). The
         // rename lives only on the stored Player — conn.DisplayName is untouched, so the player keeps
@@ -312,11 +316,17 @@ public sealed class WebSocketHandler(
         }
 
         conn.LobbyId = lobby.Id;
-        conn.Send(ConnectionManager.Serialize(new JoinedMessage(cid, lobby.Id)));
+        conn.Send(ConnectionManager.Serialize(new LobbyJoinedMessage(cid, lobby.Id)));
+
+        // If this is a returning member who was flagged disconnected (grace window), clear the flag
+        // and announce the reconnect on both planes. They were never removed from the roster, so
+        // this replaces the PlayerJoined/GamePlayerJoined a fresh join would send (skipped below).
+        if (lobby.MarkConnected(conn.PlayerId))
+            AnnounceConnected(lobby, conn.PlayerId);
 
         // Seed the joiner with the existing roster, then announce them to everyone else. Broadcast the
         // stored Player (the possibly-disambiguated name), not conn.DisplayName, so peers see the same
-        // name the joiner's own game client gets from the GameStarting roster.
+        // name the joiner's own game client gets from the EnterGame roster.
         if (!alreadyMember)
         {
             foreach (var member in lobby.Players.Where(p => p.Id != conn.PlayerId))
@@ -328,7 +338,7 @@ public sealed class WebSocketHandler(
         }
 
         // Launch the game for the entering player only — existing members already have it running,
-        // and re-sending GameStarting would rebuild their iframe.
+        // and re-sending EnterGame would rebuild their iframe.
         SendEnterGame(conn, lobby);
     }
 
@@ -338,7 +348,7 @@ public sealed class WebSocketHandler(
     private static void SendEnterGame(Connection conn, Lobby lobby)
     {
         conn.Send(ConnectionManager.Serialize(
-            new GameStartingMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players)));
+            new EnterGameMessage(lobby.Id, lobby.GameId, lobby.HostId, lobby.Players)));
     }
 
     private void HandleSetLobbyOpen(Connection conn, SetLobbyOpenMessage m)
@@ -378,7 +388,7 @@ public sealed class WebSocketHandler(
     // key/value (clamp size, strip control chars) and caps the entry count, then stamps the trusted
     // context — GameId, server Timestamp, and whether the player was the host — and forwards it to the
     // player's own CONTROL socket. The shell persists it in the browser and shows it on the home page.
-    private void HandleGameLogMessage(Connection conn, GameLogMessage m)
+    private void HandlePlayLogMessage(Connection conn, PlayLogMessage m)
     {
         if (conn.LobbyId is null) return;
         var lobby = lobbies.Get(conn.LobbyId);
@@ -396,7 +406,7 @@ public sealed class WebSocketHandler(
             }
         }
 
-        var enriched = new GameLogMessage(
+        var enriched = new PlayLogMessage(
             clean,
             GameId: lobby.GameId,
             Timestamp: time.GetUtcNow(),
@@ -463,7 +473,7 @@ public sealed class WebSocketHandler(
             conn.PlayerId, m.TargetPlayerId, lobby.Id);
     }
 
-    private void HandleRequestGameTicket(Connection conn, RequestGameTicketMessage m)
+    private void HandleRequestTicket(Connection conn, RequestTicketMessage m)
     {
         // A ticket is only ever issued for the player's CURRENT lobby — enforce the one-lobby-at-a-time
         // invariant on this path rather than trusting the client-supplied id alone.
@@ -480,7 +490,7 @@ public sealed class WebSocketHandler(
         }
 
         var ticket = tokens.IssueTicket(conn.PlayerId, lobby.Id, lobby.GameId);
-        conn.Send(ConnectionManager.Serialize(new GameTicketMessage(m.Cid, ticket)));
+        conn.Send(ConnectionManager.Serialize(new TicketMessage(m.Cid, ticket)));
     }
 
     // ── Data role (a game iframe's own socket) ────────────────────────────────
@@ -547,7 +557,7 @@ public sealed class WebSocketHandler(
                     else if (message is SetLobbyOpenMessage so) HandleSetLobbyOpen(connection, so);
                     else if (message is KickPlayerMessage kp) HandleKickPlayer(connection, kp);
                     else if (message is LogMessage log) HandleLogMessage(connection, log);
-                    else if (message is GameLogMessage gl) HandleGameLogMessage(connection, gl);
+                    else if (message is PlayLogMessage gl) HandlePlayLogMessage(connection, gl);
                 });
             }
         }
@@ -607,6 +617,91 @@ public sealed class WebSocketHandler(
                 connections.SendRawToGame(p.Id, bytes);
     }
 
+    // Tell a lobby's other members that a previously-disconnected member is back (both planes). The
+    // returning player is excluded — they get the full roster via EnterGame, not a delta. Whoever
+    // clears the disconnect flag (HandleJoin on rejoin, or the reaper when it spots a live socket the
+    // in-flight RejoinLobby raced past) calls this, so peers always see exactly one PlayerConnected.
+    private void AnnounceConnected(Lobby lobby, string playerId)
+    {
+        Broadcast(lobby, new PlayerConnectedMessage(lobby.Id, playerId), exceptPlayerId: playerId);
+        BroadcastToGame(lobby, new GamePlayerConnectedMessage(playerId), exceptPlayerId: playerId);
+    }
+
+    // Involuntary control-socket drop (tab refresh/close, network loss). With a grace window
+    // configured, the player is KEPT in the lobby and only flagged disconnected — so the lobby
+    // survives, their game ticket stays valid, and a reconnect within the window restores them with
+    // no churn. The reaper (ReapDisconnectedPlayers) evicts them if the window elapses. With grace
+    // disabled (0) this is just the old immediate-leave behaviour.
+    private void HandleControlDisconnect(Connection conn)
+    {
+        if (limits.DisconnectGrace <= TimeSpan.Zero)
+        {
+            LeaveCurrentLobby(conn);
+            return;
+        }
+
+        if (conn.LobbyId is null) return;
+        var lobby = lobbies.Get(conn.LobbyId);
+        if (lobby is null) { conn.LobbyId = null; return; }
+
+        if (lobby.MarkDisconnected(conn.PlayerId, time.GetUtcNow()))
+        {
+            Broadcast(lobby, new PlayerDisconnectedMessage(lobby.Id, conn.PlayerId), exceptPlayerId: conn.PlayerId);
+            BroadcastToGame(lobby, new GamePlayerDisconnectedMessage(conn.PlayerId), exceptPlayerId: conn.PlayerId);
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Player {PlayerId} disconnected from lobby {LobbyId}; holding for grace window", conn.PlayerId, lobby.Id);
+        }
+
+        // If this was the last connected member, there's no live game to hold open — close now
+        // rather than wait out the grace (e.g. a solo host refreshing, or the last players leaving
+        // by closing their tabs). A multiplayer lobby with someone still connected stays open.
+        CloseLobbyIfDark(lobby);
+    }
+
+    // Removes the lobby when no current member still holds a live control socket — i.e. it's empty,
+    // OR every remaining member is disconnected (grace pending). The reconnect grace only helps when
+    // someone is still there to reconnect to; a "dark" lobby has no live game to come back to, so we
+    // don't leave it hanging. No broadcast: by definition no member has a live control socket to tell.
+    private void CloseLobbyIfDark(Lobby lobby)
+    {
+        if (lobby.Players.Any(p => connections.Get(p.Id) is not null)) return;
+        lobbies.Remove(lobby.Id);
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Lobby {LobbyId} closed — no connected members remain", lobby.Id);
+    }
+
+    /// <summary>Evicts members whose reconnect grace window has elapsed. Driven by a periodic timer
+    /// (see Program.cs). A member who has since regained a live control connection is un-flagged
+    /// rather than evicted — this makes the sweep self-healing against a disconnect/reconnect race.</summary>
+    public void ReapDisconnectedPlayers()
+    {
+        var cutoff = time.GetUtcNow() - limits.DisconnectGrace;
+        foreach (var lobby in lobbies.Snapshot())
+        {
+            foreach (var pid in lobby.ExpiredDisconnects(cutoff))
+            {
+                // Reconnected after all (a live control socket exists) — keep them, drop the flag, and
+                // announce the reconnect the in-flight RejoinLobby may have raced past (else peers stay
+                // stuck on "reconnecting…"). MarkConnected guards against a double PlayerConnected.
+                if (connections.Get(pid) is not null)
+                {
+                    if (lobby.MarkConnected(pid)) AnnounceConnected(lobby, pid);
+                    continue;
+                }
+
+                if (lobby.Remove(pid))
+                {
+                    Broadcast(lobby, new PlayerLeftMessage(lobby.Id, pid));
+                    BroadcastToGame(lobby, new GamePlayerLeftMessage(pid));
+                    if (logger.IsEnabled(LogLevel.Information))
+                        logger.LogInformation("Player {PlayerId} removed from lobby {LobbyId} after reconnect grace elapsed", pid, lobby.Id);
+                }
+            }
+
+            CloseLobbyIfDark(lobby);
+        }
+    }
+
     private void LeaveCurrentLobby(Connection conn)
     {
         if (conn.LobbyId is null) return;
@@ -620,28 +715,26 @@ public sealed class WebSocketHandler(
             BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
         }
 
-        if (lobby.Count == 0)
-        {
-            lobbies.Remove(lobby.Id);
-            if (logger.IsEnabled(LogLevel.Information))
-                logger.LogInformation("Lobby {LobbyId} emptied and removed", lobby.Id);
-        }
+        CloseLobbyIfDark(lobby);
     }
 
-    // Leave any lobby other than the one just joined (used when switching lobbies).
-    private void LeaveOtherLobby(Connection conn, string keepLobbyId)
+    // Enforce one-lobby-at-a-time by MEMBERSHIP, not just conn.LobbyId (used when switching lobbies).
+    // conn.LobbyId tracks only the CURRENT connection's lobby, but a member kept through the
+    // reconnect-grace window still belongs to the lobby their now-dead prior connection joined — and a
+    // fresh reconnect's LobbyId is null. A conn.LobbyId-only check would strand them there; the reaper
+    // then refuses to evict them (they hold a live socket in the new lobby), leaking a ghost membership
+    // that keeps the old lobby alive forever. Scanning by membership closes that hole.
+    private void LeaveLobbiesExcept(Connection conn, string? keepLobbyId)
     {
-        if (conn.LobbyId is null || conn.LobbyId == keepLobbyId) return;
-        var prev = conn.LobbyId;
-        conn.LobbyId = null;
-        var lobby = lobbies.Get(prev);
-        if (lobby is null) return;
-        if (lobby.Remove(conn.PlayerId))
+        if (conn.LobbyId is not null && conn.LobbyId != keepLobbyId) conn.LobbyId = null;
+        foreach (var lobby in lobbies.Snapshot())
         {
+            if (lobby.Id == keepLobbyId) continue;
+            if (!lobby.Remove(conn.PlayerId)) continue;
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
             BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
+            CloseLobbyIfDark(lobby);
         }
-        if (lobby.Count == 0) lobbies.Remove(lobby.Id);
     }
 
     // Display names are echoed into every roster/join broadcast, so a giant one lets a single client

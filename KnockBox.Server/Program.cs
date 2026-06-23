@@ -245,6 +245,24 @@ if (precompressor is not null && precompressReconcileSeconds > 0)
     app.Lifetime.ApplicationStopping.Register(() => precompressTimer.Dispose());
 }
 
+// Reconnect-grace reaper: a member whose shell socket drops is kept in their lobby for
+// limits.DisconnectGrace so a tab refresh/blip doesn't kick them out; this timer evicts the ones
+// who never came back. Sweep frequently enough that eviction latency stays small without a
+// per-player timer: at most ~5s (cheap for the 60s default), but never tighter than 1s so a very
+// low configured grace doesn't spin a hot loop. Disabled when grace is 0. Disposed on shutdown.
+Timer? disconnectReaperTimer = null;
+if (limits.DisconnectGrace > TimeSpan.Zero)
+{
+    var handler = app.Services.GetRequiredService<WebSocketHandler>();
+    var interval = TimeSpan.FromSeconds(Math.Clamp(limits.DisconnectGrace.TotalSeconds, 1, 5));
+    disconnectReaperTimer = new Timer(_ =>
+    {
+        try { handler.ReapDisconnectedPlayers(); }
+        catch (Exception ex) { app.Logger.LogError(ex, "Reconnect-grace reaper sweep failed."); }
+    }, null, interval, interval);
+    app.Lifetime.ApplicationStopping.Register(() => disconnectReaperTimer.Dispose());
+}
+
 if (allowedOrigins.Length == 0)
     app.Logger.LogWarning("KnockBox:AllowedOrigins is empty — /ws accepts any Origin. Set it for production.");
 

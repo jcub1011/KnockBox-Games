@@ -88,6 +88,13 @@ chosen by its **first frame**. Messages are UTF-8 **JSON envelopes** discriminat
 field (`System.Text.Json` polymorphism; camelCase on the wire). Request/response ops carry a
 client-generated `cid`.
 
+**Naming convention** (keep new types consistent): **commands** (client→server) are imperative verbs
+(`CreateLobby`, `JoinLobby`, `RejoinLobby`, `RequestTicket`, `KickPlayer`); **responses**
+(cid-correlated) are noun + past participle (`LobbyCreated`, `LobbyJoined`, `RejoinRejected`,
+`GameCatalog`, `Ticket`); **events** (push, no cid) are past-tense and plane-tagged. The `Game` prefix
+is **reserved for the data plane** — the relay payload (`Game`) and the roster mirrors (`GamePlayer*`,
+the data-plane twins of the control `Player*` events, which omit `lobbyId`).
+
 The first frame also carries a **protocol version** (`"proto"`, see `KnockBoxProtocol.Version` —
 currently `1`). SDKs get copied into games and can outlive server upgrades, so the server accepts
 anything up to its own version (a missing field is a pre-versioning client, treated as `1`) and
@@ -104,38 +111,42 @@ The server honours a claimed id **only if its signed `token` verifies**; otherwi
 anonymous id. The token is per-tab (sessionStorage) and **never leaves the shell origin**.
 
 ```jsonc
-→ { "type": "ListGames",  "cid": "c1" }   ← { "type": "GameList", "cid": "c1", "games": [ … ] }
+→ { "type": "ListGames",  "cid": "c1" }   ← { "type": "GameCatalog", "cid": "c1", "games": [ … ] }
 → { "type": "CreateLobby","cid": "c2", "gameId": "tictactoe" }  ← { "type": "LobbyCreated", "cid":"c2", "lobbyId":"AB12" }
-→ { "type": "JoinLobby",  "cid": "c4", "lobbyId": "AB12" }      ← { "type": "Joined", "cid":"c4", "lobbyId":"AB12" }
-→ { "type": "Rejoin",     "cid": "c5", "lobbyId": "AB12" }      ← { "type": "RejoinFailed", "cid":"c5" }   // if gone
-→ { "type": "RequestGameTicket", "cid": "c6", "lobbyId": "AB12" } ← { "type": "GameTicket", "cid":"c6", "ticket":"<scoped>" }
+→ { "type": "JoinLobby",  "cid": "c4", "lobbyId": "AB12" }      ← { "type": "LobbyJoined", "cid":"c4", "lobbyId":"AB12" }
+→ { "type": "RejoinLobby","cid": "c5", "lobbyId": "AB12" }      ← { "type": "RejoinRejected", "cid":"c5" }   // if gone; success replies LobbyJoined
+→ { "type": "RequestTicket", "cid": "c6", "lobbyId": "AB12" }   ← { "type": "Ticket", "cid":"c6", "ticket":"<scoped>" }
 → { "type": "LeaveLobby", "lobbyId": "AB12" }   // no response
 ```
-Push events (no `cid`): `PlayerJoined`, `PlayerLeft`. `GameStarting{lobbyId,gameId,hostId,players}`
-is sent to a single player when they enter a lobby (create/join/rejoin) — it means "load the game
-now", not a min-players threshold.
+Push events (no `cid`): `PlayerJoined`, `PlayerLeft`, and the reconnect-grace pair
+`PlayerDisconnected{lobbyId,playerId}` / `PlayerConnected{lobbyId,playerId}` (a member's shell
+socket dropped but they're held in the lobby for the grace window, then returned within it — they
+stay on the roster the whole time). `EnterGame{lobbyId,gameId,hostId,players}` is sent to a
+single player when they enter a lobby (create/join/rejoin) — it means "load the game now", not a
+min-players threshold.
 
 ### Data role (a game iframe's own socket) — first frame `Attach`
 
 ```jsonc
-→ { "type": "Attach", "ticket": "<from RequestGameTicket>" }
+→ { "type": "Attach", "ticket": "<from RequestTicket>" }
 ← { "type": "Ready",  "playerId": "<id>", "players": [ … ], "isHost": true }
 
 → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }      // game sends
 ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }        // server stamps From
 → { "type": "SetLobbyOpen", "open": true|false }    // host-only: set the lobby's join policy
 → { "type": "Log", "level": "Information", "message": "…" }   // → server log sink (KnockBox.GameLog)
-→ { "type": "GameLog", "metadata": { "placement": "1", … } } // → forwarded to this player's CONTROL socket
+→ { "type": "PlayLog", "metadata": { "placement": "1", … } } // → forwarded to this player's CONTROL socket
 ← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
+← { "type": "GamePlayerDisconnected", "playerId": "…" }   ← { "type": "GamePlayerConnected", "playerId": "…" }  // reconnect grace
 ```
 The server validates the ticket signature **and live lobby membership**, binds the connection to
 `(playerId, lobbyId)`, and resolves all routing from that binding — **the game never sends a lobby
 id.** `to` routing: `"all"` → every member (incl. sender), `"host"` → the lobby's host, `"<id>"` →
 that member only. A message from a non-member is dropped silently.
 
-`GameLog` is the one data-role frame the server **routes back to a control socket**: a game calls
+`PlayLog` is the one data-role frame the server **routes back to a control socket**: a game calls
 `KnockBox.logPlay(metadata)`, and the server sanitizes the untrusted metadata, stamps trusted context
-(`gameId`, a UTC `timestamp`, `isHost`), and sends the enriched `GameLog` to **that same player's**
+(`gameId`, a UTC `timestamp`, `isHost`), and sends the enriched `PlayLog` to **that same player's**
 control socket. The shell persists the most-recent 50 in the browser and shows them in the home-page
 Play Log. (`Log`, by contrast, only lands in the server's log sink — it is never relayed.)
 
@@ -153,14 +164,14 @@ per-tab.
 ### Create / join a lobby (control)
 `CreateLobby` makes a lobby (creator = host, **open** by default). `JoinLobby` adds the player, seeds
 them the roster, and announces them to others. The server has **no "started" concept** — each player
-who creates, joins, or rejoins is sent `GameStarting` (load-the-game) for themselves, so the game
+who creates, joins, or rejoins is sent `EnterGame` (load-the-game) for themselves, so the game
 runs from the moment anyone enters. There is **no lobby-listing endpoint** — players join only by
 entering a lobby code, so private lobbies stay discoverable only to those who have the code. The host
 controls joinability with `SetLobbyOpen`: an **open** lobby accepts joins by code; a **closed** one
 rejects new joins (existing members and reconnects still get back in).
 
 ### Entering the game (control → data)
-On `GameStarting` the shell calls `RequestGameTicket`, receives a scoped ticket, and embeds the
+On `EnterGame` the shell calls `RequestTicket`, receives a scoped ticket, and embeds the
 game iframe **on the game origin** at `…/games/{id}/{entry}#kbTicket=…&kbEndpoint=wss://host:5115/ws`.
 The credentials ride in the URL **fragment** (`#…`), not a query string, so they are never sent in a
 `Referer` header or written to server/proxy logs — untrusted game code that loads an external
@@ -177,8 +188,23 @@ The server is a blind pipe routing by the bound connection; the host's browser i
 truth.
 
 ### Disconnect & reconnect
-- Closing the **control** socket removes the player from its lobby, broadcasts `PlayerLeft` (and
-  `GamePlayerLeft` to game sockets), and deletes the lobby if empty.
+- Closing the **control** socket does **not** immediately remove the player. With a reconnect grace
+  window configured (`DisconnectGraceSeconds`, default 60), the player is flagged *disconnected* but
+  kept in the lobby (so the lobby stays alive and their game ticket stays valid); the server
+  broadcasts `PlayerDisconnected`/`GamePlayerDisconnected`. A reconnect within the window (a fresh
+  shell `Hello` + `RejoinLobby`) clears the flag and broadcasts `PlayerConnected`/`GamePlayerConnected`
+  with no roster churn. A background reaper (sweeping every ~5s) removes any member whose grace
+  elapses — broadcasting `PlayerLeft`/`GamePlayerLeft` and deleting the lobby if it empties; the
+  reaper re-checks for a live control socket first, so a player who reconnected is never evicted.
+  Setting the grace to `0` restores the old behaviour: a control-socket close leaves immediately.
+- A lobby is **closed immediately** the moment no member still holds a live control socket (it's
+  empty, or every remaining member is disconnected) — the grace only helps when someone is still
+  there to reconnect to, so a "dark" lobby isn't held. So a lone host who refreshes loses the lobby
+  (and recreates it), while a multiplayer refresh stays protected by the still-connected peers.
+  Explicit leaves (Leave / home button → `LeaveLobby`) are always immediate and unaffected by grace.
+- This is why a **tab refresh** is now survivable: the identity token (per-tab `sessionStorage`) and
+  saved lobby code persist across the reload, the shell auto-rejoins, and the grace window keeps the
+  lobby and membership alive in the gap.
 - The **data** socket reconnects on a *transient* drop with capped exponential backoff (1s→30s) and
   re-`Attach`es with the same ticket (re-validated against live membership). A **terminal** close
   (code `1008`: invalid ticket / membership ended) stops reconnection — no retry storm after a game
@@ -297,5 +323,6 @@ into `games/` and it appears within a second or two — no restart.
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection token bucket on inbound data-role frames (each relayed frame fans out O(lobby size)). Sustained violation → `Error{rate_limited}` + terminal close `1008`. `0` disables. |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
+| `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

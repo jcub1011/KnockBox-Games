@@ -22,8 +22,10 @@ public sealed class ConnectionManager
 
     public void Add(Connection c) => _byPlayer[c.PlayerId] = c;
 
-    /// <summary>Removes the connection only if it is still the registered one (guards reconnect races).</summary>
-    public void Remove(Connection c) => _byPlayer.TryRemove(KeyValuePair.Create(c.PlayerId, c));
+    /// <summary>Removes the connection only if it is still the registered one (guards reconnect
+    /// races). Returns true if this connection was the registered one and was removed; false if a
+    /// newer connection for the same player had already superseded it.</summary>
+    public bool Remove(Connection c) => _byPlayer.TryRemove(KeyValuePair.Create(c.PlayerId, c));
 
     public Connection? Get(string playerId) => _byPlayer.TryGetValue(playerId, out var c) ? c : null;
 

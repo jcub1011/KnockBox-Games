@@ -9,6 +9,21 @@ namespace KnockBox.Contracts;
 /// discriminator (e.g. <c>{ "type": "Hello", ... }</c>). The server (de)serializes with a
 /// camelCase naming policy, so C# <c>PlayerId</c> ⇄ JSON <c>playerId</c>.
 ///
+/// Naming convention (keep new messages consistent with it):
+/// <list type="bullet">
+/// <item><b>Plane</b> — <i>control</i> rides the shell socket (RunControlAsync); <i>data</i> rides
+/// the game iframe socket (RunDataAsync).</item>
+/// <item><b>Commands</b> (client→server) are imperative verbs: Hello, Attach, SetName, ListGames,
+/// CreateLobby, JoinLobby, RejoinLobby, LeaveLobby, RequestTicket, SetLobbyOpen, KickPlayer.</item>
+/// <item><b>Responses</b> (server→client, cid-correlated) are noun + past participle: Welcome,
+/// Ready, GameCatalog, LobbyCreated, LobbyJoined, RejoinRejected, Ticket, Error.</item>
+/// <item><b>Events</b> (push, no cid) are past-tense, plane-tagged: control PlayerJoined/Left/
+/// Disconnected/Connected, Kicked, EnterGame; data GamePlayerJoined/Left/Disconnected/Connected.</item>
+/// <item>The <c>Game</c> prefix is reserved for the data plane — the relay payload (Game) and the
+/// roster mirrors (GamePlayer*, the data-plane twins of the control Player* events, which omit
+/// LobbyId). Data-plane messages with no control twin keep plain names (Attach, Ready, Log).</item>
+/// </list>
+///
 /// Request/response ops carry a client-generated <c>cid</c> so the client can await the
 /// matching reply. Push events have no <c>cid</c>.
 /// </summary>
@@ -17,20 +32,22 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(WelcomeMessage), "Welcome")]
 [JsonDerivedType(typeof(SetNameMessage), "SetName")]
 [JsonDerivedType(typeof(ListGamesMessage), "ListGames")]
-[JsonDerivedType(typeof(GameListMessage), "GameList")]
+[JsonDerivedType(typeof(GameCatalogMessage), "GameCatalog")]
 [JsonDerivedType(typeof(CreateLobbyMessage), "CreateLobby")]
 [JsonDerivedType(typeof(LobbyCreatedMessage), "LobbyCreated")]
 [JsonDerivedType(typeof(JoinLobbyMessage), "JoinLobby")]
-[JsonDerivedType(typeof(JoinedMessage), "Joined")]
+[JsonDerivedType(typeof(LobbyJoinedMessage), "LobbyJoined")]
 [JsonDerivedType(typeof(LeaveLobbyMessage), "LeaveLobby")]
-[JsonDerivedType(typeof(RejoinMessage), "Rejoin")]
-[JsonDerivedType(typeof(RejoinFailedMessage), "RejoinFailed")]
-[JsonDerivedType(typeof(RequestGameTicketMessage), "RequestGameTicket")]
-[JsonDerivedType(typeof(GameTicketMessage), "GameTicket")]
+[JsonDerivedType(typeof(RejoinLobbyMessage), "RejoinLobby")]
+[JsonDerivedType(typeof(RejoinRejectedMessage), "RejoinRejected")]
+[JsonDerivedType(typeof(RequestTicketMessage), "RequestTicket")]
+[JsonDerivedType(typeof(TicketMessage), "Ticket")]
 [JsonDerivedType(typeof(PlayerJoinedMessage), "PlayerJoined")]
 [JsonDerivedType(typeof(PlayerLeftMessage), "PlayerLeft")]
+[JsonDerivedType(typeof(PlayerDisconnectedMessage), "PlayerDisconnected")]
+[JsonDerivedType(typeof(PlayerConnectedMessage), "PlayerConnected")]
 [JsonDerivedType(typeof(KickedMessage), "Kicked")]
-[JsonDerivedType(typeof(GameStartingMessage), "GameStarting")]
+[JsonDerivedType(typeof(EnterGameMessage), "EnterGame")]
 [JsonDerivedType(typeof(AttachMessage), "Attach")]
 [JsonDerivedType(typeof(ReadyMessage), "Ready")]
 [JsonDerivedType(typeof(GameMessage), "Game")]
@@ -38,15 +55,17 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(KickPlayerMessage), "KickPlayer")]
 [JsonDerivedType(typeof(GamePlayerJoinedMessage), "GamePlayerJoined")]
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
+[JsonDerivedType(typeof(GamePlayerDisconnectedMessage), "GamePlayerDisconnected")]
+[JsonDerivedType(typeof(GamePlayerConnectedMessage), "GamePlayerConnected")]
 [JsonDerivedType(typeof(LogMessage), "Log")]
-[JsonDerivedType(typeof(GameLogMessage), "GameLog")]
+[JsonDerivedType(typeof(PlayLogMessage), "PlayLog")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
 public interface IMessage;
 
 // ── Identity (first exchange after connect on the CONTROL role) ──────────────
 // The signed Token makes the anonymous, per-tab playerId unforgeable: the client resends it on
 // reconnect and the server only honours a claimed PlayerId whose Token verifies. The token never
-// leaves the shell origin — games authenticate with a scoped ticket instead (see RequestGameTicket).
+// leaves the shell origin — games authenticate with a scoped ticket instead (see RequestTicket).
 // Proto declares the wire-protocol version the client speaks (see KnockBoxProtocol); 0 means a
 // pre-versioning client and is treated as version 1.
 public sealed record HelloMessage(string? PlayerId, string DisplayName, string? Token = null, int Proto = 0) : IMessage;
@@ -63,19 +82,22 @@ public sealed record SetNameMessage(string DisplayName) : IMessage;
 
 // ── Catalog (over WebSocket) ─────────────────────────────────────────────────
 public sealed record ListGamesMessage(string Cid) : IMessage;
-public sealed record GameListMessage(string Cid, IReadOnlyList<GameManifest> Games) : IMessage;
+public sealed record GameCatalogMessage(string Cid, IReadOnlyList<GameManifest> Games) : IMessage;
 
 // ── Lobby ops (cid-correlated request/response) ──────────────────────────────
 public sealed record CreateLobbyMessage(string Cid, string GameId) : IMessage;
 public sealed record LobbyCreatedMessage(string Cid, string LobbyId) : IMessage;
 
 public sealed record JoinLobbyMessage(string Cid, string LobbyId) : IMessage;
-public sealed record JoinedMessage(string Cid, string LobbyId) : IMessage;
+public sealed record LobbyJoinedMessage(string Cid, string LobbyId) : IMessage;
 
 public sealed record LeaveLobbyMessage(string LobbyId) : IMessage;
 
-public sealed record RejoinMessage(string Cid, string LobbyId) : IMessage;
-public sealed record RejoinFailedMessage(string Cid) : IMessage;
+// RejoinLobby is a reconnect after a drop: an existing member returning within the grace window. On
+// success the server replies with the same LobbyJoined response a fresh join gets; only failure
+// (lobby gone, kicked, grace elapsed) returns RejoinRejected so the shell clears its saved lobby.
+public sealed record RejoinLobbyMessage(string Cid, string LobbyId) : IMessage;
+public sealed record RejoinRejectedMessage(string Cid) : IMessage;
 
 // ── Game ticket (control role) ───────────────────────────────────────────────
 // When a game starts, the shell asks for a lobby-scoped ticket bound to (its player, this lobby).
@@ -83,16 +105,26 @@ public sealed record RejoinFailedMessage(string Cid) : IMessage;
 // library opens its OWN data-role websocket and authenticates with it — without ever seeing the
 // player's identity token. The ticket is reusable while the holder stays a lobby member (so the
 // data socket can reconnect) and until it expires; the server re-checks live membership on attach.
-public sealed record RequestGameTicketMessage(string Cid, string LobbyId) : IMessage;
-public sealed record GameTicketMessage(string Cid, string Ticket) : IMessage;
+public sealed record RequestTicketMessage(string Cid, string LobbyId) : IMessage;
+public sealed record TicketMessage(string Cid, string Ticket) : IMessage;
 
 // ── Lobby push events (server → client, no cid) ──────────────────────────────
 public sealed record PlayerJoinedMessage(string LobbyId, Player Player) : IMessage;
 public sealed record PlayerLeftMessage(string LobbyId, string PlayerId) : IMessage;
+// Pushed when a member's shell (control) socket drops but they're kept in the lobby for the
+// reconnect grace window (see KnockBox:DisconnectGraceSeconds) — and again when they reconnect
+// within it. The player stays in the roster the whole time; these only signal the transient state
+// so peers can show "reconnecting…". A grace that elapses without reconnect ends in PlayerLeft.
+public sealed record PlayerDisconnectedMessage(string LobbyId, string PlayerId) : IMessage;
+public sealed record PlayerConnectedMessage(string LobbyId, string PlayerId) : IMessage;
 // Pushed to a player's CONTROL socket when the host kicks them: the shell leaves the game and
 // returns home with a clear message (distinct from a transient drop or a "lobby full" rejection).
 public sealed record KickedMessage(string LobbyId) : IMessage;
-public sealed record GameStartingMessage(
+// Pushed to one player's CONTROL socket when they enter the lobby (on create, join, and rejoin) —
+// "you're in, here's what to load". The server has no "started" concept; the game itself owns
+// waiting-for-players and deciding when play begins. Carries the game id + full roster to bootstrap
+// the iframe.
+public sealed record EnterGameMessage(
     string LobbyId,
     string GameId,
     string HostId,
@@ -117,6 +149,11 @@ public sealed record SetLobbyOpenMessage(bool Open) : IMessage;
 public sealed record KickPlayerMessage(string TargetPlayerId) : IMessage;
 public sealed record GamePlayerJoinedMessage(Player Player) : IMessage;
 public sealed record GamePlayerLeftMessage(string PlayerId) : IMessage;
+// Game-plane counterparts of PlayerDisconnected/PlayerConnected: pushed to the OTHER members' game
+// sockets so in-game clients (the SDK's onPlayerDisconnected/onPlayerConnected) can react to a peer
+// dropping and returning during the grace window. The player stays in the roster throughout.
+public sealed record GamePlayerDisconnectedMessage(string PlayerId) : IMessage;
+public sealed record GamePlayerConnectedMessage(string PlayerId) : IMessage;
 // Game → server diagnostic (data role): the game emits a log line that lands in the server's log
 // sink so operators can observe deployed games (the player only ever sees their own console). Level
 // is the shared Microsoft.Extensions.Logging.LogLevel; it serializes as its NAME on the wire (e.g.
@@ -133,7 +170,7 @@ public sealed record LogMessage(
 // the server stamps the trusted, unforgeable context — GameId (resolved from the lobby), Timestamp
 // (server clock), and IsHost (was this player the lobby host). The shell treats a recognized set of
 // metadata keys ("placement", "playerCount", …) specially and shows the rest in a details table.
-public sealed record GameLogMessage(
+public sealed record PlayLogMessage(
     Dictionary<string, string> Metadata,
     string? GameId = null,
     DateTimeOffset? Timestamp = null,

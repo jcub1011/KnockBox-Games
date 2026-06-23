@@ -12,6 +12,11 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
     // Players the host has kicked. A kick is permanent for this lobby: kicked ids are refused by
     // TryAdd so they cannot rejoin (rejoin otherwise bypasses the Open/membership checks).
     private readonly HashSet<string> _kicked = [];
+    // Members whose shell (control) socket has dropped but who are kept in the lobby for the
+    // reconnect grace window. Presence here = currently disconnected; the value is when the drop
+    // happened, so the reaper can evict once the grace elapses. A disconnected member stays in
+    // _players (still a member) the whole time.
+    private readonly Dictionary<string, DateTimeOffset> _disconnectedSince = [];
     private readonly Lock _gate = new();
 
     public string Id { get; } = id;
@@ -96,6 +101,7 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
     {
         lock (_gate)
         {
+            _disconnectedSince.Remove(playerId);
             var idx = _players.FindIndex(p => p.Id == playerId);
             if (idx < 0) return false;
             _players.RemoveAt(idx);
@@ -110,10 +116,42 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
         lock (_gate)
         {
             _kicked.Add(playerId);
+            _disconnectedSince.Remove(playerId);
             var idx = _players.FindIndex(p => p.Id == playerId);
             if (idx < 0) return false;
             _players.RemoveAt(idx);
             return true;
         }
+    }
+
+    // ── Reconnect grace: presence tracking ────────────────────────────────────
+    /// <summary>Flags a member as disconnected as of <paramref name="now"/>, keeping them in the
+    /// roster. Returns true only on the transition (a current member not already flagged) so the
+    /// caller broadcasts exactly one PlayerDisconnected; idempotent otherwise.</summary>
+    public bool MarkDisconnected(string playerId, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            if (!_players.Any(p => p.Id == playerId)) return false; // not a member (e.g. already reaped)
+            if (_disconnectedSince.ContainsKey(playerId)) return false; // already flagged
+            _disconnectedSince[playerId] = now;
+            return true;
+        }
+    }
+
+    /// <summary>Clears a member's disconnected flag. Returns true only if they were flagged (so the
+    /// caller broadcasts PlayerConnected); false for a normal connect that was never disconnected.</summary>
+    public bool MarkConnected(string playerId)
+    {
+        lock (_gate) return _disconnectedSince.Remove(playerId);
+    }
+
+    /// <summary>Snapshot of members whose disconnect happened at or before <paramref name="cutoff"/>
+    /// (i.e. the grace window has elapsed). The caller decides removal vs. clearing the flag so it
+    /// can re-check for a live reconnect first.</summary>
+    public IReadOnlyList<string> ExpiredDisconnects(DateTimeOffset cutoff)
+    {
+        lock (_gate)
+            return [.. _disconnectedSince.Where(kv => kv.Value <= cutoff).Select(kv => kv.Key)];
     }
 }

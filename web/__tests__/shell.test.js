@@ -139,7 +139,7 @@ describe('game catalog rendering', () => {
 
 describe('Play Log', () => {
   const sendEntry = (ws, extra = {}) => ws._recv({
-    type: 'GameLog',
+    type: 'PlayLog',
     gameId: 'ttt',
     timestamp: '2026-06-17T12:00:00.000Z',
     isHost: true,
@@ -407,7 +407,7 @@ describe('joinByCode', () => {
     el('join-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     const join = ws.sent.find((f) => f.type === 'JoinLobby');
     expect(join.lobbyId).toBe('AB12');
-    ws._recv({ cid: join.cid, type: 'Joined', lobbyId: 'AB12' });
+    ws._recv({ cid: join.cid, type: 'LobbyJoined', lobbyId: 'AB12' });
     await tick();
 
     expect(sessionStorage.getItem('kb.lobbyId')).toBe('AB12');
@@ -454,26 +454,26 @@ describe('roster updates', () => {
   });
 });
 
-describe('enterGame (GameStarting)', () => {
+describe('enterGame (EnterGame)', () => {
   beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
 
-  it('rejects a GameStarting for an unknown game id', async () => {
+  it('rejects an EnterGame for an unknown game id', async () => {
     await importShell();
     const ws = await bootWithGames();
-    shell.handle({ type: 'GameStarting', lobbyId: 'AB12', gameId: 'nope', hostId: 'p1', players: [] });
+    shell.handle({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'nope', hostId: 'p1', players: [] });
     await tick();
     expect(document.querySelector('.home-error-toast').textContent).toContain('Unknown game.');
-    expect(ws.sent.some((f) => f.type === 'RequestGameTicket')).toBe(false);
+    expect(ws.sent.some((f) => f.type === 'RequestTicket')).toBe(false);
   });
 
   it('requests a ticket and embeds the game iframe (ticket in the fragment)', async () => {
     await importShell();
     const ws = await bootWithGames();
 
-    shell.enterGame({ type: 'GameStarting', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
-    const req = ws.sent.find((f) => f.type === 'RequestGameTicket');
+    shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+    const req = ws.sent.find((f) => f.type === 'RequestTicket');
     expect(req.lobbyId).toBe('AB12');
-    ws._recv({ cid: req.cid, type: 'GameTicket', ticket: 'tok+/=' });
+    ws._recv({ cid: req.cid, type: 'Ticket', ticket: 'tok+/=' });
     await tick();
 
     const frame = el('game-frame');
@@ -487,9 +487,9 @@ describe('enterGame (GameStarting)', () => {
   it('sets the cross-origin-isolated allow attribute when the manifest asks for it', async () => {
     await importShell();
     const ws = await bootWithGames([{ id: 'coi', name: 'Threaded', crossOriginIsolated: true, entry: 'index.html' }]);
-    shell.enterGame({ type: 'GameStarting', lobbyId: 'AB12', gameId: 'coi', hostId: 'p1', players: [] });
-    const req = ws.sent.find((f) => f.type === 'RequestGameTicket');
-    ws._recv({ cid: req.cid, type: 'GameTicket', ticket: 't' });
+    shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'coi', hostId: 'p1', players: [] });
+    const req = ws.sent.find((f) => f.type === 'RequestTicket');
+    ws._recv({ cid: req.cid, type: 'Ticket', ticket: 't' });
     await tick();
     expect(el('game-frame').allow).toBe('cross-origin-isolated');
   });
@@ -509,10 +509,10 @@ describe('control-plane messages', () => {
     expect(document.querySelector('.home-error-toast').textContent).toContain('kicked');
   });
 
-  it('RejoinFailed forgets the saved lobby and shows the lobby view', async () => {
+  it('RejoinRejected forgets the saved lobby and shows the lobby view', async () => {
     sessionStorage.setItem('kb.lobbyId', 'AB12');
     await importShell();
-    shell.handle({ type: 'RejoinFailed' });
+    shell.handle({ type: 'RejoinRejected' });
     expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
     expect(el('lobby-view').style.display).toBe('block');
   });
@@ -527,7 +527,7 @@ describe('control-plane messages', () => {
     sessionStorage.setItem('kb.lobbyId', 'AB12');
     await importShell();
     const ws = await bootWithGames(); // Welcome → refreshGames → tryRejoin
-    expect(ws.sent.some((f) => f.type === 'Rejoin' && f.lobbyId === 'AB12')).toBe(true);
+    expect(ws.sent.some((f) => f.type === 'RejoinLobby' && f.lobbyId === 'AB12')).toBe(true);
   });
 });
 

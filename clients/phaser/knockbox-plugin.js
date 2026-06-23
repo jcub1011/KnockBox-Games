@@ -18,6 +18,8 @@
 //   this.knockbox.events.on('message', ({ from, payload }) => { ... });
 //   this.knockbox.events.on('player-joined', (player)   => { ... });
 //   this.knockbox.events.on('player-left',   (playerId) => { ... });
+//   this.knockbox.events.on('player-disconnected', (playerId) => { ... }); // held for grace window
+//   this.knockbox.events.on('player-connected',    (playerId) => { ... }); // reconnected in time
 //   this.knockbox.sendToAll({ kind: 'move', x, y });   // -> everyone incl. self (state)
 //   this.knockbox.sendToHost({ kind: 'tap' });         // -> the authoritative host (intent)
 //   this.knockbox.sendTo(playerId, { secret: 1 });     // -> one specific player
@@ -164,7 +166,7 @@
         bag[key] = String(value);
       }
     }
-    this._sendLog({ type: 'GameLog', metadata: bag });
+    this._sendLog({ type: 'PlayLog', metadata: bag });
   };
 
   // ── Internals ─────────────────────────────────────────────────────────────────────────────────
@@ -298,6 +300,15 @@
       case 'GamePlayerLeft':
         this.players = KBCore.rosterRemove(this.players, msg.playerId);
         this.events.emit('player-left', msg.playerId);
+        break;
+      // Transient presence during the reconnect grace window: the peer stays a member (kept in
+      // `players`), so don't touch the roster — just emit the state change. A true departure
+      // arrives later as GamePlayerLeft.
+      case 'GamePlayerDisconnected':
+        this.events.emit('player-disconnected', msg.playerId);
+        break;
+      case 'GamePlayerConnected':
+        this.events.emit('player-connected', msg.playerId);
         break;
       default:
         // Unknown frame type — drop it. A newer server may send frames this client

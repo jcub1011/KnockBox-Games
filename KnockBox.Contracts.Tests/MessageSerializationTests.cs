@@ -78,6 +78,48 @@ public class MessageSerializationTests
         Assert.Equal("ABCD", back.LobbyId);
     }
 
+    [Theory]
+    [InlineData("PlayerDisconnected")]
+    [InlineData("PlayerConnected")]
+    public void Control_presence_messages_round_trip_with_lobby_and_player(string type)
+    {
+        IMessage original = type == "PlayerDisconnected"
+            ? new PlayerDisconnectedMessage("ABCD", "p7")
+            : new PlayerConnectedMessage("ABCD", "p7");
+
+        var json = JsonSerializer.Serialize(original, Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(type, doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("ABCD", doc.RootElement.GetProperty("lobbyId").GetString());
+        Assert.Equal("p7", doc.RootElement.GetProperty("playerId").GetString());
+
+        var back = JsonSerializer.Deserialize<IMessage>(json, Options);
+        var lobbyId = back switch
+        {
+            PlayerDisconnectedMessage d => d.LobbyId,
+            PlayerConnectedMessage c => c.LobbyId,
+            _ => null,
+        };
+        Assert.Equal("ABCD", lobbyId);
+    }
+
+    [Theory]
+    [InlineData("GamePlayerDisconnected")]
+    [InlineData("GamePlayerConnected")]
+    public void Game_presence_messages_round_trip_with_player(string type)
+    {
+        IMessage original = type == "GamePlayerDisconnected"
+            ? new GamePlayerDisconnectedMessage("p7")
+            : new GamePlayerConnectedMessage("p7");
+
+        var json = JsonSerializer.Serialize(original, Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(type, doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("p7", doc.RootElement.GetProperty("playerId").GetString());
+    }
+
     [Fact]
     public void Log_message_serializes_its_level_as_a_name_round_trip()
     {
@@ -111,9 +153,9 @@ public class MessageSerializationTests
     }
 
     [Fact]
-    public void GameLog_round_trips_with_metadata_and_server_stamped_context()
+    public void PlayLog_round_trips_with_metadata_and_server_stamped_context()
     {
-        IMessage original = new GameLogMessage(
+        IMessage original = new PlayLogMessage(
             new Dictionary<string, string> { ["placement"] = "1", ["playerCount"] = "4" },
             GameId: "tic-tac-toe", Timestamp: DateTimeOffset.UnixEpoch, IsHost: true);
 
@@ -121,13 +163,13 @@ public class MessageSerializationTests
 
         using (var doc = JsonDocument.Parse(json))
         {
-            Assert.Equal("GameLog", doc.RootElement.GetProperty("type").GetString());
+            Assert.Equal("PlayLog", doc.RootElement.GetProperty("type").GetString());
             Assert.Equal("tic-tac-toe", doc.RootElement.GetProperty("gameId").GetString());
             Assert.True(doc.RootElement.GetProperty("isHost").GetBoolean());
             Assert.Equal("1", doc.RootElement.GetProperty("metadata").GetProperty("placement").GetString());
         }
 
-        var back = Assert.IsType<GameLogMessage>(JsonSerializer.Deserialize<IMessage>(json, Options));
+        var back = Assert.IsType<PlayLogMessage>(JsonSerializer.Deserialize<IMessage>(json, Options));
         Assert.Equal("tic-tac-toe", back.GameId);
         Assert.Equal(DateTimeOffset.UnixEpoch, back.Timestamp);
         Assert.Equal(true, back.IsHost);
@@ -135,11 +177,11 @@ public class MessageSerializationTests
     }
 
     [Fact]
-    public void GameLog_from_the_game_omits_the_server_stamped_fields()
+    public void PlayLog_from_the_game_omits_the_server_stamped_fields()
     {
         // The game supplies only metadata; gameId/timestamp/isHost are null until the server stamps them.
-        var back = Assert.IsType<GameLogMessage>(JsonSerializer.Deserialize<IMessage>(
-            """{ "type": "GameLog", "metadata": { "result": "win" } }""", Options));
+        var back = Assert.IsType<PlayLogMessage>(JsonSerializer.Deserialize<IMessage>(
+            """{ "type": "PlayLog", "metadata": { "result": "win" } }""", Options));
 
         Assert.Null(back.GameId);
         Assert.Null(back.Timestamp);
@@ -174,14 +216,18 @@ public class MessageSerializationTests
     [Theory]
     [InlineData(typeof(AttachMessage))]
     [InlineData(typeof(ReadyMessage))]
-    [InlineData(typeof(GameTicketMessage))]
-    [InlineData(typeof(RequestGameTicketMessage))]
+    [InlineData(typeof(TicketMessage))]
+    [InlineData(typeof(RequestTicketMessage))]
     [InlineData(typeof(GamePlayerJoinedMessage))]
     [InlineData(typeof(GamePlayerLeftMessage))]
+    [InlineData(typeof(GamePlayerDisconnectedMessage))]
+    [InlineData(typeof(GamePlayerConnectedMessage))]
+    [InlineData(typeof(PlayerDisconnectedMessage))]
+    [InlineData(typeof(PlayerConnectedMessage))]
     [InlineData(typeof(KickPlayerMessage))]
     [InlineData(typeof(KickedMessage))]
     [InlineData(typeof(LogMessage))]
-    [InlineData(typeof(GameLogMessage))]
+    [InlineData(typeof(PlayLogMessage))]
     public void Every_new_message_type_has_a_registered_discriminator(Type messageType)
     {
         // Constructing each is overkill; we only assert the polymorphism attribute knows the subtype,

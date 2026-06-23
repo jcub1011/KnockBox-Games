@@ -94,6 +94,23 @@ describe('Ready & roster', () => {
     expect(left).toEqual(['p2']);
     expect(kb.players.map((p) => p.id)).toEqual(['me']); // joined then left
   });
+
+  it('fires disconnect/connect callbacks without mutating the roster', async () => {
+    const { kb, ws } = await importSdk();
+    const disconnected = [], connected = [];
+    kb.onPlayerDisconnected((id) => disconnected.push(id));
+    kb.onPlayerConnected((id) => connected.push(id));
+    ws._open();
+    ws._recv({ type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'p2' }], isHost: true });
+
+    // A peer drops then returns within the grace window — they stay a member the whole time.
+    ws._recv({ type: 'GamePlayerDisconnected', playerId: 'p2' });
+    ws._recv({ type: 'GamePlayerConnected', playerId: 'p2' });
+
+    expect(disconnected).toEqual(['p2']);
+    expect(connected).toEqual(['p2']);
+    expect(kb.players.map((p) => p.id)).toEqual(['me', 'p2']); // roster unchanged
+  });
 });
 
 describe('send API', () => {
@@ -160,19 +177,19 @@ describe('logPlay', () => {
     ws._open();
     kb.logPlay({ placement: 1, playerCount: 4, result: 'win' });
 
-    const entries = ws.sent.filter((f) => f.type === 'GameLog');
+    const entries = ws.sent.filter((f) => f.type === 'PlayLog');
     expect(entries).toEqual([
-      { type: 'GameLog', metadata: { placement: '1', playerCount: '4', result: 'win' } },
+      { type: 'PlayLog', metadata: { placement: '1', playerCount: '4', result: 'win' } },
     ]);
   });
 
   it('queues entries before attach and flushes them on open (same path as logs)', async () => {
     const { kb, ws } = await importSdk();
     kb.logPlay({ a: 1 });
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toHaveLength(0);
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toHaveLength(0);
     ws._open();
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
-      { type: 'GameLog', metadata: { a: '1' } },
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toEqual([
+      { type: 'PlayLog', metadata: { a: '1' } },
     ]);
   });
 
@@ -180,15 +197,15 @@ describe('logPlay', () => {
     const { kb, ws } = await importSdk();
     ws._open();
     kb.logPlay();
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([{ type: 'GameLog', metadata: {} }]);
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toEqual([{ type: 'PlayLog', metadata: {} }]);
   });
 
   it('drops nullish values (no "null"/"undefined") but keeps falsy primitives', async () => {
     const { kb, ws } = await importSdk();
     ws._open();
     kb.logPlay({ a: 1, b: null, c: undefined, d: 0 });
-    expect(ws.sent.filter((f) => f.type === 'GameLog')).toEqual([
-      { type: 'GameLog', metadata: { a: '1', d: '0' } },
+    expect(ws.sent.filter((f) => f.type === 'PlayLog')).toEqual([
+      { type: 'PlayLog', metadata: { a: '1', d: '0' } },
     ]);
   });
 });
