@@ -127,6 +127,10 @@ export class KnockBoxPlugin {
   setLobbyOpen(open: boolean): void;
   /** Host-only: remove a player (barred from rejoining). Non-host calls are ignored. */
   kickPlayer(playerId: string): void;
+
+  /** Record a Play Log entry on the player's home page ("Recently Played"). Each call
+   *  appends one entry; values are coerced to strings and nullish values are dropped. */
+  logPlay(metadata?: Record<string, unknown>): void;
 }
 
 export default KnockBoxPlugin;
