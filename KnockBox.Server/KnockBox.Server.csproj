@@ -64,18 +64,12 @@
        suppressed above — first-party code keeps full per-site diagnostics. -->
   <ItemGroup>
     <TrimmerRootAssembly Include="Jint" />
+    <!-- Collapse Jint's per-site diagnostics into its per-assembly roll-ups (IL2104/IL3053, both in
+         NoWarn above). The "singlewarnassembly" flag is ILC's per-assembly TrimmerSingleWarn switch
+         (Microsoft.NETCore.Native.targets maps _IlcSingleWarnAssemblies to it; IlcArg is the
+         supported pass-through). Scoped to Jint only, so first-party code keeps full diagnostics. -->
+    <IlcArg Include="--singlewarnassembly:Jint" />
   </ItemGroup>
-
-  <!-- ManagedAssemblyToLink only exists during publish, so the per-assembly metadata must be set in
-       a target (the pattern from the trimming-options docs). Both hooks are listed so it applies to
-       illink (PrepareForILLink) and Native AOT ILC (ComputeIlcCompileInputs) flows. -->
-  <Target Name="CollapseJintTrimWarnings" BeforeTargets="PrepareForILLink;ComputeIlcCompileInputs">
-    <ItemGroup>
-      <ManagedAssemblyToLink Condition="'%(FileName)' == 'Jint'">
-        <TrimmerSingleWarn>true</TrimmerSingleWarn>
-      </ManagedAssemblyToLink>
-    </ItemGroup>
-  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\KnockBox.Contracts\KnockBox.Contracts.csproj" />
