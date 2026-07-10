@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { pack, PackError, validate } from "./pack-game.mjs";
+import {
+  AUTHORITY_MAX_SCRIPT_BYTES,
+  pack,
+  PackError,
+  scanAuthorityImports,
+  validate,
+} from "./pack-game.mjs";
 
 let work; // a fresh temp workspace per test: { root, src, meta, out }
 
@@ -31,9 +37,9 @@ function manifest(obj) {
 const VALID = { id: "demo", name: "Demo", entry: "index.html", thumbnail: "thumb.svg", maxPlayers: 4 };
 
 describe("pack (happy path)", () => {
-  it("assembles <out>/<id>/ with built files, manifest, and thumbnail", () => {
+  it("assembles <out>/<id>/ with built files, manifest, and thumbnail", async () => {
     const manifestPath = manifest(VALID);
-    const { target } = pack({ in: work.src, manifest: manifestPath, out: work.out });
+    const { target } = await pack({ in: work.src, manifest: manifestPath, out: work.out });
 
     expect(target).toBe(join(work.out, "demo"));
     expect(existsSync(join(target, "index.html"))).toBe(true);
@@ -43,27 +49,27 @@ describe("pack (happy path)", () => {
     expect(JSON.parse(readFileSync(join(target, "GAME.json"), "utf8"))).toEqual(VALID);
   });
 
-  it("works with no thumbnail declared", () => {
+  it("works with no thumbnail declared", async () => {
     const { id, name, entry, maxPlayers } = VALID;
-    const { target } = pack({ in: work.src, manifest: manifest({ id, name, entry, maxPlayers }), out: work.out });
+    const { target } = await pack({ in: work.src, manifest: manifest({ id, name, entry, maxPlayers }), out: work.out });
     expect(existsSync(join(target, "index.html"))).toBe(true);
     expect(existsSync(join(target, "thumb.svg"))).toBe(false);
   });
 
-  it("re-packs idempotently, removing stale files from a prior pack", () => {
+  it("re-packs idempotently, removing stale files from a prior pack", async () => {
     const manifestPath = manifest(VALID);
-    const first = pack({ in: work.src, manifest: manifestPath, out: work.out });
+    const first = await pack({ in: work.src, manifest: manifestPath, out: work.out });
     writeFileSync(join(first.target, "stale.txt"), "old"); // simulate a leftover
-    pack({ in: work.src, manifest: manifestPath, out: work.out });
+    await pack({ in: work.src, manifest: manifestPath, out: work.out });
     expect(existsSync(join(first.target, "stale.txt"))).toBe(false);
     expect(existsSync(join(first.target, "index.html"))).toBe(true);
   });
 
-  it("keeps existing files when --no-clean (clean: false)", () => {
+  it("keeps existing files when --no-clean (clean: false)", async () => {
     const manifestPath = manifest(VALID);
-    const { target } = pack({ in: work.src, manifest: manifestPath, out: work.out });
+    const { target } = await pack({ in: work.src, manifest: manifestPath, out: work.out });
     writeFileSync(join(target, "keep.txt"), "keep");
-    pack({ in: work.src, manifest: manifestPath, out: work.out, clean: false });
+    await pack({ in: work.src, manifest: manifestPath, out: work.out, clean: false });
     expect(existsSync(join(target, "keep.txt"))).toBe(true);
   });
 });
@@ -79,70 +85,120 @@ describe("pack (contract validation — mirrors GameCatalog)", () => {
     "rejects non-integer maxPlayers": { ...VALID, maxPlayers: 2.5 },
   };
   for (const [label, obj] of Object.entries(cases)) {
-    it(label, () => {
-      expect(() => pack({ in: work.src, manifest: manifest(obj), out: work.out })).toThrow(PackError);
+    it(label, async () => {
+      await expect(pack({ in: work.src, manifest: manifest(obj), out: work.out })).rejects.toThrow(PackError);
     });
   }
 
-  it("rejects crossOriginIsolated that is not a boolean", () => {
-    expect(() => pack({ in: work.src, manifest: manifest({ ...VALID, crossOriginIsolated: "yes" }), out: work.out }))
-      .toThrow(PackError);
+  it("rejects crossOriginIsolated that is not a boolean", async () => {
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, crossOriginIsolated: "yes" }), out: work.out }))
+      .rejects.toThrow(PackError);
   });
 
-  it("rejects an entry file that does not exist in --in", () => {
-    expect(() => pack({ in: work.src, manifest: manifest({ ...VALID, entry: "missing.html" }), out: work.out }))
-      .toThrow(/entry file not found/);
+  it("rejects an entry file that does not exist in --in", async () => {
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, entry: "missing.html" }), out: work.out }))
+      .rejects.toThrow(/entry file not found/);
   });
 
-  it("rejects an entry that escapes the built folder", () => {
-    expect(() => pack({ in: work.src, manifest: manifest({ ...VALID, entry: "../secret.html" }), out: work.out }))
-      .toThrow(/escapes the built folder/);
+  it("rejects an entry that escapes the built folder", async () => {
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, entry: "../secret.html" }), out: work.out }))
+      .rejects.toThrow(/escapes the built folder/);
   });
 
-  it("rejects a declared thumbnail that is missing", () => {
-    expect(() => pack({ in: work.src, manifest: manifest({ ...VALID, thumbnail: "nope.svg" }), out: work.out }))
-      .toThrow(/thumbnail .* not found/);
+  it("rejects a declared thumbnail that is missing", async () => {
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, thumbnail: "nope.svg" }), out: work.out }))
+      .rejects.toThrow(/thumbnail .* not found/);
   });
 
-  it("rejects a thumbnail name that escapes the game folder", () => {
+  it("rejects a thumbnail name that escapes the game folder", async () => {
     // The source exists, but the OUTPUT name would write outside <id>/.
     writeFileSync(join(work.root, "evil.svg"), "<svg/>");
-    expect(() => pack({ in: work.src, manifest: manifest({ ...VALID, thumbnail: "../evil.svg" }), out: work.out }))
-      .toThrow(/escapes the game folder/);
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, thumbnail: "../evil.svg" }), out: work.out }))
+      .rejects.toThrow(/escapes the game folder/);
   });
 });
 
-describe("pack (build + thumbnail override)", () => {
-  it("runs --build before assembling", () => {
-    // The build writes the entry the manifest points at; without it, validation fails.
-    const built = join(work.root, "built");
-    const entry = join(built, "index.html");
-    const cmd = `node -e "const fs=require('fs');fs.mkdirSync('${built.replace(/\\/g, "\\\\")}',{recursive:true});fs.writeFileSync('${entry.replace(/\\/g, "\\\\")}','<html></html>')"`;
-    const { target } = pack({ in: built, manifest: manifest(VALID), out: work.out, build: cmd });
-    expect(existsSync(join(target, "index.html"))).toBe(true);
+describe("pack (serverAuthority — mirrors GameCatalog + the load check)", () => {
+  const GOOD_MODULE =
+    "export function createAuthority(kb) {\n" +
+    "  return { init() {}, applyIntent() { return null; }, snapshot() { return {}; } };\n" +
+    "}\n" +
+    "export const config = { perRecipient: false, tickHz: 0 };\n";
+
+  const withAuthority = { ...VALID, serverAuthority: "authority.js" };
+
+  it("accepts a valid module and packs it into the game folder", async () => {
+    writeFileSync(join(work.src, "authority.js"), GOOD_MODULE);
+    const { target } = await pack({ in: work.src, manifest: manifest(withAuthority), out: work.out });
+    expect(existsSync(join(target, "authority.js"))).toBe(true);
   });
 
-  it("copies a nested thumbnail name, creating the parent dir", () => {
-    // The declared name is nested and that dir isn't part of the build — pack must mkdir it.
-    mkdirSync(join(work.meta, "assets"));
-    writeFileSync(join(work.meta, "assets", "thumb.svg"), "<svg/>");
-    const { target } = pack({ in: work.src, manifest: manifest({ ...VALID, thumbnail: "assets/thumb.svg" }), out: work.out });
-    expect(existsSync(join(target, "assets", "thumb.svg"))).toBe(true);
+  it("rejects a non-string serverAuthority", async () => {
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, serverAuthority: 5 }), out: work.out }))
+      .rejects.toThrow(/non-empty string/);
   });
 
-  it("--thumbnail overrides the source but keeps the declared output name", () => {
-    const override = join(work.root, "custom.svg");
-    writeFileSync(override, "<svg id='custom'/>");
-    const { target } = pack({ in: work.src, manifest: manifest(VALID), out: work.out, thumbnail: override });
-    expect(readFileSync(join(target, "thumb.svg"), "utf8")).toContain("custom");
+  it("rejects a .wasm module (backend not yet supported)", async () => {
+    writeFileSync(join(work.src, "authority.wasm"), "\0asm");
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, serverAuthority: "authority.wasm" }), out: work.out }))
+      .rejects.toThrow(/WASM backend/);
   });
 
-  it("rejects --thumbnail when no thumbnail is declared", () => {
-    const { id, name, entry, maxPlayers } = VALID;
-    const override = join(work.root, "custom.svg");
-    writeFileSync(override, "<svg/>");
-    expect(() => pack({ in: work.src, manifest: manifest({ id, name, entry, maxPlayers }), out: work.out, thumbnail: override }))
-      .toThrow(/declares no 'thumbnail'/);
+  it("rejects a module path that escapes the built folder", async () => {
+    writeFileSync(join(work.root, "evil.js"), GOOD_MODULE);
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, serverAuthority: "../evil.js" }), out: work.out }))
+      .rejects.toThrow(/escapes the built folder/);
+  });
+
+  it("rejects a missing module", async () => {
+    await expect(pack({ in: work.src, manifest: manifest(withAuthority), out: work.out }))
+      .rejects.toThrow(/serverAuthority module not found/);
+  });
+
+  it("rejects an oversize module", async () => {
+    writeFileSync(join(work.src, "authority.js"), GOOD_MODULE + "//" + "x".repeat(AUTHORITY_MAX_SCRIPT_BYTES));
+    await expect(pack({ in: work.src, manifest: manifest(withAuthority), out: work.out }))
+      .rejects.toThrow(/max \d+/);
+  });
+
+  it("rejects a module with a relative import (single-file rule)", async () => {
+    writeFileSync(join(work.src, "authority.js"), "import './helpers.js';\n" + GOOD_MODULE);
+    await expect(pack({ in: work.src, manifest: manifest(withAuthority), out: work.out }))
+      .rejects.toThrow(/single-file/);
+  });
+
+  it("rejects a module that does not export createAuthority (load check)", async () => {
+    writeFileSync(join(work.src, "authority.js"), "export const config = {};");
+    await expect(pack({ in: work.src, manifest: manifest(withAuthority), out: work.out }))
+      .rejects.toThrow(/createAuthority/);
+  });
+
+  it("rejects a malformed config export (load check)", async () => {
+    writeFileSync(join(work.src, "authority.js"),
+      "export function createAuthority(kb) { return {}; }\nexport const config = { tickHz: 'fast' };");
+    await expect(pack({ in: work.src, manifest: manifest(withAuthority), out: work.out }))
+      .rejects.toThrow(/tickHz/);
+  });
+
+  it("does not attempt a load when serverAuthority is absent", async () => {
+    // An unfortunately-named client asset with a syntax error must not break packing.
+    writeFileSync(join(work.src, "authority.js"), "this is not javascript ((");
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out });
+    expect(existsSync(join(target, "authority.js"))).toBe(true);
+  });
+});
+
+describe("scanAuthorityImports", () => {
+  it("throws on top-level import statements and export … from re-exports", () => {
+    expect(() => scanAuthorityImports("import x from './y.js';")).toThrow(/single-file/);
+    expect(() => scanAuthorityImports("import './side-effect.js';")).toThrow(/single-file/);
+    expect(() => scanAuthorityImports("export { a } from './b.js';")).toThrow(/single-file/);
+    expect(() => scanAuthorityImports("export * from './b.js';")).toThrow(/single-file/);
+  });
+
+  it("allows plain exports", () => {
+    expect(() => scanAuthorityImports(
+      "export function createAuthority(kb) {}\nexport const config = {};")).not.toThrow();
   });
 });
 
