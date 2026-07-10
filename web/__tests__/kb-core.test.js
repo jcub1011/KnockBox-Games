@@ -17,6 +17,7 @@ import {
   parseRgbComponents,
   LOG_LEVELS,
   makeLogger,
+  normalizeReady,
   rosterAdd,
   rosterRemove,
   appendPlayLog,
@@ -27,6 +28,40 @@ import {
   FAVICONS,
   pickRandomFavicon,
 } from '../kb-core.js';
+
+describe('normalizeReady', () => {
+  it('derives owner fields for an old-server host (no authority/ownerId on the wire)', () => {
+    const info = normalizeReady({ playerId: 'me', players: [{ id: 'me' }], isHost: true });
+    expect(info).toEqual({
+      playerId: 'me', players: [{ id: 'me' }], isHost: true,
+      authority: 'host', ownerId: 'me', isOwner: true,
+    });
+  });
+
+  it('leaves an old-server guest ownerless (the owner is unknowable)', () => {
+    const info = normalizeReady({ playerId: 'me', players: [], isHost: false });
+    expect(info.authority).toBe('host');
+    expect(info.ownerId).toBeNull();
+    expect(info.isOwner).toBe(false);
+  });
+
+  it('passes server-mode fields through and derives isOwner from ownerId', () => {
+    const guest = normalizeReady({ playerId: 'me', players: [], isHost: false, authority: 'server', ownerId: 'other' });
+    expect(guest).toMatchObject({ authority: 'server', ownerId: 'other', isOwner: false });
+
+    const owner = normalizeReady({ playerId: 'me', players: [], isHost: false, authority: 'server', ownerId: 'me' });
+    expect(owner).toMatchObject({ isHost: false, isOwner: true }); // owner ≠ host in server mode
+  });
+
+  it('keeps explicit host-mode fields from a new server untouched', () => {
+    const info = normalizeReady({ playerId: 'g', players: [], isHost: false, authority: 'host', ownerId: 'h' });
+    expect(info).toMatchObject({ authority: 'host', ownerId: 'h', isOwner: false });
+  });
+
+  it('defaults a missing players list to empty', () => {
+    expect(normalizeReady({ playerId: 'me', isHost: false }).players).toEqual([]);
+  });
+});
 
 describe('isTerminalClose', () => {
   it('treats the policy-violation code as terminal (invalid ticket / membership ended)', () => {

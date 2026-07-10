@@ -199,6 +199,27 @@ export function buildJoinLink(origin, code) {
   return `${origin}/?join=${encodeURIComponent(code)}`;
 }
 
+// Normalize a Ready frame into the SDK's identity/authority fields, with old-server fallbacks.
+// `authority` says who runs the game's authoritative logic: 'host' (a member's browser — the
+// default) or 'server' (the game's authority module runs server-side; every client is a guest).
+// `ownerId` is the member holding the lobby powers (kick, open/close) — a separate concept from
+// the authority; gate owner UI on `isOwner`, never `isHost`. A pre-authority server omits both
+// fields: authority defaults to 'host', and the owner is derivable only when we ARE the host.
+export function normalizeReady(msg) {
+  const playerId = msg.playerId;
+  const isHost = !!msg.isHost;
+  const authority = msg.authority ?? 'host';
+  const ownerId = msg.ownerId ?? (isHost ? playerId : null);
+  return {
+    playerId,
+    players: msg.players || [],
+    isHost,
+    authority,
+    ownerId,
+    isOwner: ownerId != null && ownerId === playerId,
+  };
+}
+
 // Roster reducers (immutable): add is idempotent by id; remove drops by id.
 export function rosterAdd(players, player) {
   return players.some((p) => p.id === player.id) ? players : [...players, player];
