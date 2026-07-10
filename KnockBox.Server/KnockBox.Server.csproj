@@ -64,8 +64,18 @@
        suppressed above — first-party code keeps full per-site diagnostics. -->
   <ItemGroup>
     <TrimmerRootAssembly Include="Jint" />
-    <ManagedAssemblyToLink Condition="'%(FileName)' == 'Jint'" TrimmerSingleWarn="true" />
   </ItemGroup>
+
+  <!-- ManagedAssemblyToLink only exists during publish, so the per-assembly metadata must be set in
+       a target (the pattern from the trimming-options docs). Both hooks are listed so it applies to
+       illink (PrepareForILLink) and Native AOT ILC (ComputeIlcCompileInputs) flows. -->
+  <Target Name="CollapseJintTrimWarnings" BeforeTargets="PrepareForILLink;ComputeIlcCompileInputs">
+    <ItemGroup>
+      <ManagedAssemblyToLink Condition="'%(FileName)' == 'Jint'">
+        <TrimmerSingleWarn>true</TrimmerSingleWarn>
+      </ManagedAssemblyToLink>
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\KnockBox.Contracts\KnockBox.Contracts.csproj" />
