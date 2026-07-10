@@ -16,8 +16,13 @@
          path is never executed under AOT. The real risk — Serilog.Settings.Configuration's assembly
          scanning — is removed (levels are configured in code, see Program.cs). All first-party code and
          other dependencies analyze clean, so this is the only suppressed warning; revisit if new
-         non-AOT-clean dependencies are added. -->
-    <NoWarn>$(NoWarn);IL2104</NoWarn>
+         non-AOT-clean dependencies are added.
+
+         IL3053 is the AOT-analysis twin of IL2104 (per-assembly roll-up). Jint's warnings are collapsed
+         to these roll-ups via TrimmerSingleWarn below — see that ItemGroup for the evidence that the
+         flagged Jint paths are unreachable. First-party code keeps FULL per-site diagnostics (IL2026,
+         IL3050, …) because only the roll-up codes are suppressed. -->
+    <NoWarn>$(NoWarn);IL2104;IL3053</NoWarn>
   </PropertyGroup>
 
   <!-- Bake the platform shell + SDK into the publish output (web/ next to the binary), so a
@@ -43,9 +48,23 @@
   <!-- Jint is a pure-C# interpreter with an official Native AOT sample; rooting the assembly keeps
        the trimmer from removing interpreter internals reached only through JsValue dispatch. All
        interop stays on the no-reflection path (JsValue/ClrFunction only, AllowClr never enabled) —
-       see Games/JsAuthorityRuntime.cs. -->
+       see Games/JsAuthorityRuntime.cs.
+
+       Rooting makes ILC surface Jint's internal RequiresUnreferencedCode sites as per-site IL2026
+       errors under /warnaserror. All four flagged paths are unreachable from our usage, verified
+       4.11.0 (re-audit on upgrade):
+         - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs when AllowClr
+           is enabled, which it never is.
+         - DefaultTypeConverter.BuildDelegate: expression-tree marshaling for typed .NET delegates
+           passed into the engine; we pass only ClrFunction/JsValue (JsCallDelegate), never typed
+           delegates.
+         - DefaultObjectConverter.ConvertSystemTextJsonValue: JsonNode → JsValue conversion; our
+           boundary is strings through Jint's own JsonParser/JsonSerializer, JsonNode never crosses.
+       TrimmerSingleWarn collapses them to the per-assembly roll-ups (IL2104/IL3053), which are
+       suppressed above — first-party code keeps full per-site diagnostics. -->
   <ItemGroup>
     <TrimmerRootAssembly Include="Jint" />
+    <ManagedAssemblyToLink Condition="'%(FileName)' == 'Jint'" TrimmerSingleWarn="true" />
   </ItemGroup>
 
   <ItemGroup>
