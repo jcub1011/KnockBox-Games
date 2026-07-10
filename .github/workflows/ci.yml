@@ -144,6 +144,24 @@ jobs:
           curl -fsS http://localhost:8081/games/tictactoe/GAME.json >/dev/null
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
 
+      - name: Server-authority module is never served from the game origin
+        run: |
+          # tictactoe-server declares serverAuthority: authority.js — server-side code (and for
+          # hidden-information games, secret). Its client assets serve; the module (and any
+          # precompressed variant of it) must 404 even on the game origin.
+          cp -r games/tictactoe-server /tmp/kb-games/
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Discovered game 'tictactoe-server'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'tictactoe-server'"
+          curl -fsS http://localhost:8081/games/tictactoe-server/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/tictactoe-server/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/tictactoe-server/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/tictactoe-server/authority.js.br >/dev/null
+
       - name: Shell origin exposes only the thumbnail, never the full game build
         run: |
           # Isolation guarantee: the untrusted build must NOT be reachable on the shell origin (8080),

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="96" viewBox="0 0 180 96">
+  <rect width="180" height="96" fill="#0d0f15"/>
+  <g stroke="#4257f5" stroke-width="3" stroke-linecap="round">
+    <line x1="78" y1="20" x2="78" y2="76"/>
+    <line x1="102" y1="20" x2="102" y2="76"/>
+    <line x1="60" y1="38" x2="120" y2="38"/>
+    <line x1="60" y1="58" x2="120" y2="58"/>
+  </g>
+  <g stroke="#f5c542" stroke-width="3" stroke-linecap="round">
+    <line x1="64" y1="24" x2="74" y2="34"/>
+    <line x1="74" y1="24" x2="64" y2="34"/>
+  </g>
+  <circle cx="111" cy="29" r="6" fill="none" stroke="#e7e9ee" stroke-width="3"/>
+  <text x="90" y="92" fill="#9aa0b0" font-family="sans-serif" font-size="9" text-anchor="middle">Tic-Tac-Toe</text>
+</svg>
