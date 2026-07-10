@@ -11,4 +11,6 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(GameManifest))]
 [JsonSerializable(typeof(TicketPayload))]
 [JsonSerializable(typeof(IdentityPayload))]
+// The roster projection handed to an authority module's init(players) (ServerAuthorityManager).
+[JsonSerializable(typeof(IReadOnlyList<Player>))]
 public partial class KnockBoxProtocolContext : JsonSerializerContext { }

@@ -30,7 +30,8 @@ public class KickFlowTests
         var catalog = new GameCatalog(Path.GetTempPath(), NullLogger<GameCatalog>.Instance); // no Discover needed
         var tokens = new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance);
         var limits = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
-        var handler = new WebSocketHandler(connections, lobbies, catalog, tokens, limits, TimeProvider.System,
+        var handler = new WebSocketHandler(connections, lobbies, catalog,
+            TestAuthorities.Manager(connections, lobbies), tokens, limits, TimeProvider.System,
             NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
 
         // A lobby with a host and a guest.

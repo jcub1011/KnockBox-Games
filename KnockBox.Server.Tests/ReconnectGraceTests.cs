@@ -36,7 +36,8 @@ public class ReconnectGraceTests
             : ConfigFactory.FromPairs(("KnockBox:DisconnectGraceSeconds", graceSeconds));
         var limits = ServerLimits.FromConfiguration(config);
         var time = new MutableTimeProvider(Now);
-        var handler = new WebSocketHandler(connections, lobbies, catalog, tokens, limits, time,
+        var handler = new WebSocketHandler(connections, lobbies, catalog,
+            TestAuthorities.Manager(connections, lobbies), tokens, limits, time,
             NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
         return (handler, connections, lobbies, tokens, time);
     }

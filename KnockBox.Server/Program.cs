@@ -136,10 +136,14 @@ var forwardedHeaders = builder.Configuration.GetValue("KnockBox:ForwardedHeaders
 // Abuse-protection limits (handshake deadline, per-connection rate limits, per-IP connection cap).
 var limits = ServerLimits.FromConfiguration(builder.Configuration);
 
+// Server-authority sandbox knobs (per-game opt-in via GAME.json serverAuthority).
+var authorityOptions = AuthorityOptions.FromConfiguration(builder.Configuration);
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
+builder.Services.AddSingleton(authorityOptions);
 builder.Services.AddSingleton(sp =>
-    new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>()));
+    new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>(), authorityOptions.MaxScriptBytes));
 if (precompressEnabled)
     builder.Services.AddSingleton(sp => new GameAssetPrecompressor(
         gamesRoot, gamesCompressedRoot, precompressGzip, precompressMinBytes,
@@ -147,6 +151,12 @@ if (precompressEnabled)
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 builder.Services.AddSingleton<LobbyManager>();
+builder.Services.AddSingleton(sp => new ServerAuthorityManager(
+    gamesRoot, authorityOptions,
+    sp.GetRequiredService<ConnectionManager>(), sp.GetRequiredService<LobbyManager>(),
+    sp.GetRequiredService<TimeProvider>(),
+    builder.Environment.IsDevelopment(),
+    sp.GetRequiredService<ILoggerFactory>()));
 builder.Services.AddSingleton<WebSocketHandler>();
 
 // Compress responses (game bundles are large). Brotli + Gzip, including the engine asset
@@ -262,6 +272,11 @@ if (limits.DisconnectGrace > TimeSpan.Zero)
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => disconnectReaperTimer.Dispose());
 }
+
+// Server-authority actors hold live Jint engines and tick timers — stop them all on shutdown
+// (each actor's drain task disposes its own engine).
+app.Lifetime.ApplicationStopping.Register(() =>
+    app.Services.GetRequiredService<ServerAuthorityManager>().StopAll());
 
 if (allowedOrigins.Length == 0)
     app.Logger.LogWarning("KnockBox:AllowedOrigins is empty — /ws accepts any Origin. Set it for production.");

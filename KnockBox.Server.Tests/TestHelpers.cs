@@ -1,7 +1,24 @@
 using System.Net.WebSockets;
+using KnockBox.Server.Games;
+using KnockBox.Server.Lobbies;
+using KnockBox.Server.Networking;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace KnockBox.Server.Tests;
+
+/// <summary>Builds the ServerAuthorityManager a WebSocketHandler needs, with quiet defaults —
+/// host-authoritative flow tests just pass it through and never touch it.</summary>
+internal static class TestAuthorities
+{
+    public static ServerAuthorityManager Manager(
+        ConnectionManager connections, LobbyManager lobbies,
+        string? gamesRoot = null, IConfiguration? config = null,
+        TimeProvider? time = null, bool isDevelopment = false) =>
+        new(gamesRoot ?? Path.GetTempPath(),
+            AuthorityOptions.FromConfiguration(config ?? new ConfigurationBuilder().Build()),
+            connections, lobbies, time ?? TimeProvider.System, isDevelopment, NullLoggerFactory.Instance);
+}
 
 /// <summary>A TimeProvider whose "now" can be set/advanced, for deterministic expiry tests.</summary>
 internal sealed class MutableTimeProvider(DateTimeOffset start) : TimeProvider
