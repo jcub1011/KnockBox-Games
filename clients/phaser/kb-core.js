@@ -78,6 +78,28 @@
     return api;
   }
 
+  // Normalize a Ready frame into the client's identity/authority fields, with old-server
+  // fallbacks. `authority` says who runs the game's authoritative logic: 'host' (a member's
+  // browser — the default) or 'server' (the game's authority module runs server-side; every client
+  // is a guest). `ownerId` is the member holding the lobby powers (kick, open/close) — a separate
+  // concept from the authority; gate owner UI on `isOwner`, never `isHost`. A pre-authority server
+  // omits both fields: authority defaults to 'host', and the owner is derivable only when we ARE
+  // the host.
+  function normalizeReady(msg) {
+    var playerId = msg.playerId;
+    var isHost = !!msg.isHost;
+    var authority = msg.authority != null ? msg.authority : 'host';
+    var ownerId = msg.ownerId != null ? msg.ownerId : (isHost ? playerId : null);
+    return {
+      playerId: playerId,
+      players: msg.players || [],
+      isHost: isHost,
+      authority: authority,
+      ownerId: ownerId,
+      isOwner: ownerId != null && ownerId === playerId,
+    };
+  }
+
   // Roster reducers (immutable): add is idempotent by id; remove drops by id.
   function rosterAdd(players, player) {
     return players.some(function (p) { return p.id === player.id; })
@@ -98,6 +120,7 @@
     defaultEndpoint: defaultEndpoint,
     LOG_LEVELS: LOG_LEVELS,
     makeLogger: makeLogger,
+    normalizeReady: normalizeReady,
     rosterAdd: rosterAdd,
     rosterRemove: rosterRemove,
   };

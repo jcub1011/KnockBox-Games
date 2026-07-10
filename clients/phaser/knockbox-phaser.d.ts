@@ -26,7 +26,21 @@ export interface KBPlayer {
 export interface KBReadyInfo {
   playerId: string;
   players: KBPlayer[];
+  /** False on EVERY client in server-authority mode — don't branch game logic on it there. */
   isHost: boolean;
+  /**
+   * Who runs the game's authoritative logic: 'host' (a member's browser — the default) or
+   * 'server' (the game's authority module runs server-side; every client is a guest).
+   */
+  authority: 'host' | 'server';
+  /**
+   * The member holding the lobby powers (setLobbyOpen, kickPlayer) — the creator until the game's
+   * authority module reassigns it. A separate concept from the authority. Null when unknowable
+   * (a guest on a pre-authority server).
+   */
+  ownerId: string | null;
+  /** Whether this player is the lobby owner. Gate owner-only UI on this, never on isHost. */
+  isOwner: boolean;
 }
 
 /** Payload of the `message` event: a relayed game message from another player (or self). */
@@ -64,6 +78,9 @@ export interface KnockBoxEvents {
   'player-left': (playerId: string) => void;
   'player-disconnected': (playerId: string) => void;
   'player-connected': (playerId: string) => void;
+  /** The lobby owner changed (a server-authority module called kb.setOwner). ownerId/isOwner are
+   *  already updated when this fires. */
+  'owner-changed': (ownerId: string) => void;
   closed: (info: KBClosed) => void;
   resumed: () => void;
 }
@@ -96,8 +113,15 @@ export class KnockBoxPlugin {
   playerId: string | null;
   /** The lobby roster; index 0 is the host. Kept current as players join/leave. */
   players: KBPlayer[];
-  /** Whether this player is the authoritative host (the lobby creator). */
+  /** Whether this player is the authoritative host. ALWAYS false in server-authority mode
+   *  (`authority === 'server'`) — don't branch game logic on it there. */
   isHost: boolean;
+  /** Who runs the game's authoritative logic: 'host' (default) or 'server'. */
+  authority: 'host' | 'server';
+  /** The member holding the lobby powers (setLobbyOpen, kickPlayer); see KBReadyInfo.ownerId. */
+  ownerId: string | null;
+  /** Whether this player is the lobby owner. Gate owner-only UI on this, never on isHost. */
+  isOwner: boolean;
   /** True when the most recent `ready` fired after a reconnect (a prior session existed). */
   reconnected: boolean;
 

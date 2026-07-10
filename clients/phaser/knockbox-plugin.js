@@ -63,6 +63,15 @@
     this.playerId = null;
     this.players = [];
     this.isHost = false;
+    // Who runs the game's authoritative logic: 'host' (a member's browser — the default) or
+    // 'server' (the game's authority module runs server-side; every client — including the lobby
+    // creator — is a guest and isHost stays false). Don't branch game logic on isHost in server mode.
+    this.authority = 'host';
+    // The member holding the lobby powers (setLobbyOpen, kickPlayer) — the creator until the
+    // game's authority module reassigns it (kb.setOwner). A separate concept from the authority:
+    // gate owner-only UI on isOwner, never isHost.
+    this.ownerId = null;
+    this.isOwner = false;
     this.reconnected = false; // true when 'ready' fires after a reconnect
 
     // Subscribe to these for all networking events (see file header for the list).
@@ -280,16 +289,21 @@
   KnockBoxPlugin.prototype._handle = function (msg) {
     if (typeof msg.type !== 'string') return; // malformed frame — no type to dispatch on
     switch (msg.type) {
-      case 'Ready':
-        this.playerId = msg.playerId;
-        this.players = msg.players || [];
-        this.isHost = !!msg.isHost;
+      case 'Ready': {
+        var info = KBCore.normalizeReady(msg);
+        this.playerId = info.playerId;
+        this.players = info.players;
+        this.isHost = info.isHost;
+        this.authority = info.authority;
+        this.ownerId = info.ownerId;
+        this.isOwner = info.isOwner;
         this._attempt = 0; // healthy connection — reset backoff
         this.reconnected = this._hasSession; // a prior session existed => this is a reconnect
         this._hasSession = true;
-        this.events.emit('ready', { playerId: this.playerId, players: this.players, isHost: this.isHost });
+        this.events.emit('ready', info);
         if (this.reconnected) this.events.emit('resumed');
         break;
+      }
       case 'Game':
         this.events.emit('message', { from: msg.from, payload: msg.payload });
         break;
@@ -309,6 +323,13 @@
         break;
       case 'GamePlayerConnected':
         this.events.emit('player-connected', msg.playerId);
+        break;
+      // The lobby owner changed (a server-authority module called kb.setOwner — e.g. promoting a
+      // successor when the previous owner left). ownerId/isOwner update before the event fires.
+      case 'GameOwnerChanged':
+        this.ownerId = msg.ownerId;
+        this.isOwner = msg.ownerId === this.playerId;
+        this.events.emit('owner-changed', msg.ownerId);
         break;
       default:
         // Unknown frame type — drop it. A newer server may send frames this client

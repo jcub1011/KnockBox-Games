@@ -171,3 +171,107 @@ describe('KBAuthority — per-recipient (hidden-information) mode', () => {
     expect(g1Auth.currentView.all).toEqual(secrets);
   });
 });
+
+// ── Server-authority mode (design §10) ────────────────────────────────────────────────────────
+// When net.authority === 'server' every client is a guest: auto-sync on ready, adopt only frames
+// published by the reserved sender id 'server', and never run the host branch. Driven over a
+// hand-rolled fake net so each frame's `from` is fully controlled.
+describe('KBAuthority — server-authority mode', () => {
+  function fakeNet({ playerId = 'me', authority = 'server', isHost = false } = {}) {
+    const handlers = {};
+    return {
+      playerId,
+      players: [{ id: playerId, displayName: playerId }],
+      isHost,
+      authority,
+      reconnected: false,
+      isLocal: false,
+      sent: [],
+      events: {
+        on(event, fn) { (handlers[event] = handlers[event] || []).push(fn); return this; },
+        off(event, fn) {
+          handlers[event] = (handlers[event] || []).filter((h) => h !== fn);
+          return this;
+        },
+        emit(event, arg) { (handlers[event] || []).forEach((fn) => fn(arg)); return this; },
+      },
+      sendToHost(payload) { this.sent.push({ to: 'host', payload }); },
+      sendToAll(payload) { this.sent.push({ to: 'all', payload }); },
+      sendTo(id, payload) { this.sent.push({ to: id, payload }); },
+      setLobbyOpen() {},
+    };
+  }
+
+  function trackedModel() {
+    const model = counterModel();
+    model.applied = [];
+    const applyPatch = model.applyPatch.bind(model);
+    const applySnapshot = model.applySnapshot.bind(model);
+    model.applyPatch = (p) => { model.applied.push(['patch', p]); applyPatch(p); };
+    model.applySnapshot = (s) => { model.applied.push(['snapshot', s]); applySnapshot(s); };
+    return model;
+  }
+
+  it('auto-requests a sync on ready (everyone is a guest)', () => {
+    const net = fakeNet();
+    new KBAuthority(net, counterModel());
+    net.events.emit('ready', { playerId: 'me', players: net.players, isHost: false, authority: 'server' });
+
+    expect(net.sent).toEqual([{ to: 'host', payload: { _kb: 'sync' } }]);
+  });
+
+  it('adopts deltas and snapshots stamped from "server"', () => {
+    const net = fakeNet();
+    const model = trackedModel();
+    new KBAuthority(net, model);
+
+    net.events.emit('message', { from: 'server', payload: { _kb: 'delta', patch: { score: 3 } } });
+    net.events.emit('message', { from: 'server', payload: { _kb: 'state', state: { score: 7 } } });
+
+    expect(model.applied).toEqual([['patch', { score: 3 }], ['snapshot', { score: 7 }]]);
+    expect(model.state.score).toBe(7);
+  });
+
+  it('ignores forged deltas and snapshots from a player id', () => {
+    const net = fakeNet();
+    const model = trackedModel();
+    const auth = new KBAuthority(net, model);
+    const changed = [];
+    auth.events.on('state-changed', () => changed.push(1));
+
+    net.events.emit('message', { from: 'cheater', payload: { _kb: 'delta', patch: { score: 999 } } });
+    net.events.emit('message', { from: 'cheater', payload: { _kb: 'state', state: { score: 999 } } });
+
+    expect(model.applied).toEqual([]);
+    expect(model.state.score).toBe(0);
+    expect(changed).toEqual([]);
+  });
+
+  it('never runs the host branch (intents are ignored by clients)', () => {
+    const net = fakeNet();
+    const model = trackedModel();
+    let applied = 0;
+    const applyIntent = model.applyIntent.bind(model);
+    model.applyIntent = (f, a) => { applied++; return applyIntent(f, a); };
+    new KBAuthority(net, model);
+
+    net.events.emit('message', { from: 'peer', payload: { _kb: 'intent', action: { kind: 'point' } } });
+    net.events.emit('message', { from: 'server', payload: { _kb: 'sync' } });
+
+    expect(applied).toBe(0);
+    expect(net.sent).toEqual([]); // no delta broadcast, no snapshot reply
+  });
+
+  it('host-mode regression: the hardening is inert when authority is undefined', () => {
+    // An old plugin (or host mode) has no `authority` property — a guest must still adopt the
+    // HOST PLAYER's deltas, whose `from` is an ordinary player id.
+    const net = fakeNet();
+    delete net.authority;
+    const model = trackedModel();
+    new KBAuthority(net, model);
+
+    net.events.emit('message', { from: 'host-player', payload: { _kb: 'delta', patch: { score: 4 } } });
+
+    expect(model.state.score).toBe(4);
+  });
+});
