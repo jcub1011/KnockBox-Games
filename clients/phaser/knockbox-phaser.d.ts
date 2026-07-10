@@ -170,6 +170,9 @@ export type KnockBoxLocalMode =
   /** Single-player host that echoes its own sends. */
   | 'solo';
 
+/** An authority module's factory: `createAuthority(kb)` returning `{ init, applyIntent, snapshot, … }`. */
+export type KBCreateAuthority = (kb: any) => any;
+
 export interface KnockBoxLocalOptions {
   /** Which transport to use. Default 'tab'. */
   mode?: KnockBoxLocalMode;
@@ -181,6 +184,18 @@ export interface KnockBoxLocalOptions {
   displayName?: string;
   /** Cross-tab presence settle window (ms) before the first `ready`. Default 250. */
   settleMs?: number;
+  /**
+   * Server-authority emulation: run the game's REAL authority.js as a virtual server actor on the
+   * transport-elected peer. Every peer then gets `ready` with isHost:false / authority:'server' /
+   * ownerId — the byte-identical server-mode path. Accepts the createAuthority function itself, a
+   * module namespace (`await import('./authority.js')`), or a URL string (fetched, import-scanned
+   * for the single-file rule, then dynamic-imported). Fidelity checks are always on: values
+   * crossing the module boundary are strict-JSON-cloned (functions/undefined/cycles/class
+   * instances throw) and `Date` is poisoned during module calls (use kb.now()).
+   */
+  authority?: KBCreateAuthority | { createAuthority: KBCreateAuthority; config?: object } | string;
+  /** The module's `config` export ({ perRecipient?, tickHz? }) when `authority` is a bare function. */
+  authorityConfig?: { perRecipient?: boolean; tickHz?: number };
 }
 
 /**
@@ -194,6 +209,12 @@ export class KnockBoxLocalPeer {
   playerId: string;
   players: KBPlayer[];
   isHost: boolean;
+  /** 'server' when the `authority` option is set (every peer is a guest), else 'host'. */
+  authority: 'host' | 'server';
+  /** The lobby owner (the elected peer until kb.setOwner reassigns it). */
+  ownerId: string | null;
+  /** Whether this peer is the lobby owner. Gate owner-only UI on this, never isHost. */
+  isOwner: boolean;
   reconnected: boolean;
   /** Always true on the local-testing client; lets KBAuthority auto-enable its dev checks. */
   isLocal: boolean;
@@ -234,6 +255,9 @@ export class KnockBoxLocalPlugin {
   readonly playerId: string | null;
   readonly players: KBPlayer[];
   readonly isHost: boolean;
+  readonly authority: 'host' | 'server';
+  readonly ownerId: string | null;
+  readonly isOwner: boolean;
   readonly reconnected: boolean;
   /** Always true on the local-testing client; lets KBAuthority auto-enable its dev checks. */
   readonly isLocal: boolean;
@@ -253,6 +277,10 @@ export class KnockBoxLocalPlugin {
   setLobbyOpen(open: boolean): void;
   setLaunchParams(ticket?: string, endpoint?: string): void;
 }
+
+/** Throws when `source` contains a top-level `import` / `export … from` (authority modules must
+ *  be single-file — the server configures no module loader). Also run by tools/pack-game. */
+export function scanAuthorityImports(source: string): void;
 
 /** Test helper: clear the in-process hub registry between tests. */
 export function _resetLocalHubs(): void;

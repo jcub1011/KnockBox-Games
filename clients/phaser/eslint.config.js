@@ -25,6 +25,7 @@ const hostGlobals = {
   removeEventListener: 'readonly',
   BroadcastChannel: 'readonly',
   WebSocket: 'readonly',
+  fetch: 'readonly',
   URL: 'readonly',
   URLSearchParams: 'readonly',
   Image: 'readonly',

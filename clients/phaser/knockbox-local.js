@@ -23,6 +23,13 @@
 //
 // Host = the first peer to join (lowest joinedAt). When the host leaves, the lobby ENDS: remaining
 // peers get `player-left` for the host then `closed` (matching the real server — no host migration).
+//
+// SERVER-AUTHORITY emulation: pass `authority:` (the game's real authority.js — a createAuthority
+// function, a module namespace, or a URL string) and the elected peer runs it as a virtual server
+// actor: every peer becomes a guest (isHost:false, authority:'server', ownerId set), to:'host'
+// frames feed the module, and its deltas/snapshots come back stamped from:'server' — the
+// byte-identical server-mode path, with default-on fidelity checks (strict JSON boundary, Date
+// poisoning, single-file import scan). See the LocalAuthorityActor section below.
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
     module.exports = factory(require('./kb-core.js'), root.Phaser);
@@ -106,15 +113,21 @@
     entry.peer._onReady(roster, isHost);
   };
   Hub.prototype.deliver = function (to, from, payload) {
+    // `to` rides along so the receiving peer can divert to-host frames into its authority actor.
     if (to === 'all') {
-      this.peers.forEach(function (e) { e.peer._onDeliver(from, payload); });
+      this.peers.forEach(function (e) { e.peer._onDeliver(from, payload, to); });
     } else if (to === 'host') {
-      if (this.peers.length) this.peers[0].peer._onDeliver(from, payload);
+      if (this.peers.length) this.peers[0].peer._onDeliver(from, payload, to);
     } else {
       for (var i = 0; i < this.peers.length; i++) {
-        if (this.peers[i].id === to) { this.peers[i].peer._onDeliver(from, payload); return; }
+        if (this.peers[i].id === to) { this.peers[i].peer._onDeliver(from, payload, to); return; }
       }
     }
+  };
+  // Owner-changed control event (the local analog of OwnerChanged/GameOwnerChanged): every peer
+  // updates ownerId/isOwner and emits 'owner-changed'.
+  Hub.prototype.owner = function (ownerId) {
+    this.peers.forEach(function (e) { e.peer._onOwnerChanged(ownerId); });
   };
   Hub.prototype.kick = function (byId, targetId) {
     if (!this.peers.length || this.peers[0].id !== byId) return; // only host may kick
@@ -152,11 +165,16 @@
       peer._onReady([{ id: peer.playerId, displayName: peer.displayName }], true);
     });
   };
-  SoloTransport.prototype.send = function (to, payload) {
+  SoloTransport.prototype.send = function (to, payload, fromOverride) {
     var peer = this.peer;
+    var from = fromOverride || peer.playerId;
     if (to === 'all' || to === 'host' || to === peer.playerId) {
-      defer(function () { peer._onDeliver(peer.playerId, payload); });
+      defer(function () { peer._onDeliver(from, payload, to); });
     }
+  };
+  SoloTransport.prototype.ownerChanged = function (ownerId) {
+    var peer = this.peer;
+    defer(function () { peer._onOwnerChanged(ownerId); });
   };
   SoloTransport.prototype.kick = function () { /* nobody else to kick */ };
   SoloTransport.prototype.stop = function () { /* nothing to tear down */ };
@@ -169,8 +187,11 @@
       self.hub.register({ id: peer.playerId, displayName: peer.displayName, peer: peer });
     });
   };
-  ProcessTransport.prototype.send = function (to, payload) {
-    if (this.hub) this.hub.deliver(to, this.peer.playerId, payload);
+  ProcessTransport.prototype.send = function (to, payload, fromOverride) {
+    if (this.hub) this.hub.deliver(to, fromOverride || this.peer.playerId, payload);
+  };
+  ProcessTransport.prototype.ownerChanged = function (ownerId) {
+    if (this.hub) this.hub.owner(ownerId);
   };
   ProcessTransport.prototype.kick = function (targetId) {
     if (this.hub) this.hub.kick(this.peer.playerId, targetId);
@@ -238,7 +259,7 @@
     // Flush any messages that arrived before we were ready.
     var inbox = this.inbox; this.inbox = [];
     var peer = this.peer;
-    inbox.forEach(function (m) { peer._onDeliver(m.from, m.payload); });
+    inbox.forEach(function (m) { peer._onDeliver(m.from, m.payload, m.to); });
   };
   TabTransport.prototype._onMessage = function (msg) {
     if (!msg || msg._src === this.self.id) return; // ignore our own (BroadcastChannel won't echo, but guard)
@@ -247,6 +268,7 @@
       case 'LEAVE': return this._onPeerGone(msg.id);
       case 'GAME': return this._onGame(msg);
       case 'KICK': return this._onKick(msg.targetId);
+      case 'OWNER': return this.peer._onOwnerChanged(msg.ownerId);
     }
   };
   TabTransport.prototype._onAnnounce = function (p) {
@@ -284,21 +306,29 @@
   TabTransport.prototype._onGame = function (msg) {
     var deliver = msg.to === 'all' || msg.to === this.self.id || (msg.to === 'host' && this.isHost());
     if (!deliver) return;
-    if (this.readyFired) this.peer._onDeliver(msg.from, msg.payload);
-    else this.inbox.push({ from: msg.from, payload: msg.payload });
+    if (this.readyFired) this.peer._onDeliver(msg.from, msg.payload, msg.to);
+    else this.inbox.push({ from: msg.from, payload: msg.payload, to: msg.to });
   };
   TabTransport.prototype._onKick = function (targetId) {
     if (targetId === this.self.id) { this.peer._onClosed(true); this.stop(); return; }
     this._onPeerGone(targetId);
   };
-  TabTransport.prototype.send = function (to, payload) {
-    this._post('GAME', { to: to, from: this.self.id, payload: payload });
-    // BroadcastChannel never delivers to the poster, so echo to ourselves when we're a recipient.
+  TabTransport.prototype.send = function (to, payload, fromOverride) {
+    var from = fromOverride || this.self.id;
+    this._post('GAME', { to: to, from: from, payload: payload });
+    // BroadcastChannel never delivers to the poster, so echo to ourselves when we're a recipient —
+    // including the authority actor's own broadcasts, so the actor tab's game gets them too.
     var selfDeliver = to === 'all' || to === this.self.id || (to === 'host' && this.isHost());
     if (selfDeliver) {
-      var peer = this.peer, from = this.self.id;
-      defer(function () { peer._onDeliver(from, payload); });
+      var peer = this.peer;
+      defer(function () { peer._onDeliver(from, payload, to); });
     }
+  };
+  TabTransport.prototype.ownerChanged = function (ownerId) {
+    this._post('OWNER', { ownerId: ownerId });
+    // BroadcastChannel never echoes to the poster — apply locally too.
+    var peer = this.peer;
+    defer(function () { peer._onOwnerChanged(ownerId); });
   };
   TabTransport.prototype.kick = function (targetId) {
     if (!this.isHost() || targetId === this.self.id) return;
@@ -332,6 +362,247 @@
     }
   }
 
+  // ── Local authority emulation (server-authority mode without a server) ───────────────────────
+  // With an `authority:` option, the transport-elected host peer becomes a virtual server actor:
+  // it instantiates the developer's REAL authority.js module and runs the server's loop (intent →
+  // applyIntent → delta; sync → snapshot → state; roster change → hook + re-broadcast; optional
+  // tick), stamping every send from:'server'. EVERY peer — including the actor host's own game —
+  // gets ready with isHost:false / authority:'server' / ownerId, so client code runs the
+  // byte-identical server-mode path. Fidelity checks are DEFAULT ON (authority mode IS dev mode):
+  //   • JSON round-trip boundary — every value crossing into or out of the module is strict-cloned
+  //     (functions, undefined properties, symbols, cycles, and class instances THROW), mirroring
+  //     the server's strings-of-JSON boundary.
+  //   • Date poisoning — the module runs with globalThis.Date swapped for a throwing stub (the
+  //     server deletes Date; kb.now() is the only clock). Math.random is NOT poisoned (allowed v1).
+  //   • The URL form of `authority:` is import-scanned before loading (the single-file rule the
+  //     server enforces by having no module loader).
+  // Known emulation limitation: locally the module's state lives in the elected peer, so closing
+  // the actor tab still ends the session — the REAL server survives the creator leaving. Ownership
+  // (kb.setOwner) is still fully emulated; owner and actor-host are separate concepts here too.
+
+  var RealDate = Date; // captured before any poisoning can be active
+
+  function fidelityError(message) {
+    var err = new Error('[KnockBox authority] ' + message);
+    err.kbFidelity = true; // fidelity violations propagate loudly; module bugs are contained
+    return err;
+  }
+
+  function PoisonDate() {
+    throw fidelityError('authority modules must use kb.now() — the server deletes the Date global');
+  }
+  PoisonDate.now = PoisonDate.parse = PoisonDate.UTC = function () {
+    throw fidelityError('authority modules must use kb.now() — the server deletes the Date global');
+  };
+
+  // Strict JSON boundary: throws on anything JSON.stringify would silently mangle, then actually
+  // round-trips, so what the module sees/emits locally is exactly what the server would see.
+  function strictJsonClone(value, label) {
+    if (value === undefined || value === null) return null;
+    var seen = [];
+    (function check(v, path) {
+      if (v === null) return;
+      var t = typeof v;
+      if (t === 'function' || t === 'symbol') {
+        throw fidelityError(label + path + ' is a ' + t + ' — only JSON crosses the authority boundary');
+      }
+      if (t !== 'object') return;
+      if (seen.indexOf(v) !== -1) throw fidelityError(label + path + ' is cyclic — JSON cannot represent it');
+      seen.push(v);
+      if (Array.isArray(v)) {
+        for (var i = 0; i < v.length; i++) check(v[i], path + '[' + i + ']');
+      } else {
+        var proto = Object.getPrototypeOf(v);
+        if (proto !== Object.prototype && proto !== null) {
+          var name = (v.constructor && v.constructor.name) || 'unknown';
+          throw fidelityError(label + path + ' is a class instance (' + name + ') — only plain objects cross the authority boundary');
+        }
+        for (var k in v) {
+          if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+          if (v[k] === undefined) {
+            throw fidelityError(label + path + '.' + k + ' is undefined — JSON drops it silently; use null');
+          }
+          check(v[k], path + '.' + k);
+        }
+      }
+      seen.pop();
+    })(value, '');
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  // Static scan for the single-file rule (the server configures no module loader, so ANY import
+  // inside authority.js fails there). Mirrors tools/pack-game's scan — keep the two in sync.
+  function scanAuthorityImports(source) {
+    var lines = String(source).split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (/^\s*import[\s('"]/.test(line) || /^\s*export\s+[^;]*\sfrom\s*['"]/.test(line)) {
+        throw new Error('[KnockBox authority] authority modules must be single-file (the server has no module loader) — bundle your imports. Offending line ' + (i + 1) + ': ' + line.trim());
+      }
+    }
+  }
+
+  function LocalAuthorityActor(peer, createAuthority, config) {
+    if (typeof createAuthority !== 'function') {
+      throw new Error('[KnockBox authority] the authority option must provide a createAuthority(kb) function');
+    }
+    this.peer = peer;
+    this.config = config || {};
+    this.perRecipient = !!this.config.perRecipient;
+    this._pendingOwner = null;
+    this._tickTimer = null;
+    this._lastTick = RealDate.now();
+
+    var self = this;
+    var kb = Object.freeze({
+      now: function () { return RealDate.now(); },
+      setOwner: function (playerId) { self._pendingOwner = playerId; }, // deferred, like the server
+      setLobbyOpen: function (open) {
+        console.info('[KnockBox authority] setLobbyOpen(' + !!open + ') — no-op locally (no join gate)');
+      },
+      log: Object.freeze({
+        debug: function (m) { (console.debug || console.log).call(console, '[KnockBox authority] ' + m); },
+        info: function (m) { (console.info || console.log).call(console, '[KnockBox authority] ' + m); },
+        warn: function (m) { console.warn('[KnockBox authority] ' + m); },
+        error: function (m) { console.error('[KnockBox authority] ' + m); },
+      }),
+    });
+
+    this.instance = createAuthority(kb);
+    if (!this.instance || typeof this.instance.applyIntent !== 'function' || typeof this.instance.snapshot !== 'function'
+        || typeof this.instance.init !== 'function') {
+      throw new Error('[KnockBox authority] createAuthority(kb) must return an object with init, applyIntent, and snapshot');
+    }
+  }
+
+  // Called once from the elected peer's ready, with the initial roster.
+  LocalAuthorityActor.prototype.init = function (roster) {
+    this._invoke('init', [roster]);
+    this._applyEffects();
+    var hz = Number(this.config.tickHz) || 0;
+    if (typeof this.instance.tick === 'function' && hz > 0) {
+      var self = this;
+      this._tickTimer = setInterval(function () { self._tick(); }, 1000 / hz);
+    }
+  };
+
+  LocalAuthorityActor.prototype.destroy = function () {
+    if (this._tickTimer) { clearInterval(this._tickTimer); this._tickTimer = null; }
+  };
+
+  // The relay divert target: a to:'host' frame from any peer (including the actor host's own game).
+  LocalAuthorityActor.prototype.handleFrame = function (fromId, payload) {
+    var kind = payload && payload._kb;
+    var self = this;
+    if (kind === 'intent') {
+      this._contained('applyIntent', function () {
+        var patch = self._invoke('applyIntent', [fromId, payload.action]);
+        if (patch !== null) {
+          if (self.perRecipient) self._broadcastState();
+          else self._send('all', { _kb: 'delta', patch: patch });
+        }
+        self._applyEffects();
+      });
+    } else if (kind === 'sync') {
+      this._contained('snapshot', function () {
+        self._send(fromId, { _kb: 'state', state: self._invoke('snapshot', [fromId]) });
+        self._applyEffects();
+      });
+    } else {
+      console.warn('[KnockBox authority] dropping non-contract payload to the authority (kind: ' + kind + ')');
+    }
+  };
+
+  // Roster hooks (the server's roster-work rule: optional hook, then ALWAYS re-broadcast state).
+  LocalAuthorityActor.prototype.playerJoined = function (player) { this._roster('onPlayerJoined', player); };
+  LocalAuthorityActor.prototype.playerLeft = function (playerId) { this._roster('onPlayerLeft', playerId); };
+
+  LocalAuthorityActor.prototype._roster = function (hook, arg) {
+    var self = this;
+    this._contained(hook, function () {
+      if (typeof self.instance[hook] === 'function') self._invoke(hook, [arg]);
+      self._broadcastState();
+      self._applyEffects();
+    });
+  };
+
+  LocalAuthorityActor.prototype._tick = function () {
+    var now = RealDate.now();
+    var dt = now - this._lastTick;
+    this._lastTick = now;
+    var self = this;
+    this._contained('tick', function () {
+      var patch = self._invoke('tick', [dt]);
+      if (patch !== null) {
+        if (self.perRecipient) self._broadcastState();
+        else self._send('all', { _kb: 'delta', patch: patch });
+      }
+      self._applyEffects();
+    });
+  };
+
+  // The server's §7 contained path, minus the fatal escalation (locally the dev just fixes the
+  // bug): a module throw is logged, the work dropped, and the UNCHANGED snapshot re-broadcast so
+  // clients converge. Fidelity violations are NOT contained — they rethrow to the offending caller
+  // so the dev sees them where they happen (in process mode that's the sending test/game line).
+  LocalAuthorityActor.prototype._contained = function (context, fn) {
+    try {
+      fn();
+    } catch (err) {
+      this._pendingOwner = null; // a failed call's partial effects must not leak
+      if (err && err.kbFidelity) throw err;
+      console.error('[KnockBox authority] module error in ' + context + ' (intent dropped, state re-broadcast):', err);
+      try { this._broadcastState(); }
+      catch (resyncErr) { console.error('[KnockBox authority] re-sync after the error also failed:', resyncErr); }
+    }
+  };
+
+  // One chokepoint for every module invocation: JSON boundary on the way in and out, Date poisoned
+  // for the (synchronous) duration of the call.
+  LocalAuthorityActor.prototype._invoke = function (name, args) {
+    var cleanArgs = [];
+    for (var i = 0; i < args.length; i++) cleanArgs.push(strictJsonClone(args[i], name + ' argument ' + i));
+    var g = globalThis;
+    var prevDate = g.Date;
+    g.Date = PoisonDate;
+    var result;
+    try { result = this.instance[name].apply(this.instance, cleanArgs); }
+    finally { g.Date = prevDate; }
+    if (result === undefined || result === null) return null;
+    return strictJsonClone(result, name + ' result');
+  };
+
+  LocalAuthorityActor.prototype._broadcastState = function () {
+    if (this.perRecipient) {
+      for (var i = 0; i < this.peer.players.length; i++) {
+        var id = this.peer.players[i].id;
+        this._send(id, { _kb: 'state', state: this._invoke('snapshot', [id]) });
+      }
+    } else {
+      this._send('all', { _kb: 'state', state: this._invoke('snapshot', [null]) });
+    }
+  };
+
+  LocalAuthorityActor.prototype._send = function (to, envelope) {
+    var t = this.peer._transport;
+    if (t) t.send(to, envelope, 'server'); // the reserved sender id, like the real relay
+  };
+
+  // Deferred kb.setOwner, applied AFTER the invocation's own sends (the server's ordering rule:
+  // the owner event always follows the delta of the intent that triggered it).
+  LocalAuthorityActor.prototype._applyEffects = function () {
+    if (this._pendingOwner == null) return;
+    var target = this._pendingOwner;
+    this._pendingOwner = null;
+    var isMember = this.peer.players.some(function (p) { return p.id === target; });
+    if (!isMember) {
+      console.error('[KnockBox authority] kb.setOwner(' + JSON.stringify(target) + ') ignored — not a lobby member');
+      return;
+    }
+    var t = this.peer._transport;
+    if (t && t.ownerChanged) t.ownerChanged(target);
+  };
+
   // ── KnockBoxLocalPeer ─────────────────────────────────────────────────────────────────────────
   // The transport-agnostic client. Phaser-free; this is what automated tests use and what the
   // plugin composes internally. Public API matches KnockBoxPlugin.
@@ -347,6 +618,20 @@
     this.isHost = false;
     this.reconnected = false; // local sessions never reconnect
     this.isLocal = true;      // marks the local-testing transport; KBAuthority auto-enables dev checks
+
+    // Server-authority emulation (§12a): pass the developer's real authority module and the
+    // elected peer runs it as a virtual server actor (see LocalAuthorityActor above). Accepts:
+    //   • the createAuthority function itself      authority: createAuthority
+    //   • a module namespace / object              authority: await import('./authority.js')
+    //   • a URL string (fetched + import-scanned)  authority: './authority.js'
+    // `authorityConfig` supplies the config export when the function form is used.
+    this._authorityOpt = opts.authority || null;
+    this._authorityConfig = opts.authorityConfig || null;
+    this._resolved = null; // { createAuthority, config } once the option is resolved
+    this._actor = null;    // set on the transport-elected peer in authority mode
+    this.authority = this._authorityOpt ? 'server' : 'host';
+    this.ownerId = null;
+    this.isOwner = false;
 
     this.events = makeEmitter();
 
@@ -370,7 +655,51 @@
 
   KnockBoxLocalPeer.prototype.start = function () {
     if (this._stopped) return;
+    var opt = this._authorityOpt;
+    if (!opt) { this._transport.start(); return; }
+
+    // Resolve the authority option before the transport elects a host. The URL form is async
+    // (fetch + import-scan + dynamic import); a load failure is LOUD and the session never starts —
+    // mirroring the server, where TryStart failing fails lobby creation.
+    var self = this;
+    if (typeof opt === 'string') {
+      this._loadAuthority(opt).then(
+        function (resolved) {
+          if (self._stopped) return;
+          self._resolved = resolved;
+          self._transport.start();
+        },
+        function (err) {
+          console.error('[KnockBox authority] module failed to load — session not started:', err);
+          self.events.emit('closed', { terminal: true });
+        }
+      );
+      return;
+    }
+    this._resolved = typeof opt === 'function'
+      ? { createAuthority: opt, config: this._authorityConfig || {} }
+      : { createAuthority: opt.createAuthority, config: opt.config || this._authorityConfig || {} };
     this._transport.start();
+  };
+
+  // URL form: fetch the source, run the single-file import scan (a relative import would happily
+  // resolve in the browser but fail on the server), then dynamic-import for real.
+  KnockBoxLocalPeer.prototype._loadAuthority = function (url) {
+    return fetch(url)
+      .then(function (res) {
+        if (!res.ok) throw new Error('fetch of ' + url + ' failed: ' + res.status);
+        return res.text();
+      })
+      .then(function (source) {
+        scanAuthorityImports(source);
+        return import(/* @vite-ignore */ url);
+      })
+      .then(function (mod) {
+        if (typeof mod.createAuthority !== 'function') {
+          throw new Error(url + ' must export a createAuthority(kb) function');
+        }
+        return { createAuthority: mod.createAuthority, config: mod.config || {} };
+      });
   };
 
   KnockBoxLocalPeer.prototype.sendToHost = function (payload) { this._send('host', payload); };
@@ -388,12 +717,26 @@
 
   KnockBoxLocalPeer.prototype.destroy = function () {
     this._stopped = true;
+    if (this._actor) { this._actor.destroy(); this._actor = null; }
     if (this._transport) { this._transport.stop(); this._transport = null; }
     if (this.events) this.events.destroy();
   };
 
   KnockBoxLocalPeer.prototype._send = function (to, payload) {
     if (this._stopped) return;
+    // Mirror the real relay's server-authority rules (§5a/§5d) at the sender, so a game can't
+    // accidentally depend on something the real server forbids.
+    if (this.authority === 'server') {
+      var kind = payload && payload._kb;
+      if (kind === 'delta' || kind === 'state') {
+        console.warn('[KnockBox] dropped client-sent _kb "' + kind + '" — only the authority publishes state in server-authority mode');
+        return;
+      }
+      if (to === 'host' && !kind) {
+        console.warn('[KnockBox] dropped non-_kb payload to "host" — the _kb envelope is the contract in server-authority mode');
+        return;
+      }
+    }
     if (this._ready) this._transport.send(to, payload);
     else this._pending.push({ to: to, payload: payload }); // flush on ready (parity with real plugin)
   };
@@ -401,32 +744,75 @@
   // ── Transport callbacks ──
   KnockBoxLocalPeer.prototype._onReady = function (roster, isHost) {
     this.players = roster || [];
-    this.isHost = !!isHost;
+    var electedId = this.players.length ? this.players[0].id : null; // index 0 is the elected host on every transport
+
+    if (this._authorityOpt) {
+      // The transport-elected peer becomes the virtual server actor. Everyone — including that
+      // peer's own game — is then told isHost:false, exactly like the real server-mode Ready.
+      if (isHost && !this._actor) {
+        try {
+          this._actor = new LocalAuthorityActor(this, this._resolved.createAuthority, this._resolved.config);
+          this._actor.init(this.players);
+        } catch (err) {
+          console.error('[KnockBox authority] failed to start the authority module — session closed:', err);
+          this._actor = null;
+          this._onClosed(true);
+          return;
+        }
+      }
+      this.isHost = false;
+      this.ownerId = electedId;
+    } else {
+      this.isHost = !!isHost;
+      this.ownerId = electedId; // host-mode parity fields: the elected host is the owner
+    }
+    this.isOwner = this.ownerId != null && this.ownerId === this.playerId;
     this._ready = true;
-    this.events.emit('ready', { playerId: this.playerId, players: this.players, isHost: this.isHost });
+    this.events.emit('ready', {
+      playerId: this.playerId,
+      players: this.players,
+      isHost: this.isHost,
+      authority: this.authority,
+      ownerId: this.ownerId,
+      isOwner: this.isOwner,
+    });
     // Flush messages that arrived before we were ready, then queued outbound sends.
     var inbox = this._inbox; this._inbox = [];
     var self = this;
-    inbox.forEach(function (m) { self.events.emit('message', { from: m.from, payload: m.payload }); });
+    inbox.forEach(function (m) { self._dispatchDeliver(m.from, m.payload, m.to); });
     var pending = this._pending; this._pending = [];
     var t = this._transport;
     if (t) pending.forEach(function (m) { t.send(m.to, m.payload); });
   };
-  KnockBoxLocalPeer.prototype._onDeliver = function (from, payload) {
+  KnockBoxLocalPeer.prototype._onDeliver = function (from, payload, to) {
     if (this._stopped) return;
-    if (!this._ready) { this._inbox.push({ from: from, payload: payload }); return; }
+    if (!this._ready) { this._inbox.push({ from: from, payload: payload, to: to }); return; }
+    this._dispatchDeliver(from, payload, to);
+  };
+  // The local analog of the relay's to:'host' divert: on the actor-hosting peer, frames addressed
+  // to 'host' feed the module instead of the game's onMessage (there is no host player).
+  KnockBoxLocalPeer.prototype._dispatchDeliver = function (from, payload, to) {
+    if (this._actor && to === 'host') { this._actor.handleFrame(from, payload); return; }
     this.events.emit('message', { from: from, payload: payload });
   };
   KnockBoxLocalPeer.prototype._onJoined = function (roster, player) {
     this.players = roster || KBCore.rosterAdd(this.players, player);
     this.events.emit('player-joined', player);
+    if (this._actor) this._actor.playerJoined(player);
   };
   KnockBoxLocalPeer.prototype._onLeft = function (roster, playerId) {
     this.players = roster || KBCore.rosterRemove(this.players, playerId);
     this.events.emit('player-left', playerId);
+    if (this._actor) this._actor.playerLeft(playerId);
+  };
+  KnockBoxLocalPeer.prototype._onOwnerChanged = function (ownerId) {
+    this.ownerId = ownerId;
+    this.isOwner = ownerId === this.playerId;
+    this.events.emit('owner-changed', ownerId);
   };
   KnockBoxLocalPeer.prototype._onClosed = function (terminal) {
     this._ready = false;
+    if (this._actor) { this._actor.destroy(); this._actor = null; }
     this.events.emit('closed', { terminal: !!terminal });
   };
 
@@ -462,7 +848,7 @@
       KnockBoxLocalPlugin.prototype[m] = function () { return this._peer[m].apply(this._peer, arguments); };
     });
     // Mirror the peer's state as read-only properties (log is the peer's console-like logger object).
-    ['playerId', 'players', 'isHost', 'reconnected', 'isLocal', 'log'].forEach(function (prop) {
+    ['playerId', 'players', 'isHost', 'authority', 'ownerId', 'isOwner', 'reconnected', 'isLocal', 'log'].forEach(function (prop) {
       Object.defineProperty(KnockBoxLocalPlugin.prototype, prop, {
         get: function () { return this._peer ? this._peer[prop] : undefined; },
         enumerable: true,
@@ -473,6 +859,9 @@
   return {
     KnockBoxLocalPlugin: KnockBoxLocalPlugin,
     KnockBoxLocalPeer: KnockBoxLocalPeer,
+    // The single-file import scan (also run by tools/pack-game) — exported so tests and tooling
+    // can call it without going through the URL loader.
+    scanAuthorityImports: scanAuthorityImports,
     // Test helper: clear the in-process hub registry between tests.
     _resetLocalHubs: function () { hubs = {}; },
   };
