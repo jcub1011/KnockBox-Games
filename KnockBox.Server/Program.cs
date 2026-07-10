@@ -407,6 +407,18 @@ app.MapWhen(
            && !ctx.Request.Path.StartsWithSegments("/ws"),
     gameApp =>
     {
+        // FIRST, before the encoding negotiation can rewrite paths: never serve a game's
+        // server-authority module (or a stale pre-compressed variant of it) — it is server-side
+        // code, and for hidden-information games its secrecy is the point (design §11).
+        gameApp.Use(async (ctx, next) =>
+        {
+            if (GameOriginAssetGate.IsDeniedAuthorityAsset(ctx.Request.Path.Value ?? "", catalog))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            await next();
+        });
         gameApp.Use(async (ctx, next) =>
         {
             ApplyCrossOriginIsolation(ctx, catalog);
