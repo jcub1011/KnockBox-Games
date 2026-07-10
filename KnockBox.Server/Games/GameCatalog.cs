@@ -10,7 +10,12 @@ namespace KnockBox.Server.Games;
 /// In-memory only. A <see cref="FileSystemWatcher"/> re-discovers on change so a server manager can
 /// drop in (or remove) a game folder with no restart and no code.
 /// </summary>
-public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) : IDisposable
+public sealed class GameCatalog(
+    string gamesRoot,
+    ILogger<GameCatalog> logger,
+    // Size cap for a manifest's serverAuthority module (KnockBox:AuthorityMaxScriptBytes). A ctor
+    // scalar rather than the whole AuthorityOptions — discovery needs one number, not runtime knobs.
+    long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes) : IDisposable
 {
     // Swapped atomically by Discover(). Readers take the reference once and enumerate a stable
     // snapshot, so a concurrent rebuild can never expose a half-built catalog (no lock needed).
@@ -120,6 +125,12 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
                     continue;
                 }
 
+                // A serverAuthority module gets the same treatment as entry (traversal + existence)
+                // plus a size cap. Any failure skips the WHOLE game: a game that opted into
+                // server-side enforcement must never silently downgrade to the cheatable host mode.
+                if (manifest.ServerAuthority is not null && !ValidateServerAuthority(manifest, dir, dirPrefix))
+                    continue;
+
                 next[manifest.Id] = manifest;
                 if (logger.IsEnabled(LogLevel.Information))
                     logger.LogInformation("Discovered game '{Id}' ({Name}) from {Dir}", manifest.Id, manifest.Name, dir);
@@ -139,6 +150,44 @@ public sealed class GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) :
         // break hot-reload, so swallow and log — Discover() is itself called from timer callbacks.
         try { Discovered?.Invoke(Games); }
         catch (Exception ex) { logger.LogError(ex, "A Discovered handler threw; continuing."); }
+    }
+
+    private bool ValidateServerAuthority(GameManifest manifest, string dir, string dirPrefix)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.ServerAuthority))
+        {
+            logger.LogWarning("Skipping game '{Id}': serverAuthority is empty.", manifest.Id);
+            return false;
+        }
+        // V1 runs .js modules only (Jint); ".wasm" selects a backend that doesn't exist yet.
+        // Skipping (not ignoring the field) keeps the never-silently-downgrade promise.
+        if (!manifest.ServerAuthority.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is not a .js module (the WASM backend is not yet supported).",
+                manifest.Id, manifest.ServerAuthority);
+            return false;
+        }
+        var moduleFull = Path.GetFullPath(Path.Combine(dir, manifest.ServerAuthority));
+        if (!moduleFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' escapes the game folder.",
+                manifest.Id, manifest.ServerAuthority);
+            return false;
+        }
+        if (!File.Exists(moduleFull))
+        {
+            logger.LogWarning("Skipping game '{Id}': serverAuthority file '{Module}' not found.",
+                manifest.Id, manifest.ServerAuthority);
+            return false;
+        }
+        var size = new FileInfo(moduleFull).Length;
+        if (size > authorityMaxScriptBytes)
+        {
+            logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is {Size} bytes (max {Max}).",
+                manifest.Id, manifest.ServerAuthority, size, authorityMaxScriptBytes);
+            return false;
+        }
+        return true;
     }
 
     /// <summary>

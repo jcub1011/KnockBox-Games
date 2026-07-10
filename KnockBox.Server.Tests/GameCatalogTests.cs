@@ -19,7 +19,8 @@ public class GameCatalogTests : IDisposable
         if (writeEntry) File.WriteAllText(Path.Combine(dir, entry), "<html></html>");
     }
 
-    private GameCatalog NewCatalog() => new(_root, NullLogger<GameCatalog>.Instance);
+    private GameCatalog NewCatalog(long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes) =>
+        new(_root, NullLogger<GameCatalog>.Instance, authorityMaxScriptBytes);
 
     [Fact]
     public void Discovers_a_valid_game()
@@ -112,6 +113,78 @@ public class GameCatalogTests : IDisposable
             // Restore access so Dispose can clean the directory up.
             File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
+    }
+
+    // ── serverAuthority validation ────────────────────────────────────────────
+    // A manifest that declares serverAuthority but fails any check skips the WHOLE game: silently
+    // downgrading a game that asked for server-side enforcement to host mode would betray the opt-in.
+
+    private const string AuthorityManifest =
+        """{ "id": "sa", "name": "S", "entry": "index.html", "maxPlayers": 2, "serverAuthority": "authority.js" }""";
+
+    private void WriteAuthorityModule(string id, string name = "authority.js", int sizeBytes = 0)
+    {
+        var content = sizeBytes > 0 ? new string('/', sizeBytes) : "export function createAuthority(kb) {}";
+        File.WriteAllText(Path.Combine(_root, id, name), content);
+    }
+
+    [Fact]
+    public void Discovers_a_game_with_a_valid_serverAuthority_module()
+    {
+        WriteGame("sa", AuthorityManifest);
+        WriteAuthorityModule("sa");
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("sa", out var m));
+        Assert.Equal("authority.js", m.ServerAuthority);
+    }
+
+    [Fact]
+    public void Skips_a_game_whose_authority_module_escapes_the_game_folder()
+    {
+        WriteGame("sa",
+            """{ "id": "sa", "name": "S", "entry": "index.html", "maxPlayers": 2, "serverAuthority": "../evil.js" }""");
+        File.WriteAllText(Path.Combine(_root, "evil.js"), "export function createAuthority(kb) {}");
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.False(catalog.TryGet("sa", out _));
+    }
+
+    [Fact]
+    public void Skips_a_game_whose_authority_module_is_missing()
+    {
+        WriteGame("sa", AuthorityManifest); // no authority.js written
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.False(catalog.TryGet("sa", out _));
+    }
+
+    [Fact]
+    public void Skips_a_game_whose_authority_module_exceeds_the_size_cap()
+    {
+        WriteGame("sa", AuthorityManifest);
+        WriteAuthorityModule("sa", sizeBytes: 2048);
+        var catalog = NewCatalog(authorityMaxScriptBytes: 1024);
+        catalog.Discover();
+
+        Assert.False(catalog.TryGet("sa", out _));
+    }
+
+    [Fact]
+    public void Skips_a_game_declaring_a_wasm_authority_module()
+    {
+        // The WASM backend is a later phase; skipping (not ignoring the field) keeps the
+        // never-silently-downgrade promise.
+        WriteGame("sa",
+            """{ "id": "sa", "name": "S", "entry": "index.html", "maxPlayers": 2, "serverAuthority": "authority.wasm" }""");
+        WriteAuthorityModule("sa", name: "authority.wasm");
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.False(catalog.TryGet("sa", out _));
     }
 
     [Fact]

@@ -15,6 +15,46 @@ public class LobbyTests
     }
 
     [Fact]
+    public void Server_authority_defaults_to_false_and_is_stamped_at_creation()
+    {
+        Assert.False(New().IsServerAuthority);
+        Assert.True(new Lobby("ABCD", "ttt", "host", 2, isServerAuthority: true).IsServerAuthority);
+    }
+
+    [Fact]
+    public void TrySetHost_reassigns_the_owner_to_a_member()
+    {
+        var lobby = New();
+        lobby.TryAdd(new Player("host", "Ann"));
+        lobby.TryAdd(new Player("p2", "Bob"));
+
+        Assert.True(lobby.TrySetHost("p2"));
+        Assert.Equal("p2", lobby.HostId);
+    }
+
+    [Fact]
+    public void TrySetHost_rejects_a_non_member_without_changing_the_owner()
+    {
+        var lobby = New();
+        lobby.TryAdd(new Player("host", "Ann"));
+
+        Assert.False(lobby.TrySetHost("stranger"));
+        Assert.Equal("host", lobby.HostId);
+    }
+
+    [Fact]
+    public void TrySetHost_rejects_a_removed_member()
+    {
+        var lobby = New();
+        lobby.TryAdd(new Player("host", "Ann"));
+        lobby.TryAdd(new Player("p2", "Bob"));
+        lobby.Remove("p2");
+
+        Assert.False(lobby.TrySetHost("p2"));
+        Assert.Equal("host", lobby.HostId);
+    }
+
+    [Fact]
     public void TryAdd_is_idempotent_for_an_existing_member()
     {
         var lobby = New(max: 2);

@@ -16,12 +16,13 @@ public sealed class LobbyManager
 
     /// <summary>Creates a lobby with a unique code. Returns false (and a null <paramref name="lobby"/>)
     /// if a free code couldn't be found within <see cref="MAX_CODE_GENERATION_ATTEMPTS"/> tries.</summary>
-    public bool TryCreate(string gameId, string hostId, int maxPlayers, [NotNullWhen(true)] out Lobby? lobby)
+    public bool TryCreate(string gameId, string hostId, int maxPlayers, [NotNullWhen(true)] out Lobby? lobby,
+        bool isServerAuthority = false)
     {
         int attempt = 0;
         while (attempt++ < MAX_CODE_GENERATION_ATTEMPTS)
         {
-            lobby = new Lobby(NewId(), gameId, hostId, maxPlayers);
+            lobby = new Lobby(NewId(), gameId, hostId, maxPlayers, isServerAuthority);
             if (_lobbies.TryAdd(lobby.Id, lobby)) return true;
         }
 

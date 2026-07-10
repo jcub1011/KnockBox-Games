@@ -21,6 +21,15 @@ namespace KnockBox.Contracts;
 /// Optional CSS color for the header's text/icons. When omitted the shell auto-picks black or
 /// white for contrast against the resolved <see cref="ThemeColor"/>. Also shell-validated.
 /// </param>
+/// <param name="ServerAuthority">
+/// Opt-in to server-authoritative mode: the path (relative to the game folder) of the game's
+/// authority module — pure game rules the SERVER executes in a sandbox, one instance per lobby
+/// (see docs/SERVER_AUTHORITY_DESIGN.md). Currently only <c>.js</c> modules are supported. The
+/// file is validated like <see cref="Entry"/> (must exist, no path traversal, plus a size cap);
+/// a manifest that declares it but fails validation skips the whole game — a game that asked for
+/// server-side enforcement is never silently downgraded to the cheatable host mode. The game
+/// origin never serves this file.
+/// </param>
 public sealed record GameManifest(
     string Id,
     string Name,
@@ -29,4 +38,5 @@ public sealed record GameManifest(
     int MaxPlayers,
     bool CrossOriginIsolated = false,
     string? ThemeColor = null,
-    string? ThemeTextColor = null);
+    string? ThemeTextColor = null,
+    string? ServerAuthority = null);
