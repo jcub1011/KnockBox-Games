@@ -14,6 +14,9 @@ public sealed class LobbyManager
 
     public Lobby? Get(string id) => _lobbies.TryGetValue(id, out var l) ? l : null;
 
+    /// <summary>Count of active lobbies. Cheap (no snapshot allocation) — for the memory diagnostics log.</summary>
+    public int Count => _lobbies.Count;
+
     /// <summary>Creates a lobby with a unique code. Returns false (and a null <paramref name="lobby"/>)
     /// if a free code couldn't be found within <see cref="MAX_CODE_GENERATION_ATTEMPTS"/> tries.</summary>
     public bool TryCreate(string gameId, string hostId, int maxPlayers, [NotNullWhen(true)] out Lobby? lobby,

@@ -140,6 +140,11 @@ var limits = ServerLimits.FromConfiguration(builder.Configuration);
 // Server-authority sandbox knobs (per-game opt-in via GAME.json serverAuthority).
 var authorityOptions = AuthorityOptions.FromConfiguration(builder.Configuration);
 
+// Periodic memory diagnostics. Each server-authority lobby holds a Jint engine, so footprint scales
+// with concurrent authority lobbies; this log lets an operator correlate working set with live
+// lobby/actor counts (and see whether memory falls back after lobbies close). 0 = off (default).
+var memoryLogSeconds = builder.Configuration.GetValue("KnockBox:MemoryLogSeconds", 0);
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
 builder.Services.AddSingleton(authorityOptions);
@@ -286,6 +291,34 @@ if (limits.DisconnectGrace > TimeSpan.Zero)
         catch (Exception ex) { app.Logger.LogError(ex, "Reconnect-grace reaper sweep failed."); }
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => disconnectReaperTimer.Dispose());
+}
+
+// Memory diagnostics: log GC/working-set stats alongside the live lobby and authority-actor counts,
+// so an operator can see whether footprint scales with concurrent authority lobbies and whether it
+// falls back after lobbies close. Off by default (0); disposed on shutdown.
+Timer? memoryLogTimer = null;
+if (memoryLogSeconds > 0)
+{
+    var lobbyManager = app.Services.GetRequiredService<LobbyManager>();
+    var authorityManager = app.Services.GetRequiredService<ServerAuthorityManager>();
+    var interval = TimeSpan.FromSeconds(memoryLogSeconds);
+    memoryLogTimer = new Timer(_ =>
+    {
+        try
+        {
+            var info = GC.GetGCMemoryInfo();
+            app.Logger.LogInformation(
+                "Memory — workingSet: {WorkingSetMB} MB, managedHeap: {ManagedHeapMB} MB, gcCommitted: {GcCommittedMB} MB, " +
+                "gc(g0/g1/g2): {Gen0}/{Gen1}/{Gen2}, lobbies: {Lobbies}, authorityActors: {Actors}",
+                Environment.WorkingSet / (1024 * 1024),
+                GC.GetTotalMemory(false) / (1024 * 1024),
+                info.TotalCommittedBytes / (1024 * 1024),
+                GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2),
+                lobbyManager.Count, authorityManager.ActorCount);
+        }
+        catch (Exception ex) { app.Logger.LogError(ex, "Memory diagnostics sweep failed."); }
+    }, null, interval, interval);
+    app.Lifetime.ApplicationStopping.Register(() => memoryLogTimer.Dispose());
 }
 
 // Server-authority actors hold live Jint engines and tick timers — stop them all on shutdown

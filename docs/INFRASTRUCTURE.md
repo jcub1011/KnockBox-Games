@@ -337,5 +337,25 @@ into `games/` and it appears within a second or two — no restart.
 | `AuthorityMaxWordFileBytes` | `33554432` (32 MB) | Max size of a single `authorityWords` dictionary file; checked at discovery (oversize ⇒ the game is skipped). Dictionaries load once into a shared CLR structure (not a per-lobby budget), so this cap is generous. |
 | `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
 | `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
+| `MemoryLogSeconds` | `0` (off) | Interval for a periodic memory-diagnostics log line (working set, managed heap, GC-committed bytes, gen0/1/2 collection counts, live lobby & authority-actor counts). Use it to correlate footprint with concurrent server-authority lobbies and confirm memory falls back after lobbies close. |
+
+### Memory footprint (server-authority games)
+
+Each server-authority lobby runs one sandboxed **Jint engine** for the lobby's lifetime; footprint
+scales with concurrent authority lobbies. Two things keep it in check:
+
+- **Shared parsed module** — a game's `authority.js` is parsed once and the reusable parsed module is
+  shared across every lobby engine of that game (`Games/AuthorityModuleCache.cs`), so N lobbies of
+  one game don't hold N copies of the parsed AST. (The per-engine ECMAScript realm baseline is still
+  per lobby — it can't be shared for isolated untrusted state.) `AuthorityMaxMemoryBytes` bounds only
+  a single *invocation's* allocation, not what an engine retains.
+- **GC tuning** — the server runs **Server GC** (throughput for the WebSocket relay) but with
+  footprint knobs baked into the publish (`KnockBox.Server.csproj`): `System.GC.ConserveMemory=5`
+  (release/decommit sooner) and `System.GC.HeapCount=2` (cap the per-core heap multiplication that
+  otherwise makes RSS climb and stay on many-core hosts); .NET's DATAS adaptation is also on by
+  default. In Docker, set a container **memory limit** (`mem_limit` in `docker-compose.yml`) so the
+  GC sizes and collects against the cgroup budget — the single biggest lever on steady-state RSS.
+  Override at runtime via `DOTNET_*` env vars only if needed (**foot-gun:** `DOTNET_GCHeapCount` is
+  **hex**, unlike the decimal `System.GC.HeapCount` runtimeconfig knob).
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

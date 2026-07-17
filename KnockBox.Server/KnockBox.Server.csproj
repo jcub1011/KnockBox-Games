@@ -11,6 +11,16 @@
     <RootNamespace>KnockBox.Server</RootNamespace>
     <AssemblyName>KnockBox.Server</AssemblyName>
     <PublishAot>True</PublishAot>
+    <!-- GC: keep Server GC (best throughput for the WebSocket relay), but rein in its footprint.
+         Server GC allocates a heap per logical CPU and retains memory aggressively, which on a
+         many-core host makes RSS "climb high and stay" as server-authority Jint engines come and go.
+         ConserveMemory (0-9) trades a little CPU to release/decommit sooner; HeapCount caps the
+         per-core heap multiplication. These are embedded in runtimeconfig at publish and honored
+         under Native AOT. Starting values — tune with KnockBox:MemoryLogSeconds diagnostics.
+         NOTE: the equivalent env vars differ in encoding (DOTNET_GCHeapCount is HEX); the Dockerfile
+         documents that foot-gun. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <!-- Serilog core emits an IL2104 trim roll-up for its reflective object-destructuring path. We only
          log scalar structured properties (ids, names, counts) and never @-destructure objects, so that
          path is never executed under AOT. The real risk — Serilog.Settings.Configuration's assembly
@@ -41,6 +51,14 @@
        games/ is deliberately NOT published — it is external content (volume / next to the exe). -->
   <ItemGroup>
     <Content Include="..\web\**" Exclude="..\web\node_modules\**;..\web\__tests__\**;..\web\package.json;..\web\package-lock.json" LinkBase="web" CopyToOutputDirectory="Never" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- GC footprint knobs (see the GC comment above). Written into runtimeconfig.json and embedded by
+       ILC for the AOT publish. System.GC.HeapCount is DECIMAL here (unlike the DOTNET_GCHeapCount env
+       var, which is hex). -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" Trim="false" />
+    <RuntimeHostConfigurationOption Include="System.GC.HeapCount" Value="2" Trim="false" />
   </ItemGroup>
 
   <ItemGroup>

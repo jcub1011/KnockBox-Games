@@ -26,6 +26,9 @@ public sealed class ServerAuthorityManager(
     private static readonly IReadOnlyDictionary<string, IWordPool> NoWords =
         new Dictionary<string, IWordPool>(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ServerAuthority> _actors = new(StringComparer.OrdinalIgnoreCase);
+    // Shared across every lobby engine (this manager is a singleton): one parsed copy of each game's
+    // authority module instead of a per-lobby re-parse. See AuthorityModuleCache.
+    private readonly AuthorityModuleCache _modules = new();
     private readonly ILogger _logger = loggerFactory.CreateLogger<ServerAuthorityManager>();
     // The module's own kb.log output — its own category (the "KnockBox.GameLog" precedent) so an
     // operator can filter or re-level untrusted module output independently.
@@ -81,7 +84,7 @@ public sealed class ServerAuthorityManager(
             return false;
         }
 
-        var runtime = new JsAuthorityRuntime(modulePath, options, time, wordPools);
+        var runtime = new JsAuthorityRuntime(modulePath, _modules, options, time, wordPools);
         try
         {
             runtime.Initialize(JsonSerializer.Serialize(lobby.Players, KnockBoxProtocolContext.Default.IReadOnlyListPlayer));
@@ -125,6 +128,11 @@ public sealed class ServerAuthorityManager(
     }
 
     public bool TryGet(string lobbyId, out ServerAuthority authority) => _actors.TryGetValue(lobbyId, out authority!);
+
+    /// <summary>Number of live per-lobby authority actors (each holds one Jint engine). Exposed for
+    /// the memory diagnostics log (see Program.cs) so operators can correlate footprint with
+    /// concurrent server-authority lobbies.</summary>
+    public int ActorCount => _actors.Count;
 
     /// <summary>Normal teardown (lobby closed dark / removed): stop the actor; its drain task
     /// finishes the backlog and disposes the engine.</summary>

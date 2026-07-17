@@ -30,6 +30,12 @@ ENV KnockBox__GamesRoot=/games \
     KnockBox__GamesPort=8081 \
     KnockBox__GamesPollSeconds=10 \
     ASPNETCORE_HTTP_PORTS="8080;8081"
+# GC footprint: the GC mode and the ConserveMemory/HeapCount knobs are baked into the binary at
+# publish (see KnockBox.Server.csproj) and honored under Native AOT, so nothing is needed here by
+# default. Give the container a memory limit (compose `mem_limit`, k8s limits) so .NET sizes/collects
+# against the cgroup budget. If the embedded knobs ever don't take effect (verify via
+# KnockBox__MemoryLogSeconds), override at runtime — FOOT-GUN: DOTNET_GCHeapCount is HEX:
+#   ENV DOTNET_gcServer=1 DOTNET_GCConserveMemory=5 DOTNET_GCHeapCount=0x2
 EXPOSE 8080
 EXPOSE 8081
 

@@ -202,4 +202,37 @@ public class JintSandboxSpikeTests
         // config is a plain module export.
         Assert.Equal(0d, ns.Get("config").AsObject().Get("tickHz").AsNumber());
     }
+
+    // ── Shared prepared module (memory optimization) ─────────────────────────
+    // Engine.PrepareModule parses+analyzes ONCE and returns a reusable, thread-safe Prepared<Module>.
+    // AuthorityModuleCache shares one per game file across every lobby engine instead of re-reading
+    // and re-parsing the file per lobby. Pin the registration API and the isolation guarantee (each
+    // engine gets its own module state) so a Jint upgrade that changes either fails loudly here.
+
+    [Fact]
+    public void Prepared_module_is_reusable_across_engines_with_isolated_state()
+    {
+        var prepared = Engine.PrepareModule("""
+            export function createAuthority() {
+              let n = 0;
+              return { bump() { return ++n; } };
+            }
+            """, "authority.js");
+
+        static int RunOn(Jint.Prepared<Acornima.Ast.Module> mod)
+        {
+            var engine = new Engine(o => o.Strict());
+            engine.Modules.Add("authority", b => b.AddModule(mod));
+            var ns = engine.Modules.Import("authority");
+            var inst = engine.Call(ns.Get("createAuthority")).AsObject();
+            engine.Call(inst.Get("bump"));
+            engine.Call(inst.Get("bump"));
+            return (int)engine.Call(inst.Get("bump")).AsNumber();
+        }
+
+        // Two independent engines built from the SAME prepared module each start their own state at 0,
+        // so both reach 3 after three bumps — no shared mutable state leaks between engines.
+        Assert.Equal(3, RunOn(prepared));
+        Assert.Equal(3, RunOn(prepared));
+    }
 }

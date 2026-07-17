@@ -31,6 +31,9 @@ public class JsAuthorityRuntimeTests : IDisposable
         MaxLobbies: 100);
 
     private static readonly IReadOnlyDictionary<string, IWordPool> NoWords = new Dictionary<string, IWordPool>();
+    // Shared across a test's Loads, exactly as the singleton manager shares one across all lobbies.
+    // Each Load writes a unique path, so entries never collide.
+    private readonly AuthorityModuleCache _modules = new();
 
     private JsAuthorityRuntime Load(string moduleSource, AuthorityOptions? opts = null,
         TimeProvider? time = null, string playersJson = """[{"id":"p1","displayName":"Ann"}]""",
@@ -38,7 +41,7 @@ public class JsAuthorityRuntimeTests : IDisposable
     {
         var path = Path.Combine(_dir, Guid.NewGuid().ToString("N") + ".js");
         File.WriteAllText(path, moduleSource);
-        var runtime = new JsAuthorityRuntime(path, opts ?? Opts(), time ?? TimeProvider.System, wordPools ?? NoWords);
+        var runtime = new JsAuthorityRuntime(path, _modules, opts ?? Opts(), time ?? TimeProvider.System, wordPools ?? NoWords);
         _runtimes.Add(runtime);
         runtime.Initialize(playersJson);
         return runtime;

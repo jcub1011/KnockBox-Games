@@ -26,6 +26,7 @@ namespace KnockBox.Server.Games;
 /// </summary>
 public sealed class JsAuthorityRuntime(
     string scriptPath,
+    AuthorityModuleCache modules,
     AuthorityOptions options,
     TimeProvider time,
     IReadOnlyDictionary<string, IWordPool> wordPools) : IAuthorityRuntime
@@ -76,7 +77,10 @@ public sealed class JsAuthorityRuntime(
             // in strict mode — only unqualified `delete Date` isn't.)
             engine.Evaluate("delete globalThis.Date");
 
-            engine.Modules.Add("authority", File.ReadAllText(scriptPath));
+            // Register the SHARED prepared module (parsed once, reused across every lobby engine of
+            // this game) rather than re-reading and re-parsing the file per lobby. The size cap was
+            // already enforced above; the cache only parses/caches.
+            engine.Modules.Add("authority", b => b.AddModule(modules.Get(scriptPath)));
             var ns = engine.Modules.Import("authority");
 
             var create = ns.Get("createAuthority");
