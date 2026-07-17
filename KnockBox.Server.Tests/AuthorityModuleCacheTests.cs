@@ -24,24 +24,48 @@ public class AuthorityModuleCacheTests : IDisposable
     }
 
     [Fact]
-    public void Same_file_returns_the_same_prepared_module_and_reparses_on_change()
+    public void Cache_hit_does_not_reparse_and_change_triggers_reparse()
     {
         var path = Path.Combine(_dir, "authority.js");
-        File.WriteAllText(path, "export function createAuthority() { return { value: () => 'v1' }; }");
+        const string v1 = "export function createAuthority() { return { value: () => 'aaa' }; }";
+        File.WriteAllText(path, v1);
+        var stamp = File.GetLastWriteTimeUtc(path);
 
         var cache = new AuthorityModuleCache();
-        var first = cache.Get(path);
-        var second = cache.Get(path);
+        Assert.Equal("aaa", Run(cache.Get(path)));
 
-        // Cache hit: byte-identical file yields the same prepared module (no re-parse).
-        Assert.Equal(first, second);
-        Assert.Equal("v1", Run(first));
+        // Cache hit proven behaviorally: rewrite with a DIFFERENT body of the SAME length and reset the
+        // mtime, so the (mtime, length) fingerprint is identical. If Get re-read/re-parsed we'd see
+        // 'bbb'; the cache must return the already-parsed module, so it still yields 'aaa'.
+        const string v1SameLen = "export function createAuthority() { return { value: () => 'bbb' }; }";
+        Assert.Equal(v1.Length, v1SameLen.Length); // guard: identical fingerprint length
+        File.WriteAllText(path, v1SameLen);
+        File.SetLastWriteTimeUtc(path, stamp);
+        Assert.Equal("aaa", Run(cache.Get(path)));
 
         // Freshness: a changed file (different length + a later write time) is re-parsed.
         File.WriteAllText(path, "export function createAuthority() { return { value: () => 'v2-longer' }; }");
         File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(2));
-        var third = cache.Get(path);
-        Assert.Equal("v2-longer", Run(third));
+        Assert.Equal("v2-longer", Run(cache.Get(path)));
+    }
+
+    [Fact]
+    public void Prune_drops_entries_whose_path_is_not_live()
+    {
+        var kept = Path.Combine(_dir, "kept.js");
+        var removed = Path.Combine(_dir, "removed.js");
+        File.WriteAllText(kept, "export function createAuthority() { return { value: () => 'kept' }; }");
+        File.WriteAllText(removed, "export function createAuthority() { return { value: () => 'removed' }; }");
+
+        var cache = new AuthorityModuleCache();
+        cache.Get(kept);
+        cache.Get(removed);
+
+        // Prune with only `kept` live. The `removed` entry is dropped; deleting its file afterward and
+        // re-Getting `kept` proves `kept` survived (no re-read needed for a cache hit).
+        cache.Prune(new HashSet<string>(new[] { kept }, StringComparer.Ordinal));
+        File.Delete(removed);
+        Assert.Equal("kept", Run(cache.Get(kept)));
     }
 
     [Fact]

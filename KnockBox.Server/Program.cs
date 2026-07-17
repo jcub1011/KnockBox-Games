@@ -253,6 +253,16 @@ catalog.Discovered += games =>
     catch (Exception ex) { app.Logger.LogError(ex, "Word-pool prune failed."); }
 };
 
+// Same rationale for the shared authority module cache: drop parsed modules for games that no longer
+// exist so they don't leak a parsed AST for the process lifetime. Trivial in-memory set work, so
+// inline like the word-pool prune — guarded so a throw can't break sibling Discovered handlers.
+var authorityManager = app.Services.GetRequiredService<ServerAuthorityManager>();
+catalog.Discovered += games =>
+{
+    try { authorityManager.PruneModuleCache(games); }
+    catch (Exception ex) { app.Logger.LogError(ex, "Authority module-cache prune failed."); }
+};
+
 catalog.Discover();
 catalog.StartWatching();
 // Polling safety net for bind mounts where file events don't propagate (Docker Desktop). 0 = off.
@@ -300,7 +310,7 @@ Timer? memoryLogTimer = null;
 if (memoryLogSeconds > 0)
 {
     var lobbyManager = app.Services.GetRequiredService<LobbyManager>();
-    var authorityManager = app.Services.GetRequiredService<ServerAuthorityManager>();
+    // authorityManager is captured above (module-cache prune wiring) — reuse it.
     var interval = TimeSpan.FromSeconds(memoryLogSeconds);
     memoryLogTimer = new Timer(_ =>
     {

@@ -506,12 +506,16 @@ concurrent authority lobbies. Two mitigations keep the per-lobby cost down:
   via `Engine.PrepareModule` (Jint documents the result as reusable + thread-safe) and the shared
   prepared module is registered on each lobby engine with `ModuleBuilder.AddModule`, keyed by file
   path with mtime/length freshness. So N lobbies of one game share a single parsed AST instead of
-  re-reading and re-parsing per lobby. The per-engine **realm baseline** (ECMAScript intrinsics)
-  still can't be shared for isolated untrusted state and dominates when many lobbies run.
-- **GC footprint knobs** (`KnockBox.Server.csproj`): Server GC stays (relay throughput) but with
-  `System.GC.ConserveMemory=5` and `System.GC.HeapCount=2` embedded at publish (honored under AOT),
-  plus a container `mem_limit` so the GC sizes to the cgroup budget. `KnockBox:MemoryLogSeconds`
-  logs working set / heap / lobby+actor counts to measure and verify all of the above.
+  re-reading and re-parsing per lobby. The cache is pruned on `GameCatalog.Discovered` (like the word
+  service) so a removed game's parsed AST doesn't linger for the process lifetime. The per-engine
+  **realm baseline** (ECMAScript intrinsics) still can't be shared for isolated untrusted state and
+  dominates when many lobbies run.
+- **GC footprint** (`KnockBox.Server.csproj`): Server GC stays (relay throughput) with **DATAS**
+  (heap-count adaptation, on by default since .NET 8) doing the footprint work — it grows/shrinks
+  heaps with load, so no fixed `System.GC.HeapCount` is set (that would disable DATAS). Only
+  `System.GC.ConserveMemory=5` is embedded at publish (honored under AOT), plus a container `mem_limit`
+  so DATAS/GC size to the cgroup budget. `KnockBox:MemoryLogSeconds` logs working set / heap /
+  lobby+actor counts to measure and verify all of the above.
 
 ---
 

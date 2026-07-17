@@ -349,13 +349,14 @@ scales with concurrent authority lobbies. Two things keep it in check:
   one game don't hold N copies of the parsed AST. (The per-engine ECMAScript realm baseline is still
   per lobby — it can't be shared for isolated untrusted state.) `AuthorityMaxMemoryBytes` bounds only
   a single *invocation's* allocation, not what an engine retains.
-- **GC tuning** — the server runs **Server GC** (throughput for the WebSocket relay) but with
-  footprint knobs baked into the publish (`KnockBox.Server.csproj`): `System.GC.ConserveMemory=5`
-  (release/decommit sooner) and `System.GC.HeapCount=2` (cap the per-core heap multiplication that
-  otherwise makes RSS climb and stay on many-core hosts); .NET's DATAS adaptation is also on by
-  default. In Docker, set a container **memory limit** (`mem_limit` in `docker-compose.yml`) so the
-  GC sizes and collects against the cgroup budget — the single biggest lever on steady-state RSS.
-  Override at runtime via `DOTNET_*` env vars only if needed (**foot-gun:** `DOTNET_GCHeapCount` is
-  **hex**, unlike the decimal `System.GC.HeapCount` runtimeconfig knob).
+- **GC tuning** — the server runs **Server GC** (throughput for the WebSocket relay) with **DATAS**
+  (Dynamic Adaptation To Application Sizes, on by default since .NET 8) doing the footprint work:
+  DATAS grows and shrinks the heap count with actual load, which is exactly the "RSS climbs and stays
+  on many-core hosts" case. So the publish (`KnockBox.Server.csproj`) sets `System.GC.ConserveMemory=5`
+  (release/decommit sooner, composes with DATAS) and deliberately **no** `System.GC.HeapCount` —
+  pinning a heap count would *disable* DATAS. In Docker, set a container **memory limit** (`mem_limit`
+  in `docker-compose.yml`) so DATAS/GC size and collect against the cgroup budget — the single biggest
+  lever on steady-state RSS. Only pin `DOTNET_GCHeapCount` as a runtime override if you have a specific
+  reason (**foot-gun:** it is **hex**, and setting it turns DATAS off).
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

@@ -60,7 +60,7 @@ public sealed class ServerAuthorityManager(
         // The catalog validated all of this at discovery; re-check cheaply because a hot-reload
         // could have swapped the folder contents between discovery and this lobby's creation.
         var gameDir = Path.GetFullPath(Path.Combine(gamesRoot, manifest.Id));
-        var modulePath = Path.GetFullPath(Path.Combine(gameDir, manifest.ServerAuthority));
+        var modulePath = ModulePath(gameDir, manifest.ServerAuthority);
         var dirPrefix = gameDir.EndsWith(Path.DirectorySeparatorChar) ? gameDir : gameDir + Path.DirectorySeparatorChar;
         if (!modulePath.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase) || !File.Exists(modulePath))
         {
@@ -125,6 +125,24 @@ public sealed class ServerAuthorityManager(
                 ?? throw new InvalidOperationException($"authorityWords '{key}' failed to register.");
         }
         return pools;
+    }
+
+    // Full path of a game's authority module, matching exactly what TryStart passes to the module
+    // cache — so PruneModuleCache's live-path set keys identically to Get.
+    private string ModulePath(string gameDir, string serverAuthority) =>
+        Path.GetFullPath(Path.Combine(gameDir, serverAuthority));
+
+    /// <summary>Keep the shared module cache in lock-step with the catalog (mirrors
+    /// <see cref="Words.AuthorityWordService.Prune"/>): drop parsed modules for games no longer
+    /// declared, so a removed game doesn't leak a parsed AST for the process lifetime. Wired to
+    /// <c>GameCatalog.Discovered</c> in Program.cs; runs inline (trivial in-memory set work).</summary>
+    public void PruneModuleCache(IReadOnlyCollection<GameManifest> games)
+    {
+        var live = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var g in games)
+            if (!string.IsNullOrWhiteSpace(g.ServerAuthority))
+                live.Add(ModulePath(Path.GetFullPath(Path.Combine(gamesRoot, g.Id)), g.ServerAuthority));
+        _modules.Prune(live);
     }
 
     public bool TryGet(string lobbyId, out ServerAuthority authority) => _actors.TryGetValue(lobbyId, out authority!);
