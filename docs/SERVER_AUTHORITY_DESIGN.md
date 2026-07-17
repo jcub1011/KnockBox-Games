@@ -1,12 +1,13 @@
 # KnockBox Games — Server-Authoritative Mode (Design)
 
-**Status: proposed — not yet implemented.** This document is the design for an optional,
-per-game server-authoritative mode. Nothing described here exists in the codebase yet; file/line
-references describe the code *today* as anchors for where the changes land.
+**Status: Phases 0–2 implemented** on `feature/server-authoratative-state` (2026-07-10); Phase 3
+(docs) in progress; Phase 4 (WASM backend) remains (§13). This document is the design for an
+optional, per-game server-authoritative mode. Most file/line references now describe the code
+*as-built*; a few (WASM, §3c/§13 Phase 4) still describe where later work lands.
 
 > Architecture background: **[INFRASTRUCTURE.md](./INFRASTRUCTURE.md)**. Game authoring:
-> **[GAME_DEVELOPER_GUIDE.md](./GAME_DEVELOPER_GUIDE.md)** (§5 documents the current
-> host-authoritative contract this mode replaces for opted-in games).
+> **[GAME_DEVELOPER_GUIDE.md](./GAME_DEVELOPER_GUIDE.md)** (§5 documents the host-authoritative
+> contract that stays the default; §5b documents this server-authoritative mode for opted-in games).
 
 ---
 

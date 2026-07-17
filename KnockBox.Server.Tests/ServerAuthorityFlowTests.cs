@@ -367,6 +367,45 @@ public class ServerAuthorityFlowTests : IDisposable
         await actor.Completion;
     }
 
+    [Fact]
+    public async Task Module_setLobbyOpen_closes_the_join_gate_end_to_end()
+    {
+        // The module holds the join gate (design §3): kb.setLobbyOpen is a deferred effect applied on
+        // the actor's drain task, and it must reach the control-plane join gate — not just flip a flag.
+        var (handler, _, lobbies, authorities, tokens, catalog, gameId) = BuildServer("""
+            export function createAuthority(kb) {
+              return {
+                init() {},
+                applyIntent(fromId, action) {
+                  if (action.kind === 'close') { kb.setLobbyOpen(false); return { closed: true }; }
+                  return null;
+                },
+                snapshot() { return {}; },
+              };
+            }
+            """);
+        var lobby = CreateAuthorityLobby(lobbies, authorities, catalog, gameId, "creator");
+        Assert.True(lobby.Open);
+
+        // An intent drives the module to close the lobby; draining applies the deferred effect.
+        await DriveData(handler, tokens, "creator", lobby, out _,
+            Game("host", """{"_kb":"intent","action":{"kind":"close"}}"""));
+        await DrainActor(authorities, lobby);
+        Assert.False(lobby.Open);
+
+        // A fresh player is now refused at the control-plane join gate (WebSocketHandler join path).
+        var newcomer = new ScriptedWebSocket(
+        [
+            ConnectionManager.Serialize(new HelloMessage(null, "newcomer", tokens.IssueIdentity("newcomer"))),
+            ConnectionManager.Serialize(new JoinLobbyMessage("j1", lobby.Id)),
+        ]);
+        await handler.HandleAsync(newcomer, GameOrigin, _cts.Token);
+
+        Assert.Contains(Decode(newcomer.Sent), m => m is ErrorMessage e && e.Cid == "j1" && e.Reason == "Lobby is closed");
+        Assert.DoesNotContain(Decode(newcomer.Sent), m => m is LobbyJoinedMessage);
+        Assert.False(lobby.Contains("newcomer"));
+    }
+
     /// <summary>Minimal in-memory WebSocket: replays scripted inbound frames, captures outbound ones.</summary>
     private sealed class ScriptedWebSocket(IEnumerable<byte[]>? inbound = null) : WebSocket
     {

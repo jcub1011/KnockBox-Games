@@ -22,8 +22,11 @@ supplied as drop-in content folders. Four principles shape the design:
    and exchanges role-addressed messages (`host` / everyone / a player). It never names a lobby —
    the server resolves routing from the connection, which it bound to a lobby at attach time.
 4. **One session is authoritative on one client — the host.** Game rules run in the lobby creator's
-   browser. Others send intent; the host validates and broadcasts state. (Real cheat-resistance
-   would need server-side logic, intentionally out of scope.)
+   browser. Others send intent; the host validates and broadcasts state. This is the default. A game
+   may instead **opt in** to server-authoritative mode (`GAME.json` `serverAuthority`), where the
+   server runs the game's sandboxed authority module — cheat-resistance and creator-departure
+   survival *for opted-in games*. See [SERVER_AUTHORITY_DESIGN.md](./SERVER_AUTHORITY_DESIGN.md) and
+   GAME_DEVELOPER_GUIDE §5b; principle 2 still holds for every game that doesn't opt in.
 
 The server holds **no durable state**: a restart drops all in-progress lobbies by design. Anonymous,
 per-tab player identity lives in the browser and is made unforgeable with a signed token (§4).
@@ -324,5 +327,14 @@ into `games/` and it appears within a second or two — no restart.
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
 | `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
+| `AuthorityEnabled` | `true` | Master switch for server-authoritative mode (games with `GAME.json` `serverAuthority`, see SERVER_AUTHORITY_DESIGN.md). `false` ⇒ creating a lobby for such a game fails with a clear error — never a silent downgrade to host mode. |
+| `AuthorityMaxMemoryBytes` | `33554432` (32 MB) | Per-engine memory budget for the sandboxed authority runtime (Jint `LimitMemory`; a per-invocation allocation budget, see design §8). |
+| `AuthorityCallTimeoutMs` | `250` | Wall-clock budget per module invocation. A blunt fatal trigger (a GC pause counts against it), so it leaves headroom — `AuthorityMaxStatements` is the deterministic runaway guard. |
+| `AuthorityMaxStatements` | `1000000` | Statement budget per invocation (deterministic infinite-loop guard). Overflow is fatal — the lobby is closed. |
+| `AuthorityRecursionLimit` | `64` | Call-depth limit for the authority engine. |
+| `AuthorityTickHzMax` | `20` | Clamp on a module's requested `config.tickHz` (a module exporting `tick` opts into a server-driven timer). |
+| `AuthorityMaxScriptBytes` | `1048576` (1 MB) | Max authority-module file size; checked at discovery (oversize ⇒ the game is skipped) and at load. |
+| `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
+| `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.
