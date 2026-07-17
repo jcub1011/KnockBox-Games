@@ -442,7 +442,83 @@
     }
   }
 
-  function LocalAuthorityActor(peer, createAuthority, config) {
+  // ── Local kb.words emulation ─────────────────────────────────────────────────────────────────
+  // Mirrors the server's word service (AuthorityWordService / WordPoolSet) closely enough that the
+  // same authority.js behaves identically: ASCII-only, per-dictionary case folding, and — critically —
+  // the SAME pick ordering (length buckets ascending, ordinal within a length, one contiguous global
+  // index). A naive array would drift; the shared-fixture Vitest/xUnit test pins this.
+  function isAsciiWord(s) {
+    for (var i = 0; i < s.length; i++) if (s.charCodeAt(i) > 127) return false;
+    return true;
+  }
+
+  function buildLocalWordPool(list, caseInsensitive) {
+    var byLength = {}; // len -> Set of normalized words (dedupe)
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] == null) continue;
+      var trimmed = String(list[i]).trim();
+      if (trimmed.length === 0 || !isAsciiWord(trimmed)) continue;
+      var w = caseInsensitive ? trimmed.toLowerCase() : trimmed;
+      (byLength[w.length] || (byLength[w.length] = new Set())).add(w);
+    }
+    var lengths = Object.keys(byLength).map(Number).sort(function (a, b) { return a - b; });
+    var order = [], perLength = {};
+    lengths.forEach(function (len) {
+      var arr = Array.from(byLength[len]).sort(); // default sort is code-unit order == ordinal for ASCII
+      perLength[len] = arr;
+      for (var j = 0; j < arr.length; j++) order.push(arr[j]);
+    });
+    return { order: order, perLength: perLength, set: new Set(order), caseInsensitive: caseInsensitive };
+  }
+
+  function makeWordsCapability(pools) {
+    function pool(dict) { return Object.prototype.hasOwnProperty.call(pools, dict) ? pools[dict] : null; }
+    function norm(p, word) {
+      if (typeof word !== 'string' || !isAsciiWord(word)) return null; // server returns false for non-ASCII
+      return p.caseInsensitive ? word.toLowerCase() : word;
+    }
+    function idx(v) { var n = Math.trunc(Number(v)); return Number.isFinite(n) ? n : NaN; }
+    return Object.freeze({
+      has: function (dict, word) {
+        var p = pool(dict); if (!p) return false;
+        var q = norm(p, word); return q !== null && p.set.has(q);
+      },
+      count: function (dict) { var p = pool(dict); return p ? p.order.length : 0; },
+      pick: function (dict, index) {
+        var p = pool(dict); if (!p) return null;
+        var i = idx(index);
+        return (i >= 0 && i < p.order.length) ? p.order[i] : null;
+      },
+      countOfLength: function (dict, len) {
+        var p = pool(dict); if (!p) return 0;
+        var arr = p.perLength[idx(len)]; return arr ? arr.length : 0;
+      },
+      pickOfLength: function (dict, len, index) {
+        var p = pool(dict); if (!p) return null;
+        var arr = p.perLength[idx(len)]; if (!arr) return null;
+        var i = idx(index);
+        return (i >= 0 && i < arr.length) ? arr[i] : null;
+      },
+    });
+  }
+
+  // Builds the capability from a plain spec map (no fetching) — used by _resolveWords once lists are
+  // in hand, and exported for tests. Each value is an array of words or { words|list, caseInsensitive }.
+  function buildLocalWordsFromSpec(spec) {
+    var pools = {};
+    for (var k in spec) {
+      if (!Object.prototype.hasOwnProperty.call(spec, k)) continue;
+      var v = spec[k];
+      var list = Array.isArray(v) ? v : (v.words || v.list || []);
+      var ci = Array.isArray(v) ? true : (v.caseInsensitive !== false);
+      pools[k] = buildLocalWordPool(list, ci);
+    }
+    return makeWordsCapability(pools);
+  }
+
+  var EMPTY_WORDS = makeWordsCapability({});
+
+  function LocalAuthorityActor(peer, createAuthority, config, words) {
     if (typeof createAuthority !== 'function') {
       throw new Error('[KnockBox authority] the authority option must provide a createAuthority(kb) function');
     }
@@ -466,6 +542,7 @@
         warn: function (m) { console.warn('[KnockBox authority] ' + m); },
         error: function (m) { console.error('[KnockBox authority] ' + m); },
       }),
+      words: words || EMPTY_WORDS,
     });
 
     this.instance = createAuthority(kb);
@@ -627,6 +704,11 @@
     // `authorityConfig` supplies the config export when the function form is used.
     this._authorityOpt = opts.authority || null;
     this._authorityConfig = opts.authorityConfig || null;
+    // Optional word dictionaries for kb.words. A map key -> array | { words|list, caseInsensitive } |
+    // { file|url, caseInsensitive }. When `authority:` is a URL, the sibling ./GAME.json's
+    // authorityWords are auto-discovered too (explicit keys here win). See _resolveWords.
+    this._wordsOpt = opts.words || null;
+    this._words = EMPTY_WORDS;
     this._resolved = null; // { createAuthority, config } once the option is resolved
     this._actor = null;    // set on the transport-elected peer in authority mode
     this.authority = this._authorityOpt ? 'server' : 'host';
@@ -662,24 +744,86 @@
     // (fetch + import-scan + dynamic import); a load failure is LOUD and the session never starts —
     // mirroring the server, where TryStart failing fails lobby creation.
     var self = this;
-    if (typeof opt === 'string') {
-      this._loadAuthority(opt).then(
-        function (resolved) {
-          if (self._stopped) return;
-          self._resolved = resolved;
-          self._transport.start();
-        },
-        function (err) {
-          console.error('[KnockBox authority] module failed to load — session not started:', err);
-          self.events.emit('closed', { terminal: true });
+    var authUrl = typeof opt === 'string' ? opt : null;
+    var resolveAuthority = authUrl
+      ? this._loadAuthority(authUrl)
+      : Promise.resolve(typeof opt === 'function'
+          ? { createAuthority: opt, config: this._authorityConfig || {} }
+          : { createAuthority: opt.createAuthority, config: opt.config || this._authorityConfig || {} });
+
+    resolveAuthority
+      .then(function (resolved) {
+        self._resolved = resolved;
+        return self._resolveWords(authUrl); // fetch/build word dictionaries before electing a host
+      })
+      .then(function (words) {
+        if (self._stopped) return;
+        self._words = words;
+        self._transport.start();
+      })
+      .catch(function (err) {
+        console.error('[KnockBox authority] module failed to load — session not started:', err);
+        self.events.emit('closed', { terminal: true });
+      });
+  };
+
+  // Resolves kb.words data from the explicit `words` option and, for the URL form of `authority:`,
+  // the sibling ./GAME.json's authorityWords (explicit keys win). URL/file entries are fetched; the
+  // built capability mirrors the server's ordering. Missing GAME.json is fine (rely on the option).
+  KnockBoxLocalPeer.prototype._resolveWords = function (authUrl) {
+    var decls = {}; // key -> { list?: string[], url?: string, caseInsensitive: bool }
+    var opt = this._wordsOpt;
+    if (opt) {
+      for (var k in opt) {
+        if (!Object.prototype.hasOwnProperty.call(opt, k)) continue;
+        var v = opt[k];
+        if (Array.isArray(v)) decls[k] = { list: v, caseInsensitive: true };
+        else if (v && typeof v === 'object') {
+          decls[k] = {
+            list: v.words || v.list || null,
+            url: v.url || v.file || null,
+            caseInsensitive: v.caseInsensitive !== false,
+          };
         }
-      );
-      return;
+      }
     }
-    this._resolved = typeof opt === 'function'
-      ? { createAuthority: opt, config: this._authorityConfig || {} }
-      : { createAuthority: opt.createAuthority, config: opt.config || this._authorityConfig || {} };
-    this._transport.start();
+
+    var dir = authUrl ? authUrl.replace(/[^/]*$/, '') : null;
+    var discover = (authUrl && typeof fetch === 'function')
+      ? fetch(dir + 'GAME.json')
+          .then(function (res) { return res.ok ? res.json() : null; })
+          .then(function (manifest) {
+            var words = manifest && manifest.authorityWords;
+            if (!words) return;
+            for (var key in words) {
+              if (!Object.prototype.hasOwnProperty.call(words, key) || decls[key]) continue; // explicit wins
+              var d = words[key];
+              if (d && d.file) decls[key] = { url: dir + d.file, caseInsensitive: d.caseInsensitive !== false };
+            }
+          })
+          .catch(function () { /* no manifest / not fetchable — rely on the explicit option */ })
+      : Promise.resolve();
+
+    return discover.then(function () {
+      var keys = Object.keys(decls);
+      return Promise.all(keys.map(function (key) {
+        var d = decls[key];
+        if (d.list) return { key: key, list: d.list, ci: d.caseInsensitive };
+        if (d.url && typeof fetch === 'function') {
+          return fetch(d.url)
+            .then(function (res) {
+              if (!res.ok) throw new Error('fetch of ' + d.url + ' failed: ' + res.status);
+              return res.text();
+            })
+            .then(function (text) { return { key: key, list: text.split(/\r?\n/), ci: d.caseInsensitive }; });
+        }
+        return { key: key, list: [], ci: d.caseInsensitive };
+      })).then(function (built) {
+        var spec = {};
+        built.forEach(function (b) { spec[b.key] = { list: b.list, caseInsensitive: b.ci }; });
+        return buildLocalWordsFromSpec(spec);
+      });
+    });
   };
 
   // URL form: fetch the source, run the single-file import scan (a relative import would happily
@@ -751,7 +895,7 @@
       // peer's own game — is then told isHost:false, exactly like the real server-mode Ready.
       if (isHost && !this._actor) {
         try {
-          this._actor = new LocalAuthorityActor(this, this._resolved.createAuthority, this._resolved.config);
+          this._actor = new LocalAuthorityActor(this, this._resolved.createAuthority, this._resolved.config, this._words);
           this._actor.init(this.players);
         } catch (err) {
           console.error('[KnockBox authority] failed to start the authority module — session closed:', err);
@@ -862,6 +1006,10 @@
     // The single-file import scan (also run by tools/pack-game) — exported so tests and tooling
     // can call it without going through the URL loader.
     scanAuthorityImports: scanAuthorityImports,
+    // Builds a kb.words capability from a plain spec map (key -> array | { words|list, caseInsensitive })
+    // — no fetching. Exported so tests can pin the has/count/pick behaviour and the server-identical
+    // pick ordering (shared-fixture parity with the C# WordPoolSet).
+    _buildLocalWords: buildLocalWordsFromSpec,
     // Test helper: clear the in-process hub registry between tests.
     _resetLocalHubs: function () { hubs = {}; },
   };

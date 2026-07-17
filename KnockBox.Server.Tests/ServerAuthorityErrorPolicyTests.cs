@@ -1,6 +1,7 @@
 using System.Text.Json;
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Words;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Serialization;
@@ -61,7 +62,9 @@ public class ServerAuthorityErrorPolicyTests : IDisposable
         var lobbies = new LobbyManager();
         var manager = new ServerAuthorityManager(_root,
             AuthorityOptions.FromConfiguration(ConfigFactory.FromPairs(config)),
-            connections, lobbies, TimeProvider.System, isDevelopment, NullLoggerFactory.Instance);
+            connections, lobbies, TimeProvider.System,
+            new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),
+            isDevelopment, NullLoggerFactory.Instance);
 
         Assert.True(lobbies.TryCreate(gameId, "p1", 8, out var lobby, isServerAuthority: true));
         Assert.True(lobby.TryAdd(new Player("p1", "p1")));

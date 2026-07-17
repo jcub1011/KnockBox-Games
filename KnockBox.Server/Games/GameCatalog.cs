@@ -15,7 +15,9 @@ public sealed class GameCatalog(
     ILogger<GameCatalog> logger,
     // Size cap for a manifest's serverAuthority module (KnockBox:AuthorityMaxScriptBytes). A ctor
     // scalar rather than the whole AuthorityOptions — discovery needs one number, not runtime knobs.
-    long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes) : IDisposable
+    long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes,
+    // Size cap for a single authorityWords dictionary file (KnockBox:AuthorityMaxWordFileBytes).
+    long authorityMaxWordFileBytes = AuthorityOptions.DefaultMaxWordFileBytes) : IDisposable
 {
     // Swapped atomically by Discover(). Readers take the reference once and enumerate a stable
     // snapshot, so a concurrent rebuild can never expose a half-built catalog (no lock needed).
@@ -131,6 +133,12 @@ public sealed class GameCatalog(
                 if (manifest.ServerAuthority is not null && !ValidateServerAuthority(manifest, dir, dirPrefix))
                     continue;
 
+                // authorityWords dictionaries: same traversal + existence + size treatment. They are
+                // server-only, so a game declaring them must also opt into serverAuthority. Any failure
+                // skips the whole game (a word game with a broken dictionary should fail loud).
+                if (manifest.AuthorityWords is { Count: > 0 } && !ValidateAuthorityWords(manifest, dir, dirPrefix))
+                    continue;
+
                 next[manifest.Id] = manifest;
                 if (logger.IsEnabled(LogLevel.Information))
                     logger.LogInformation("Discovered game '{Id}' ({Name}) from {Dir}", manifest.Id, manifest.Name, dir);
@@ -186,6 +194,53 @@ public sealed class GameCatalog(
             logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is {Size} bytes (max {Max}).",
                 manifest.Id, manifest.ServerAuthority, size, authorityMaxScriptBytes);
             return false;
+        }
+        return true;
+    }
+
+    private bool ValidateAuthorityWords(GameManifest manifest, string dir, string dirPrefix)
+    {
+        // Word data is only reachable from an authority module (kb.words); declaring it without
+        // serverAuthority is a misconfiguration — skip loudly rather than silently ignore it.
+        if (string.IsNullOrWhiteSpace(manifest.ServerAuthority))
+        {
+            logger.LogWarning("Skipping game '{Id}': authorityWords requires serverAuthority to be set.", manifest.Id);
+            return false;
+        }
+
+        foreach (var (key, decl) in manifest.AuthorityWords!)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                logger.LogWarning("Skipping game '{Id}': an authorityWords entry has an empty key.", manifest.Id);
+                return false;
+            }
+            if (decl is null || string.IsNullOrWhiteSpace(decl.File))
+            {
+                logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' has no file.", manifest.Id, key);
+                return false;
+            }
+
+            var fileFull = Path.GetFullPath(Path.Combine(dir, decl.File));
+            if (!fileFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' escapes the game folder.",
+                    manifest.Id, key, decl.File);
+                return false;
+            }
+            if (!File.Exists(fileFull))
+            {
+                logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' not found.",
+                    manifest.Id, key, decl.File);
+                return false;
+            }
+            var size = new FileInfo(fileFull).Length;
+            if (size > authorityMaxWordFileBytes)
+            {
+                logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' is {Size} bytes (max {Max}).",
+                    manifest.Id, key, decl.File, size, authorityMaxWordFileBytes);
+                return false;
+            }
         }
         return true;
     }

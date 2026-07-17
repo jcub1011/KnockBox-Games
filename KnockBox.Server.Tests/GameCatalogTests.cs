@@ -19,8 +19,10 @@ public class GameCatalogTests : IDisposable
         if (writeEntry) File.WriteAllText(Path.Combine(dir, entry), "<html></html>");
     }
 
-    private GameCatalog NewCatalog(long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes) =>
-        new(_root, NullLogger<GameCatalog>.Instance, authorityMaxScriptBytes);
+    private GameCatalog NewCatalog(
+        long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes,
+        long authorityMaxWordFileBytes = AuthorityOptions.DefaultMaxWordFileBytes) =>
+        new(_root, NullLogger<GameCatalog>.Instance, authorityMaxScriptBytes, authorityMaxWordFileBytes);
 
     [Fact]
     public void Discovers_a_valid_game()
@@ -185,6 +187,77 @@ public class GameCatalogTests : IDisposable
         catalog.Discover();
 
         Assert.False(catalog.TryGet("sa", out _));
+    }
+
+    // ── authorityWords validation ─────────────────────────────────────────────
+    // Same fail-loud policy as serverAuthority: a word game with a broken dictionary skips entirely.
+
+    private const string WordGameManifest =
+        """{ "id": "wg", "name": "W", "entry": "index.html", "maxPlayers": 4, "serverAuthority": "authority.js", "authorityWords": { "en": { "file": "words.txt", "caseInsensitive": true } } }""";
+
+    private void WriteWordGame(string id, string manifestJson, bool writeWords = true, int wordBytes = 0)
+    {
+        WriteGame(id, manifestJson);
+        File.WriteAllText(Path.Combine(_root, id, "authority.js"), "export function createAuthority(kb) {}");
+        if (writeWords)
+        {
+            var content = wordBytes > 0 ? new string('a', wordBytes) : "apple\nbrave\ncrane\n";
+            File.WriteAllText(Path.Combine(_root, id, "words.txt"), content);
+        }
+    }
+
+    [Fact]
+    public void Discovers_a_game_with_valid_authorityWords()
+    {
+        WriteWordGame("wg", WordGameManifest);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("wg", out var m));
+        Assert.NotNull(m.AuthorityWords);
+        Assert.Equal("words.txt", m.AuthorityWords!["en"].File);
+        Assert.True(m.AuthorityWords["en"].CaseInsensitive);
+    }
+
+    [Fact]
+    public void Skips_a_game_whose_word_file_is_missing()
+    {
+        WriteWordGame("wg", WordGameManifest, writeWords: false);
+        var catalog = NewCatalog();
+        catalog.Discover();
+        Assert.False(catalog.TryGet("wg", out _));
+    }
+
+    [Fact]
+    public void Skips_a_game_whose_word_file_escapes_the_game_folder()
+    {
+        WriteGame("wg",
+            """{ "id": "wg", "name": "W", "entry": "index.html", "maxPlayers": 4, "serverAuthority": "authority.js", "authorityWords": { "en": { "file": "../evil.txt" } } }""");
+        File.WriteAllText(Path.Combine(_root, "wg", "authority.js"), "export function createAuthority(kb) {}");
+        File.WriteAllText(Path.Combine(_root, "evil.txt"), "apple\n");
+        var catalog = NewCatalog();
+        catalog.Discover();
+        Assert.False(catalog.TryGet("wg", out _));
+    }
+
+    [Fact]
+    public void Skips_a_game_whose_word_file_exceeds_the_size_cap()
+    {
+        WriteWordGame("wg", WordGameManifest, wordBytes: 4096);
+        var catalog = NewCatalog(authorityMaxWordFileBytes: 1024);
+        catalog.Discover();
+        Assert.False(catalog.TryGet("wg", out _));
+    }
+
+    [Fact]
+    public void Skips_a_game_declaring_authorityWords_without_serverAuthority()
+    {
+        WriteGame("wg",
+            """{ "id": "wg", "name": "W", "entry": "index.html", "maxPlayers": 4, "authorityWords": { "en": { "file": "words.txt" } } }""");
+        File.WriteAllText(Path.Combine(_root, "wg", "words.txt"), "apple\n");
+        var catalog = NewCatalog();
+        catalog.Discover();
+        Assert.False(catalog.TryGet("wg", out _));
     }
 
     [Fact]

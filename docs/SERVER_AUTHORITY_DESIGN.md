@@ -120,6 +120,7 @@ The module also receives a tiny frozen capability object at creation:
 | `kb.setOwner(playerId)` | **Owner migration primitive.** Reassigns the lobby owner (kick/open powers + `isOwner` on clients). The server validates the target is a current member, updates `Lobby.HostId`, and pushes an `OwnerChanged` event (§5f). *Policy* is the game's: typically called from `onPlayerLeft` when the departed player was the owner. A module that never calls it leaves the lobby owner-less after the creator departs — allowed and documented. |
 | `kb.now()` | Milliseconds since epoch, server clock (backed by `TimeProvider` so tests can fake it). Modules must not reach for their own clock — engine setup **deletes the `Date` global** (Jint ships the full ECMAScript `Date` by default, so this is an active removal, verified in the Phase 0 spike), making `kb.now()` the only time source. |
 | `kb.log.info/warn/error/debug(msg)` | Serilog under a `KnockBox.Authority` category (the `KnockBox.GameLog` precedent), stamped with gameId/lobbyId. |
+| `kb.words.has/count/pick/countOfLength/pickOfLength` | Read-only queries over the game's declared word dictionaries (`GAME.json` `authorityWords`). Each dictionary is loaded **once** by `AuthorityWordService` into a shared, immutable, length-bucketed structure (`WordPoolSet`) that every lobby engine of the game shares — the dictionary never enters the JS heap or the per-invocation memory budget; only the boolean/number/string result of a query crosses the boundary. Backed by `ClrFunction` (the same no-reflection path as the rest of `kb`), so it stays AOT-clean. Guarded: an unknown key / out-of-range index returns `false`/`0`/`null`, never a fatal throw. This is the answer to games needing a large dictionary (a word list) without the naive per-lobby copy or a raised memory cap. |
 
 `kb.setOwner` and `kb.setLobbyOpen` are **deferred effects**: a call during a module invocation
 only records the request; the actor applies it (validation, `HostId` update, event broadcasts)
@@ -482,6 +483,7 @@ New `AuthorityOptions` record (`ServerLimits.FromConfiguration` pattern), all un
 | `AuthorityRecursionLimit` | 64 | Call-depth limit (Jint). |
 | `AuthorityTickHzMax` | 20 | Clamp on a module's requested `config.tickHz`. |
 | `AuthorityMaxScriptBytes` | 1048576 (1 MB) | Max module file size (checked at discovery and load). |
+| `AuthorityMaxWordFileBytes` | 33554432 (32 MB) | Max size of a single `authorityWords` dictionary file (checked at discovery). Larger than the module cap because dictionaries are the big blobs; they live on the shared CLR heap, not in a per-invocation budget. |
 | `AuthorityQueueCapacity` | 256 | Actor inbound channel bound (two-tier: intents drop-oldest, ticks coalesce, roster work never dropped — §6). |
 | `AuthorityMaxLobbies` | 100 | Cap on concurrent server-authority lobbies (`0` = unlimited). |
 
@@ -595,6 +597,13 @@ the game-origin pipeline for the manifest's `serverAuthority` path, with a test
 (`GET /games/<id>/authority.js` → 404), and the precompressor skips the file (no point warming
 variants of an asset that is never served). Excluding `GAME.json` the same way is an optional
 tidy-up — a separate decision, since nothing secret lives in it today.
+
+The same deny + precompressor-skip applies to every `authorityWords` dictionary file
+(`GameOriginAssetGate.IsDeniedAuthorityAsset` covers both the module and the word files, plus their
+`.br`/`.gz` variants): the words are server-side data the client never needs, and for a
+hidden-information word game the answer list is exactly the secret. The local dev loop (§12a) has no
+such deny — the developer's own static server serves the file so `knockbox-local.js` can fetch it to
+emulate `kb.words`.
 
 ---
 

@@ -1,9 +1,11 @@
+using System.Text;
 using Jint;
 using Jint.Native;
 using Jint.Native.Json;
 using Jint.Native.Object;
 using Jint.Runtime;
 using Jint.Runtime.Interop;
+using KnockBox.Server.Games.Words;
 
 namespace KnockBox.Server.Games;
 
@@ -25,7 +27,8 @@ namespace KnockBox.Server.Games;
 public sealed class JsAuthorityRuntime(
     string scriptPath,
     AuthorityOptions options,
-    TimeProvider time) : IAuthorityRuntime
+    TimeProvider time,
+    IReadOnlyDictionary<string, IWordPool> wordPools) : IAuthorityRuntime
 {
     private static readonly string[] RequiredHooks = ["init", "applyIntent", "snapshot"];
     private static readonly string[] OptionalHooks =
@@ -187,9 +190,13 @@ public sealed class JsAuthorityRuntime(
         AddLog(log, "error", LogLevel.Error);
         kb.Set("log", log);
 
+        var words = BuildWords(engine);
+        kb.Set("words", words);
+
         // Freeze so a buggy module can't repoint capabilities mid-game.
         var freeze = engine.Evaluate("Object.freeze");
         engine.Call(freeze, log);
+        engine.Call(freeze, words);
         engine.Call(freeze, kb);
         return kb;
 
@@ -199,6 +206,69 @@ public sealed class JsAuthorityRuntime(
                 _logs.Add((level, args.Length > 0 ? args[0].ToString() : ""));
                 return JsValue.Undefined;
             }));
+    }
+
+    /// <summary>Builds the frozen <c>kb.words</c> capability over the lobby's pre-resolved dictionaries
+    /// (design: the shared word service). Every member is a ClrFunction closing over the shared
+    /// <see cref="IWordPool"/> map, so the dictionary never enters the JS heap — only the
+    /// boolean/number/string RESULT of a lookup crosses the boundary. All members are defensively
+    /// guarded and return <c>false</c>/<c>0</c>/<c>null</c> for a bad arg, unknown key, or out-of-range
+    /// index rather than throwing — a CLR throw out of a ClrFunction would be misclassified as a fatal
+    /// module failure (design §7).</summary>
+    private ObjectInstance BuildWords(Engine engine)
+    {
+        var words = new JsObject(engine);
+
+        // has(dictKey, word) -> boolean
+        words.Set("has", new ClrFunction(engine, "has", (_, args) =>
+        {
+            if (args.Length < 2 || !args[0].IsString() || !args[1].IsString()) return false;
+            return wordPools.TryGetValue(args[0].AsString(), out var pool) && pool.Contains(args[1].AsString());
+        }));
+
+        // count(dictKey) -> number (total across all lengths; the valid index range for pick)
+        words.Set("count", new ClrFunction(engine, "count", (_, args) =>
+        {
+            if (args.Length < 1 || !args[0].IsString()) return 0d;
+            return wordPools.TryGetValue(args[0].AsString(), out var pool) ? (double)pool.TotalWordCount : 0d;
+        }));
+
+        // pick(dictKey, index) -> string | null   (global index in [0, count))
+        words.Set("pick", new ClrFunction(engine, "pick", (_, args) =>
+        {
+            if (args.Length < 2 || !args[0].IsString() || !args[1].IsNumber()) return JsValue.Null;
+            if (!wordPools.TryGetValue(args[0].AsString(), out var pool)) return JsValue.Null;
+            var n = args[1].AsNumber();
+            if (!double.IsFinite(n)) return JsValue.Null;
+            var index = (int)n;
+            if (index < 0 || index >= pool.TotalWordCount) return JsValue.Null;
+            return Encoding.ASCII.GetString(pool.GetWord(index));
+        }));
+
+        // countOfLength(dictKey, length) -> number
+        words.Set("countOfLength", new ClrFunction(engine, "countOfLength", (_, args) =>
+        {
+            if (args.Length < 2 || !args[0].IsString() || !args[1].IsNumber()) return 0d;
+            if (!wordPools.TryGetValue(args[0].AsString(), out var pool)) return 0d;
+            var len = args[1].AsNumber();
+            return double.IsFinite(len) ? (double)pool.GetWordCount((int)len) : 0d;
+        }));
+
+        // pickOfLength(dictKey, length, index) -> string | null   (index in [0, countOfLength))
+        words.Set("pickOfLength", new ClrFunction(engine, "pickOfLength", (_, args) =>
+        {
+            if (args.Length < 3 || !args[0].IsString() || !args[1].IsNumber() || !args[2].IsNumber())
+                return JsValue.Null;
+            if (!wordPools.TryGetValue(args[0].AsString(), out var pool)) return JsValue.Null;
+            var lenN = args[1].AsNumber();
+            var idxN = args[2].AsNumber();
+            if (!double.IsFinite(lenN) || !double.IsFinite(idxN)) return JsValue.Null;
+            int len = (int)lenN, index = (int)idxN;
+            if (index < 0 || index >= pool.GetWordCount(len)) return JsValue.Null;
+            return Encoding.ASCII.GetString(pool.GetWord(len, index));
+        }));
+
+        return words;
     }
 
     private static AuthorityConfig ParseConfig(Engine engine, JsValue config)

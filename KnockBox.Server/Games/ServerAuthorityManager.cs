@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using KnockBox.Contracts;
+using KnockBox.Server.Games.Words;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Serialization;
@@ -18,9 +19,12 @@ public sealed class ServerAuthorityManager(
     ConnectionManager connections,
     LobbyManager lobbies,
     TimeProvider time,
+    IAuthorityWordService words,
     bool isDevelopment,
     ILoggerFactory loggerFactory)
 {
+    private static readonly IReadOnlyDictionary<string, IWordPool> NoWords =
+        new Dictionary<string, IWordPool>(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ServerAuthority> _actors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger _logger = loggerFactory.CreateLogger<ServerAuthorityManager>();
     // The module's own kb.log output — its own category (the "KnockBox.GameLog" precedent) so an
@@ -61,7 +65,23 @@ public sealed class ServerAuthorityManager(
             return false;
         }
 
-        var runtime = new JsAuthorityRuntime(modulePath, options, time);
+        // Resolve the game's declared word dictionaries into shared pools BEFORE building the runtime,
+        // so the kb.words bridge closes over them directly (no per-call lookup). A missing/failed
+        // dictionary fails lobby creation loudly (never a silent-half-alive lobby).
+        IReadOnlyDictionary<string, IWordPool> wordPools;
+        try
+        {
+            wordPools = LoadWordPools(manifest, gameDir, dirPrefix);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Authority word data for game {GameId} failed to load; lobby {LobbyId} not created",
+                manifest.Id, lobby.Id);
+            error = "The game's word data failed to load.";
+            return false;
+        }
+
+        var runtime = new JsAuthorityRuntime(modulePath, options, time, wordPools);
         try
         {
             runtime.Initialize(JsonSerializer.Serialize(lobby.Players, KnockBoxProtocolContext.Default.IReadOnlyListPlayer));
@@ -82,6 +102,26 @@ public sealed class ServerAuthorityManager(
             _logger.LogInformation("Server authority started for lobby {LobbyId} (game {GameId})", lobby.Id, manifest.Id);
         error = null;
         return true;
+    }
+
+    // Loads each declared authorityWords dictionary (idempotent/cached in the word service) and returns
+    // the dictKey -> pool map the runtime's kb.words closes over. The catalog validated these at
+    // discovery; re-check the path cheaply against a hot-reload race, exactly like the module path.
+    private IReadOnlyDictionary<string, IWordPool> LoadWordPools(GameManifest manifest, string gameDir, string dirPrefix)
+    {
+        if (manifest.AuthorityWords is not { Count: > 0 } decls) return NoWords;
+
+        var pools = new Dictionary<string, IWordPool>(decls.Count, StringComparer.Ordinal);
+        foreach (var (key, decl) in decls)
+        {
+            var path = Path.GetFullPath(Path.Combine(gameDir, decl.File));
+            if (!path.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+                throw new FileNotFoundException($"authorityWords '{key}' file is missing.", decl.File);
+            words.Load(manifest.Id, key, path, decl.CaseInsensitive);
+            pools[key] = words.Get(manifest.Id, key)
+                ?? throw new InvalidOperationException($"authorityWords '{key}' failed to register.");
+        }
+        return pools;
     }
 
     public bool TryGet(string lobbyId, out ServerAuthority authority) => _actors.TryGetValue(lobbyId, out authority!);

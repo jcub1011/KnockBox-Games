@@ -9,6 +9,10 @@ namespace KnockBox.Server.Serialization;
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(IMessage))]
 [JsonSerializable(typeof(GameManifest))]
+// GameManifest.AuthorityWords: a nested dictionary of records is not auto-covered by source-gen the
+// way the flat ServerAuthority string is, so register both explicitly.
+[JsonSerializable(typeof(AuthorityWordDeclaration))]
+[JsonSerializable(typeof(IReadOnlyDictionary<string, AuthorityWordDeclaration>))]
 [JsonSerializable(typeof(TicketPayload))]
 [JsonSerializable(typeof(IdentityPayload))]
 // The roster projection handed to an authority module's init(players) (ServerAuthorityManager).

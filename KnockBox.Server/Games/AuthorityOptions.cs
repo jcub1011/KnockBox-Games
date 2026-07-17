@@ -27,6 +27,10 @@ public sealed record AuthorityOptions(
     double TickHzMax,
     // Max authority-module file size, checked at discovery and again at load.
     long MaxScriptBytes,
+    // Max size of a single declared authorityWords dictionary file, checked at discovery. Larger than
+    // MaxScriptBytes because dictionaries are the big blobs (a ~350k-word list is a few MB); the data
+    // lives on the CLR heap (shared across lobbies), NOT in a per-invocation Jint budget.
+    long MaxWordFileBytes,
     // Actor inbound channel bound. Two-tier overflow: intents drop with a warning (client
     // resyncs), ticks coalesce, roster work is never dropped.
     int QueueCapacity,
@@ -34,6 +38,7 @@ public sealed record AuthorityOptions(
     int MaxLobbies)
 {
     public const long DefaultMaxScriptBytes = 1_048_576;
+    public const long DefaultMaxWordFileBytes = 33_554_432;
 
     public static AuthorityOptions FromConfiguration(IConfiguration config) => new(
         config.GetValue("KnockBox:AuthorityEnabled", true),
@@ -43,6 +48,7 @@ public sealed record AuthorityOptions(
         config.GetValue("KnockBox:AuthorityRecursionLimit", 64),
         config.GetValue("KnockBox:AuthorityTickHzMax", 20.0),
         config.GetValue("KnockBox:AuthorityMaxScriptBytes", DefaultMaxScriptBytes),
+        config.GetValue("KnockBox:AuthorityMaxWordFileBytes", DefaultMaxWordFileBytes),
         config.GetValue("KnockBox:AuthorityQueueCapacity", 256),
         config.GetValue("KnockBox:AuthorityMaxLobbies", 100));
 }

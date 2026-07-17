@@ -422,6 +422,45 @@ emotes) is untouched.
 | `kb.setOwner(playerId)` | **Owner-migration primitive** (see below). |
 | `kb.now()` | Milliseconds since epoch, **server clock**. There is **no `Date`** in the sandbox — `kb.now()` is the only time source. |
 | `kb.log.info/warn/error/debug(msg)` | Server-side logging under `KnockBox.Authority`. |
+| `kb.words.*` | Shared, immutable word dictionaries (validate a word, pick one by index). See **Word dictionaries** below. |
+
+### Word dictionaries (`kb.words`)
+
+Word games need a large dictionary (hundreds of thousands of entries) to validate and pick words.
+Inlining it in `authority.js` is impossible (it blows the module size cap) and would be duplicated
+into every lobby's sandbox. Instead **declare dictionaries in `GAME.json`** and the server loads each
+one **once** into a shared, memory-efficient structure that every lobby of the game queries — the
+dictionary never enters your sandbox's memory, so a huge list costs one copy for the whole process.
+
+```jsonc
+{
+  "id": "word-rush",
+  "serverAuthority": "authority.js",
+  "authorityWords": {
+    "en": { "file": "words.txt", "caseInsensitive": true }
+  }
+}
+```
+
+The file is line-delimited (one word per line; blanks trimmed), ASCII-only, and lives in the game
+folder — validated like `serverAuthority` (must exist, no path traversal, size ≤
+`AuthorityMaxWordFileBytes`) and **never served on the game origin** (it's server-side data, and for
+hidden-information games the answer list is secret). `authorityWords` **requires** `serverAuthority`.
+
+Your module queries it through `kb.words`, keyed by the dictionary key you chose (`"en"` above):
+
+| Call | Returns |
+|---|---|
+| `kb.words.has(key, word)` | `boolean` — is `word` in the dictionary (case per `caseInsensitive`; non-ASCII → false) |
+| `kb.words.count(key)` | `number` — total words (the valid index range for `pick` is `[0, count)`) |
+| `kb.words.pick(key, index)` | `string \| null` — the word at a global index, or `null` if out of range |
+| `kb.words.countOfLength(key, len)` | `number` — words of a given length |
+| `kb.words.pickOfLength(key, len, index)` | `string \| null` — the `index`-th word of that length |
+
+Use `count` to size the dictionary before indexing — e.g. draw a random word with
+`kb.words.pick(key, Math.floor(Math.random() * kb.words.count(key)))`. An unknown key or an
+out-of-range index is safe (`false`/`0`/`null`), never a crash. Words are ordered length-bucket by
+length (ascending), ordinal within a length, so `pick` is stable and identical in local emulation.
 
 ### Owner ≠ authority
 
@@ -462,11 +501,19 @@ Three tiers — see §11 for the mechanics; server-authority specifics:
    patches/snapshots. `fakeKb` is ~10 lines:
    ```js
    let ownerId = 'p1';
+   const words = new Set(['apple', 'brave', 'crane']); // stub kb.words for the test
    const fakeKb = {
      now: () => 0,
      log: { info(){}, warn(){}, error(){}, debug(){} },
      setLobbyOpen(_open) {},
      setOwner(id) { ownerId = id; },
+     words: {
+       has: (_key, w) => words.has(String(w).toLowerCase()),
+       count: () => words.size,
+       pick: (_key, i) => [...words][i] ?? null,
+       countOfLength: (_key, len) => [...words].filter((w) => w.length === len).length,
+       pickOfLength: (_key, len, i) => [...words].filter((w) => w.length === len)[i] ?? null,
+     },
    };
    const a = createAuthority(fakeKb);
    a.init([{ id: 'p1', displayName: 'A' }, { id: 'p2', displayName: 'B' }]);
@@ -475,7 +522,12 @@ Three tiers — see §11 for the mechanics; server-authority specifics:
 2. **Local emulation (Phaser `knockbox-local.js`).** Pass `authority: createAuthority` (or a
    `'./authority.js'` URL) to run your real module as a virtual `from:"server"` actor over the local
    `tab`/`process` transports, with default-on fidelity checks (JSON round-trip boundary, `Date`
-   poisoning, single-file import scan) that catch server-only failures early.
+   poisoning, single-file import scan) that catch server-only failures early. For `kb.words`, supply
+   the data with a `words` option — `words: { en: ['apple', 'brave', …] }`, or
+   `words: { en: { file: './words.txt' } }` to fetch it — with the same `pick` ordering as the
+   server. With the `'./authority.js'` URL form, the sibling `GAME.json`'s `authorityWords` are
+   auto-discovered and fetched, so no `words` option is needed. (Those files fetch in dev because your
+   own static server serves them; the real KnockBox server denies them on the game origin.)
 3. **A real server (optional, full fidelity).** Drop the game into `games/` of a local instance
    (desktop exe or `dotnet run`) for the real Jint sandbox and constraint limits.
 

@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Words;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using Microsoft.Extensions.Configuration;
@@ -14,10 +15,13 @@ internal static class TestAuthorities
     public static ServerAuthorityManager Manager(
         ConnectionManager connections, LobbyManager lobbies,
         string? gamesRoot = null, IConfiguration? config = null,
-        TimeProvider? time = null, bool isDevelopment = false) =>
+        TimeProvider? time = null, bool isDevelopment = false,
+        IAuthorityWordService? words = null) =>
         new(gamesRoot ?? Path.GetTempPath(),
             AuthorityOptions.FromConfiguration(config ?? new ConfigurationBuilder().Build()),
-            connections, lobbies, time ?? TimeProvider.System, isDevelopment, NullLoggerFactory.Instance);
+            connections, lobbies, time ?? TimeProvider.System,
+            words ?? new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),
+            isDevelopment, NullLoggerFactory.Instance);
 }
 
 /// <summary>A TimeProvider whose "now" can be set/advanced, for deterministic expiry tests.</summary>

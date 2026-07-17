@@ -30,6 +30,16 @@ namespace KnockBox.Contracts;
 /// server-side enforcement is never silently downgraded to the cheatable host mode. The game
 /// origin never serves this file.
 /// </param>
+/// <param name="AuthorityWords">
+/// Optional immutable word dictionaries the game's authority module queries through
+/// <c>kb.words</c> (validate a word, pick a word by index) — keyed by a game-chosen dictionary key.
+/// Each declared file is loaded once into a shared, memory-efficient CLR structure and never
+/// duplicated into a lobby's sandbox, so a large dictionary (a word list of hundreds of thousands
+/// of entries) costs one copy for the whole process. Files are validated like
+/// <see cref="ServerAuthority"/> (exist, no path traversal, size cap) and require
+/// <see cref="ServerAuthority"/> to be set (words are server-only). The game origin never serves
+/// these files — they are server-side data and, for hidden-information games, secret.
+/// </param>
 public sealed record GameManifest(
     string Id,
     string Name,
@@ -39,4 +49,15 @@ public sealed record GameManifest(
     bool CrossOriginIsolated = false,
     string? ThemeColor = null,
     string? ThemeTextColor = null,
-    string? ServerAuthority = null);
+    string? ServerAuthority = null,
+    IReadOnlyDictionary<string, AuthorityWordDeclaration>? AuthorityWords = null);
+
+/// <summary>
+/// One entry in <see cref="GameManifest.AuthorityWords"/>: the game-relative path of a line-delimited
+/// word list plus how words are matched.
+/// </summary>
+/// <param name="File">Path, relative to the game folder, of the line-delimited dictionary (one word
+/// per line; blank/whitespace lines ignored).</param>
+/// <param name="CaseInsensitive">When true (default) queries fold <c>A–Z</c> so <c>"Apple"</c> ==
+/// <c>"apple"</c>; when false words match exactly. Words are ASCII-only either way.</param>
+public sealed record AuthorityWordDeclaration(string File, bool CaseInsensitive = true);

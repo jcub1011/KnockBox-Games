@@ -75,12 +75,10 @@ public sealed class GameAssetPrecompressor(
     private void ReconcileOnce(IReadOnlyCollection<GameManifest> games)
     {
         var liveIds = new HashSet<string>(games.Select(g => g.Id), StringComparer.OrdinalIgnoreCase);
-        // A game's server-authority module is never served (Hosting/GameOriginAssetGate), so warming
-        // variants of it is pointless — and pre-existing variants must be actively pruned so the
-        // compressed cache can't leak it either.
-        var authorityByGame = games
-            .Where(g => !string.IsNullOrEmpty(g.ServerAuthority))
-            .ToDictionary(g => g.Id, g => NormalizeRelative(g.ServerAuthority!), StringComparer.OrdinalIgnoreCase);
+        // A game's server-authority module and its authorityWords dictionaries are never served
+        // (Hosting/GameOriginAssetGate), so warming variants of them is pointless — and pre-existing
+        // variants must be actively pruned so the compressed cache can't leak them either.
+        var deniedByGame = games.ToDictionary(g => g.Id, DeniedRelatives, StringComparer.OrdinalIgnoreCase);
         var compressed = 0;
         var removed = PruneRemovedGames(liveIds);
 
@@ -88,9 +86,9 @@ public sealed class GameAssetPrecompressor(
         {
             var srcDir = Path.Combine(gamesRoot, id);
             if (!Directory.Exists(srcDir)) continue;
-            var excludedRelative = authorityByGame.GetValueOrDefault(id);
-            compressed += CompressGameDir(id, srcDir, excludedRelative);
-            removed += PruneOrphanVariants(id, srcDir, excludedRelative);
+            var excluded = deniedByGame.GetValueOrDefault(id);
+            compressed += CompressGameDir(id, srcDir, excluded);
+            removed += PruneOrphanVariants(id, srcDir, excluded);
         }
 
         // Only narrate when something actually changed — this runs on a timer and would otherwise spam.
@@ -118,7 +116,7 @@ public sealed class GameAssetPrecompressor(
     // (Re)compresses source files whose recorded (mtime, length) no longer matches — or whose produced
     // variants were removed — and records the outcome in the per-game index so unchanged files are
     // skipped and not-beneficial files aren't re-attempted every pass. Returns the count processed.
-    private int CompressGameDir(string id, string srcDir, string? excludedRelative = null)
+    private int CompressGameDir(string id, string srcDir, IReadOnlySet<string>? excluded = null)
     {
         var dir = Path.Combine(compressedRoot, id);
         var oldIndex = LoadIndex(dir);
@@ -130,7 +128,7 @@ public sealed class GameAssetPrecompressor(
             try
             {
                 var relative = Path.GetRelativePath(srcDir, src);
-                if (IsExcluded(relative, excludedRelative)) continue; // the never-served authority module
+                if (IsExcluded(relative, excluded)) continue; // never-served authority module / word file
 
                 var info = new FileInfo(src);
                 if (!ShouldCompress(info.Name, info.Length, minBytes)) continue;
@@ -218,7 +216,7 @@ public sealed class GameAssetPrecompressor(
 
     // Deletes variants whose source file is gone, whose source should no longer be compressed, or whose
     // encoding is disabled (.gz when gzip is off). Returns the count removed.
-    private int PruneOrphanVariants(string id, string srcDir, string? excludedRelative = null)
+    private int PruneOrphanVariants(string id, string srcDir, IReadOnlySet<string>? excluded = null)
     {
         var dir = Path.Combine(compressedRoot, id);
         if (!Directory.Exists(dir)) return 0;
@@ -244,7 +242,7 @@ public sealed class GameAssetPrecompressor(
             var src = Path.Combine(srcDir, sourceRelative);
 
             var orphan = (isGz && !gzip)
-                || IsExcluded(sourceRelative, excludedRelative) // variant of the never-served authority module
+                || IsExcluded(sourceRelative, excluded) // variant of a never-served authority module / word file
                 || !File.Exists(src)
                 || !ShouldCompress(Path.GetFileName(src), new FileInfo(src).Length, minBytes);
             if (!orphan) continue;
@@ -267,13 +265,23 @@ public sealed class GameAssetPrecompressor(
         return !IncompressibleExtensions.Contains(Path.GetExtension(fileName));
     }
 
-    // Matches a game-relative path against the manifest's serverAuthority path — separators
-    // normalized, ordinal-ignore-case (games live on case-insensitive filesystems too).
-    private static string NormalizeRelative(string relative) => relative.Replace('\\', '/');
+    // Game-relative path with separators normalized, lowercased so the exclusion set can be compared
+    // ordinal-ignore-case (games live on case-insensitive filesystems too).
+    private static string NormalizeRelative(string relative) => relative.Replace('\\', '/').ToLowerInvariant();
 
-    private static bool IsExcluded(string relative, string? excludedRelative) =>
-        excludedRelative is not null
-        && string.Equals(NormalizeRelative(relative), excludedRelative, StringComparison.OrdinalIgnoreCase);
+    // The never-served files for a game: its serverAuthority module and every authorityWords dictionary.
+    private static IReadOnlySet<string> DeniedRelatives(GameManifest g)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrEmpty(g.ServerAuthority)) set.Add(NormalizeRelative(g.ServerAuthority));
+        if (g.AuthorityWords is { } words)
+            foreach (var decl in words.Values)
+                if (!string.IsNullOrEmpty(decl?.File)) set.Add(NormalizeRelative(decl.File));
+        return set;
+    }
+
+    private static bool IsExcluded(string relative, IReadOnlySet<string>? excluded) =>
+        excluded is not null && excluded.Contains(NormalizeRelative(relative));
 
     // Per-game freshness record (one line per compressed source file). Lives inside games-compressed/<id>
     // as a dot-prefixed file, which PhysicalFileProvider's default exclusion filters keep from ever being

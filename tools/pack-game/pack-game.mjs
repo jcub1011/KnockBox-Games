@@ -41,6 +41,10 @@ export const defaultOut = resolve(toolDir, "..", "..", "games");
 // (AuthorityOptions.DefaultMaxScriptBytes / KnockBox:AuthorityMaxScriptBytes) — keep in sync.
 export const AUTHORITY_MAX_SCRIPT_BYTES = 1_048_576;
 
+// Max authorityWords dictionary file size. Mirrors the server default
+// (AuthorityOptions.DefaultMaxWordFileBytes / KnockBox:AuthorityMaxWordFileBytes) — keep in sync.
+export const AUTHORITY_MAX_WORD_FILE_BYTES = 33_554_432;
+
 /** Thrown for any contract/usage error so the CLI can report it and exit non-zero. */
 export class PackError extends Error {}
 
@@ -156,6 +160,44 @@ export function validate(manifest, manifestPath, inDir) {
       throw new PackError(`serverAuthority module is ${size} bytes (max ${AUTHORITY_MAX_SCRIPT_BYTES}).`);
     }
     scanAuthorityImports(readFileSync(authorityFull, "utf8"));
+  }
+
+  // authorityWords (optional): immutable dictionaries the authority module queries via kb.words.
+  // Same traversal / existence / size treatment as serverAuthority, and it REQUIRES serverAuthority
+  // (word data is only reachable server-side). Mirrors GameCatalog.ValidateAuthorityWords, which
+  // SKIPS the whole game on any violation — so authors must fail here instead.
+  if (manifest.authorityWords !== undefined) {
+    const words = manifest.authorityWords;
+    if (words === null || typeof words !== "object" || Array.isArray(words)) {
+      throw new PackError("GAME.json: 'authorityWords' must be an object mapping keys to { file, caseInsensitive? }.");
+    }
+    if (typeof manifest.serverAuthority !== "string" || manifest.serverAuthority.trim() === "") {
+      throw new PackError("GAME.json: 'authorityWords' requires 'serverAuthority' to be set (word data is server-only).");
+    }
+    for (const [key, decl] of Object.entries(words)) {
+      if (key.trim() === "") throw new PackError("GAME.json: an 'authorityWords' key must be a non-empty string.");
+      if (!decl || typeof decl !== "object" || Array.isArray(decl)) {
+        throw new PackError(`GAME.json: authorityWords '${key}' must be an object { file, caseInsensitive? }.`);
+      }
+      if (typeof decl.file !== "string" || decl.file.trim() === "") {
+        throw new PackError(`GAME.json: authorityWords '${key}' must have a non-empty 'file'.`);
+      }
+      if (decl.caseInsensitive !== undefined && typeof decl.caseInsensitive !== "boolean") {
+        throw new PackError(`GAME.json: authorityWords '${key}' 'caseInsensitive' must be a boolean when present.`);
+      }
+      const fileFull = resolve(inFull, decl.file);
+      const fileRel = relative(inFull, fileFull);
+      if (fileRel === "" || fileRel.startsWith("..") || isAbsolute(fileRel)) {
+        throw new PackError(`GAME.json: authorityWords '${key}' file (${decl.file}) escapes the built folder.`);
+      }
+      if (!existsSync(fileFull) || !statSync(fileFull).isFile()) {
+        throw new PackError(`authorityWords '${key}' file not found in --in: ${decl.file} (looked in ${inDir}).`);
+      }
+      const wsize = statSync(fileFull).size;
+      if (wsize > AUTHORITY_MAX_WORD_FILE_BYTES) {
+        throw new PackError(`authorityWords '${key}' file is ${wsize} bytes (max ${AUTHORITY_MAX_WORD_FILE_BYTES}).`);
+      }
+    }
   }
 
   // Thumbnail (optional). Resolve relative to the manifest's folder so metadata can

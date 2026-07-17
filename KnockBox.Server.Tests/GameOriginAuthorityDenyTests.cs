@@ -91,6 +91,54 @@ public class GameOriginAuthorityDenyTests : IDisposable
         Assert.False(GameOriginAssetGate.IsDeniedAuthorityAsset("/games/plain/authority.js", catalog));
     }
 
+    // ── authorityWords files ─────────────────────────────────────────────────
+
+    private const string WordGame =
+        """{ "id": "wg", "name": "W", "entry": "index.html", "maxPlayers": 4, "serverAuthority": "authority.js", "authorityWords": { "en": { "file": "words.txt" }, "answers": { "file": "data/answers.txt" } } }""";
+
+    private GameCatalog WordCatalog() => CatalogWith("wg", WordGame,
+        ("authority.js", "export function createAuthority(kb) {}"),
+        ("words.txt", "apple\nbrave\n"),
+        ("data/answers.txt", "crane\n"));
+
+    [Theory]
+    [InlineData("/games/wg/words.txt")]
+    [InlineData("/games/wg/words.txt.br")]
+    [InlineData("/games/wg/words.txt.gz")]
+    [InlineData("/games/wg/WORDS.TXT")]
+    [InlineData("/games/wg/data/answers.txt")]     // nested word file
+    [InlineData("/games/wg/data/answers.txt.br")]
+    public void Denies_declared_word_files_in_all_their_shapes(string path)
+    {
+        Assert.True(GameOriginAssetGate.IsDeniedAuthorityAsset(path, WordCatalog()));
+    }
+
+    [Theory]
+    [InlineData("/games/wg/index.html")]
+    [InlineData("/games/wg/data/other.txt")]       // a non-declared file in the same folder serves
+    public void Allows_non_word_files_in_a_word_game(string path)
+    {
+        Assert.False(GameOriginAssetGate.IsDeniedAuthorityAsset(path, WordCatalog()));
+    }
+
+    [Fact]
+    public void Precompressor_skips_declared_word_files()
+    {
+        var catalog = CatalogWith("wg", WordGame,
+            ("authority.js", Compressible("export function createAuthority(kb) {}")),
+            ("words.txt", Compressible("apple")),
+            ("data/answers.txt", Compressible("crane")),
+            ("game.js", Compressible("render();")));
+        var precompressor = new GameAssetPrecompressor(_root, _compressed, gzip: true, minBytes: 1,
+            NullLogger<GameAssetPrecompressor>.Instance);
+
+        precompressor.ReconcileAll(catalog.Games);
+
+        Assert.True(File.Exists(Path.Combine(_compressed, "wg", "game.js.br")));
+        Assert.False(File.Exists(Path.Combine(_compressed, "wg", "words.txt.br")));
+        Assert.False(File.Exists(Path.Combine(_compressed, "wg", "data", "answers.txt.br")));
+    }
+
     // ── Precompressor exclusion ──────────────────────────────────────────────
 
     private static string Compressible(string seed) => string.Concat(Enumerable.Repeat(seed + "\n", 200));

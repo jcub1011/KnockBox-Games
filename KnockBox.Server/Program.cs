@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Net.WebSockets;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
@@ -143,7 +144,9 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
 builder.Services.AddSingleton(authorityOptions);
 builder.Services.AddSingleton(sp =>
-    new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>(), authorityOptions.MaxScriptBytes));
+    new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>(),
+        authorityOptions.MaxScriptBytes, authorityOptions.MaxWordFileBytes));
+builder.Services.AddSingleton<IAuthorityWordService, AuthorityWordService>();
 if (precompressEnabled)
     builder.Services.AddSingleton(sp => new GameAssetPrecompressor(
         gamesRoot, gamesCompressedRoot, precompressGzip, precompressMinBytes,
@@ -155,6 +158,7 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
     gamesRoot, authorityOptions,
     sp.GetRequiredService<ConnectionManager>(), sp.GetRequiredService<LobbyManager>(),
     sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<IAuthorityWordService>(),
     builder.Environment.IsDevelopment(),
     sp.GetRequiredService<ILoggerFactory>()));
 builder.Services.AddSingleton<WebSocketHandler>();

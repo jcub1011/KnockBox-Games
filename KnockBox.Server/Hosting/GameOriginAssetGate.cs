@@ -3,19 +3,19 @@ using KnockBox.Server.Games;
 namespace KnockBox.Server.Hosting;
 
 /// <summary>
-/// Denies the ONE game asset the game origin must never serve: a game's server-authority module
-/// (design §11). It is server-side code, not a client asset — and for hidden-information games its
-/// secrecy is the whole point. The game origin otherwise serves everything in a game folder
-/// (ServeUnknownFileTypes), so this is an explicit exclusion, mirroring the shell origin's
-/// thumbnail allowlist.
+/// Denies the game assets the game origin must never serve: a game's server-authority module and its
+/// declared <c>authorityWords</c> dictionaries (design §11). These are server-side code/data, not
+/// client assets — and for hidden-information games (a secret answer list) their secrecy is the whole
+/// point. The game origin otherwise serves everything in a game folder (ServeUnknownFileTypes), so
+/// this is an explicit exclusion, mirroring the shell origin's thumbnail allowlist.
 /// </summary>
 public static class GameOriginAssetGate
 {
     /// <summary>
-    /// True for <c>/games/{id}/{path}</c> where {path} equals game {id}'s declared serverAuthority
-    /// (separator-normalized, ordinal-ignore-case — game folders live on case-insensitive
-    /// filesystems too), or that path plus a <c>.br</c>/<c>.gz</c> suffix — so a stale
-    /// pre-compressed variant from before the exclusion existed can never leak the module either.
+    /// True for <c>/games/{id}/{path}</c> where {path} equals game {id}'s declared serverAuthority OR
+    /// any of its authorityWords files (separator-normalized, ordinal-ignore-case — game folders live
+    /// on case-insensitive filesystems too), or that path plus a <c>.br</c>/<c>.gz</c> suffix — so a
+    /// stale pre-compressed variant from before the exclusion existed can never leak the file either.
     /// </summary>
     public static bool IsDeniedAuthorityAsset(string path, GameCatalog catalog)
     {
@@ -28,18 +28,29 @@ public static class GameOriginAssetGate
         var id = rest[..slash];
         var file = rest[(slash + 1)..];
 
-        if (!catalog.TryGet(id, out var manifest) || string.IsNullOrEmpty(manifest.ServerAuthority))
-            return false;
+        if (!catalog.TryGet(id, out var manifest)) return false;
 
         if (file.EndsWith(".br", StringComparison.OrdinalIgnoreCase)
             || file.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
         {
             file = file[..^3];
         }
+        var normalized = file.Replace('\\', '/');
 
-        return string.Equals(
-            file.Replace('\\', '/'),
-            manifest.ServerAuthority.Replace('\\', '/'),
-            StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrEmpty(manifest.ServerAuthority)
+            && string.Equals(normalized, manifest.ServerAuthority.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (manifest.AuthorityWords is { } words)
+        {
+            foreach (var decl in words.Values)
+            {
+                if (!string.IsNullOrEmpty(decl?.File)
+                    && string.Equals(normalized, decl.File.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
     }
 }

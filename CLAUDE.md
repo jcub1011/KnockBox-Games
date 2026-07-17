@@ -162,6 +162,18 @@ a module throw is contained (drop + re-broadcast snapshot; 5 in a row → fatal)
 violation is fatal (`LobbyClosed`, sockets aborted). See `docs/SERVER_AUTHORITY_DESIGN.md` and
 GAME_DEVELOPER_GUIDE §5b. Knobs: `Authority*` (§Configuration).
 
+**Shared word dictionaries (`kb.words`)**: a game declares immutable word lists in `GAME.json`
+(`authorityWords: { "<key>": { file, caseInsensitive } }`, validated like `serverAuthority` + a size
+cap, and requiring `serverAuthority`). `Games/Words/AuthorityWordService.cs` (DI singleton) loads each
+file **once** into a shared, length-bucketed packed-ASCII structure (`WordPool`/`WordPoolSet`, adapted
+from the sibling `KnockBox.WordService` repo) shared by every lobby engine of the game and deduped
+across games by file fingerprint — so a large dictionary costs one copy, never a per-lobby copy or a
+raised memory cap. The module queries it via `kb.words.has/count/pick/countOfLength/pickOfLength`
+(`ClrFunction`s over the shared pool — the dictionary never enters the JS heap; guarded, so unknown
+key / out-of-range → `false`/`0`/`null`). The word files are denied on the game origin
+(`GameOriginAssetGate`, server-side/secret) and skipped by the precompressor; `knockbox-local.js`
+emulates `kb.words` with server-identical `pick` ordering. Sample: `games/word-rush/`.
+
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
 `players`, `isHost` (plus `authority`/`ownerId`/`isOwner` for server-authority mode, normalized via
@@ -199,5 +211,5 @@ fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMin
 `*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
 default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,
 `MaxConnectionsPerIp`, `LobbyCreatesPerMinute`), and the server-authority knobs (`AuthorityEnabled`
-master switch, `AuthorityMax{MemoryBytes,Statements,ScriptBytes,Lobbies}`, `AuthorityCallTimeoutMs`,
-`AuthorityRecursionLimit`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).
+master switch, `AuthorityMax{MemoryBytes,Statements,ScriptBytes,WordFileBytes,Lobbies}`,
+`AuthorityCallTimeoutMs`, `AuthorityRecursionLimit`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).

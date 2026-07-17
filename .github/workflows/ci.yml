@@ -162,6 +162,25 @@ jobs:
           ! curl -fsS http://localhost:8081/games/tictactoe-server/authority.js >/dev/null
           ! curl -fsS http://localhost:8081/games/tictactoe-server/authority.js.br >/dev/null
 
+      - name: authorityWords dictionaries are never served from the game origin
+        run: |
+          # word-rush declares authorityWords — shared, server-side dictionaries (and for
+          # hidden-information word games, secret). Its client assets serve; the word file (and any
+          # precompressed variant) must 404 on the game origin, like the authority module.
+          cp -r games/word-rush /tmp/kb-games/
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Discovered game 'word-rush'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'word-rush'"
+          curl -fsS http://localhost:8081/games/word-rush/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/word-rush/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-rush/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-rush/words.txt >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-rush/words.txt.br >/dev/null
+
       - name: Shell origin exposes only the thumbnail, never the full game build
         run: |
           # Isolation guarantee: the untrusted build must NOT be reachable on the shell origin (8080),

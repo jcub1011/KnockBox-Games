@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   AUTHORITY_MAX_SCRIPT_BYTES,
+  AUTHORITY_MAX_WORD_FILE_BYTES,
   pack,
   PackError,
   scanAuthorityImports,
@@ -185,6 +186,64 @@ describe("pack (serverAuthority — mirrors GameCatalog + the load check)", () =
     writeFileSync(join(work.src, "authority.js"), "this is not javascript ((");
     const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out });
     expect(existsSync(join(target, "authority.js"))).toBe(true);
+  });
+});
+
+describe("pack (authorityWords — mirrors GameCatalog.ValidateAuthorityWords)", () => {
+  const GOOD_MODULE =
+    "export function createAuthority(kb) {\n" +
+    "  return { init() {}, applyIntent() { return null; }, snapshot() { return {}; } };\n" +
+    "}\n";
+
+  const withWords = {
+    ...VALID,
+    serverAuthority: "authority.js",
+    authorityWords: { en: { file: "words.txt", caseInsensitive: true } },
+  };
+
+  function writeWordGame(extra = {}) {
+    writeFileSync(join(work.src, "authority.js"), GOOD_MODULE);
+    writeFileSync(join(work.src, "words.txt"), "apple\nbrave\ncrane\n");
+    return manifest({ ...withWords, ...extra });
+  }
+
+  it("accepts valid authorityWords and packs the dictionary into the game folder", async () => {
+    const { target } = await pack({ in: work.src, manifest: writeWordGame(), out: work.out });
+    expect(existsSync(join(target, "words.txt"))).toBe(true);
+  });
+
+  it("rejects authorityWords without serverAuthority", async () => {
+    writeFileSync(join(work.src, "words.txt"), "apple\n");
+    const m = manifest({ ...VALID, authorityWords: { en: { file: "words.txt" } } });
+    await expect(pack({ in: work.src, manifest: m, out: work.out })).rejects.toThrow(/requires 'serverAuthority'/);
+  });
+
+  it("rejects a word file that does not exist", async () => {
+    writeFileSync(join(work.src, "authority.js"), GOOD_MODULE);
+    const m = manifest(withWords); // words.txt not written
+    await expect(pack({ in: work.src, manifest: m, out: work.out })).rejects.toThrow(/file not found/);
+  });
+
+  it("rejects a word file that escapes the built folder", async () => {
+    writeFileSync(join(work.root, "evil.txt"), "apple\n");
+    const m = writeWordGame({ authorityWords: { en: { file: "../evil.txt" } } });
+    await expect(pack({ in: work.src, manifest: m, out: work.out })).rejects.toThrow(/escapes the built folder/);
+  });
+
+  it("rejects an oversize word file", async () => {
+    writeFileSync(join(work.src, "authority.js"), GOOD_MODULE);
+    writeFileSync(join(work.src, "words.txt"), "a".repeat(AUTHORITY_MAX_WORD_FILE_BYTES + 1));
+    await expect(pack({ in: work.src, manifest: manifest(withWords), out: work.out })).rejects.toThrow(/max \d+/);
+  });
+
+  it("rejects a non-boolean caseInsensitive", async () => {
+    const m = writeWordGame({ authorityWords: { en: { file: "words.txt", caseInsensitive: "yes" } } });
+    await expect(pack({ in: work.src, manifest: m, out: work.out })).rejects.toThrow(/caseInsensitive/);
+  });
+
+  it("rejects an entry missing its file", async () => {
+    const m = writeWordGame({ authorityWords: { en: {} } });
+    await expect(pack({ in: work.src, manifest: m, out: work.out })).rejects.toThrow(/non-empty 'file'/);
   });
 });
 

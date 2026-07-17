@@ -1,4 +1,5 @@
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Words;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
@@ -25,15 +26,19 @@ public class JsAuthorityRuntimeTests : IDisposable
         RecursionLimit: 64,
         TickHzMax: 20,
         MaxScriptBytes: maxScriptBytes,
+        MaxWordFileBytes: AuthorityOptions.DefaultMaxWordFileBytes,
         QueueCapacity: 256,
         MaxLobbies: 100);
 
+    private static readonly IReadOnlyDictionary<string, IWordPool> NoWords = new Dictionary<string, IWordPool>();
+
     private JsAuthorityRuntime Load(string moduleSource, AuthorityOptions? opts = null,
-        TimeProvider? time = null, string playersJson = """[{"id":"p1","displayName":"Ann"}]""")
+        TimeProvider? time = null, string playersJson = """[{"id":"p1","displayName":"Ann"}]""",
+        IReadOnlyDictionary<string, IWordPool>? wordPools = null)
     {
         var path = Path.Combine(_dir, Guid.NewGuid().ToString("N") + ".js");
         File.WriteAllText(path, moduleSource);
-        var runtime = new JsAuthorityRuntime(path, opts ?? Opts(), time ?? TimeProvider.System);
+        var runtime = new JsAuthorityRuntime(path, opts ?? Opts(), time ?? TimeProvider.System, wordPools ?? NoWords);
         _runtimes.Add(runtime);
         runtime.Initialize(playersJson);
         return runtime;
@@ -232,6 +237,90 @@ public class JsAuthorityRuntimeTests : IDisposable
 
         // Drained: a second drain is empty.
         Assert.Same(AuthorityEffects.None, runtime.DrainEffects());
+    }
+
+    private const string WordModule = """
+        export function createAuthority(kb) {
+          return {
+            init() {},
+            applyIntent(fromId, action) {
+              switch (action.kind) {
+                case 'has':      return { r: kb.words.has(action.dict, action.word) };
+                case 'count':    return { r: kb.words.count(action.dict) };
+                case 'pick':     return { r: kb.words.pick(action.dict, action.i) };
+                case 'countLen': return { r: kb.words.countOfLength(action.dict, action.len) };
+                case 'pickLen':  return { r: kb.words.pickOfLength(action.dict, action.len, action.i) };
+              }
+              return null;
+            },
+            snapshot() { return {}; },
+          };
+        }
+        """;
+
+    private JsAuthorityRuntime LoadWordRuntime() => Load(WordModule, wordPools:
+        new Dictionary<string, IWordPool> { ["en"] = WordPoolSet.Build(["cat", "dog", "be", "ax"]) });
+
+    private static string Intent(JsAuthorityRuntime r, string json) => r.Invoke("applyIntent", "\"p1\"", json);
+
+    [Fact]
+    public void Words_has_validates_case_insensitively()
+    {
+        var r = LoadWordRuntime();
+        Assert.Equal("""{"r":true}""", Intent(r, """{"kind":"has","dict":"en","word":"CAT"}"""));
+        Assert.Equal("""{"r":false}""", Intent(r, """{"kind":"has","dict":"en","word":"zzz"}"""));
+    }
+
+    [Fact]
+    public void Words_count_bounds_a_valid_pick()
+    {
+        var r = LoadWordRuntime();
+        Assert.Equal("""{"r":4}""", Intent(r, """{"kind":"count","dict":"en"}"""));
+        // Global index order: length 2 (ax, be) then length 3 (cat, dog).
+        Assert.Equal("""{"r":"ax"}""", Intent(r, """{"kind":"pick","dict":"en","i":0}"""));
+        Assert.Equal("""{"r":"dog"}""", Intent(r, """{"kind":"pick","dict":"en","i":3}"""));
+    }
+
+    [Fact]
+    public void Words_pick_out_of_range_returns_null_not_a_fatal_error()
+    {
+        var r = LoadWordRuntime();
+        Assert.Equal("""{"r":null}""", Intent(r, """{"kind":"pick","dict":"en","i":99}"""));
+        Assert.Equal("""{"r":null}""", Intent(r, """{"kind":"pick","dict":"en","i":-1}"""));
+    }
+
+    [Fact]
+    public void Words_length_specific_count_and_pick()
+    {
+        var r = LoadWordRuntime();
+        Assert.Equal("""{"r":2}""", Intent(r, """{"kind":"countLen","dict":"en","len":3}"""));
+        Assert.Equal("""{"r":"dog"}""", Intent(r, """{"kind":"pickLen","dict":"en","len":3,"i":1}"""));
+        Assert.Equal("""{"r":null}""", Intent(r, """{"kind":"pickLen","dict":"en","len":9,"i":0}"""));
+    }
+
+    [Fact]
+    public void Words_unknown_key_is_safe()
+    {
+        var r = LoadWordRuntime();
+        Assert.Equal("""{"r":false}""", Intent(r, """{"kind":"has","dict":"nope","word":"cat"}"""));
+        Assert.Equal("""{"r":0}""", Intent(r, """{"kind":"count","dict":"nope"}"""));
+        Assert.Equal("""{"r":null}""", Intent(r, """{"kind":"pick","dict":"nope","i":0}"""));
+    }
+
+    [Fact]
+    public void Words_capability_is_frozen()
+    {
+        var r = Load("""
+            export function createAuthority(kb) {
+              return {
+                init() {},
+                applyIntent() { kb.words.has = function () { return true; }; return null; },
+                snapshot() { return {}; },
+              };
+            }
+            """, wordPools: new Dictionary<string, IWordPool> { ["en"] = WordPoolSet.Build(["cat"]) });
+
+        Assert.Throws<AuthorityScriptException>(() => Intent(r, "{}"));
     }
 
     [Fact]

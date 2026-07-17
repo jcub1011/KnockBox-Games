@@ -334,6 +334,7 @@ into `games/` and it appears within a second or two — no restart.
 | `AuthorityRecursionLimit` | `64` | Call-depth limit for the authority engine. |
 | `AuthorityTickHzMax` | `20` | Clamp on a module's requested `config.tickHz` (a module exporting `tick` opts into a server-driven timer). |
 | `AuthorityMaxScriptBytes` | `1048576` (1 MB) | Max authority-module file size; checked at discovery (oversize ⇒ the game is skipped) and at load. |
+| `AuthorityMaxWordFileBytes` | `33554432` (32 MB) | Max size of a single `authorityWords` dictionary file; checked at discovery (oversize ⇒ the game is skipped). Dictionaries load once into a shared CLR structure (not a per-lobby budget), so this cap is generous. |
 | `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
 | `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
 
