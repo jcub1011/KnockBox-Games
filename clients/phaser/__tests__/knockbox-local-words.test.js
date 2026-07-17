@@ -50,6 +50,17 @@ describe('local kb.words — capability', () => {
     expect(w.pick('en', 99)).toBeNull();
     expect(w.pick('en', -1)).toBeNull();
   });
+
+  it('supports words longer than 64 chars (no length limit, matches the server)', () => {
+    const word = 'a'.repeat(80);
+    const w = _buildLocalWords({ en: [word, 'cat'] });
+    expect(w.has('en', word)).toBe(true);
+    expect(w.has('en', 'A'.repeat(80))).toBe(true); // case-folded
+    expect(w.has('en', 'b'.repeat(80))).toBe(false);
+    expect(w.countOfLength('en', 80)).toBe(1);
+    expect(w.pickOfLength('en', 80, 0)).toBe(word);
+    expect(w.pick('en', 1)).toBe(word); // length asc: 'cat' (3) then the 80-char word
+  });
 });
 
 describe('local kb.words — over a live authority peer', () => {

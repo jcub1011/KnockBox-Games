@@ -1,3 +1,5 @@
+using KnockBox.Contracts;
+
 namespace KnockBox.Server.Games.Words;
 
 /// <summary>
@@ -19,4 +21,11 @@ public interface IAuthorityWordService
 
     /// <summary>The pool registered under <c>(gameId, dictKey)</c>, or null if none.</summary>
     IWordPool? Get(string gameId, string dictKey);
+
+    /// <summary>
+    /// Reclaims pools/handles no longer backed by the live catalog. Driven by
+    /// <c>GameCatalog.Discovered</c> so the shared structures don't accumulate stale copies as games
+    /// are added, removed, or their dictionaries edited in place over a long-running process.
+    /// </summary>
+    void Prune(IReadOnlyCollection<GameManifest> games);
 }

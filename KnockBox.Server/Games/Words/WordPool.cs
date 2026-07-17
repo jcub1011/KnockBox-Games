@@ -5,7 +5,8 @@ namespace KnockBox.Server.Games.Words;
 /// <summary>
 /// Read-only set of fixed-length ASCII words backed by a packed byte buffer. Words live at
 /// <c>_buffer[i*WordLength .. (i+1)*WordLength)</c>, sorted ordinal. <see cref="Contains"/> is
-/// O(log N) and allocation-free (stackalloc needle); <see cref="GetWord"/> is O(1).
+/// O(log N) and allocation-free (it folds and compares the query span in place, so there is no
+/// per-query buffer and no word-length limit); <see cref="GetWord"/> is O(1).
 /// </summary>
 /// <remarks>
 /// Adapted from <c>KnockBox.WordService/Services/WordPool.cs</c> with a per-pool
@@ -14,8 +15,6 @@ namespace KnockBox.Server.Games.Words;
 /// </remarks>
 public sealed class WordPool
 {
-    private const int MaxQueryLength = 64;
-
     public int WordLength { get; }
     private readonly byte[] _buffer;
     private readonly bool _caseInsensitive;
@@ -63,27 +62,39 @@ public sealed class WordPool
 
     public bool Contains(ReadOnlySpan<char> query)
     {
-        if (query.Length != WordLength || query.Length > MaxQueryLength) return false;
+        if (query.Length != WordLength) return false;
+        foreach (var c in query)
+            if (c > 127) return false; // non-ASCII can never be stored, so it can never match
 
-        Span<byte> needle = stackalloc byte[query.Length];
-        for (var i = 0; i < query.Length; i++)
-        {
-            var c = query[i];
-            if (c > 127) return false;
-            needle[i] = (byte)(_caseInsensitive && c is >= 'A' and <= 'Z' ? c + 32 : c);
-        }
-
+        // Fold + compare the query against each packed entry in place — no needle buffer, so words
+        // of any length work (there is no stackalloc to bound).
         int lo = 0, hi = WordCount - 1;
         while (lo <= hi)
         {
             var mid = (lo + hi) >> 1;
             ReadOnlySpan<byte> entry = _buffer.AsSpan(mid * WordLength, WordLength);
-            var cmp = entry.SequenceCompareTo(needle);
+            var cmp = CompareEntryToQuery(entry, query, _caseInsensitive);
             if (cmp == 0) return true;
             if (cmp < 0) lo = mid + 1;
             else hi = mid - 1;
         }
         return false;
+    }
+
+    // Ordinal comparison of a stored entry against a query, sign-compatible with SequenceCompareTo
+    // (negative when entry sorts before query). Entries are already lowercased at build when the pool
+    // is case-insensitive; the query is folded on the fly here. Callers guarantee equal length and an
+    // all-ASCII query.
+    private static int CompareEntryToQuery(ReadOnlySpan<byte> entry, ReadOnlySpan<char> query, bool caseInsensitive)
+    {
+        for (var i = 0; i < entry.Length; i++)
+        {
+            int q = query[i];
+            if (caseInsensitive && q is >= 'A' and <= 'Z') q += 32;
+            var d = entry[i] - q;
+            if (d != 0) return d;
+        }
+        return 0;
     }
 
     public ReadOnlySpan<byte> GetWord(int index)

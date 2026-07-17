@@ -139,4 +139,20 @@ public class WordPoolTests
         Assert.Throws<ArgumentOutOfRangeException>(() => { _ = set.GetWord(2); });
         Assert.Throws<ArgumentOutOfRangeException>(() => { _ = set.GetWord(-1); });
     }
+
+    [Fact]
+    public void Handles_words_longer_than_64_chars()
+    {
+        // There is no word-length limit: has/pick/count all work for arbitrary lengths (the old 64-char
+        // cap made long words pickable but never matchable — this pins that it is gone).
+        var word = new string('a', 80);
+        var set = WordPoolSet.Build([word, "cat"]);
+
+        Assert.Contains(80, set.AvailableLengths);
+        Assert.Equal(1, set.GetWordCount(80));
+        Assert.True(set.Contains(word));
+        Assert.True(set.Contains(new string('A', 80))); // case-folded
+        Assert.False(set.Contains(new string('b', 80))); // non-member of the right length
+        Assert.Equal(word, Word(set.GetWord(80, 0)));    // pickable by length + index
+    }
 }

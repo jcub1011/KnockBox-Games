@@ -1,3 +1,4 @@
+using KnockBox.Contracts;
 using KnockBox.Server.Games.Words;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -117,5 +118,22 @@ public class AuthorityWordServiceTests : IDisposable
         var svc = NewService();
         Assert.Throws<FileNotFoundException>(() =>
             svc.Load("game1", "en", Path.Combine(_dir, "nope.txt"), caseInsensitive: true));
+    }
+
+    [Fact]
+    public void Prune_drops_pools_for_games_no_longer_in_catalog()
+    {
+        var svc = NewService();
+        svc.Load("keep", "en", WriteWords("keep.txt", "apple", "brave"), caseInsensitive: true);
+        svc.Load("gone", "en", WriteWords("gone.txt", "crane", "delta"), caseInsensitive: true);
+
+        // A catalog that only still declares "keep".
+        var manifest = new GameManifest("keep", "Keep", "index.html", null, 4,
+            ServerAuthority: "authority.js",
+            AuthorityWords: new Dictionary<string, AuthorityWordDeclaration> { ["en"] = new("keep.txt") });
+        svc.Prune([manifest]);
+
+        Assert.NotNull(svc.Get("keep", "en")); // survivor still resolves
+        Assert.Null(svc.Get("gone", "en"));    // dropped game's handle is gone
     }
 }

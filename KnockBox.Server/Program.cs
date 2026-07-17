@@ -237,6 +237,17 @@ if (precompressor is not null)
         catch (Exception ex) { app.Logger.LogError(ex, "Pre-compression reconcile failed."); }
     });
 
+// Keep the shared word pools in lock-step with the catalog so they don't accumulate stale copies as
+// games/dictionaries change. Subscribing before the first Discover() means startup discovery also
+// runs the initial (no-op) prune. Prune is trivial in-memory set work, so it runs inline (unlike the
+// precompressor's slow compression) — but guarded so a throw can't break sibling Discovered handlers.
+var wordService = app.Services.GetRequiredService<IAuthorityWordService>();
+catalog.Discovered += games =>
+{
+    try { wordService.Prune(games); }
+    catch (Exception ex) { app.Logger.LogError(ex, "Word-pool prune failed."); }
+};
+
 catalog.Discover();
 catalog.StartWatching();
 // Polling safety net for bind mounts where file events don't propagate (Docker Desktop). 0 = off.
