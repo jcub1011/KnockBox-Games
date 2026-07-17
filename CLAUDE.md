@@ -167,7 +167,7 @@ GAME_DEVELOPER_GUIDE §5b. Knobs: `Authority*` (§Configuration).
 cap, and requiring `serverAuthority`). `Games/Words/AuthorityWordService.cs` (DI singleton) loads each
 file **once** into a shared, length-bucketed packed-ASCII structure (`WordPool`/`WordPoolSet`, adapted
 from the sibling `KnockBox.WordService` repo) shared by every lobby engine of the game and deduped
-across games by file fingerprint — so a large dictionary costs one copy, never a per-lobby copy or a
+across games by content hash (byte-identical files share one structure regardless of name/path) — so a large dictionary costs one copy, never a per-lobby copy or a
 raised memory cap. The module queries it via `kb.words.has/count/pick/countOfLength/pickOfLength`
 (`ClrFunction`s over the shared pool — the dictionary never enters the JS heap; guarded, so unknown
 key / out-of-range → `false`/`0`/`null`). The word files are denied on the game origin

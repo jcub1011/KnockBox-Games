@@ -74,6 +74,31 @@ public class AuthorityWordServiceTests : IDisposable
     }
 
     [Fact]
+    public void Distinct_file_names_with_identical_content_are_shared()
+    {
+        // The headline: dedup is content-based, NOT name/path-based. Two games each ship their own
+        // copy of the same dictionary under different names — they must share one structure.
+        var svc = NewService();
+        var a = WriteWords("game-a-words.txt", "apple", "brave", "crane");
+        var b = WriteWords("totally-different-name.txt", "apple", "brave", "crane");
+        Assert.NotEqual(a, b); // different paths...
+        svc.Load("gameA", "en", a, caseInsensitive: true);
+        svc.Load("gameB", "dict", b, caseInsensitive: true);
+
+        Assert.Same(svc.Get("gameA", "en"), svc.Get("gameB", "dict")); // ...same content -> shared pool
+    }
+
+    [Fact]
+    public void Distinct_content_is_not_shared()
+    {
+        var svc = NewService();
+        svc.Load("gameA", "en", WriteWords("a.txt", "apple", "brave"), caseInsensitive: true);
+        svc.Load("gameB", "en", WriteWords("b.txt", "crane", "delta"), caseInsensitive: true);
+
+        Assert.NotSame(svc.Get("gameA", "en"), svc.Get("gameB", "en"));
+    }
+
+    [Fact]
     public void Same_file_different_case_flag_is_not_shared()
     {
         var svc = NewService();
