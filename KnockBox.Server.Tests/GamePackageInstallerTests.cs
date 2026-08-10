@@ -382,7 +382,7 @@ public class GamePackageInstallerTests : IDisposable
 
         var manifest = System.IO.File.ReadAllText(Installed("demo", "GAME.json"));
         Assert.Contains("First", manifest);
-        Assert.Single(Directory.EnumerateDirectories(_unpackedRoot).Where(d => !new DirectoryInfo(d).Name.StartsWith('.')));
+        Assert.Single(Directory.EnumerateDirectories(_unpackedRoot), d => !new DirectoryInfo(d).Name.StartsWith('.'));
     }
 
     [Fact]
