@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using KnockBox.Contracts;
 using KnockBox.Server.Games;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -24,11 +25,18 @@ public class GameAssetPrecompressorTests : IDisposable
     private GameAssetPrecompressor New(bool gzip = true, int minBytes = 16) =>
         new(_compressedRoot, gzip, minBytes, NullLogger<GameAssetPrecompressor>.Instance);
 
-    // The precompressor is root-agnostic: callers hand it id -> source directory (normally taken from
-    // GameCatalog.GameDirectories), because a game's files may live under the games folder OR under the
-    // unpacked-package cache.
-    private IReadOnlyDictionary<string, string> Games(params string[] ids) =>
-        ids.ToDictionary(id => id, id => Path.Combine(_gamesRoot, id), StringComparer.OrdinalIgnoreCase);
+    // The precompressor is root-agnostic: callers hand it the catalog's id -> manifest + directory map
+    // (normally GameCatalog.GameLocations), because a game's files may live under the games folder OR
+    // under the unpacked-package cache, and the manifest says which of them are never served.
+    private IReadOnlyDictionary<string, GameCatalog.GameLocation> Games(params string[] ids) =>
+        ids.ToDictionary(
+            id => id,
+            id => new GameCatalog.GameLocation(Manifest(id), Path.Combine(_gamesRoot, id)),
+            StringComparer.OrdinalIgnoreCase);
+
+    private static GameManifest Manifest(string id, string? serverAuthority = null,
+        IReadOnlyDictionary<string, AuthorityWordDeclaration>? words = null) =>
+        new(id, id, "index.html", null, 4, ServerAuthority: serverAuthority, AuthorityWords: words);
 
     // Writes a file under games/<id>/<relative> and returns its full path.
     private string WriteGameFile(string id, string relative, string content)

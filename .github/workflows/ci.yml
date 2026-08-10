@@ -151,6 +151,51 @@ jobs:
           curl -fsS http://localhost:8081/games/tictactoe/GAME.json >/dev/null
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
 
+      - name: Server-authority module is never served from the game origin
+        run: |
+          # tictactoe-server declares serverAuthority: authority.js — server-side code (and for
+          # hidden-information games, secret). Its client assets serve; the module (and any
+          # precompressed variant of it) must 404 even on the game origin.
+          cp -r games/tictactoe-server /tmp/kb-games/
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Discovered game 'tictactoe-server'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'tictactoe-server'"
+          curl -fsS http://localhost:8081/games/tictactoe-server/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/tictactoe-server/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/tictactoe-server/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/tictactoe-server/authority.js.br >/dev/null
+
+      - name: authorityWords dictionaries are never served from the game origin
+        run: |
+          # A game declaring authorityWords ships shared, server-side dictionaries (and for
+          # hidden-information word games, secret ones). Its client assets serve; the word file (and
+          # any precompressed variant) must 404 on the game origin, like the authority module.
+          # The game is synthesized here from tictactoe-server rather than committed: the only thing
+          # under test is the manifest declaration, and games/ is otherwise gitignored build output.
+          mkdir -p /tmp/wordsrc && cp -r games/tictactoe-server/. /tmp/wordsrc/
+          printf 'apple\nbrave\ncrane\n' > /tmp/wordsrc/words.txt
+          printf '%s' '{ "id": "word-gate", "name": "Word Gate", "entry": "index.html",
+            "thumbnail": "thumb.svg", "maxPlayers": 2, "serverAuthority": "authority.js",
+            "authorityWords": { "en": { "file": "words.txt", "caseInsensitive": true } } }' \
+            > /tmp/wordsrc/GAME.json
+          mkdir -p /tmp/kb-games/word-gate && cp -r /tmp/wordsrc/. /tmp/kb-games/word-gate/
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Discovered game 'word-gate'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'word-gate'"
+          curl -fsS http://localhost:8081/games/word-gate/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/word-gate/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-gate/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-gate/words.txt >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-gate/words.txt.br >/dev/null
+
       # The container's /games is mounted READ-ONLY, so this is the only place the real constraint is
       # exercised: the server must expand the package into its own writable cache instead.
       - name: Hot drop-in — a .kbg package installs itself into a read-only games mount
@@ -210,6 +255,40 @@ jobs:
           ! curl -fsS http://localhost:8081/games/packaged-demo/GAME.json >/dev/null
           # The plain folder dropped in earlier must be untouched by all of this.
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
+
+      # The two features meet here: a server-authority game shipped as a package. Its module has to
+      # survive the round trip into the unpacked-package cache (the server resolves the module through
+      # the catalog's directory, NOT gamesRoot/<id>, or every packaged authority game fails to start)
+      # while still never being served.
+      - name: A server-authority game ships as a .kbg — installed, playable, module still hidden
+        run: |
+          mkdir -p /tmp/sasrc && cp -r games/tictactoe-server/. /tmp/sasrc/
+          # A distinct id: tictactoe-server is already in the mount as a plain folder from the step
+          # above, and a folder deliberately wins a contested id.
+          sed -i 's/"id": *"tictactoe-server"/"id": "packaged-authority"/' /tmp/sasrc/GAME.json
+          grep -q '"packaged-authority"' /tmp/sasrc/GAME.json  # fail loudly if the manifest changed
+          node tools/pack-game/pack-game.mjs \
+            --in /tmp/sasrc --manifest /tmp/sasrc/GAME.json \
+            --out /tmp/authority.kbg --version 2.0.0 --quality 4
+          cp /tmp/authority.kbg /tmp/kb-games/
+          for i in $(seq 1 45); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Installed game package 'packaged-authority'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Installed game package 'packaged-authority'"
+          for i in $(seq 1 30); do
+            docker logs kb 2>&1 | grep -q "Discovered game 'packaged-authority'" && break
+            sleep 1
+          done
+          # Discovery is the proof the module survived: GameCatalog SKIPS a game whose declared
+          # serverAuthority is missing, so a broken extraction would leave the game absent entirely.
+          docker logs kb 2>&1 | grep "Discovered game 'packaged-authority'"
+          curl -fsS http://localhost:8081/games/packaged-authority/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/packaged-authority/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/packaged-authority/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/packaged-authority/authority.js.br >/dev/null
 
       - name: Shell origin exposes only the thumbnail, never the full game build
         run: |

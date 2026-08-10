@@ -4,9 +4,13 @@ namespace KnockBox.Server.Lobbies;
 
 /// <summary>
 /// In-memory membership for one lobby. The server owns no game state — only who is here, which
-/// game, and which member is the authoritative <see cref="HostId"/> (the creator).
+/// game, and which member holds the lobby powers (<see cref="HostId"/>, initially the creator).
+/// In a host-authoritative lobby (the default) that member's browser is also the game's authority;
+/// in a server-authority lobby (<see cref="IsServerAuthority"/>) the SERVER runs the game's
+/// authority module and HostId is only the owner of the two lobby powers (SetLobbyOpen,
+/// KickPlayer) — reassignable by the module via kb.setOwner (<see cref="TrySetHost"/>).
 /// </summary>
-public sealed class Lobby(string id, string gameId, string hostId, int maxPlayers)
+public sealed class Lobby(string id, string gameId, string hostId, int maxPlayers, bool isServerAuthority = false)
 {
     private readonly List<Player> _players = [];
     // Players the host has kicked. A kick is permanent for this lobby: kicked ids are refused by
@@ -21,8 +25,33 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
 
     public string Id { get; } = id;
     public string GameId { get; } = gameId;
-    public string HostId { get; } = hostId;
     public int MaxPlayers { get; } = maxPlayers;
+
+    /// <summary>Whether the server runs this game's authority module (stamped at creation from the
+    /// manifest). The relay keys the to:"host" divert on this mode, never on actor presence.</summary>
+    public bool IsServerAuthority { get; } = isServerAuthority;
+
+    private string _hostId = hostId;
+
+    // Guarded like Open: written by the authority actor's drain task, read on socket threads.
+    // Handlers that read HostId more than once (HandleSetLobbyOpen, HandleKickPlayer) tolerate an
+    // owner change interleaving between reads — worst case an op from the just-demoted owner is
+    // honored or refused a beat late, which is indistinguishable from network timing.
+    public string HostId { get { lock (_gate) return _hostId; } }
+
+    /// <summary>
+    /// Reassigns the lobby owner (kb.setOwner is the only caller in v1). Validates the target is a
+    /// current member atomically under the lobby lock; false (no change) for a non-member.
+    /// </summary>
+    public bool TrySetHost(string playerId)
+    {
+        lock (_gate)
+        {
+            if (!_players.Any(p => p.Id == playerId)) return false;
+            _hostId = playerId;
+            return true;
+        }
+    }
 
     private bool _open = true;
 

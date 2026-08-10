@@ -47,6 +47,8 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(PlayerDisconnectedMessage), "PlayerDisconnected")]
 [JsonDerivedType(typeof(PlayerConnectedMessage), "PlayerConnected")]
 [JsonDerivedType(typeof(KickedMessage), "Kicked")]
+[JsonDerivedType(typeof(LobbyClosedMessage), "LobbyClosed")]
+[JsonDerivedType(typeof(OwnerChangedMessage), "OwnerChanged")]
 [JsonDerivedType(typeof(EnterGameMessage), "EnterGame")]
 [JsonDerivedType(typeof(AttachMessage), "Attach")]
 [JsonDerivedType(typeof(ReadyMessage), "Ready")]
@@ -57,6 +59,7 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(GamePlayerLeftMessage), "GamePlayerLeft")]
 [JsonDerivedType(typeof(GamePlayerDisconnectedMessage), "GamePlayerDisconnected")]
 [JsonDerivedType(typeof(GamePlayerConnectedMessage), "GamePlayerConnected")]
+[JsonDerivedType(typeof(GameOwnerChangedMessage), "GameOwnerChanged")]
 [JsonDerivedType(typeof(LogMessage), "Log")]
 [JsonDerivedType(typeof(PlayLogMessage), "PlayLog")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
@@ -120,6 +123,18 @@ public sealed record PlayerConnectedMessage(string LobbyId, string PlayerId) : I
 // Pushed to a player's CONTROL socket when the host kicks them: the shell leaves the game and
 // returns home with a clear message (distinct from a transient drop or a "lobby full" rejection).
 public sealed record KickedMessage(string LobbyId) : IMessage;
+// Pushed to every member's CONTROL socket when the server closes a LIVE lobby — today only the
+// server-authority fatal-failure path (reason "authority-failed"); CloseLobbyIfDark never needs
+// this because it only fires when nobody is connected. The shell returns home with the reason;
+// game sockets are aborted by the server.
+public sealed record LobbyClosedMessage(string LobbyId, string Reason) : IMessage;
+// Pushed to all members when the lobby owner changes (v1: only a server-authority module calling
+// kb.setOwner — owner succession is the game's policy, the platform ships the primitive). Dual-
+// plane like PlayerLeft/GamePlayerLeft: this control event keeps the shell's roster honest, the
+// GameOwnerChanged mirror lets in-game SDKs update ownerId/isOwner live. The owner holds the two
+// server-enforced lobby powers (SetLobbyOpen, KickPlayer); in server-authority lobbies the owner
+// is NOT the authority — the server is.
+public sealed record OwnerChangedMessage(string LobbyId, string OwnerId) : IMessage;
 // Pushed to one player's CONTROL socket when they enter the lobby (on create, join, and rejoin) —
 // "you're in, here's what to load". The server has no "started" concept; the game itself owns
 // waiting-for-players and deciding when play begins. Carries the game id + full roster to bootstrap
@@ -136,8 +151,15 @@ public sealed record EnterGameMessage(
 // only sends GameMessage{to, payload} — it never names a lobby; the server resolves routing from
 // the bound connection. To ∈ { "host", "all", "<playerId>" }; From is stamped on the way out.
 public sealed record AttachMessage(string Ticket, int Proto = 0) : IMessage;
+// Authority says who runs the game's authoritative logic: "host" (a member's browser — the
+// default, unchanged mode) or "server" (the game's authority module runs server-side; every
+// client gets IsHost:false and behaves as a guest). OwnerId is the member holding the lobby
+// powers (kick, open/close) — the creator until a module reassigns it via kb.setOwner. Owner and
+// authority are separate concepts; SDKs expose isOwner so games gate owner UI on it, not isHost.
 public sealed record ReadyMessage(string PlayerId, IReadOnlyList<Player> Players, bool IsHost,
-    int Proto = KnockBoxProtocol.Version) : IMessage;
+    int Proto = KnockBoxProtocol.Version,
+    string Authority = "host",
+    string? OwnerId = null) : IMessage;
 public sealed record GameMessage(string To, JsonElement Payload, string? From = null) : IMessage;
 // Game → server control (data role): the host sets whether the lobby accepts new joins. The server
 // owns no "started" concept — the game decides this. Open lobbies are listed/joinable; closed ones
@@ -154,6 +176,9 @@ public sealed record GamePlayerLeftMessage(string PlayerId) : IMessage;
 // dropping and returning during the grace window. The player stays in the roster throughout.
 public sealed record GamePlayerDisconnectedMessage(string PlayerId) : IMessage;
 public sealed record GamePlayerConnectedMessage(string PlayerId) : IMessage;
+// Data-plane mirror of OwnerChanged (no LobbyId, per the Game* convention): in-game SDKs update
+// ownerId/isOwner and fire their owner-changed callback so owner-gated UI re-renders live.
+public sealed record GameOwnerChangedMessage(string OwnerId) : IMessage;
 // Game → server diagnostic (data role): the game emits a log line that lands in the server's log
 // sink so operators can observe deployed games (the player only ever sees their own console). Level
 // is the shared Microsoft.Extensions.Logging.LogLevel; it serializes as its NAME on the wire (e.g.

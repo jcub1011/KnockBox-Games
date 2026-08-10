@@ -12,13 +12,42 @@
     <RootNamespace>KnockBox.Server</RootNamespace>
     <AssemblyName>KnockBox.Server</AssemblyName>
     <PublishAot>True</PublishAot>
+    <!-- GC: keep Server GC (best throughput for the WebSocket relay), but rein in its footprint.
+         Server GC allocates a heap per logical CPU and retains memory aggressively, which on a
+         many-core host makes RSS "climb high and stay" as server-authority Jint engines come and go.
+         The fix is to let DATAS (Dynamic Adaptation To Application Sizes, on by DEFAULT for Server
+         GC since .NET 8) grow/shrink the heap count with actual load — precisely the "climbs and
+         stays" case — rather than pinning a fixed heap count, which would DISABLE DATAS. So we set no
+         HeapCount here. ConserveMemory (0-9, below) trades a little CPU to release/decommit sooner and
+         composes with DATAS. Embedded in runtimeconfig at publish and honored under Native AOT.
+         Tune with KnockBox:MemoryLogSeconds diagnostics; give the container a memory limit (compose
+         mem_limit) so DATAS/GC size against the cgroup budget — the biggest lever on steady-state RSS.
+         NOTE (foot-gun): if you ever DO pin a heap count as a runtime override, DOTNET_GCHeapCount is
+         HEX and setting it turns DATAS off; the Dockerfile documents that. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <!-- Serilog core emits an IL2104 trim roll-up for its reflective object-destructuring path. We only
          log scalar structured properties (ids, names, counts) and never @-destructure objects, so that
          path is never executed under AOT. The real risk — Serilog.Settings.Configuration's assembly
          scanning — is removed (levels are configured in code, see Program.cs). All first-party code and
          other dependencies analyze clean, so this is the only suppressed warning; revisit if new
-         non-AOT-clean dependencies are added. -->
-    <NoWarn>$(NoWarn);IL2104</NoWarn>
+         non-AOT-clean dependencies are added.
+
+         IL2026/IL3053 are Jint's. Rooting Jint (TrimmerRootAssembly below) makes ILC analyze the whole
+         assembly and report its internal RequiresUnreferencedCode sites per-site; per-assembly collapse
+         (TrimmerSingleWarn / ilc singlewarnassembly) does not apply to rooted assemblies, so the codes
+         are suppressed here — the design's decided fallback (SERVER_AUTHORITY_DESIGN.md §14.1). All
+         four flagged 4.11.0 sites are unreachable from our usage (re-audit on Jint upgrade):
+           - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs under AllowClr,
+             which is never enabled.
+           - DefaultTypeConverter.BuildDelegate: expression-tree marshaling for typed .NET delegates
+             passed into the engine; we pass only ClrFunction/JsValue, never typed delegates.
+           - DefaultObjectConverter.ConvertSystemTextJsonValue: JsonNode → JsValue conversion; our
+             boundary is JSON strings through Jint's own JsonParser/JsonSerializer.
+         Trade-off: first-party IL2026 is suppressed too. Mitigation: all first-party JSON goes through
+         the source-generated KnockBoxProtocolContext (Serialization/), and the other AOT codes
+         (IL3050 dynamic-code, IL2087/IL2075 reflection, …) still fail the gate. -->
+    <NoWarn>$(NoWarn);IL2104;IL2026;IL3053</NoWarn>
   </PropertyGroup>
 
   <!-- Bake the platform shell + SDK into the publish output (web/ next to the binary), so a
@@ -29,14 +58,44 @@
     <Content Include="..\web\**" Exclude="..\web\node_modules\**;..\web\__tests__\**;..\web\package.json;..\web\package-lock.json" LinkBase="web" CopyToOutputDirectory="Never" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- GC footprint knob (see the GC comment above). Written into runtimeconfig.json and embedded by
+       ILC for the AOT publish. Deliberately NO System.GC.HeapCount — that would disable DATAS, which
+       is the mechanism we want doing the heap-count adaptation. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" Trim="false" />
+  </ItemGroup>
+
   <!-- Microsoft.AspNetCore.OpenApi is deliberately absent: this server exposes no REST endpoints to
        describe (only static files and /ws), so nothing ever called AddOpenApi/MapOpenApi. It also
        pins Microsoft.OpenApi to an exact version with a published high-severity advisory
        (GHSA-v5pm-xwqc-g5wc) that no 10.0.x bump moves off, which failed the AOT job's /warnaserror
-       gate via NuGet audit. Don't re-add it without an endpoint that needs it. -->
+       gate via NuGet audit. Don't re-add it without an endpoint that needs it. (Dropping it also
+       retired the direct Microsoft.OpenApi override that used to sit here purely to patch it.) -->
   <ItemGroup>
+    <PackageReference Include="Jint" Version="4.11.0" />
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+  </ItemGroup>
+
+  <!-- Jint is a pure-C# interpreter with an official Native AOT sample; rooting the assembly keeps
+       the trimmer from removing interpreter internals reached only through JsValue dispatch. All
+       interop stays on the no-reflection path (JsValue/ClrFunction only, AllowClr never enabled) —
+       see Games/JsAuthorityRuntime.cs.
+
+       Rooting makes ILC surface Jint's internal RequiresUnreferencedCode sites as per-site IL2026
+       errors under /warnaserror. All four flagged paths are unreachable from our usage, verified
+       4.11.0 (re-audit on upgrade):
+         - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs when AllowClr
+           is enabled, which it never is.
+         - DefaultTypeConverter.BuildDelegate: expression-tree marshaling for typed .NET delegates
+           passed into the engine; we pass only ClrFunction/JsValue (JsCallDelegate), never typed
+           delegates.
+         - DefaultObjectConverter.ConvertSystemTextJsonValue: JsonNode → JsValue conversion; our
+           boundary is strings through Jint's own JsonParser/JsonSerializer, JsonNode never crosses.
+       TrimmerSingleWarn collapses them to the per-assembly roll-ups (IL2104/IL3053), which are
+       suppressed above — first-party code keeps full per-site diagnostics. -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="Jint" />
   </ItemGroup>
 
   <ItemGroup>

@@ -36,4 +36,30 @@ public class GameManifestTests
 
         Assert.True(manifest!.CrossOriginIsolated);
     }
+
+    [Fact]
+    public void ServerAuthority_defaults_to_null_when_absent()
+    {
+        const string json = """
+        { "id": "ttt", "name": "Tic-Tac-Toe", "entry": "index.html", "maxPlayers": 2 }
+        """;
+
+        var manifest = JsonSerializer.Deserialize<GameManifest>(json, Options);
+
+        Assert.NotNull(manifest);
+        Assert.Null(manifest!.ServerAuthority);
+    }
+
+    [Fact]
+    public void ServerAuthority_parses_from_camelCase()
+    {
+        const string json = """
+        { "id": "tictactoe-server", "name": "Tic-Tac-Toe (server)", "entry": "index.html",
+          "maxPlayers": 2, "serverAuthority": "authority.js" }
+        """;
+
+        var manifest = JsonSerializer.Deserialize<GameManifest>(json, Options);
+
+        Assert.Equal("authority.js", manifest!.ServerAuthority);
+    }
 }

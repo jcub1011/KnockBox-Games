@@ -23,24 +23,44 @@ public sealed class GameCatalog : IDisposable
     /// The directory is kept HERE rather than on <see cref="GameManifest"/> because the manifest is a
     /// wire DTO sent to clients — a server-side filesystem path must never leak into it.
     /// </remarks>
-    private sealed record GameEntry(GameManifest Manifest, string Directory);
+    public sealed record GameLocation(GameManifest Manifest, string Directory);
 
     private readonly IReadOnlyList<string> _roots;
     private readonly ILogger<GameCatalog> _logger;
+    private readonly long _authorityMaxScriptBytes;
+    private readonly long _authorityMaxWordFileBytes;
 
     /// <param name="roots">
     /// Search order, most-authoritative first. Must contain at least one root; <c>roots[0]</c> is the
     /// administrator's games directory and the only one watched for changes.
     /// </param>
-    public GameCatalog(IReadOnlyList<string> roots, ILogger<GameCatalog> logger)
+    /// <param name="authorityMaxScriptBytes">
+    /// Size cap for a manifest's serverAuthority module (KnockBox:AuthorityMaxScriptBytes). A ctor
+    /// scalar rather than the whole AuthorityOptions — discovery needs one number, not runtime knobs.
+    /// </param>
+    /// <param name="authorityMaxWordFileBytes">
+    /// Size cap for a single authorityWords dictionary file (KnockBox:AuthorityMaxWordFileBytes).
+    /// </param>
+    public GameCatalog(
+        IReadOnlyList<string> roots,
+        ILogger<GameCatalog> logger,
+        long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes,
+        long authorityMaxWordFileBytes = AuthorityOptions.DefaultMaxWordFileBytes)
     {
         if (roots.Count == 0) throw new ArgumentException("At least one games root is required.", nameof(roots));
         _roots = roots;
         _logger = logger;
+        _authorityMaxScriptBytes = authorityMaxScriptBytes;
+        _authorityMaxWordFileBytes = authorityMaxWordFileBytes;
     }
 
     /// <summary>Convenience overload for the common single-root case (tests, simple hosts).</summary>
-    public GameCatalog(string gamesRoot, ILogger<GameCatalog> logger) : this([gamesRoot], logger) { }
+    public GameCatalog(
+        string gamesRoot,
+        ILogger<GameCatalog> logger,
+        long authorityMaxScriptBytes = AuthorityOptions.DefaultMaxScriptBytes,
+        long authorityMaxWordFileBytes = AuthorityOptions.DefaultMaxWordFileBytes)
+        : this([gamesRoot], logger, authorityMaxScriptBytes, authorityMaxWordFileBytes) { }
 
     /// <summary>The administrator-owned games directory: the root that is watched and polled.</summary>
     public string PrimaryRoot => _roots[0];
@@ -49,8 +69,8 @@ public sealed class GameCatalog : IDisposable
     // snapshot, so a concurrent rebuild can never expose a half-built catalog (no lock needed).
     // ONE dictionary holds both the manifest and its directory: two parallel dictionaries could not
     // be swapped atomically together, letting a reader pair a pre-swap manifest with a post-swap path.
-    private volatile IReadOnlyDictionary<string, GameEntry> _games =
-        new Dictionary<string, GameEntry>(StringComparer.OrdinalIgnoreCase);
+    private volatile IReadOnlyDictionary<string, GameLocation> _games =
+        new Dictionary<string, GameLocation>(StringComparer.OrdinalIgnoreCase);
 
     private FileSystemWatcher? _watcher;
     private Timer? _debounce;
@@ -72,12 +92,14 @@ public sealed class GameCatalog : IDisposable
 
     /// <summary>
     /// Raised at the end of every successful <see cref="Discover"/>, after the atomic swap, with the
-    /// freshly-published catalog as an id → directory map. Lets derived state (the pre-compressed
-    /// asset cache, the .kbg installer) rebuild on the same add/remove/edit signal the watcher and
-    /// poll already drive — no second watcher needed. Handlers must not throw and should offload
-    /// heavy work to a background task.
+    /// freshly-published catalog as an id → <see cref="GameLocation"/> map. Lets derived state (the
+    /// pre-compressed asset cache, the .kbg installer, the shared word/module caches) rebuild on the
+    /// same add/remove/edit signal the watcher and poll already drive — no second watcher needed.
+    /// The payload carries the manifest AND the directory because subscribers need both: where a
+    /// game's files are (which root won) and what it declares (which of them are never served).
+    /// Handlers must not throw and should offload heavy work to a background task.
     /// </summary>
-    public event Action<IReadOnlyDictionary<string, string>>? Discovered;
+    public event Action<IReadOnlyDictionary<string, GameLocation>>? Discovered;
 
     public IReadOnlyCollection<GameManifest> Games => [.. _games.Values.Select(e => e.Manifest)];
 
@@ -104,10 +126,16 @@ public sealed class GameCatalog : IDisposable
     public IReadOnlyDictionary<string, string> GameDirectories =>
         _games.ToDictionary(kv => kv.Key, kv => kv.Value.Directory, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Snapshot of id → manifest + serving directory: the same payload <see cref="Discovered"/>
+    /// carries, for callers that reconcile on a timer instead of the event.
+    /// </summary>
+    public IReadOnlyDictionary<string, GameLocation> GameLocations => _games;
+
     /// <summary>Scans every games root and atomically swaps in the rebuilt catalog.</summary>
     public void Discover()
     {
-        var next = new Dictionary<string, GameEntry>(StringComparer.OrdinalIgnoreCase);
+        var next = new Dictionary<string, GameLocation>(StringComparer.OrdinalIgnoreCase);
         string? primaryError = null;
 
         for (var i = 0; i < _roots.Count; i++)
@@ -155,12 +183,12 @@ public sealed class GameCatalog : IDisposable
 
         // Notify after the swap so handlers see the published catalog. A misbehaving handler must not
         // break hot-reload, so swallow and log — Discover() is itself called from timer callbacks.
-        try { Discovered?.Invoke(GameDirectories); }
+        try { Discovered?.Invoke(next); }
         catch (Exception ex) { _logger.LogError(ex, "A Discovered handler threw; continuing."); }
     }
 
     /// <summary>Validates one candidate game directory and adds it to <paramref name="next"/>.</summary>
-    private void TryAddGame(string dir, string root, Dictionary<string, GameEntry> next)
+    private void TryAddGame(string dir, string root, Dictionary<string, GameLocation> next)
     {
         var manifestPath = Path.Combine(dir, "GAME.json");
         if (!File.Exists(manifestPath)) return;
@@ -203,6 +231,18 @@ public sealed class GameCatalog : IDisposable
                 return;
             }
 
+            // A serverAuthority module gets the same treatment as entry (traversal + existence)
+            // plus a size cap. Any failure skips the WHOLE game: a game that opted into
+            // server-side enforcement must never silently downgrade to the cheatable host mode.
+            if (manifest.ServerAuthority is not null && !ValidateServerAuthority(manifest, dir, dirPrefix))
+                return;
+
+            // authorityWords dictionaries: same traversal + existence + size treatment. They are
+            // server-only, so a game declaring them must also opt into serverAuthority. Any failure
+            // skips the whole game (a word game with a broken dictionary should fail loud).
+            if (manifest.AuthorityWords is { Count: > 0 } && !ValidateAuthorityWords(manifest, dir, dirPrefix))
+                return;
+
             // First root to claim an id wins. Without this the loser would still have its ASSETS
             // served (static files resolve by path, not through the catalog), so a request could pair
             // one folder's manifest with another folder's files — a baffling thing to debug. Say so.
@@ -214,7 +254,7 @@ public sealed class GameCatalog : IDisposable
                 return;
             }
 
-            next[manifest.Id] = new GameEntry(manifest, dir);
+            next[manifest.Id] = new GameLocation(manifest, dir);
             if (_logger.IsEnabled(LogLevel.Information))
                 _logger.LogInformation("Discovered game '{Id}' ({Name}) from {Dir}", manifest.Id, manifest.Name, dir);
         }
@@ -222,6 +262,91 @@ public sealed class GameCatalog : IDisposable
         {
             _logger.LogError(ex, "Failed to load manifest at {Path}", manifestPath);
         }
+    }
+
+    private bool ValidateServerAuthority(GameManifest manifest, string dir, string dirPrefix)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.ServerAuthority))
+        {
+            _logger.LogWarning("Skipping game '{Id}': serverAuthority is empty.", manifest.Id);
+            return false;
+        }
+        // V1 runs .js modules only (Jint); ".wasm" selects a backend that doesn't exist yet.
+        // Skipping (not ignoring the field) keeps the never-silently-downgrade promise.
+        if (!manifest.ServerAuthority.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is not a .js module (the WASM backend is not yet supported).",
+                manifest.Id, manifest.ServerAuthority);
+            return false;
+        }
+        var moduleFull = Path.GetFullPath(Path.Combine(dir, manifest.ServerAuthority));
+        if (!moduleFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' escapes the game folder.",
+                manifest.Id, manifest.ServerAuthority);
+            return false;
+        }
+        if (!File.Exists(moduleFull))
+        {
+            _logger.LogWarning("Skipping game '{Id}': serverAuthority file '{Module}' not found.",
+                manifest.Id, manifest.ServerAuthority);
+            return false;
+        }
+        var size = new FileInfo(moduleFull).Length;
+        if (size > _authorityMaxScriptBytes)
+        {
+            _logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is {Size} bytes (max {Max}).",
+                manifest.Id, manifest.ServerAuthority, size, _authorityMaxScriptBytes);
+            return false;
+        }
+        return true;
+    }
+
+    private bool ValidateAuthorityWords(GameManifest manifest, string dir, string dirPrefix)
+    {
+        // Word data is only reachable from an authority module (kb.words); declaring it without
+        // serverAuthority is a misconfiguration — skip loudly rather than silently ignore it.
+        if (string.IsNullOrWhiteSpace(manifest.ServerAuthority))
+        {
+            _logger.LogWarning("Skipping game '{Id}': authorityWords requires serverAuthority to be set.", manifest.Id);
+            return false;
+        }
+
+        foreach (var (key, decl) in manifest.AuthorityWords!)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                _logger.LogWarning("Skipping game '{Id}': an authorityWords entry has an empty key.", manifest.Id);
+                return false;
+            }
+            if (decl is null || string.IsNullOrWhiteSpace(decl.File))
+            {
+                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' has no file.", manifest.Id, key);
+                return false;
+            }
+
+            var fileFull = Path.GetFullPath(Path.Combine(dir, decl.File));
+            if (!fileFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' escapes the game folder.",
+                    manifest.Id, key, decl.File);
+                return false;
+            }
+            if (!File.Exists(fileFull))
+            {
+                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' not found.",
+                    manifest.Id, key, decl.File);
+                return false;
+            }
+            var size = new FileInfo(fileFull).Length;
+            if (size > _authorityMaxWordFileBytes)
+            {
+                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' is {Size} bytes (max {Max}).",
+                    manifest.Id, key, decl.File, size, _authorityMaxWordFileBytes);
+                return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>

@@ -21,15 +21,21 @@ public class HandshakeHardeningTests
 {
     private static ServerLimits Defaults => ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
 
-    private static WebSocketHandler NewHandler(ServerLimits limits) => new(
-        new ConnectionManager(),
-        new LobbyManager(),
-        new GameCatalog(Path.GetTempPath(), NullLogger<GameCatalog>.Instance),
-        new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance),
-        limits,
-        TimeProvider.System,
-        NullLoggerFactory.Instance,
-        NullLogger<WebSocketHandler>.Instance);
+    private static WebSocketHandler NewHandler(ServerLimits limits)
+    {
+        var connections = new ConnectionManager();
+        var lobbies = new LobbyManager();
+        return new(
+            connections,
+            lobbies,
+            new GameCatalog(Path.GetTempPath(), NullLogger<GameCatalog>.Instance),
+            TestAuthorities.Manager(connections, lobbies),
+            new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance),
+            limits,
+            TimeProvider.System,
+            NullLoggerFactory.Instance,
+            NullLogger<WebSocketHandler>.Instance);
+    }
 
     [Fact]
     public async Task A_socket_that_never_sends_a_first_frame_is_closed_at_the_handshake_deadline()

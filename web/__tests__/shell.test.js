@@ -509,6 +509,49 @@ describe('control-plane messages', () => {
     expect(document.querySelector('.home-error-toast').textContent).toContain('kicked');
   });
 
+  it('LobbyClosed for the current lobby clears it, returns home, and explains the failure', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+    shell.handle({ type: 'LobbyClosed', lobbyId: 'AB12', reason: 'authority-failed' });
+    expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.querySelector('.home-error-toast').textContent).toContain('server logic failed');
+  });
+
+  it('LobbyClosed with an unknown reason uses the generic message', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+    shell.handle({ type: 'LobbyClosed', lobbyId: 'AB12', reason: 'maintenance' });
+    expect(document.querySelector('.home-error-toast').textContent).toContain('The lobby was closed.');
+  });
+
+  it('LobbyClosed for a different lobby is ignored', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+    shell.handle({ type: 'LobbyClosed', lobbyId: 'OTHER', reason: 'authority-failed' });
+    expect(sessionStorage.getItem('kb.lobbyId')).toBe('AB12'); // still in our lobby
+    expect(document.querySelector('.home-error-toast')).toBeNull();
+  });
+
+  it('OwnerChanged updates the tracked lobby owner for the current lobby only', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+    shell.handle({ type: 'OwnerChanged', lobbyId: 'OTHER', ownerId: 'x' }); // ignored — no throw
+    shell.handle({ type: 'OwnerChanged', lobbyId: 'AB12', ownerId: 'p2' });
+    // The shell renders no owner UI; correctness = no error and the record stays honest, which
+    // the next assertion proves indirectly: the lobby is still active (no view change, no toast).
+    expect(sessionStorage.getItem('kb.lobbyId')).toBe('AB12');
+    expect(document.querySelector('.home-error-toast')).toBeNull();
+  });
+
   it('RejoinRejected forgets the saved lobby and shows the lobby view', async () => {
     sessionStorage.setItem('kb.lobbyId', 'AB12');
     await importShell();

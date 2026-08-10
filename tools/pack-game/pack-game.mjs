@@ -21,14 +21,18 @@
  * KnockBox.Server/Games/GameCatalog.cs (Discover) and the KnockBox.Contracts
  * GameManifest record, and is intentionally STRICTER: the server leaves `name` and
  * `maxPlayers` to deserialization, while the packer rejects an empty name and a
- * non-positive/non-integer maxPlayers so authors fail fast. Keep the two in sync: if
- * the contract or discovery rules change, update both.
+ * non-positive/non-integer maxPlayers so authors fail fast. For `serverAuthority`
+ * (server-authoritative games) the packer additionally runs two checks the catalog
+ * can't do cheaply: a static import scan (single-file rule) and a load check that
+ * dynamic-imports the module and asserts its exports — the developer's own code, run
+ * in their own packer. Keep the two in sync: if the contract or discovery rules
+ * change, update both.
  */
 
 import { execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_QUALITY, KbgError, packKbg, readKbg } from "./kbg.mjs";
 
 const toolDir = dirname(fileURLToPath(import.meta.url));
@@ -38,8 +42,65 @@ export const defaultOut = resolve(toolDir, "..", "..", "games");
 
 const VERSION = "0.2.0";
 
+// Max serverAuthority module size. Mirrors the server default
+// (AuthorityOptions.DefaultMaxScriptBytes / KnockBox:AuthorityMaxScriptBytes) — keep in sync.
+export const AUTHORITY_MAX_SCRIPT_BYTES = 1_048_576;
+
+// Max authorityWords dictionary file size. Mirrors the server default
+// (AuthorityOptions.DefaultMaxWordFileBytes / KnockBox:AuthorityMaxWordFileBytes) — keep in sync.
+export const AUTHORITY_MAX_WORD_FILE_BYTES = 33_554_432;
+
 /** Thrown for any contract/usage error so the CLI can report it and exit non-zero. */
 export class PackError extends Error {}
+
+/**
+ * Static scan for the single-file rule: the SERVER configures no module loader, so any
+ * `import` / `export … from` inside authority.js fails at lobby creation there. Catching it here
+ * (and in knockbox-local.js's URL loader — keep the two in sync) beats a browser dev loop where a
+ * relative import happily resolves. Authors with multi-file logic bundle (esbuild/rollup) first.
+ */
+export function scanAuthorityImports(source) {
+  const lines = String(source).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*import[\s('"]/.test(line) || /^\s*export\s+[^;]*\sfrom\s*['"]/.test(line)) {
+      throw new PackError(
+        `serverAuthority module must be single-file (the server has no module loader) — bundle your imports. ` +
+        `Offending line ${i + 1}: ${line.trim()}`);
+    }
+  }
+}
+
+/**
+ * Load check: dynamic-import the authority module (the developer's own code, in their own packer)
+ * and assert the contract shape — createAuthority is a function, and config (when present) is a
+ * plain object with valid perRecipient/tickHz. Catches "forgot to export" long before a server
+ * rejects the lobby.
+ */
+export async function checkAuthorityModule(authorityPath) {
+  let mod;
+  try {
+    // Cache-bust so repeated packs (and tests) see the current file, not Node's module cache.
+    mod = await import(`${pathToFileURL(authorityPath).href}?v=${Date.now()}`);
+  } catch (err) {
+    throw new PackError(`serverAuthority module failed to load: ${err.message}`);
+  }
+  if (typeof mod.createAuthority !== "function") {
+    throw new PackError("serverAuthority module must export a createAuthority(kb) function.");
+  }
+  const config = mod.config;
+  if (config !== undefined) {
+    if (config === null || typeof config !== "object" || Array.isArray(config)) {
+      throw new PackError("serverAuthority 'config' export must be a plain object when present.");
+    }
+    if (config.perRecipient !== undefined && typeof config.perRecipient !== "boolean") {
+      throw new PackError("serverAuthority config.perRecipient must be a boolean when present.");
+    }
+    if (config.tickHz !== undefined && (typeof config.tickHz !== "number" || !Number.isFinite(config.tickHz) || config.tickHz < 0)) {
+      throw new PackError("serverAuthority config.tickHz must be a finite non-negative number when present.");
+    }
+  }
+}
 
 /**
  * Validate a parsed manifest against the platform contract — covering
@@ -78,6 +139,72 @@ export function validate(manifest, manifestPath, inDir) {
     throw new PackError(`entry file not found in --in: ${entry} (looked in ${inDir}).`);
   }
 
+  // serverAuthority (optional): the per-game opt-in to server-authoritative mode. Same traversal
+  // guard as entry, plus existence, a size cap, and the single-file import scan — mirroring
+  // GameCatalog.Discover(), which SKIPS the whole game on any violation (never a silent downgrade
+  // to host mode), so authors must fail here instead. The load check (dynamic import) is async and
+  // runs in pack(), not here.
+  if (manifest.serverAuthority !== undefined) {
+    const authority = manifest.serverAuthority;
+    if (typeof authority !== "string" || authority.trim() === "") {
+      throw new PackError("GAME.json: 'serverAuthority' must be a non-empty string when present.");
+    }
+    if (!authority.toLowerCase().endsWith(".js")) {
+      throw new PackError("GAME.json: 'serverAuthority' must be a .js module (the WASM backend is not yet supported).");
+    }
+    const authorityFull = resolve(inFull, authority);
+    const authorityRel = relative(inFull, authorityFull);
+    if (authorityRel === "" || authorityRel.startsWith("..") || isAbsolute(authorityRel)) {
+      throw new PackError(`GAME.json: 'serverAuthority' (${authority}) escapes the built folder.`);
+    }
+    if (!existsSync(authorityFull) || !statSync(authorityFull).isFile()) {
+      throw new PackError(`serverAuthority module not found in --in: ${authority} (looked in ${inDir}).`);
+    }
+    const size = statSync(authorityFull).size;
+    if (size > AUTHORITY_MAX_SCRIPT_BYTES) {
+      throw new PackError(`serverAuthority module is ${size} bytes (max ${AUTHORITY_MAX_SCRIPT_BYTES}).`);
+    }
+    scanAuthorityImports(readFileSync(authorityFull, "utf8"));
+  }
+
+  // authorityWords (optional): immutable dictionaries the authority module queries via kb.words.
+  // Same traversal / existence / size treatment as serverAuthority, and it REQUIRES serverAuthority
+  // (word data is only reachable server-side). Mirrors GameCatalog.ValidateAuthorityWords, which
+  // SKIPS the whole game on any violation — so authors must fail here instead.
+  if (manifest.authorityWords !== undefined) {
+    const words = manifest.authorityWords;
+    if (words === null || typeof words !== "object" || Array.isArray(words)) {
+      throw new PackError("GAME.json: 'authorityWords' must be an object mapping keys to { file, caseInsensitive? }.");
+    }
+    if (typeof manifest.serverAuthority !== "string" || manifest.serverAuthority.trim() === "") {
+      throw new PackError("GAME.json: 'authorityWords' requires 'serverAuthority' to be set (word data is server-only).");
+    }
+    for (const [key, decl] of Object.entries(words)) {
+      if (key.trim() === "") throw new PackError("GAME.json: an 'authorityWords' key must be a non-empty string.");
+      if (!decl || typeof decl !== "object" || Array.isArray(decl)) {
+        throw new PackError(`GAME.json: authorityWords '${key}' must be an object { file, caseInsensitive? }.`);
+      }
+      if (typeof decl.file !== "string" || decl.file.trim() === "") {
+        throw new PackError(`GAME.json: authorityWords '${key}' must have a non-empty 'file'.`);
+      }
+      if (decl.caseInsensitive !== undefined && typeof decl.caseInsensitive !== "boolean") {
+        throw new PackError(`GAME.json: authorityWords '${key}' 'caseInsensitive' must be a boolean when present.`);
+      }
+      const fileFull = resolve(inFull, decl.file);
+      const fileRel = relative(inFull, fileFull);
+      if (fileRel === "" || fileRel.startsWith("..") || isAbsolute(fileRel)) {
+        throw new PackError(`GAME.json: authorityWords '${key}' file (${decl.file}) escapes the built folder.`);
+      }
+      if (!existsSync(fileFull) || !statSync(fileFull).isFile()) {
+        throw new PackError(`authorityWords '${key}' file not found in --in: ${decl.file} (looked in ${inDir}).`);
+      }
+      const wsize = statSync(fileFull).size;
+      if (wsize > AUTHORITY_MAX_WORD_FILE_BYTES) {
+        throw new PackError(`authorityWords '${key}' file is ${wsize} bytes (max ${AUTHORITY_MAX_WORD_FILE_BYTES}).`);
+      }
+    }
+  }
+
   // Thumbnail (optional). Resolve relative to the manifest's folder so metadata can
   // live outside the build, then confirm it exists before we try to copy it.
   let thumbSrc = null;
@@ -102,7 +229,8 @@ function walk(dir) {
 
 /**
  * Run the build (if any), validate the manifest, and resolve the exact set of files that make up
- * the game — the shared front half of both output modes.
+ * the game — the shared front half of both output modes. Synchronous: the one async check a game
+ * can need (load-checking a serverAuthority module) is awaited by pack() around this.
  * @returns {{ manifest: object, manifestPath: string, inDir: string, contents: Map<string,string> }}
  *          `contents` maps a logical game-folder path to the absolute file it comes from.
  */
@@ -230,7 +358,7 @@ function resolveKbgPath(opts, id) {
  * @returns { target, manifest, stats?, header? } — target is the .kbg file, or the <id>/ folder
  *          when --dir was given.
  */
-export function pack(opts) {
+export async function pack(opts) {
   if (opts.dir && opts.out) throw new PackError("--out and --dir are mutually exclusive.");
   if (opts.clean === false && !opts.dir) throw new PackError("--no-clean only applies to --dir output.");
   if (opts.quality !== undefined && (!Number.isInteger(opts.quality) || opts.quality < 0 || opts.quality > 11)) {
@@ -238,6 +366,13 @@ export function pack(opts) {
   }
 
   const p = plan(opts);
+
+  // The two checks the static pass can't do: the module actually loads, and exports the contract.
+  // Async, hence pack()'s promise — it dynamic-imports the developer's own module in their own packer.
+  if (p.manifest.serverAuthority) {
+    await checkAuthorityModule(resolve(p.inDir, p.manifest.serverAuthority));
+  }
+
   const emitted = opts.dir ? emitFolder(p, opts) : emitKbg(p, opts);
   return { ...emitted, manifest: p.manifest };
 }
@@ -291,11 +426,11 @@ const size = (n) => (n < 1024 ? `${n} B`
   : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB`
     : `${(n / 1048576).toFixed(2)} MiB`);
 
-function cli() {
+async function cli() {
   try {
     const opts = parseArgs(process.argv.slice(2));
     if (opts.help) { console.log(HELP); return; }
-    const { target, manifest, stats } = pack(opts);
+    const { target, manifest, stats } = await pack(opts);
     if (stats) {
       const pct = stats.raw === 0 ? 0 : Math.round((1 - stats.packed / stats.raw) * 100);
       console.log(`✓ packed "${manifest.name}" → ${target}`);
@@ -310,7 +445,7 @@ function cli() {
       console.error(`✗ ${err.message}`);
       process.exit(1);
     }
-    throw err;
+    throw err; // unexpected: surface with a stack (the unhandled rejection exits non-zero)
   }
 }
 

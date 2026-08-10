@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Net.WebSockets;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
@@ -145,13 +146,24 @@ var forwardedHeaders = builder.Configuration.GetValue("KnockBox:ForwardedHeaders
 // Abuse-protection limits (handshake deadline, per-connection rate limits, per-IP connection cap).
 var limits = ServerLimits.FromConfiguration(builder.Configuration);
 
+// Server-authority sandbox knobs (per-game opt-in via GAME.json serverAuthority).
+var authorityOptions = AuthorityOptions.FromConfiguration(builder.Configuration);
+
+// Periodic memory diagnostics. Each server-authority lobby holds a Jint engine, so footprint scales
+// with concurrent authority lobbies; this log lets an operator correlate working set with live
+// lobby/actor counts (and see whether memory falls back after lobbies close). 0 = off (default).
+var memoryLogSeconds = builder.Configuration.GetValue("KnockBox:MemoryLogSeconds", 0);
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
+builder.Services.AddSingleton(authorityOptions);
 // Search order matters: the administrator's games folder first, then games extracted from .kbg
 // packages, so a hand-placed folder always wins a contested id. With packages off there is only one root.
 List<string> gameRoots = packagesEnabled ? [gamesRoot, gamesUnpackedRoot] : [gamesRoot];
 builder.Services.AddSingleton(sp =>
-    new GameCatalog(gameRoots, sp.GetRequiredService<ILogger<GameCatalog>>()));
+    new GameCatalog(gameRoots, sp.GetRequiredService<ILogger<GameCatalog>>(),
+        authorityOptions.MaxScriptBytes, authorityOptions.MaxWordFileBytes));
+builder.Services.AddSingleton<IAuthorityWordService, AuthorityWordService>();
 if (precompressEnabled)
     builder.Services.AddSingleton(sp => new GameAssetPrecompressor(
         gamesCompressedRoot, precompressGzip, precompressMinBytes,
@@ -165,6 +177,16 @@ if (packagesEnabled)
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 builder.Services.AddSingleton<LobbyManager>();
+builder.Services.AddSingleton(sp => new ServerAuthorityManager(
+    // Where a game's files live is the catalog's answer, not gamesRoot/<id>: a game installed from a
+    // .kbg is served out of the unpacked-package cache instead.
+    id => sp.GetRequiredService<GameCatalog>().TryGetDirectory(id, out var dir) ? dir : null,
+    authorityOptions,
+    sp.GetRequiredService<ConnectionManager>(), sp.GetRequiredService<LobbyManager>(),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<IAuthorityWordService>(),
+    builder.Environment.IsDevelopment(),
+    sp.GetRequiredService<ILoggerFactory>()));
 builder.Services.AddSingleton<WebSocketHandler>();
 
 // Compress responses (game bundles are large). Brotli + Gzip, including the engine asset
@@ -252,6 +274,27 @@ if (precompressor is not null)
         catch (Exception ex) { app.Logger.LogError(ex, "Pre-compression reconcile failed."); }
     });
 
+// Keep the shared word pools in lock-step with the catalog so they don't accumulate stale copies as
+// games/dictionaries change. Subscribing before the first Discover() means startup discovery also
+// runs the initial (no-op) prune. Prune is trivial in-memory set work, so it runs inline (unlike the
+// precompressor's slow compression) — but guarded so a throw can't break sibling Discovered handlers.
+var wordService = app.Services.GetRequiredService<IAuthorityWordService>();
+catalog.Discovered += games =>
+{
+    try { wordService.Prune(games); }
+    catch (Exception ex) { app.Logger.LogError(ex, "Word-pool prune failed."); }
+};
+
+// Same rationale for the shared authority module cache: drop parsed modules for games that no longer
+// exist so they don't leak a parsed AST for the process lifetime. Trivial in-memory set work, so
+// inline like the word-pool prune — guarded so a throw can't break sibling Discovered handlers.
+var authorityManager = app.Services.GetRequiredService<ServerAuthorityManager>();
+catalog.Discovered += games =>
+{
+    try { authorityManager.PruneModuleCache(games); }
+    catch (Exception ex) { app.Logger.LogError(ex, "Authority module-cache prune failed."); }
+};
+
 // Install .kbg packages off the same signal, for the same reason: it rides the catalog's watcher and
 // polling instead of adding a second watcher, and extraction (potentially hundreds of megabytes) is
 // offloaded so it never blocks a discovery running on a timer callback. Having changed something, it
@@ -304,7 +347,7 @@ if (precompressor is not null && precompressReconcileSeconds > 0)
     var interval = TimeSpan.FromSeconds(precompressReconcileSeconds);
     precompressTimer = new Timer(_ =>
     {
-        try { precompressor.ReconcileAll(catalog.GameDirectories); }
+        try { precompressor.ReconcileAll(catalog.GameLocations); }
         catch (Exception ex) { app.Logger.LogError(ex, "Scheduled pre-compression reconcile failed."); }
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => precompressTimer.Dispose());
@@ -327,6 +370,39 @@ if (limits.DisconnectGrace > TimeSpan.Zero)
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => disconnectReaperTimer.Dispose());
 }
+
+// Memory diagnostics: log GC/working-set stats alongside the live lobby and authority-actor counts,
+// so an operator can see whether footprint scales with concurrent authority lobbies and whether it
+// falls back after lobbies close. Off by default (0); disposed on shutdown.
+Timer? memoryLogTimer = null;
+if (memoryLogSeconds > 0)
+{
+    var lobbyManager = app.Services.GetRequiredService<LobbyManager>();
+    // authorityManager is captured above (module-cache prune wiring) — reuse it.
+    var interval = TimeSpan.FromSeconds(memoryLogSeconds);
+    memoryLogTimer = new Timer(_ =>
+    {
+        try
+        {
+            var info = GC.GetGCMemoryInfo();
+            app.Logger.LogInformation(
+                "Memory — workingSet: {WorkingSetMB} MB, managedHeap: {ManagedHeapMB} MB, gcCommitted: {GcCommittedMB} MB, " +
+                "gc(g0/g1/g2): {Gen0}/{Gen1}/{Gen2}, lobbies: {Lobbies}, authorityActors: {Actors}",
+                Environment.WorkingSet / (1024 * 1024),
+                GC.GetTotalMemory(false) / (1024 * 1024),
+                info.TotalCommittedBytes / (1024 * 1024),
+                GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2),
+                lobbyManager.Count, authorityManager.ActorCount);
+        }
+        catch (Exception ex) { app.Logger.LogError(ex, "Memory diagnostics sweep failed."); }
+    }, null, interval, interval);
+    app.Lifetime.ApplicationStopping.Register(() => memoryLogTimer.Dispose());
+}
+
+// Server-authority actors hold live Jint engines and tick timers — stop them all on shutdown
+// (each actor's drain task disposes its own engine).
+app.Lifetime.ApplicationStopping.Register(() =>
+    app.Services.GetRequiredService<ServerAuthorityManager>().StopAll());
 
 if (allowedOrigins.Length == 0)
     app.Logger.LogWarning("KnockBox:AllowedOrigins is empty — /ws accepts any Origin. Set it for production.");
@@ -464,6 +540,20 @@ app.MapWhen(
            && !ctx.Request.Path.StartsWithSegments("/ws"),
     gameApp =>
     {
+        // FIRST, before the encoding negotiation can rewrite paths: never serve a game's
+        // server-authority module (or a stale pre-compressed variant of it) — it is server-side
+        // code, and for hidden-information games its secrecy is the point (design §11). This holds
+        // however the game arrived: the gate matches the catalog's manifest, so a module extracted
+        // from a .kbg is refused exactly like one in a hand-placed folder.
+        gameApp.Use(async (ctx, next) =>
+        {
+            if (GameOriginAssetGate.IsDeniedAuthorityAsset(ctx.Request.Path.Value ?? "", catalog))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            await next();
+        });
         // .kbg packages sit in the games folder, which is served under /games — and GamesStaticOptions
         // sets ServeUnknownFileTypes, so /games/<name>.kbg would hand out the whole archive at a
         // guessable URL, uncached. Its CONTENTS are public (they're the game), but a multi-megabyte

@@ -162,6 +162,23 @@ export function handle(msg) {
       sessionStorage.removeItem('kb.lobbyId');
       showLobbyView();
       break;
+    case 'LobbyClosed':
+      // The server closed a LIVE lobby (today: the game's server-side authority module failed
+      // fatally). Same shape as Kicked: leave the game, forget the lobby, explain why.
+      console.info('[KnockBox shell] LobbyClosed received for lobby', msg.lobbyId, msg.reason);
+      if (!lobby || msg.lobbyId === lobby.lobbyId) {
+        sessionStorage.removeItem('kb.lobbyId');
+        showLobbyView();
+        showError(msg.reason === 'authority-failed'
+          ? "The game's server logic failed, so the lobby was closed."
+          : 'The lobby was closed.');
+      }
+      break;
+    case 'OwnerChanged':
+      // The lobby owner (kick/open-close powers) moved — a server-authority game promoted a
+      // successor. The shell renders no owner UI; just keep its lobby record honest.
+      if (lobby && msg.lobbyId === lobby.lobbyId) lobby.hostId = msg.ownerId;
+      break;
     case 'PlayLog':
       // A game we're playing recorded a Play Log entry; the server already stamped game/time/host
       // and routed it back to us. Persist it (browser-local) and refresh the home-page panel.

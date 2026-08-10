@@ -22,8 +22,11 @@ supplied as drop-in content folders. Four principles shape the design:
    and exchanges role-addressed messages (`host` / everyone / a player). It never names a lobby —
    the server resolves routing from the connection, which it bound to a lobby at attach time.
 4. **One session is authoritative on one client — the host.** Game rules run in the lobby creator's
-   browser. Others send intent; the host validates and broadcasts state. (Real cheat-resistance
-   would need server-side logic, intentionally out of scope.)
+   browser. Others send intent; the host validates and broadcasts state. This is the default. A game
+   may instead **opt in** to server-authoritative mode (`GAME.json` `serverAuthority`), where the
+   server runs the game's sandboxed authority module — cheat-resistance and creator-departure
+   survival *for opted-in games*. See [SERVER_AUTHORITY_DESIGN.md](./SERVER_AUTHORITY_DESIGN.md) and
+   GAME_DEVELOPER_GUIDE §5b; principle 2 still holds for every game that doesn't opt in.
 
 The server holds **no durable state**: a restart drops all in-progress lobbies by design. Anonymous,
 per-tab player identity lives in the browser and is made unforgeable with a signed token (§4).
@@ -338,5 +341,36 @@ into `games/` and it appears within a second or two — no restart.
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
 | `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
+| `AuthorityEnabled` | `true` | Master switch for server-authoritative mode (games with `GAME.json` `serverAuthority`, see SERVER_AUTHORITY_DESIGN.md). `false` ⇒ creating a lobby for such a game fails with a clear error — never a silent downgrade to host mode. |
+| `AuthorityMaxMemoryBytes` | `33554432` (32 MB) | Per-engine memory budget for the sandboxed authority runtime (Jint `LimitMemory`; a per-invocation allocation budget, see design §8). |
+| `AuthorityCallTimeoutMs` | `250` | Wall-clock budget per module invocation. A blunt fatal trigger (a GC pause counts against it), so it leaves headroom — `AuthorityMaxStatements` is the deterministic runaway guard. |
+| `AuthorityMaxStatements` | `1000000` | Statement budget per invocation (deterministic infinite-loop guard). Overflow is fatal — the lobby is closed. |
+| `AuthorityRecursionLimit` | `64` | Call-depth limit for the authority engine. |
+| `AuthorityTickHzMax` | `20` | Clamp on a module's requested `config.tickHz` (a module exporting `tick` opts into a server-driven timer). |
+| `AuthorityMaxScriptBytes` | `1048576` (1 MB) | Max authority-module file size; checked at discovery (oversize ⇒ the game is skipped) and at load. |
+| `AuthorityMaxWordFileBytes` | `33554432` (32 MB) | Max size of a single `authorityWords` dictionary file; checked at discovery (oversize ⇒ the game is skipped). Dictionaries load once into a shared CLR structure (not a per-lobby budget), so this cap is generous. |
+| `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
+| `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
+| `MemoryLogSeconds` | `0` (off) | Interval for a periodic memory-diagnostics log line (working set, managed heap, GC-committed bytes, gen0/1/2 collection counts, live lobby & authority-actor counts). Use it to correlate footprint with concurrent server-authority lobbies and confirm memory falls back after lobbies close. |
+
+### Memory footprint (server-authority games)
+
+Each server-authority lobby runs one sandboxed **Jint engine** for the lobby's lifetime; footprint
+scales with concurrent authority lobbies. Two things keep it in check:
+
+- **Shared parsed module** — a game's `authority.js` is parsed once and the reusable parsed module is
+  shared across every lobby engine of that game (`Games/AuthorityModuleCache.cs`), so N lobbies of
+  one game don't hold N copies of the parsed AST. (The per-engine ECMAScript realm baseline is still
+  per lobby — it can't be shared for isolated untrusted state.) `AuthorityMaxMemoryBytes` bounds only
+  a single *invocation's* allocation, not what an engine retains.
+- **GC tuning** — the server runs **Server GC** (throughput for the WebSocket relay) with **DATAS**
+  (Dynamic Adaptation To Application Sizes, on by default since .NET 8) doing the footprint work:
+  DATAS grows and shrinks the heap count with actual load, which is exactly the "RSS climbs and stays
+  on many-core hosts" case. So the publish (`KnockBox.Server.csproj`) sets `System.GC.ConserveMemory=5`
+  (release/decommit sooner, composes with DATAS) and deliberately **no** `System.GC.HeapCount` —
+  pinning a heap count would *disable* DATAS. In Docker, set a container **memory limit** (`mem_limit`
+  in `docker-compose.yml`) so DATAS/GC size and collect against the cgroup budget — the single biggest
+  lever on steady-state RSS. Only pin `DOTNET_GCHeapCount` as a runtime override if you have a specific
+  reason (**foot-gun:** it is **hex**, and setting it turns DATAS off).
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

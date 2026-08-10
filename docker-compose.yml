@@ -36,6 +36,11 @@ services:
     ports:
       - "8080:8080"   # shell — players open this
       - "8081:8081"   # game origin — iframes + game data sockets
+    # Cap container memory so .NET sizes its (Server) GC heaps and collects against the cgroup budget
+    # instead of the host's full RAM — the main lever on "RSS climbs and stays high" as
+    # server-authority Jint engines come and go. Tune to your host; raise if you run many concurrent
+    # authority lobbies (each holds a Jint engine — see KnockBox__AuthorityMaxLobbies).
+    mem_limit: 1g
     volumes:
       # The server only READS the games dir (hence :ro), so it can be any stable host path and
       # can be shared by multiple instances. This is also why .kbg packages are expanded elsewhere:

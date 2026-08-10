@@ -25,6 +25,7 @@ public sealed class WebSocketHandler(
     ConnectionManager connections,
     LobbyManager lobbies,
     GameCatalog catalog,
+    ServerAuthorityManager authorities,
     TokenService tokens,
     ServerLimits limits,
     TimeProvider time,
@@ -248,7 +249,8 @@ public sealed class WebSocketHandler(
 
         LeaveLobbiesExcept(conn, null); // one lobby at a time (by membership, not just this connection's)
 
-        if (!lobbies.TryCreate(game.Id, conn.PlayerId, game.MaxPlayers, out var lobby))
+        if (!lobbies.TryCreate(game.Id, conn.PlayerId, game.MaxPlayers, out var lobby,
+                isServerAuthority: game.ServerAuthority is not null))
         {
             logger.LogError("Failed to create a lobby with game {id} for user {playerId}.", game.Id, conn.PlayerId);
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "Could not create a lobby, please try again.")));
@@ -258,7 +260,19 @@ public sealed class WebSocketHandler(
         if (!lobby.TryAdd(new Player(conn.PlayerId, conn.DisplayName)))
         {
             logger.LogError("Failed to add host {playerId} to lobby {lobbyId}.", conn.PlayerId, lobby.Id);
+            lobbies.Remove(lobby.Id);
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, "Could not join the lobby you created.")));
+            return;
+        }
+
+        // A server-authority game gets its actor BEFORE the creator is told to enter. Failure is
+        // loud: remove the just-created lobby and error out — never a half-alive lobby, never a
+        // silent downgrade to the cheatable host mode the game explicitly opted out of.
+        if (lobby.IsServerAuthority && !authorities.TryStart(lobby, game, out var authorityError))
+        {
+            lobbies.Remove(lobby.Id);
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
+                authorityError ?? "Could not start the game's server logic.")));
             return;
         }
 
@@ -335,6 +349,7 @@ public sealed class WebSocketHandler(
             Broadcast(lobby, new PlayerJoinedMessage(lobby.Id, joined), exceptPlayerId: conn.PlayerId);
             // Mid-game joins: also tell the other members' game sockets so in-game rosters update.
             BroadcastToGame(lobby, new GamePlayerJoinedMessage(joined), exceptPlayerId: conn.PlayerId);
+            PostAuthorityRoster(lobby, a => a.PostPlayerJoined(joined));
         }
 
         // Launch the game for the entering player only — existing members already have it running,
@@ -463,6 +478,7 @@ public sealed class WebSocketHandler(
         // Announce on both planes so shells and in-game rosters drop the player.
         Broadcast(lobby, new PlayerLeftMessage(lobby.Id, m.TargetPlayerId));
         BroadcastToGame(lobby, new GamePlayerLeftMessage(m.TargetPlayerId));
+        PostAuthorityRoster(lobby, a => a.PostPlayerLeft(m.TargetPlayerId));
         // Tell the kicked player on their CONTROL socket so the shell leaves the game and shows a
         // clear message — don't abort that socket (the push must deliver). Their game (data) socket
         // is evicted, and the kicked-set bars any rejoin.
@@ -531,8 +547,14 @@ public sealed class WebSocketHandler(
 
         connections.AddGame(connection);
         var sendLoop = connection.SendLoopAsync(ct);
-        connection.Send(ConnectionManager.Serialize(
-            new ReadyMessage(playerId, lobby.Players, IsHost: playerId == lobby.HostId)));
+        // Server-authority lobby: NO client is ever told it is host, so client code written to the
+        // existing contract runs its guest branch (request sync, send intents to "host", adopt
+        // broadcast state). OwnerId is a separate concept — the member holding kick/open powers.
+        connection.Send(ConnectionManager.Serialize(new ReadyMessage(
+            playerId, lobby.Players,
+            IsHost: !lobby.IsServerAuthority && playerId == lobby.HostId,
+            Authority: lobby.IsServerAuthority ? "server" : "host",
+            OwnerId: lobby.HostId)));
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Player {PlayerId} attached game socket to lobby {LobbyId}", playerId, lobbyId);
 
@@ -584,6 +606,50 @@ public sealed class WebSocketHandler(
         var lobby = lobbies.Get(conn.LobbyId);
         if (lobby is null || !lobby.Contains(conn.PlayerId)) return; // not a member; drop silently
 
+        // Only server-authority lobbies inspect the payload — and only for the _kb discriminator
+        // (design §5d). Host-authoritative lobbies keep the routing-only, zero-inspection contract.
+        string? kbKind = null;
+        if (lobby.IsServerAuthority
+            && m.Payload.ValueKind == JsonValueKind.Object
+            && m.Payload.TryGetProperty("_kb", out var kb)
+            && kb.ValueKind == JsonValueKind.String)
+        {
+            kbKind = kb.GetString();
+        }
+
+        if (lobby.IsServerAuthority)
+        {
+            // Divert to the actor. The MODE keys this branch, never actor presence: if the actor is
+            // missing (fatal-failure teardown race) the frame is dropped — an intent must never
+            // fall through to the creator's socket in a mode that promised server-side enforcement.
+            if (m.To == "host")
+            {
+                if (kbKind is null)
+                {
+                    // There is no host player to deliver it to; the _kb envelope IS the documented
+                    // contract for server-mode games.
+                    if (logger.IsEnabled(LogLevel.Debug))
+                        logger.LogDebug("Dropping non-_kb payload to 'host' in server-authority lobby {LobbyId}", lobby.Id);
+                }
+                else if (authorities.TryGet(lobby.Id, out var authority))
+                {
+                    authority.PostIntent(conn.PlayerId, m.Payload.GetRawText());
+                }
+                return;
+            }
+
+            // Only the authority may publish state: a client-sent delta/state (to "all" or to a
+            // player) is a forgery attempt — enforcing rules where clients can't tamper is this
+            // mode's entire premise. Other client-to-client chatter (cursors, emotes) relays as-is.
+            if (kbKind is "delta" or "state")
+            {
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug("Dropping client-sent _kb '{Kind}' from {PlayerId} in server-authority lobby {LobbyId}",
+                        kbKind, conn.PlayerId, lobby.Id);
+                return;
+            }
+        }
+
         var bytes = ConnectionManager.Serialize(m with { From = conn.PlayerId });
 
         switch (m.To)
@@ -601,6 +667,14 @@ public sealed class WebSocketHandler(
     }
 
     // ── Shared lobby helpers ──────────────────────────────────────────────────
+
+    // Mirrors a membership change into the lobby's authority actor, adjacent to every GamePlayer*
+    // roster broadcast (the module's roster view must track real membership exactly — design §6).
+    private void PostAuthorityRoster(Lobby lobby, Action<ServerAuthority> post)
+    {
+        if (lobby.IsServerAuthority && authorities.TryGet(lobby.Id, out var authority)) post(authority);
+    }
+
     private void Broadcast(Lobby lobby, IMessage message, string? exceptPlayerId = null)
     {
         var bytes = ConnectionManager.Serialize(message);
@@ -625,6 +699,7 @@ public sealed class WebSocketHandler(
     {
         Broadcast(lobby, new PlayerConnectedMessage(lobby.Id, playerId), exceptPlayerId: playerId);
         BroadcastToGame(lobby, new GamePlayerConnectedMessage(playerId), exceptPlayerId: playerId);
+        PostAuthorityRoster(lobby, a => a.PostPlayerConnected(playerId));
     }
 
     // Involuntary control-socket drop (tab refresh/close, network loss). With a grace window
@@ -648,6 +723,7 @@ public sealed class WebSocketHandler(
         {
             Broadcast(lobby, new PlayerDisconnectedMessage(lobby.Id, conn.PlayerId), exceptPlayerId: conn.PlayerId);
             BroadcastToGame(lobby, new GamePlayerDisconnectedMessage(conn.PlayerId), exceptPlayerId: conn.PlayerId);
+            PostAuthorityRoster(lobby, a => a.PostPlayerDisconnected(conn.PlayerId));
             if (logger.IsEnabled(LogLevel.Information))
                 logger.LogInformation("Player {PlayerId} disconnected from lobby {LobbyId}; holding for grace window", conn.PlayerId, lobby.Id);
         }
@@ -666,6 +742,9 @@ public sealed class WebSocketHandler(
     {
         if (lobby.Players.Any(p => connections.Get(p.Id) is not null)) return;
         lobbies.Remove(lobby.Id);
+        // The single normal-teardown chokepoint for the authority actor — every leave/kick/reap
+        // path funnels through here. (The fatal path tears down via the manager itself, §7.)
+        if (lobby.IsServerAuthority) authorities.Stop(lobby.Id);
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Lobby {LobbyId} closed — no connected members remain", lobby.Id);
     }
@@ -693,6 +772,7 @@ public sealed class WebSocketHandler(
                 {
                     Broadcast(lobby, new PlayerLeftMessage(lobby.Id, pid));
                     BroadcastToGame(lobby, new GamePlayerLeftMessage(pid));
+                    PostAuthorityRoster(lobby, a => a.PostPlayerLeft(pid));
                     if (logger.IsEnabled(LogLevel.Information))
                         logger.LogInformation("Player {PlayerId} removed from lobby {LobbyId} after reconnect grace elapsed", pid, lobby.Id);
                 }
@@ -713,6 +793,7 @@ public sealed class WebSocketHandler(
         {
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
             BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
+            PostAuthorityRoster(lobby, a => a.PostPlayerLeft(conn.PlayerId));
         }
 
         CloseLobbyIfDark(lobby);
@@ -733,6 +814,7 @@ public sealed class WebSocketHandler(
             if (!lobby.Remove(conn.PlayerId)) continue;
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
             BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
+            PostAuthorityRoster(lobby, a => a.PostPlayerLeft(conn.PlayerId));
             CloseLobbyIfDark(lobby);
         }
     }
@@ -749,8 +831,10 @@ public sealed class WebSocketHandler(
     }
 
     // A single relayed frame should never approach this; the cap stops a malicious/buggy client from
-    // growing the reassembly buffer without bound (memory-pressure DoS).
-    private const int MaxMessageBytes = 512 * 1024;
+    // growing the reassembly buffer without bound (memory-pressure DoS). Internal because the
+    // authority actor (Games/ServerAuthority.cs) enforces the same cap on its OUTBOUND frames — an
+    // oversized module snapshot must not bypass a limit every client-relayed frame respects.
+    internal const int MaxMessageBytes = 512 * 1024;
 
     /// <summary>Reassembles one full text message across frames; returns null on a close frame.
     /// Closes the socket and returns null if the message exceeds <see cref="MaxMessageBytes"/>.</summary>

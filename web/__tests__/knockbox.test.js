@@ -111,6 +111,54 @@ describe('Ready & roster', () => {
     expect(connected).toEqual(['p2']);
     expect(kb.players.map((p) => p.id)).toEqual(['me', 'p2']); // roster unchanged
   });
+
+  it('surfaces server-authority Ready fields on the API and in the onReady payload', async () => {
+    const { kb, ws } = await importSdk();
+    const seen = [];
+    kb.onReady((s) => seen.push(s));
+    ws._open();
+    ws._recv({
+      type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'owner' }],
+      isHost: false, authority: 'server', ownerId: 'owner',
+    });
+
+    expect(kb.isHost).toBe(false); // no client is ever host in server mode
+    expect(kb.authority).toBe('server');
+    expect(kb.ownerId).toBe('owner');
+    expect(kb.isOwner).toBe(false);
+    expect(seen[0]).toMatchObject({ authority: 'server', ownerId: 'owner', isOwner: false });
+  });
+
+  it('falls back to host-mode defaults on an old-server Ready', async () => {
+    const { kb, ws } = await importSdk();
+    ws._open();
+    ws._recv({ type: 'Ready', playerId: 'me', players: [{ id: 'me' }], isHost: true }); // no new fields
+
+    expect(kb.authority).toBe('host');
+    expect(kb.ownerId).toBe('me'); // the host IS the owner on an old server
+    expect(kb.isOwner).toBe(true);
+  });
+});
+
+describe('owner changes', () => {
+  it('updates ownerId/isOwner and fires onOwnerChanged', async () => {
+    const { kb, ws } = await importSdk();
+    const seen = [];
+    kb.onOwnerChanged((id) => seen.push({ id, isOwner: kb.isOwner }));
+    ws._open();
+    ws._recv({
+      type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'other' }],
+      isHost: false, authority: 'server', ownerId: 'other',
+    });
+    expect(kb.isOwner).toBe(false);
+
+    ws._recv({ type: 'GameOwnerChanged', ownerId: 'me' });   // promoted
+    ws._recv({ type: 'GameOwnerChanged', ownerId: 'other' }); // demoted again
+
+    expect(seen).toEqual([{ id: 'me', isOwner: true }, { id: 'other', isOwner: false }]);
+    expect(kb.ownerId).toBe('other');
+    expect(kb.isOwner).toBe(false);
+  });
 });
 
 describe('send API', () => {

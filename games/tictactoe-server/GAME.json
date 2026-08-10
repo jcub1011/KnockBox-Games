@@ -1,0 +1,8 @@
+{
+  "id": "tictactoe-server",
+  "name": "Tic-Tac-Toe (Server)",
+  "entry": "index.html",
+  "thumbnail": "thumb.svg",
+  "maxPlayers": 2,
+  "serverAuthority": "authority.js"
+}

@@ -151,6 +151,50 @@ describe('Ready & reconnected flag', () => {
     expect(() => ws.onmessage({ data: '{not json' })).not.toThrow();
     expect(() => ws._recv({ type: 'SomethingNew' })).not.toThrow();
   });
+
+  it('surfaces server-authority Ready fields on the plugin and in the ready payload', async () => {
+    const { plugin, ws } = await makePlugin();
+    const ready = record(plugin, 'ready');
+    ws._open();
+    ws._recv({
+      type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'owner' }],
+      isHost: false, authority: 'server', ownerId: 'owner',
+    });
+
+    expect(plugin.isHost).toBe(false); // no client is ever host in server mode
+    expect(plugin.authority).toBe('server');
+    expect(plugin.ownerId).toBe('owner');
+    expect(plugin.isOwner).toBe(false);
+    expect(ready[0]).toMatchObject({ authority: 'server', ownerId: 'owner', isOwner: false });
+  });
+
+  it('falls back to host-mode defaults on an old-server Ready', async () => {
+    const { plugin, ws } = await makePlugin();
+    ws._open();
+    ws._recv({ type: 'Ready', playerId: 'me', players: [{ id: 'me' }], isHost: true }); // no new fields
+
+    expect(plugin.authority).toBe('host');
+    expect(plugin.ownerId).toBe('me'); // the host IS the owner on an old server
+    expect(plugin.isOwner).toBe(true);
+  });
+
+  it('updates ownerId/isOwner and emits owner-changed on GameOwnerChanged', async () => {
+    const { plugin, ws } = await makePlugin();
+    const seen = [];
+    plugin.events.on('owner-changed', (id) => seen.push({ id, isOwner: plugin.isOwner }));
+    ws._open();
+    ws._recv({
+      type: 'Ready', playerId: 'me', players: [{ id: 'me' }, { id: 'other' }],
+      isHost: false, authority: 'server', ownerId: 'other',
+    });
+
+    ws._recv({ type: 'GameOwnerChanged', ownerId: 'me' });    // promoted
+    ws._recv({ type: 'GameOwnerChanged', ownerId: 'other' }); // demoted again
+
+    expect(seen).toEqual([{ id: 'me', isOwner: true }, { id: 'other', isOwner: false }]);
+    expect(plugin.ownerId).toBe('other');
+    expect(plugin.isOwner).toBe(false);
+  });
 });
 
 describe('send API & queueing', () => {

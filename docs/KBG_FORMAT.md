@@ -196,5 +196,16 @@ A KnockBox server supports both. A plain `games/<id>/` folder and a `games/<id>.
 equally valid ways to install a game, and a folder takes precedence if both provide the same `id`.
 The archive exists for *distribution*; the folder remains the simplest thing to author and edit.
 
+### Server-only files
+
+A package carries whatever the game folder carries, including files the server executes or reads but
+**never serves**: a server-authoritative game's `serverAuthority` module and its `authorityWords`
+dictionaries (see [`SERVER_AUTHORITY_DESIGN.md`](./SERVER_AUTHORITY_DESIGN.md) §11). The format gives
+them no special treatment — they are ordinary `files[]` entries — because the secrecy guarantee lives
+at the serving layer, which matches request paths against the installed manifest and 404s them
+wherever the game was installed from. Two consequences worth knowing: a `.kbg` is *not* a
+confidentiality boundary (anyone holding the archive can read its contents), and the installer skips
+seeding pre-compressed variants of those files, so they never reach the served asset cache either.
+
 See [`GAME_DEVELOPER_GUIDE.md`](./GAME_DEVELOPER_GUIDE.md) for authoring a game and packing it, and
 [`HOSTING.md`](./HOSTING.md) for how a server stores and serves installed packages.

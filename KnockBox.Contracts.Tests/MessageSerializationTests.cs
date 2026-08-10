@@ -213,9 +213,57 @@ public class MessageSerializationTests
         Assert.Equal(KnockBoxProtocol.Version, r.RootElement.GetProperty("proto").GetInt32());
     }
 
+    [Fact]
+    public void Ready_carries_authority_and_owner_camelCased()
+    {
+        var json = JsonSerializer.Serialize<IMessage>(
+            new ReadyMessage("p1", [], IsHost: false, Authority: "server", OwnerId: "p2"), Options);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("server", doc.RootElement.GetProperty("authority").GetString());
+        Assert.Equal("p2", doc.RootElement.GetProperty("ownerId").GetString());
+    }
+
+    [Fact]
+    public void Legacy_ready_without_authority_reads_with_host_defaults()
+    {
+        // A Ready from a pre-server-authority server: authority defaults to "host", ownerId to null
+        // (clients derive the owner from isHost in that case).
+        var ready = Assert.IsType<ReadyMessage>(JsonSerializer.Deserialize<IMessage>(
+            """{ "type": "Ready", "playerId": "p1", "players": [], "isHost": true }""", Options));
+
+        Assert.Equal("host", ready.Authority);
+        Assert.Null(ready.OwnerId);
+    }
+
+    [Fact]
+    public void LobbyClosed_round_trips()
+    {
+        var json = JsonSerializer.Serialize<IMessage>(new LobbyClosedMessage("AB12", "authority-failed"), Options);
+        var back = Assert.IsType<LobbyClosedMessage>(JsonSerializer.Deserialize<IMessage>(json, Options));
+
+        Assert.Equal("AB12", back.LobbyId);
+        Assert.Equal("authority-failed", back.Reason);
+    }
+
+    [Fact]
+    public void Owner_changed_messages_round_trip_on_both_planes()
+    {
+        var control = JsonSerializer.Serialize<IMessage>(new OwnerChangedMessage("AB12", "p2"), Options);
+        var data = JsonSerializer.Serialize<IMessage>(new GameOwnerChangedMessage("p2"), Options);
+
+        var c = Assert.IsType<OwnerChangedMessage>(JsonSerializer.Deserialize<IMessage>(control, Options));
+        var d = Assert.IsType<GameOwnerChangedMessage>(JsonSerializer.Deserialize<IMessage>(data, Options));
+        Assert.Equal(("AB12", "p2"), (c.LobbyId, c.OwnerId));
+        Assert.Equal("p2", d.OwnerId);
+    }
+
     [Theory]
     [InlineData(typeof(AttachMessage))]
     [InlineData(typeof(ReadyMessage))]
+    [InlineData(typeof(LobbyClosedMessage))]
+    [InlineData(typeof(OwnerChangedMessage))]
+    [InlineData(typeof(GameOwnerChangedMessage))]
     [InlineData(typeof(TicketMessage))]
     [InlineData(typeof(RequestTicketMessage))]
     [InlineData(typeof(GamePlayerJoinedMessage))]

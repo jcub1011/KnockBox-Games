@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Text.Json;
+using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Games;
 
@@ -294,16 +296,55 @@ public sealed class GamePackageInstaller(
         if (precompressor is null) return;
         try
         {
+            // A packaged game may ship server-only files (a serverAuthority module, authorityWords
+            // dictionaries). The game origin never serves those, so a compressed copy is pure waste —
+            // and for a deliberately secret word list, a copy that shouldn't exist at all. Read the
+            // manifest we just extracted and leave them out of the seed.
+            var denied = DeniedRelatives(target);
+
             // Entries are opened lazily and one at a time, while the archive is still open.
-            precompressor.SeedFromPackage(id, target, plan.Files.Select(f =>
-                (f.LogicalPath.Replace('/', Path.DirectorySeparatorChar),
-                 f.Brotli ? (Func<Stream>?)(() => f.Entry.Open()) : null)));
+            precompressor.SeedFromPackage(id, target, plan.Files
+                .Where(f => !denied.Contains(f.LogicalPath))
+                .Select(f =>
+                    (f.LogicalPath.Replace('/', Path.DirectorySeparatorChar),
+                     f.Brotli ? (Func<Stream>?)(() => f.Entry.Open()) : null)));
         }
         catch (Exception ex)
         {
             // Seeding is an optimisation. Losing it costs CPU on the next reconcile, nothing more.
             logger.LogWarning(ex, "Could not seed the pre-compressed cache for '{Id}'; it will be compressed normally.", id);
         }
+    }
+
+    /// <summary>
+    /// The package-logical paths (<c>/</c> separators) of the extracted game's never-served files: its
+    /// serverAuthority module and any authorityWords dictionaries. An unreadable or invalid manifest
+    /// yields an EMPTY set on purpose — this runs before the catalog has validated the game, and the
+    /// only cost of a wrong guess here is a redundant compressed variant, which the next reconcile
+    /// prunes. The authoritative gate is <see cref="Hosting.GameOriginAssetGate"/>.
+    /// </summary>
+    private static HashSet<string> DeniedRelatives(string gameDir)
+    {
+        var denied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var manifestPath = Path.Combine(gameDir, GamePackage.ManifestEntryName);
+            if (!File.Exists(manifestPath)) return denied;
+            var manifest = JsonSerializer.Deserialize(
+                File.ReadAllText(manifestPath), KnockBoxProtocolContext.Default.GameManifest);
+            if (manifest is null) return denied;
+
+            if (!string.IsNullOrEmpty(manifest.ServerAuthority))
+                denied.Add(manifest.ServerAuthority.Replace('\\', '/'));
+            if (manifest.AuthorityWords is { } words)
+                foreach (var decl in words.Values)
+                    if (!string.IsNullOrEmpty(decl?.File)) denied.Add(decl.File.Replace('\\', '/'));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Nothing to do: seed everything, and let the reconcile pass sort it out.
+        }
+        return denied;
     }
 
     /// <summary>

@@ -26,7 +26,21 @@ export interface KBPlayer {
 export interface KBReadyInfo {
   playerId: string;
   players: KBPlayer[];
+  /** False on EVERY client in server-authority mode — don't branch game logic on it there. */
   isHost: boolean;
+  /**
+   * Who runs the game's authoritative logic: 'host' (a member's browser — the default) or
+   * 'server' (the game's authority module runs server-side; every client is a guest).
+   */
+  authority: 'host' | 'server';
+  /**
+   * The member holding the lobby powers (setLobbyOpen, kickPlayer) — the creator until the game's
+   * authority module reassigns it. A separate concept from the authority. Null when unknowable
+   * (a guest on a pre-authority server).
+   */
+  ownerId: string | null;
+  /** Whether this player is the lobby owner. Gate owner-only UI on this, never on isHost. */
+  isOwner: boolean;
 }
 
 /** Payload of the `message` event: a relayed game message from another player (or self). */
@@ -64,6 +78,9 @@ export interface KnockBoxEvents {
   'player-left': (playerId: string) => void;
   'player-disconnected': (playerId: string) => void;
   'player-connected': (playerId: string) => void;
+  /** The lobby owner changed (a server-authority module called kb.setOwner). ownerId/isOwner are
+   *  already updated when this fires. */
+  'owner-changed': (ownerId: string) => void;
   closed: (info: KBClosed) => void;
   resumed: () => void;
 }
@@ -96,8 +113,15 @@ export class KnockBoxPlugin {
   playerId: string | null;
   /** The lobby roster; index 0 is the host. Kept current as players join/leave. */
   players: KBPlayer[];
-  /** Whether this player is the authoritative host (the lobby creator). */
+  /** Whether this player is the authoritative host. ALWAYS false in server-authority mode
+   *  (`authority === 'server'`) — don't branch game logic on it there. */
   isHost: boolean;
+  /** Who runs the game's authoritative logic: 'host' (default) or 'server'. */
+  authority: 'host' | 'server';
+  /** The member holding the lobby powers (setLobbyOpen, kickPlayer); see KBReadyInfo.ownerId. */
+  ownerId: string | null;
+  /** Whether this player is the lobby owner. Gate owner-only UI on this, never on isHost. */
+  isOwner: boolean;
   /** True when the most recent `ready` fired after a reconnect (a prior session existed). */
   reconnected: boolean;
 
@@ -146,6 +170,9 @@ export type KnockBoxLocalMode =
   /** Single-player host that echoes its own sends. */
   | 'solo';
 
+/** An authority module's factory: `createAuthority(kb)` returning `{ init, applyIntent, snapshot, … }`. */
+export type KBCreateAuthority = (kb: any) => any;
+
 export interface KnockBoxLocalOptions {
   /** Which transport to use. Default 'tab'. */
   mode?: KnockBoxLocalMode;
@@ -157,6 +184,18 @@ export interface KnockBoxLocalOptions {
   displayName?: string;
   /** Cross-tab presence settle window (ms) before the first `ready`. Default 250. */
   settleMs?: number;
+  /**
+   * Server-authority emulation: run the game's REAL authority.js as a virtual server actor on the
+   * transport-elected peer. Every peer then gets `ready` with isHost:false / authority:'server' /
+   * ownerId — the byte-identical server-mode path. Accepts the createAuthority function itself, a
+   * module namespace (`await import('./authority.js')`), or a URL string (fetched, import-scanned
+   * for the single-file rule, then dynamic-imported). Fidelity checks are always on: values
+   * crossing the module boundary are strict-JSON-cloned (functions/undefined/cycles/class
+   * instances throw) and `Date` is poisoned during module calls (use kb.now()).
+   */
+  authority?: KBCreateAuthority | { createAuthority: KBCreateAuthority; config?: object } | string;
+  /** The module's `config` export ({ perRecipient?, tickHz? }) when `authority` is a bare function. */
+  authorityConfig?: { perRecipient?: boolean; tickHz?: number };
 }
 
 /**
@@ -170,6 +209,12 @@ export class KnockBoxLocalPeer {
   playerId: string;
   players: KBPlayer[];
   isHost: boolean;
+  /** 'server' when the `authority` option is set (every peer is a guest), else 'host'. */
+  authority: 'host' | 'server';
+  /** The lobby owner (the elected peer until kb.setOwner reassigns it). */
+  ownerId: string | null;
+  /** Whether this peer is the lobby owner. Gate owner-only UI on this, never isHost. */
+  isOwner: boolean;
   reconnected: boolean;
   /** Always true on the local-testing client; lets KBAuthority auto-enable its dev checks. */
   isLocal: boolean;
@@ -210,6 +255,9 @@ export class KnockBoxLocalPlugin {
   readonly playerId: string | null;
   readonly players: KBPlayer[];
   readonly isHost: boolean;
+  readonly authority: 'host' | 'server';
+  readonly ownerId: string | null;
+  readonly isOwner: boolean;
   readonly reconnected: boolean;
   /** Always true on the local-testing client; lets KBAuthority auto-enable its dev checks. */
   readonly isLocal: boolean;
@@ -229,6 +277,10 @@ export class KnockBoxLocalPlugin {
   setLobbyOpen(open: boolean): void;
   setLaunchParams(ticket?: string, endpoint?: string): void;
 }
+
+/** Throws when `source` contains a top-level `import` / `export … from` (authority modules must
+ *  be single-file — the server configures no module loader). Also run by tools/pack-game. */
+export function scanAuthorityImports(source: string): void;
 
 /** Test helper: clear the in-process hub registry between tests. */
 export function _resetLocalHubs(): void;

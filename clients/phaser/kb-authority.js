@@ -231,6 +231,10 @@
         if (this._net.isHost) this._net.sendTo(fromId, this._stateMsg(fromId));
         break;
       case 'delta':
+        // In server-authority mode only the server publishes state — a delta from any player id is
+        // a forgery (the relay drops these too; this guards clients on old/other servers). Inert in
+        // host mode: `net.authority` is undefined there, so the check never fires.
+        if (this._net.authority === 'server' && fromId !== 'server') return;
         if (this._net.isHost) return; // already applied via applyIntent; the echo is for guests
         // applyPatch must be safe to apply even out-of-order vs. a snapshot (see _handleMessage's
         // 'intent' branch): patches carry absolute values, so a snapshot landing after a delta —
@@ -239,6 +243,7 @@
         this.events.emit('state-changed');
         break;
       case 'state':
+        if (this._net.authority === 'server' && fromId !== 'server') return; // forged snapshot — see 'delta'
         if (this._net.isHost) return; // host is authoritative; never adopts a snapshot
         if (this._perRecipient) {
           this.currentView = this._replica(payload.state); // guests render this directly; no model needed

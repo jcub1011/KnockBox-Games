@@ -182,11 +182,54 @@ Handshake timeout on `/ws`, per-connection token-bucket rate limits (separate fo
 data planes), per-IP connection cap, and a per-player lobby-create throttle. All are
 configurable and disabled with `0`.
 
+### Server-authoritative mode (`Games/ServerAuthority*.cs`, `Games/*AuthorityRuntime*.cs`)
+Optional, per-game. A game opts in with `GAME.json` `serverAuthority: "authority.js"` (validated
+like `entry`; the game origin never serves the module — `Hosting/GameOriginAssetGate.cs` → 404).
+On lobby creation `ServerAuthorityManager` loads the module into a per-lobby sandboxed **Jint**
+engine (`JsAuthorityRuntime` behind `IAuthorityRuntime`; `Date` deleted, no CLR, memory/timeout/
+statement/recursion budgets — AOT-clean via `TrimmerRootAssembly`) wrapped in a `ServerAuthority`
+actor: one drain task over a bounded `Channel` (two-tier overflow — intents drop, ticks coalesce,
+roster never dropped). `WebSocketHandler.HandleGameMessage` diverts `to:"host"` to the actor
+instead of a client and enforces the `_kb` envelope both ways (§5d — clients can't publish
+`delta`/`state`); the actor broadcasts state stamped `from:"server"`. The module ABI is the
+`kb-authority.js` model contract as a superset (`init`/`applyIntent`/`snapshot` + roster hooks +
+`tick`/`config`), runtime-agnostic (JSON strings in/out) so a WASM backend is additive (Phase 4,
+not built). **Owner ≠ authority**: every client is `isHost:false`; `Lobby.HostId` (now mutable,
+lock-guarded) is the owner holding kick/open powers, reassignable by the module via `kb.setOwner`
+(`OwnerChanged`/`GameOwnerChanged` events, so the session survives the creator leaving). Errors:
+a module throw is contained (drop + re-broadcast snapshot; 5 in a row → fatal), a constraint
+violation is fatal (`LobbyClosed`, sockets aborted). See `docs/SERVER_AUTHORITY_DESIGN.md` and
+GAME_DEVELOPER_GUIDE §5b. Knobs: `Authority*` (§Configuration).
+
+**Shared word dictionaries (`kb.words`)**: a game declares immutable word lists in `GAME.json`
+(`authorityWords: { "<key>": { file, caseInsensitive } }`, validated like `serverAuthority` + a size
+cap, and requiring `serverAuthority`). `Games/Words/AuthorityWordService.cs` (DI singleton) loads each
+file **once** into a shared, length-bucketed packed-ASCII structure (`WordPool`/`WordPoolSet`, adapted
+from the sibling `KnockBox.WordService` repo) shared by every lobby engine of the game and deduped
+across games by content hash (byte-identical files share one structure regardless of name/path) — so a large dictionary costs one copy, never a per-lobby copy or a
+raised memory cap. The module queries it via `kb.words.has/count/pick/countOfLength/pickOfLength`
+(`ClrFunction`s over the shared pool — the dictionary never enters the JS heap; guarded, so unknown
+key / out-of-range → `false`/`0`/`null`). The word files are denied on the game origin
+(`GameOriginAssetGate`, server-side/secret) and skipped by the precompressor; `knockbox-local.js`
+emulates `kb.words` with server-identical `pick` ordering. GAME_DEVELOPER_GUIDE §5b walks a
+worked example; the docker CI job synthesizes one to prove the files 404 on the game origin.
+
+**Server authority + `.kbg` packages**: the two compose. An authority game packs like any other
+(`knockbox-pack` ships `serverAuthority` / `authorityWords` files inside the archive) and installs
+into `GamesUnpackedRoot`, so its files are **not** under `GamesRoot/<id>`. Everything server-side
+therefore resolves a game's folder through the catalog — `GameCatalog.TryGetDirectory` /
+`GameLocations`, never `gamesRoot/<id>`: `ServerAuthorityManager` takes a
+`Func<string, string?> gameDirectory` resolver, and the `Discovered` event carries
+`GameLocation(Manifest, Directory)` so the precompressor, word-pool prune and module-cache prune
+all see both. The origin gate is path-based and so is unaffected by which root won; the installer
+skips seeding compressed variants of the never-served files.
+
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
-`players`, `isHost`; callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
+`players`, `isHost` (plus `authority`/`ownerId`/`isOwner` for server-authority mode, normalized via
+`kb-core.js` `normalizeReady`); callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
 `onPlayerDisconnected`, `onPlayerConnected` (the last two: a peer's tab dropped but is held for the
-reconnect grace window, then returned — they stay in `players` throughout); send
+reconnect grace window, then returned — they stay in `players` throughout), `onOwnerChanged`; send
 methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
 `log.{info,warn,error,debug,trace,critical}(message)` (console-like logging to the server, relayed
 as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPlay(metadata)` (a
@@ -217,5 +260,7 @@ fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMin
 (`.kbg` install; the root must be writable and outside `games/`), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
-default 60; `0` = immediate), and the rate-limit knobs (`*MessagesPerSecond/Burst`,
-`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`).
+default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,
+`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`), and the server-authority knobs (`AuthorityEnabled`
+master switch, `AuthorityMax{MemoryBytes,Statements,ScriptBytes,WordFileBytes,Lobbies}`,
+`AuthorityCallTimeoutMs`, `AuthorityRecursionLimit`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).

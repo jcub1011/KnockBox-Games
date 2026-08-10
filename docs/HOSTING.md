@@ -124,6 +124,12 @@ instance showing exactly that pattern.
 > here is not merely slower: `.kbg` packages **cannot install at all**, so the home page shows a
 > configuration warning saying so (plain game folders keep working). Set
 > `KnockBox__Packages: "false"` to ignore packages entirely and support only folders.
+>
+> A **server-authoritative** game packages like any other: its `serverAuthority` module and any
+> `authorityWords` dictionaries are extracted here with the rest of the build, and the server runs
+> them from this directory. They are still never served on the game origin, so this directory holds
+> files that are readable server-side but not over HTTP — worth knowing if the games library contains
+> hidden-information answer lists.
 
 There are no secrets to configure. Player identities are anonymous, per-tab, and ephemeral by
 design: a restart mints fresh ids, which is expected — in-memory lobbies drop on restart anyway.

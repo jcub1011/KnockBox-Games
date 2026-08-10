@@ -244,7 +244,8 @@ markup).
 ## 5. The host-authoritative model (the contract)
 
 KnockBox uses **host-client authority**: one player (the lobby creator, `isHost === true`) owns the
-game state. Everyone else holds a render copy only.
+game state. Everyone else holds a render copy only. (Prefer the **server** to own the rules — for
+cheat-resistance or so the session survives the creator leaving? See **§5b** to opt in per game.)
 
 Follow this loop:
 
@@ -341,6 +342,217 @@ it hits zero, send the move. Over the wire the host's clock already expired and 
 client's late intent is rejected or applies to the wrong turn — and nothing errors.
 
 See §11 for how to catch all of this before you ship.
+
+---
+
+## 5b. Server-authoritative mode (opt-in)
+
+§5 runs your rules in the **host's browser**. A game can instead opt in to having the **server** run
+its authoritative logic, sandboxed, one instance per lobby. You get three wins over host authority:
+uniform (near-zero) authority latency, **the session survives the creator leaving**, and rules are
+enforced where clients can't tamper with them. Host-authoritative (§5) stays the default and is
+untouched — this is per-game, and you choose it.
+
+> Full design & server internals: **[SERVER_AUTHORITY_DESIGN.md](./SERVER_AUTHORITY_DESIGN.md)**.
+> This section is the game-author's view.
+
+### Opt in
+
+Add one field to your [`GAME.json`](#gamejson) (§2):
+
+```jsonc
+{
+  "id": "tictactoe-server",
+  "name": "Tic-Tac-Toe (server)",
+  "entry": "index.html",
+  "maxPlayers": 2,
+  "serverAuthority": "authority.js"   // ← ships an authority module; the server runs it
+}
+```
+
+`serverAuthority` names a **single-file ES module** in your game folder. It is validated exactly
+like `entry` (must exist, no path traversal, ≤ 1 MB) — and if it fails validation the game is
+**skipped**, never silently downgraded to host mode. The module is **server-side code**: the game
+origin never serves it (a `GET /games/<id>/authority.js` returns 404), so it's safe to hold secrets
+there (see *Hidden information*, below).
+
+### The module contract
+
+Your module exports a `createAuthority(kb)` factory and an optional `config`. The returned object is
+a bundle of **pure functions over JSON** — no rendering, no DOM, no network:
+
+```js
+// games/<id>/authority.js
+export function createAuthority(kb) {
+  let state = null;
+  return {
+    init(players) { state = { /* … */ }; },              // required — establish initial state
+    applyIntent(fromId, action) { /* … */ return patch; }, // required — validate & mutate; return patch or null
+    snapshot(forPlayerId) { return state; },              // required — full state for sync/late-join
+    // optional roster hooks & tick below
+  };
+}
+export const config = {};   // optional — { perRecipient?, tickHz? }
+```
+
+| Export | Required | Signature | Notes |
+|---|---|---|---|
+| `init` | ✅ | `init(players)` | Called once at lobby start with the roster `[{id, displayName}]`. |
+| `applyIntent` | ✅ | `applyIntent(fromId, action) → patch \| null` | Validate against authoritative state; mutate; return a small **absolute-valued** patch to broadcast, or `null` to reject (nothing is sent, clients re-sync). |
+| `snapshot` | ✅ | `snapshot(forPlayerId?) → state` | Full self-contained state for sync / late-join / reconnect. `forPlayerId` is passed in per-recipient mode. |
+| `onPlayerJoined` | — | `onPlayerJoined(player) → patch \| null` | Roster hooks. State is re-broadcast after any of them, so a return patch is optional. |
+| `onPlayerLeft` | — | `onPlayerLeft(playerId) → patch \| null` | |
+| `onPlayerDisconnected` / `onPlayerConnected` | — | `(playerId) → patch \| null` | Soft presence during the reconnect grace window (e.g. pause a timer). |
+| `tick` | — | `tick(dtMs) → patch \| null` | Exporting it opts into a server-driven tick; rate from `config.tickHz` (clamped). Absent → no timer at all. |
+| `config` | — | `{ perRecipient?, tickHz? }` | `perRecipient:true` re-projects `snapshot(playerId)` per player (hidden info); `tickHz` requests a tick rate. |
+
+This is a **superset of the `KBAuthority` model contract** (§5a / the Phaser client): a plain object
+with `applyIntent`/`snapshot` you already use client-side ports over with a few lines. `applyPatch`/
+`applySnapshot` from that contract are simply unused server-side — the server *is* the authority and
+never adopts external state.
+
+### The wire: intents in, state out
+
+Clients speak the same `_kb` envelope `KBAuthority` uses. You rarely hand-write it — `KBAuthority`
+(or the sample's `game.js`) does — but for a raw-SDK game:
+
+| Direction | Payload |
+|---|---|
+| client → `sendToHost` | `{ "_kb": "intent", "action": { … } }` |
+| client → `sendToHost` | `{ "_kb": "sync" }` (request full state — do this on `onReady`) |
+| server → all | `{ "_kb": "delta", "patch": { … } }` |
+| server → one/all | `{ "_kb": "state", "state": { … } }` |
+
+`sendToHost` still means "send to the authority" — **the send path doesn't change.** The authority's
+broadcasts arrive stamped `from: "server"`. In server mode the relay **drops** any client-sent
+`_kb` `delta`/`state` (only the authority may publish state) and any non-`_kb` payload sent to
+`host` — so don't route game state that way. Plain client-to-client chatter (`sendToAll` cursors,
+emotes) is untouched.
+
+### The `kb` capability object
+
+`createAuthority(kb)` receives a small frozen `kb`:
+
+| Capability | Purpose |
+|---|---|
+| `kb.setLobbyOpen(open)` | Join gate — e.g. close joins once a round starts. |
+| `kb.setOwner(playerId)` | **Owner-migration primitive** (see below). |
+| `kb.now()` | Milliseconds since epoch, **server clock**. There is **no `Date`** in the sandbox — `kb.now()` is the only time source. |
+| `kb.log.info/warn/error/debug(msg)` | Server-side logging under `KnockBox.Authority`. |
+| `kb.words.*` | Shared, immutable word dictionaries (validate a word, pick one by index). See **Word dictionaries** below. |
+
+### Word dictionaries (`kb.words`)
+
+Word games need a large dictionary (hundreds of thousands of entries) to validate and pick words.
+Inlining it in `authority.js` is impossible (it blows the module size cap) and would be duplicated
+into every lobby's sandbox. Instead **declare dictionaries in `GAME.json`** and the server loads each
+one **once** into a shared, memory-efficient structure that every lobby of the game queries — the
+dictionary never enters your sandbox's memory, so a huge list costs one copy for the whole process.
+
+```jsonc
+{
+  "id": "word-rush",
+  "serverAuthority": "authority.js",
+  "authorityWords": {
+    "en": { "file": "words.txt", "caseInsensitive": true }
+  }
+}
+```
+
+The file is line-delimited (one word per line; blanks trimmed), ASCII-only, and lives in the game
+folder — validated like `serverAuthority` (must exist, no path traversal, size ≤
+`AuthorityMaxWordFileBytes`) and **never served on the game origin** (it's server-side data, and for
+hidden-information games the answer list is secret). `authorityWords` **requires** `serverAuthority`.
+It travels inside a `.kbg` package like every other file (`knockbox-pack` packs it and checks the
+same rules), so a packaged word game works exactly like a folder-dropped one: the server extracts
+the dictionary into its own cache and still refuses to serve it.
+
+Your module queries it through `kb.words`, keyed by the dictionary key you chose (`"en"` above):
+
+| Call | Returns |
+|---|---|
+| `kb.words.has(key, word)` | `boolean` — is `word` in the dictionary (case per `caseInsensitive`; non-ASCII → false) |
+| `kb.words.count(key)` | `number` — total words (the valid index range for `pick` is `[0, count)`) |
+| `kb.words.pick(key, index)` | `string \| null` — the word at a global index, or `null` if out of range |
+| `kb.words.countOfLength(key, len)` | `number` — words of a given length |
+| `kb.words.pickOfLength(key, len, index)` | `string \| null` — the `index`-th word of that length |
+
+Use `count` to size the dictionary before indexing — e.g. draw a random word with
+`kb.words.pick(key, Math.floor(Math.random() * kb.words.count(key)))`. An unknown key or an
+out-of-range index is safe (`false`/`0`/`null`), never a crash. Words are ordered length-bucket by
+length (ascending), ordinal within a length, so `pick` is stable and identical in local emulation.
+
+### Owner ≠ authority
+
+In server mode **every client is `isHost: false`** — no browser is the host. A separate concept, the
+**owner** (initially the lobby creator), holds the lobby powers `setLobbyOpen` / `kickPlayer`, and is
+surfaced to clients as `KnockBox.ownerId` / `KnockBox.isOwner`. **Gate owner-only UI (kick buttons,
+open/close toggles) on `isOwner`, not `isHost`.** When the owner leaves, the game continues; your
+module decides succession by calling `kb.setOwner(nextId)` (typically from `onPlayerLeft`). A module
+that never calls it simply runs owner-less — allowed. Clients get an `onOwnerChanged(ownerId)`
+callback when it moves.
+
+### Limits & error semantics
+
+Each module call is budgeted (memory / wall-clock / statement count — see the `Authority*` knobs in
+INFRASTRUCTURE.md §9). Two failure classes:
+- **Contained** — your `applyIntent`/hook *throws*: the intent is dropped, the current `snapshot()`
+  is re-broadcast so clients re-converge, and the lobby stays alive. In development the error message
+  is relayed to the browser console as `{ "_kb": "error", … }`; production leaks nothing. Five
+  consecutive contained failures escalate to fatal.
+- **Fatal** — a constraint violation (timeout / memory / statement overflow) or a load/`init`
+  failure: the engine is untrustworthy, so the lobby is **closed loudly** — members get a
+  `LobbyClosed` control event (the shell returns them home) and the game sockets are dropped. A
+  load/`init` failure at creation just fails lobby creation with an error to the creator.
+
+### Hidden information (server mode makes this real)
+
+Because the module runs server-side and is never served to clients, secret state genuinely stays
+secret. Set `config.perRecipient = true` and return a per-player projection from
+`snapshot(forPlayerId)`. The clean structure is a **split-file pattern**: a shared rules module
+(loadable client-side too) composed by a thin, server-only `authority.js` that holds the secret
+projection. Contrast §9's host-authoritative hidden-info approach, which trusts the host browser.
+
+### Test it locally (no server needed for the inner loop)
+
+Three tiers — see §11 for the mechanics; server-authority specifics:
+
+1. **Pure module tests (Vitest).** Import `createAuthority(fakeKb)`, feed intents, assert
+   patches/snapshots. `fakeKb` is ~10 lines:
+   ```js
+   let ownerId = 'p1';
+   const words = new Set(['apple', 'brave', 'crane']); // stub kb.words for the test
+   const fakeKb = {
+     now: () => 0,
+     log: { info(){}, warn(){}, error(){}, debug(){} },
+     setLobbyOpen(_open) {},
+     setOwner(id) { ownerId = id; },
+     words: {
+       has: (_key, w) => words.has(String(w).toLowerCase()),
+       count: () => words.size,
+       pick: (_key, i) => [...words][i] ?? null,
+       countOfLength: (_key, len) => [...words].filter((w) => w.length === len).length,
+       pickOfLength: (_key, len, i) => [...words].filter((w) => w.length === len)[i] ?? null,
+     },
+   };
+   const a = createAuthority(fakeKb);
+   a.init([{ id: 'p1', displayName: 'A' }, { id: 'p2', displayName: 'B' }]);
+   expect(a.applyIntent('p1', { kind: 'move', cell: 0 })).toMatchObject({ /* … */ });
+   ```
+2. **Local emulation (Phaser `knockbox-local.js`).** Pass `authority: createAuthority` (or a
+   `'./authority.js'` URL) to run your real module as a virtual `from:"server"` actor over the local
+   `tab`/`process` transports, with default-on fidelity checks (JSON round-trip boundary, `Date`
+   poisoning, single-file import scan) that catch server-only failures early. For `kb.words`, supply
+   the data with a `words` option — `words: { en: ['apple', 'brave', …] }`, or
+   `words: { en: { file: './words.txt' } }` to fetch it — with the same `pick` ordering as the
+   server. With the `'./authority.js'` URL form, the sibling `GAME.json`'s `authorityWords` are
+   auto-discovered and fetched, so no `words` option is needed. (Those files fetch in dev because your
+   own static server serves them; the real KnockBox server denies them on the game origin.)
+3. **A real server (optional, full fidelity).** Drop the game into `games/` of a local instance
+   (desktop exe or `dotnet run`) for the real Jint sandbox and constraint limits.
+
+The canonical worked example is **`games/tictactoe-server/`** — a faithful port of `games/tictactoe`:
+`authority.js` (the rules + owner succession + join gate) and a render-only `game.js`.
 
 ---
 
@@ -604,6 +816,10 @@ replicated copy, so the bugs in §5a stay hidden. Two ways to surface them:
   If you use `KBAuthority` in per-recipient mode, its **dev checks** (on by default under the local
   client) deep-freeze `currentView`, so a stray mutation of the rendered copy throws right here
   instead of silently diverging in production — see the Phaser client README.
+
+**Server-authoritative games (§5b)** iterate with the same three tiers, but the module runs as a
+virtual `from:"server"` actor: pure `createAuthority(fakeKb)` tests, then the `authority:` option on
+`knockbox-local.js`, then optionally a real local server. See §5b for the specifics.
 
 ---
 

@@ -31,6 +31,7 @@ import {
   reconnectDelay,
   isTerminalClose,
   makeLogger,
+  normalizeReady,
   rosterAdd,
   rosterRemove,
 } from './kb-core.js';
@@ -45,7 +46,7 @@ import {
   // (analytics, third-party scripts). replaceState keeps the fragment out of the history entry.
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 
-  const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [], playerDisconnected: [], playerConnected: [] };
+  const handlers = { ready: [], message: [], playerJoined: [], playerLeft: [], playerDisconnected: [], playerConnected: [], ownerChanged: [] };
   let ready = false;
   let ws = null;
   let attempt = 0;        // consecutive failed/transient connects, for backoff
@@ -58,6 +59,15 @@ import {
     playerId: null,
     players: [],
     isHost: false,
+    // Who runs the game's authoritative logic: 'host' (a member's browser — the default) or
+    // 'server' (the game's authority module runs server-side; every client — including the lobby
+    // creator — is a guest and isHost is false). Don't branch game logic on isHost in server mode.
+    authority: 'host',
+    // The member holding the lobby powers (setLobbyOpen, kick) — the creator until the game's
+    // authority module reassigns it. A separate concept from the authority: gate owner-only UI on
+    // isOwner, never isHost.
+    ownerId: null,
+    isOwner: false,
 
     onReady(cb) { handlers.ready.push(cb); if (ready) cb(snapshot()); },
     onMessage(cb) { handlers.message.push(cb); },
@@ -69,6 +79,9 @@ import {
     // window elapses without a reconnect, onPlayerLeft fires instead.
     onPlayerDisconnected(cb) { handlers.playerDisconnected.push(cb); },
     onPlayerConnected(cb) { handlers.playerConnected.push(cb); },
+    // The lobby owner changed (a server-authority module called kb.setOwner — e.g. promoting a
+    // successor when the previous owner left). ownerId/isOwner are updated before this fires.
+    onOwnerChanged(cb) { handlers.ownerChanged.push(cb); },
 
     sendToHost(payload) { send('host', payload); },
     sendToAll(payload) { send('all', payload); },
@@ -108,7 +121,14 @@ import {
   };
 
   function snapshot() {
-    return { playerId: KnockBox.playerId, players: KnockBox.players, isHost: KnockBox.isHost };
+    return {
+      playerId: KnockBox.playerId,
+      players: KnockBox.players,
+      isHost: KnockBox.isHost,
+      authority: KnockBox.authority,
+      ownerId: KnockBox.ownerId,
+      isOwner: KnockBox.isOwner,
+    };
   }
 
   function send(to, payload) {
@@ -180,14 +200,19 @@ import {
 
   function handle(msg) {
     switch (msg.type) {
-      case 'Ready':
-        KnockBox.playerId = msg.playerId;
-        KnockBox.players = msg.players || [];
-        KnockBox.isHost = !!msg.isHost;
+      case 'Ready': {
+        const info = normalizeReady(msg);
+        KnockBox.playerId = info.playerId;
+        KnockBox.players = info.players;
+        KnockBox.isHost = info.isHost;
+        KnockBox.authority = info.authority;
+        KnockBox.ownerId = info.ownerId;
+        KnockBox.isOwner = info.isOwner;
         ready = true;
         attempt = 0; // healthy connection — reset backoff
         fire(handlers.ready, snapshot());
         break;
+      }
       case 'Game':
         fire(handlers.message, { from: msg.from, payload: msg.payload });
         break;
@@ -206,6 +231,11 @@ import {
         break;
       case 'GamePlayerConnected':
         fire(handlers.playerConnected, msg.playerId);
+        break;
+      case 'GameOwnerChanged':
+        KnockBox.ownerId = msg.ownerId;
+        KnockBox.isOwner = msg.ownerId === KnockBox.playerId;
+        fire(handlers.ownerChanged, msg.ownerId);
         break;
     }
   }
