@@ -27,5 +27,5 @@ public interface IAuthorityWordService
     /// <c>GameCatalog.Discovered</c> so the shared structures don't accumulate stale copies as games
     /// are added, removed, or their dictionaries edited in place over a long-running process.
     /// </summary>
-    void Prune(IReadOnlyCollection<GameManifest> games);
+    void Prune(IReadOnlyDictionary<string, GameCatalog.GameLocation> games);
 }

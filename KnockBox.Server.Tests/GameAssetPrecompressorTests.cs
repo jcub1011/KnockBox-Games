@@ -23,9 +23,20 @@ public class GameAssetPrecompressorTests : IDisposable
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { /* best effort */ } }
 
     private GameAssetPrecompressor New(bool gzip = true, int minBytes = 16) =>
-        new(_gamesRoot, _compressedRoot, gzip, minBytes, NullLogger<GameAssetPrecompressor>.Instance);
+        new(_compressedRoot, gzip, minBytes, NullLogger<GameAssetPrecompressor>.Instance);
 
-    private static GameManifest Manifest(string id) => new(id, id, "index.html", null, 2);
+    // The precompressor is root-agnostic: callers hand it the catalog's id -> manifest + directory map
+    // (normally GameCatalog.GameLocations), because a game's files may live under the games folder OR
+    // under the unpacked-package cache, and the manifest says which of them are never served.
+    private IReadOnlyDictionary<string, GameCatalog.GameLocation> Games(params string[] ids) =>
+        ids.ToDictionary(
+            id => id,
+            id => new GameCatalog.GameLocation(Manifest(id), Path.Combine(_gamesRoot, id)),
+            StringComparer.OrdinalIgnoreCase);
+
+    private static GameManifest Manifest(string id, string? serverAuthority = null,
+        IReadOnlyDictionary<string, AuthorityWordDeclaration>? words = null) =>
+        new(id, id, "index.html", null, 4, ServerAuthority: serverAuthority, AuthorityWords: words);
 
     // Writes a file under games/<id>/<relative> and returns its full path.
     private string WriteGameFile(string id, string relative, string content)
@@ -61,7 +72,7 @@ public class GameAssetPrecompressorTests : IDisposable
         var content = Filler();
         var src = WriteGameFile("ttt", "game.wasm", content);
 
-        New().ReconcileAll([Manifest("ttt")]);
+        New().ReconcileAll(Games("ttt"));
 
         var br = Path.Combine(_compressedRoot, "ttt", "game.wasm.br");
         var gz = Path.Combine(_compressedRoot, "ttt", "game.wasm.gz");
@@ -78,7 +89,7 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "game.js", Filler());
 
-        New(gzip: false).ReconcileAll([Manifest("ttt")]);
+        New(gzip: false).ReconcileAll(Games("ttt"));
 
         Assert.True(File.Exists(Path.Combine(_compressedRoot, "ttt", "game.js.br")));
         Assert.False(File.Exists(Path.Combine(_compressedRoot, "ttt", "game.js.gz")));
@@ -89,7 +100,7 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "thumb.png", Filler()); // .png is on the denylist
 
-        New().ReconcileAll([Manifest("ttt")]);
+        New().ReconcileAll(Games("ttt"));
 
         Assert.False(File.Exists(Path.Combine(_compressedRoot, "ttt", "thumb.png.br")));
     }
@@ -99,7 +110,7 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "tiny.js", "x");
 
-        New(minBytes: 1024).ReconcileAll([Manifest("ttt")]);
+        New(minBytes: 1024).ReconcileAll(Games("ttt"));
 
         Assert.False(File.Exists(Path.Combine(_compressedRoot, "ttt", "tiny.js.br")));
     }
@@ -114,7 +125,7 @@ public class GameAssetPrecompressorTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, bytes);
 
-        New().ReconcileAll([Manifest("ttt")]);
+        New().ReconcileAll(Games("ttt"));
 
         Assert.False(File.Exists(Path.Combine(_compressedRoot, "ttt", "blob.dat.br")));
     }
@@ -124,12 +135,12 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         var src = WriteGameFile("ttt", "game.js", Filler());
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         var updated = Filler() + "// changed";
         File.WriteAllText(src, updated);
         File.SetLastWriteTimeUtc(src, File.GetLastWriteTimeUtc(src).AddMinutes(5)); // ensure a newer mtime
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         Assert.Equal(updated, ReadBrotli(Path.Combine(_compressedRoot, "ttt", "game.js.br")));
     }
@@ -139,13 +150,13 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "game.js", Filler());
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         // Overwrite the variant with a sentinel; with the source unchanged the index marks it fresh, so a
         // second pass must skip it and leave the sentinel in place rather than recompressing.
         var br = Path.Combine(_compressedRoot, "ttt", "game.js.br");
         File.WriteAllText(br, "SENTINEL");
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         Assert.Equal("SENTINEL", File.ReadAllText(br));
     }
@@ -156,14 +167,14 @@ public class GameAssetPrecompressorTests : IDisposable
         var src = WriteGameFile("ttt", "game.js", Filler());
         var originalMtime = File.GetLastWriteTimeUtc(src);
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         // Simulate an in-place/offline edit that changes content (and length) while a timestamp-preserving
         // tool resets the mtime to its old value — the length check must still catch it.
         var updated = Filler() + " // a longer body";
         File.WriteAllText(src, updated);
         File.SetLastWriteTimeUtc(src, originalMtime);
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         Assert.Equal(updated, ReadBrotli(Path.Combine(_compressedRoot, "ttt", "game.js.br")));
     }
@@ -173,11 +184,11 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "game.js", Filler());
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         var br = Path.Combine(_compressedRoot, "ttt", "game.js.br");
         File.Delete(br);
-        pre.ReconcileAll([Manifest("ttt")]); // source unchanged, but the variant is gone
+        pre.ReconcileAll(Games("ttt")); // source unchanged, but the variant is gone
 
         Assert.True(File.Exists(br));
     }
@@ -187,12 +198,12 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "game.js", Filler());
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
         Assert.True(Directory.Exists(Path.Combine(_compressedRoot, "ttt")));
 
         // Game removed from games/ and the catalog.
         Directory.Delete(Path.Combine(_gamesRoot, "ttt"), recursive: true);
-        pre.ReconcileAll([]);
+        pre.ReconcileAll(Games());
 
         Assert.False(Directory.Exists(Path.Combine(_compressedRoot, "ttt")));
     }
@@ -203,10 +214,10 @@ public class GameAssetPrecompressorTests : IDisposable
         WriteGameFile("ttt", "a.js", Filler());
         WriteGameFile("ttt", "b.js", Filler());
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         File.Delete(Path.Combine(_gamesRoot, "ttt", "a.js"));
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         Assert.False(File.Exists(Path.Combine(_compressedRoot, "ttt", "a.js.br")));
         Assert.True(File.Exists(Path.Combine(_compressedRoot, "ttt", "b.js.br")));
@@ -216,10 +227,10 @@ public class GameAssetPrecompressorTests : IDisposable
     public void Prunes_gz_variants_once_gzip_is_disabled()
     {
         WriteGameFile("ttt", "game.js", Filler());
-        New(gzip: true).ReconcileAll([Manifest("ttt")]);
+        New(gzip: true).ReconcileAll(Games("ttt"));
         Assert.True(File.Exists(Path.Combine(_compressedRoot, "ttt", "game.js.gz")));
 
-        New(gzip: false).ReconcileAll([Manifest("ttt")]);
+        New(gzip: false).ReconcileAll(Games("ttt"));
 
         Assert.False(File.Exists(Path.Combine(_compressedRoot, "ttt", "game.js.gz")));
         Assert.True(File.Exists(Path.Combine(_compressedRoot, "ttt", "game.js.br")));
@@ -230,12 +241,12 @@ public class GameAssetPrecompressorTests : IDisposable
     {
         WriteGameFile("ttt", "game.js", Filler());
         var pre = New();
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         // Simulate a process killed mid-write: a leftover .tmp next to the real variant.
         var stray = Path.Combine(_compressedRoot, "ttt", "game.js.br.tmp");
         File.WriteAllText(stray, "partial");
-        pre.ReconcileAll([Manifest("ttt")]);
+        pre.ReconcileAll(Games("ttt"));
 
         Assert.False(File.Exists(stray));
         Assert.True(File.Exists(Path.Combine(_compressedRoot, "ttt", "game.js.br")));

@@ -23,8 +23,12 @@
 **/values.dev.yaml
 LICENSE
 README.md
-# Not part of the image: games are volume-mounted, the rest is dev-only.
+# Not part of the image: games are volume-mounted, the rest is dev-only. The two derived caches are
+# regenerable and can be large, so keep them out of the build context too (exact-path patterns, so
+# each must be listed).
 games
+games-compressed
+games-unpacked
 logs
 docs
 clients

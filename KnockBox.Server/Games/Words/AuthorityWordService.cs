@@ -68,14 +68,14 @@ public sealed class AuthorityWordService(ILogger<AuthorityWordService> logger) :
     public IWordPool? Get(string gameId, string dictKey)
         => _pools.TryGetValue(Key(gameId, dictKey), out var entry) ? entry.Pool : null;
 
-    public void Prune(IReadOnlyCollection<GameManifest> games)
+    public void Prune(IReadOnlyDictionary<string, GameCatalog.GameLocation> games)
     {
         // The (gameId, dictKey) handles still declared by the live catalog.
         var live = new HashSet<(string, string)>();
-        foreach (var g in games)
-            if (g.AuthorityWords is { Count: > 0 } decls)
+        foreach (var location in games.Values)
+            if (location.Manifest.AuthorityWords is { Count: > 0 } decls)
                 foreach (var dictKey in decls.Keys)
-                    live.Add(Key(g.Id, dictKey));
+                    live.Add(Key(location.Manifest.Id, dictKey));
 
         // Drop handles for games/dicts no longer declared.
         foreach (var handleKey in _pools.Keys)

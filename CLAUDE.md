@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-KnockBox is a game-hosting platform for multiplayer web games. Drop an HTML5/WASM game
-folder into `games/` and it becomes playable with no server code and no restart. The server
-owns discovery, lobbies, anonymous identity, and message routing; **games own all logic and
-state** (host-authoritative). Games talk to the server over WebSocket via the `web/knockbox.js`
-SDK. See `docs/INFRASTRUCTURE.md` (architecture) and `docs/GAME_DEVELOPER_GUIDE.md` (authoring).
+KnockBox is a game-hosting platform for multiplayer web games. Drop an HTML5/WASM game into
+`games/` — as a single `.kbg` package or a plain folder — and it becomes playable with no server
+code and no restart. The server owns discovery, lobbies, anonymous identity, and message routing;
+**games own all logic and state** (host-authoritative). Games talk to the server over WebSocket via
+the `web/knockbox.js` SDK. See `docs/INFRASTRUCTURE.md` (architecture),
+`docs/GAME_DEVELOPER_GUIDE.md` (authoring), and `docs/KBG_FORMAT.md` (the package format).
 
 ## Commands
 
@@ -42,9 +43,11 @@ Docker does not build locally on this machine — verify container changes via G
   hot-reload discovery). Build context is the repo root; `web/` must be present.
 
 Deployment: the `games/` directory is mounted **read-only** from a stable host path
-**outside** the image, so it survives image updates (see `docs/HOSTING.md`). On bind mounts,
-file-watch events don't propagate, so the image sets `KnockBox__GamesPollSeconds=10` as a
-polling fallback for hot-reload.
+**outside** the image, so it survives image updates (see `docs/HOSTING.md`). That read-only-ness is
+why both derived caches (`GamesCompressedRoot`, `GamesUnpackedRoot`) live outside it on their own
+writable mounts. On bind mounts, file-watch events don't propagate, so the image sets
+`KnockBox__GamesPollSeconds=10` as a polling fallback for hot-reload — which is also the only signal
+that notices a dropped `.kbg` there.
 
 ## Architecture
 
@@ -61,8 +64,10 @@ Outside the .NET solution, two Node subprojects (each its own npm package, Vites
 - `clients/phaser/` (`knockbox-phaser`) — networking client for Phaser. Ships `kb-core.js`
   (pure protocol logic, same concept as `web/kb-core.js`), `knockbox-local.js` (server-less
   local peer), and `kb-authority.js` (host-authoritative helper).
-- `tools/pack-game/` (`knockbox-pack-game`) — engine-agnostic CLI (`knockbox-pack`) that
-  assembles a drop-in `games/<id>/` folder.
+- `tools/pack-game/` (`knockbox-pack-game`) — engine-agnostic CLI (`knockbox-pack`) that packages a
+  game into a drop-in `<id>.kbg` file (`--dir` still emits the plain folder layout). `kbg.mjs` is the
+  dependency-free stored-ZIP writer + Brotli pipeline; its compress-or-store decision deliberately
+  mirrors `GameAssetPrecompressor.ShouldCompress`, so keep the two in sync.
 
 ### One `/ws` endpoint, two roles (the core idea)
 `/ws` is served on **both** the shell origin and the game origin. The **first frame** selects the role:
@@ -90,10 +95,15 @@ this is intentional (anonymous, no accounts).
   validity is re-checked against **live lobby membership** (primary) plus ticket signature/expiry.
 
 ### Game discovery & hot-reload
-`Games/GameCatalog.cs` scans `games/*/GAME.json` at startup and on change (debounced
-`FileSystemWatcher`, plus the polling fallback above). The folder name **must equal** the
-manifest `id`, and `entry` is path-traversal–checked to stay inside the game folder. The
-catalog reference is swapped atomically — readers never see a half-built catalog. A games dir
+`Games/GameCatalog.cs` scans `<root>/*/GAME.json` at startup and on change (debounced
+`FileSystemWatcher`, plus the polling fallback above). It is **multi-root**: `games/` first, then
+`GamesUnpackedRoot` (where `.kbg` packages are extracted), and the first root to claim an id wins with
+a warning on duplicates. Only `roots[0]` is watched/polled — the installer owns the other root and
+triggers rediscovery itself. The folder name **must equal** the manifest `id`, and `entry` is
+path-traversal–checked to stay inside the game folder. **One** dictionary of `GameEntry(manifest,
+directory)` is swapped atomically — two parallel dictionaries could not be swapped together, letting a
+reader pair a pre-swap manifest with a post-swap path. `TryGetDirectory`/`GameDirectories` expose the
+resolved path (never put it on `GameManifest`, which goes over the wire). A games dir
 that is missing OR present-but-unreadable (e.g. a Docker mount the UID-1654 user can't read) does
 **not** crash startup: `Discover()` catches the access error and exposes `GameCatalog.ScanError`,
 which `Hosting/DeploymentDiagnostics.cs` surfaces (with other file-access problems found at
@@ -105,12 +115,41 @@ GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
 `themeTextColor` (optional CSS colors the shell tints the in-game header chrome with;
 shell-validated, so invalid values are ignored — no CSS injection).
 
+### `.kbg` game packages
+A game can be installed as a single `.kbg` file instead of a folder: copying it into `games/` is the
+whole procedure, no CLI and no restart. Spec: `docs/KBG_FORMAT.md`. It is a ZIP with every entry
+**stored**, a `KBG.json` header (`formatVersion`, `id`, `files[]`), and per-file **Brotli** payloads
+under `<path>.br`. Brotli rather than deflate/LZMA because it is built into both .NET and Node (zero
+new dependencies, keeping the `aot` job clean) and lands within ~3% of LZMA; per-file rather than solid
+so `GameAssetPrecompressor.SeedFromPackage` can copy the blobs straight into `games-compressed/`,
+skipping the ~49s-per-asset max-effort Brotli the server otherwise pays on every cold boot.
+
+`Games/GamePackageInstaller.cs` extracts into `GamesUnpackedRoot` (the `games/` mount is read-only in
+production). It owns **no watcher and no timer**: it hangs off `GameCatalog.Discovered` and calls
+`catalog.ScheduleRescan()` — never `Discover()`, which has no mutual exclusion and could let an older
+scan win the publish. `ComputeFingerprint` therefore also stats `*.kbg`; without that, packages would
+never install under Docker, where the poll is the only signal that fires. A package must present the
+same (mtime, length) on **two** consecutive passes before it is read (so a half-copied archive never
+is), and must be absent for two passes before its game is uninstalled (so delete-then-copy doesn't
+drop a live game). `Reconcile()` returns `Pending` for both of those deferrals — the caller must
+rescan, or that work stalls until an unrelated file event arrives.
+
+`Games/GamePackageReader.cs` treats packages as untrusted: full validation before any byte is written,
+manual entry iteration (**never** `ZipFile.ExtractToDirectory` — no caps, can't pre-validate, and on
+.NET 7+ it restores the entry's Unix file mode), strict path rules, and byte caps counted **while
+copying** because declared sizes are attacker-controlled. Tests: `GamePackageReaderTests` (validation),
+`GamePackageInstallerTests` (lifecycle), `PackageFixture` (builds deliberately malformed packages).
+
 ### Serving game assets & pre-compression
 Game builds are served with stock `UseStaticFiles` (ETag + `must-revalidate`, so unchanged
 assets — esp. the large `.wasm` — return `304`). To avoid re-compressing the same static bytes
 on every cold request, `Games/GameAssetPrecompressor.cs` keeps a derived cache of max-effort
 (`CompressionLevel.SmallestSize`) `.br`/`.gz` variants under `GamesCompressedRoot`
 (default sibling `games-compressed/`, **writable, outside the read-only `games/` mount**).
+`GameAssetPrecompressor` is **root-agnostic** — `ReconcileAll` takes an id→directory map (from
+`GameCatalog.GameDirectories`), because a game's files may sit under either root. Both former uses of
+`gamesRoot` had to change together: fixing the compression side alone would leave the prune side
+deleting every package-backed game's cache each pass and recompressing it at max effort.
 Reconciliation is driven by `GameCatalog.Discovered` plus a periodic timer
 (`PrecompressReconcileSeconds`) — it (re)compresses changed files (mtime/length freshness),
 prunes orphaned variants, and removes directories for deleted games. A negotiation step on the
@@ -172,7 +211,18 @@ raised memory cap. The module queries it via `kb.words.has/count/pick/countOfLen
 (`ClrFunction`s over the shared pool — the dictionary never enters the JS heap; guarded, so unknown
 key / out-of-range → `false`/`0`/`null`). The word files are denied on the game origin
 (`GameOriginAssetGate`, server-side/secret) and skipped by the precompressor; `knockbox-local.js`
-emulates `kb.words` with server-identical `pick` ordering. Sample: `games/word-rush/`.
+emulates `kb.words` with server-identical `pick` ordering. GAME_DEVELOPER_GUIDE §5b walks a
+worked example; the docker CI job synthesizes one to prove the files 404 on the game origin.
+
+**Server authority + `.kbg` packages**: the two compose. An authority game packs like any other
+(`knockbox-pack` ships `serverAuthority` / `authorityWords` files inside the archive) and installs
+into `GamesUnpackedRoot`, so its files are **not** under `GamesRoot/<id>`. Everything server-side
+therefore resolves a game's folder through the catalog — `GameCatalog.TryGetDirectory` /
+`GameLocations`, never `gamesRoot/<id>`: `ServerAuthorityManager` takes a
+`Func<string, string?> gameDirectory` resolver, and the `Discovered` event carries
+`GameLocation(Manifest, Directory)` so the precompressor, word-pool prune and module-cache prune
+all see both. The origin gate is path-based and so is unaffected by which root won; the installer
+skips seeding compressed variants of the never-served files.
 
 ### Web SDK (`web/knockbox.js`)
 Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
@@ -206,7 +256,8 @@ All knobs use the `KnockBox:` prefix (env: `KnockBox__Key`, `__` for nesting). F
 in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`LogsRoot`,
 `GamesPort`/`GamesHost`/`GamesOrigin` (origin routing), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
-(pre-compressed game-asset cache), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
+(pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
+(`.kbg` install; the root must be writable and outside `games/`), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
 default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,

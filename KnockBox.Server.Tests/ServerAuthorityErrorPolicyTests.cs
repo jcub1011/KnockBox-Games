@@ -60,7 +60,7 @@ public class ServerAuthorityErrorPolicyTests : IDisposable
 
         var connections = new ConnectionManager();
         var lobbies = new LobbyManager();
-        var manager = new ServerAuthorityManager(_root,
+        var manager = new ServerAuthorityManager(id => Path.Combine(_root, id),
             AuthorityOptions.FromConfiguration(ConfigFactory.FromPairs(config)),
             connections, lobbies, TimeProvider.System,
             new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),

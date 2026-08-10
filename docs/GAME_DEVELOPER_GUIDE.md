@@ -42,6 +42,10 @@ games/
    └─ … any other assets (images, wasm, data) …
 ```
 
+This folder is also exactly what a `.kbg` package contains — a `.kbg` is this tree plus a small
+header, compressed into one file (see [Packaging your game](#packaging-your-game) below). Either form
+can be dropped into a server's games directory.
+
 ### `GAME.json`
 
 ```jsonc
@@ -73,24 +77,37 @@ within a second or two — **no server restart**.
 
 ### Packaging your game
 
-You can hand-assemble the folder above, but the repo ships a packer that does it for you and
-**validates your manifest against the same rules the server enforces** — so a bad `id`, a missing
-`entry`, or a thumbnail typo fails immediately instead of being silently skipped at runtime.
+To **ship** a game, package it into a single `.kbg` file. An administrator copies that one file into
+their server's games directory and the server installs it — no unzipping, no CLI on their host, no
+restart. The packer also **validates your manifest against the same rules the server enforces**, so a
+bad `id`, a missing `entry`, or a thumbnail typo fails immediately instead of being silently skipped
+at runtime.
 
 ```sh
-# Vite/Phaser: build, then package dist/ straight into games/ (hot-reloads)
+# Vite/Phaser: build, then package dist/ (lands in this platform's games/, so it installs at once)
 node tools/pack-game/pack-game.mjs --build "npm run build" --in dist --manifest export/GAME.json
 
 # Godot/Unity: export from the editor first, then package the export folder
-node tools/pack-game/pack-game.mjs --in build/web --manifest GAME.json
+node tools/pack-game/pack-game.mjs --in build/web --manifest GAME.json --version 1.4.0
 
 # Hand-written: the files are already the build
 node tools/pack-game/pack-game.mjs --in . --manifest GAME.json
 ```
 
-The output folder is named after your `id`, and the manifest/thumbnail may live outside the build
-(e.g. an `export/` folder). See [`tools/pack-game/README.md`](../tools/pack-game/README.md) for all
-options. Pass `--out dist-game` for a local inspect build that doesn't touch the platform.
+The package is named after your `id`, and the manifest/thumbnail may live outside the build (e.g. an
+`export/` folder). Pass `--out ~/builds/` to write it somewhere that doesn't touch the platform, or
+`--dir dist-game` to get the plain folder layout instead when you want to inspect exactly what was
+packaged. See [`tools/pack-game/README.md`](../tools/pack-game/README.md) for all options and
+[`KBG_FORMAT.md`](./KBG_FORMAT.md) for the format itself.
+
+Packing runs Brotli at maximum quality, which takes ~50 seconds for a 38 MB WASM export. That cost is
+paid once here instead of on every server cold start — the server copies your compressed assets
+straight into its HTTP cache. While iterating, use `--quality 4`; save the default for releases.
+
+> **Both installation methods stay supported.** A plain `games/<id>/` folder works exactly as before,
+> and is still the easiest thing to edit while developing (§11). `.kbg` is for *distribution*: one
+> file to hand over, checksum, and version. If a folder and a package supply the same `id`, the
+> folder wins and the server logs a warning.
 
 ---
 
@@ -446,6 +463,9 @@ The file is line-delimited (one word per line; blanks trimmed), ASCII-only, and 
 folder — validated like `serverAuthority` (must exist, no path traversal, size ≤
 `AuthorityMaxWordFileBytes`) and **never served on the game origin** (it's server-side data, and for
 hidden-information games the answer list is secret). `authorityWords` **requires** `serverAuthority`.
+It travels inside a `.kbg` package like every other file (`knockbox-pack` packs it and checks the
+same rules), so a packaged word game works exactly like a folder-dropped one: the server extracts
+the dictionary into its own cache and still refuses to serve it.
 
 Your module queries it through `kb.words`, keyed by the dictionary key you chose (`"en"` above):
 

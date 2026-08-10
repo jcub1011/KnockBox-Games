@@ -1,4 +1,5 @@
 using KnockBox.Contracts;
+using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -131,7 +132,10 @@ public class AuthorityWordServiceTests : IDisposable
         var manifest = new GameManifest("keep", "Keep", "index.html", null, 4,
             ServerAuthority: "authority.js",
             AuthorityWords: new Dictionary<string, AuthorityWordDeclaration> { ["en"] = new("keep.txt") });
-        svc.Prune([manifest]);
+        svc.Prune(new Dictionary<string, GameCatalog.GameLocation>
+        {
+            ["keep"] = new(manifest, Path.Combine(_dir, "keep")),
+        });
 
         Assert.NotNull(svc.Get("keep", "en")); // survivor still resolves
         Assert.Null(svc.Get("gone", "en"));    // dropped game's handle is gone

@@ -95,6 +95,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
+      # Needed by the .kbg smoke test below, which builds a package with the real packer. Pinned for
+      # the same reason as the other Node jobs rather than relying on the runner's default version.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/pack-game/package-lock.json
 
       # Build via buildx so the layers land in the gha cache that the publish job reuses — the
       # published image is then a cache-hit rebuild of these exact, smoke-tested layers, not a
@@ -164,22 +171,124 @@ jobs:
 
       - name: authorityWords dictionaries are never served from the game origin
         run: |
-          # word-rush declares authorityWords — shared, server-side dictionaries (and for
-          # hidden-information word games, secret). Its client assets serve; the word file (and any
-          # precompressed variant) must 404 on the game origin, like the authority module.
-          cp -r games/word-rush /tmp/kb-games/
+          # A game declaring authorityWords ships shared, server-side dictionaries (and for
+          # hidden-information word games, secret ones). Its client assets serve; the word file (and
+          # any precompressed variant) must 404 on the game origin, like the authority module.
+          # The game is synthesized here from tictactoe-server rather than committed: the only thing
+          # under test is the manifest declaration, and games/ is otherwise gitignored build output.
+          mkdir -p /tmp/wordsrc && cp -r games/tictactoe-server/. /tmp/wordsrc/
+          printf 'apple\nbrave\ncrane\n' > /tmp/wordsrc/words.txt
+          printf '%s' '{ "id": "word-gate", "name": "Word Gate", "entry": "index.html",
+            "thumbnail": "thumb.svg", "maxPlayers": 2, "serverAuthority": "authority.js",
+            "authorityWords": { "en": { "file": "words.txt", "caseInsensitive": true } } }' \
+            > /tmp/wordsrc/GAME.json
+          mkdir -p /tmp/kb-games/word-gate && cp -r /tmp/wordsrc/. /tmp/kb-games/word-gate/
           for i in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
               || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
-            docker logs kb 2>&1 | grep -q "Discovered game 'word-rush'" && break
+            docker logs kb 2>&1 | grep -q "Discovered game 'word-gate'" && break
             sleep 1
           done
-          docker logs kb 2>&1 | grep "Discovered game 'word-rush'"
-          curl -fsS http://localhost:8081/games/word-rush/index.html >/dev/null
-          curl -fsS http://localhost:8081/games/word-rush/game.js >/dev/null
-          ! curl -fsS http://localhost:8081/games/word-rush/authority.js >/dev/null
-          ! curl -fsS http://localhost:8081/games/word-rush/words.txt >/dev/null
-          ! curl -fsS http://localhost:8081/games/word-rush/words.txt.br >/dev/null
+          docker logs kb 2>&1 | grep "Discovered game 'word-gate'"
+          curl -fsS http://localhost:8081/games/word-gate/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/word-gate/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-gate/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-gate/words.txt >/dev/null
+          ! curl -fsS http://localhost:8081/games/word-gate/words.txt.br >/dev/null
+
+      # The container's /games is mounted READ-ONLY, so this is the only place the real constraint is
+      # exercised: the server must expand the package into its own writable cache instead.
+      - name: Hot drop-in — a .kbg package installs itself into a read-only games mount
+        run: |
+          (cd tools/pack-game && npm ci --silent)
+          # tictactoe is the only game committed in full (the others are gitignored build output), so
+          # package a copy of it under a DIFFERENT id: the plain tictactoe folder is already in the
+          # mount from the step above, and a folder deliberately wins a contested id.
+          mkdir -p /tmp/pkgsrc && cp -r games/tictactoe/. /tmp/pkgsrc/
+          sed -i 's/"id": *"tictactoe"/"id": "packaged-demo"/' /tmp/pkgsrc/GAME.json
+          grep -q '"packaged-demo"' /tmp/pkgsrc/GAME.json  # fail loudly if the manifest shape changed
+          # --quality 4 keeps CI fast; the format is identical either way.
+          node tools/pack-game/pack-game.mjs \
+            --in /tmp/pkgsrc --manifest /tmp/pkgsrc/GAME.json \
+            --out /tmp/packaged.kbg --version 1.2.3 --quality 4
+          cp /tmp/packaged.kbg /tmp/kb-games/
+          for i in $(seq 1 45); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            # A distinct marker: "Discovered game" alone would match the plain-folder step above.
+            docker logs kb 2>&1 | grep -q "Installed game package 'packaged-demo'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Installed game package 'packaged-demo'"
+          # The archive filename is deliberately NOT the id — the manifest id names the folder.
+          docker logs kb 2>&1 | grep -q "Installed game package 'packaged-demo'.*1.2.3.*packaged.kbg"
+          for i in $(seq 1 30); do
+            docker logs kb 2>&1 | grep -q "Discovered game 'packaged-demo'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'packaged-demo'"
+          # ...and the extracted game serves from the game origin like any other.
+          curl -fsS http://localhost:8081/games/packaged-demo/GAME.json >/dev/null
+          curl -fsS http://localhost:8081/games/packaged-demo/index.html >/dev/null
+          # The package's Brotli payloads are copied straight into the serving cache, so a br request
+          # is served pre-compressed without the server ever re-running max-effort Brotli.
+          docker logs kb 2>&1 | grep -q "Seeded .* pre-compressed asset(s) for 'packaged-demo'"
+          curl -fsS -H 'Accept-Encoding: br' -D- -o /dev/null \
+            http://localhost:8081/games/packaged-demo/index.html | grep -qi '^content-encoding: br'
+          # The archive itself must not be downloadable: its contents are public, but handing out a
+          # multi-megabyte uncacheable file at a guessable URL is a pointless bandwidth amplifier.
+          ! curl -fsS http://localhost:8081/games/packaged.kbg >/dev/null
+          ! curl -fsS http://localhost:8080/games/packaged.kbg >/dev/null
+
+      - name: Removing a .kbg uninstalls its game
+        run: |
+          rm /tmp/kb-games/packaged.kbg
+          for i in $(seq 1 45); do
+            docker logs kb 2>&1 | grep -q "Uninstalled game 'packaged-demo'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Uninstalled game 'packaged-demo'"
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8081/games/packaged-demo/GAME.json >/dev/null 2>&1 || break
+            sleep 1
+          done
+          ! curl -fsS http://localhost:8081/games/packaged-demo/GAME.json >/dev/null
+          # The plain folder dropped in earlier must be untouched by all of this.
+          curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
+
+      # The two features meet here: a server-authority game shipped as a package. Its module has to
+      # survive the round trip into the unpacked-package cache (the server resolves the module through
+      # the catalog's directory, NOT gamesRoot/<id>, or every packaged authority game fails to start)
+      # while still never being served.
+      - name: A server-authority game ships as a .kbg — installed, playable, module still hidden
+        run: |
+          mkdir -p /tmp/sasrc && cp -r games/tictactoe-server/. /tmp/sasrc/
+          # A distinct id: tictactoe-server is already in the mount as a plain folder from the step
+          # above, and a folder deliberately wins a contested id.
+          sed -i 's/"id": *"tictactoe-server"/"id": "packaged-authority"/' /tmp/sasrc/GAME.json
+          grep -q '"packaged-authority"' /tmp/sasrc/GAME.json  # fail loudly if the manifest changed
+          node tools/pack-game/pack-game.mjs \
+            --in /tmp/sasrc --manifest /tmp/sasrc/GAME.json \
+            --out /tmp/authority.kbg --version 2.0.0 --quality 4
+          cp /tmp/authority.kbg /tmp/kb-games/
+          for i in $(seq 1 45); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            docker logs kb 2>&1 | grep -q "Installed game package 'packaged-authority'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Installed game package 'packaged-authority'"
+          for i in $(seq 1 30); do
+            docker logs kb 2>&1 | grep -q "Discovered game 'packaged-authority'" && break
+            sleep 1
+          done
+          # Discovery is the proof the module survived: GameCatalog SKIPS a game whose declared
+          # serverAuthority is missing, so a broken extraction would leave the game absent entirely.
+          docker logs kb 2>&1 | grep "Discovered game 'packaged-authority'"
+          curl -fsS http://localhost:8081/games/packaged-authority/index.html >/dev/null
+          curl -fsS http://localhost:8081/games/packaged-authority/game.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/packaged-authority/authority.js >/dev/null
+          ! curl -fsS http://localhost:8081/games/packaged-authority/authority.js.br >/dev/null
 
       - name: Shell origin exposes only the thumbnail, never the full game build
         run: |

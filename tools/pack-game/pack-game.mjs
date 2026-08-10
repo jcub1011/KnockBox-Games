@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 /*
- * KnockBox game packer — assembles a drop-in `games/<id>/` folder from any engine.
+ * KnockBox game packer — packages any engine's build into a single drop-in `.kbg` file.
  *
  *   node pack-game.mjs --in <built-dir> --manifest <GAME.json> \
- *        [--out <gamesDir>] [--build "<cmd>"] [--cwd <dir>] \
- *        [--thumbnail <file>] [--no-clean]
+ *        [--out <file.kbg>] [--dir <dir>] [--build "<cmd>"] [--cwd <dir>] \
+ *        [--thumbnail <file>] [--version <s>] [--quality <0-11>] [--no-clean]
  *
  * "Build" (producing a folder of static files) is engine-specific and optional:
  *   • Vite/Phaser → `--build "npm run build" --in dist`
  *   • Godot/Unity → export from the editor first, then `--in build/web` (no --build)
  *   • hand-written → `--in . --manifest GAME.json` (no --build)
  *
- * "Assemble" is universal and is what this tool owns: validate the manifest against
- * the platform contract, then lay down `<out>/<id>/` = built files + GAME.json +
- * thumbnail. The output folder is named `<id>` because the platform serves assets at
- * /games/{id}/… and requires the folder name to equal the manifest id.
+ * "Assemble" is universal and is what this tool owns: validate the manifest against the platform
+ * contract, then emit `<id>.kbg` — a single file an administrator copies into the server's games
+ * directory, where it installs itself (see docs/KBG_FORMAT.md). `--dir` writes the older
+ * uncompressed `<id>/` folder layout instead, which is useful for inspecting what was packaged;
+ * the server still supports plain folders.
  *
  * Validation here covers the server's discovery rules in
  * KnockBox.Server/Games/GameCatalog.cs (Discover) and the KnockBox.Contracts
@@ -29,13 +30,17 @@
  */
 
 import { execSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { DEFAULT_QUALITY, KbgError, packKbg, readKbg } from "./kbg.mjs";
 
 const toolDir = dirname(fileURLToPath(import.meta.url));
-// tools/pack-game/ → repo root → games/. The default target is this platform's games dir.
+// tools/pack-game/ → repo root → games/. The default target is this platform's games dir, so the
+// common dev loop (pack, then watch it hot-reload) stays a single command.
 export const defaultOut = resolve(toolDir, "..", "..", "games");
+
+const VERSION = "0.2.0";
 
 // Max serverAuthority module size. Mirrors the server default
 // (AuthorityOptions.DefaultMaxScriptBytes / KnockBox:AuthorityMaxScriptBytes) — keep in sync.
@@ -110,7 +115,7 @@ export function validate(manifest, manifestPath, inDir) {
   const { id, name, entry, maxPlayers, crossOriginIsolated } = manifest;
 
   if (typeof id !== "string" || id.trim() === "") throw new PackError("GAME.json: 'id' is required.");
-  // The output folder is named <id> and must equal it, so id must be one safe segment.
+  // The installed folder is named <id> and must equal it, so id must be one safe segment.
   if (/[\\/]/.test(id) || id === "." || id === ".." || id.includes("..")) {
     throw new PackError(`GAME.json: 'id' must be a single path segment (no slashes or "..": got "${id}").`);
   }
@@ -216,12 +221,20 @@ export function validate(manifest, manifestPath, inDir) {
   return thumbSrc;
 }
 
+/** Recursively list files under a directory as absolute paths. */
+function walk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
+}
+
 /**
- * Run the build (if any), validate, and assemble the drop-in folder. Async because a declared
- * serverAuthority module is also load-checked via dynamic import.
- * @returns { target, manifest } where target is the assembled <out>/<id> path.
+ * Run the build (if any), validate the manifest, and resolve the exact set of files that make up
+ * the game — the shared front half of both output modes. Synchronous: the one async check a game
+ * can need (load-checking a serverAuthority module) is awaited by pack() around this.
+ * @returns {{ manifest: object, manifestPath: string, inDir: string, contents: Map<string,string> }}
+ *          `contents` maps a logical game-folder path to the absolute file it comes from.
  */
-export async function pack(opts) {
+function plan(opts) {
   if (!opts.in) throw new PackError("--in <built-dir> is required.");
   if (!opts.manifest) throw new PackError("--manifest <GAME.json> is required.");
 
@@ -249,11 +262,6 @@ export async function pack(opts) {
   // Validate the contract; returns the declared thumbnail's source (or null).
   let thumbSrc = validate(manifest, manifestPath, inDir);
 
-  // The two checks the static pass can't do: the module actually loads, and exports the contract.
-  if (manifest.serverAuthority) {
-    await checkAuthorityModule(resolve(inDir, manifest.serverAuthority));
-  }
-
   // --thumbnail overrides only the SOURCE file; the output name is always whatever
   // GAME.json references, since that is what the catalog serves. An override with no
   // declared thumbnail has nothing to wire up.
@@ -263,39 +271,132 @@ export async function pack(opts) {
     if (!existsSync(thumbSrc)) throw new PackError(`--thumbnail not found: ${opts.thumbnail}`);
   }
 
-  const outRoot = opts.out ? resolve(opts.out) : defaultOut;
-  const target = join(outRoot, manifest.id); // folder name === id (platform requirement)
+  // Built files first, then the manifest, then the thumbnail — later writes win, so an explicit
+  // --manifest/--thumbnail always beats a stale copy inside the build. (Same precedence the
+  // folder output has always had.)
+  const contents = new Map();
+  for (const abs of walk(inDir)) contents.set(relative(inDir, abs).split(sep).join("/"), abs);
+  contents.set("GAME.json", manifestPath);
+  if (thumbSrc) contents.set(manifest.thumbnail.split(sep).join("/"), thumbSrc);
+
+  return { manifest, manifestPath, inDir, contents };
+}
+
+/** Assemble the plain `<out>/<id>/` folder layout (debug / legacy output). */
+function emitFolder(p, opts) {
+  const outRoot = resolve(opts.dir);
+  const target = join(outRoot, p.manifest.id); // folder name === id (platform requirement)
 
   if (opts.clean !== false) rmSync(target, { recursive: true, force: true });
   mkdirSync(target, { recursive: true });
 
-  // Built static files, then the manifest, then the thumbnail (under its declared name).
-  cpSync(inDir, target, { recursive: true });
-  cpSync(manifestPath, join(target, "GAME.json"));
-  if (thumbSrc) {
-    // The declared name may be nested (e.g. "assets/thumb.svg"); cpSync of a file won't
-    // create missing parents, so make the dir first.
-    const thumbDest = join(target, manifest.thumbnail);
-    mkdirSync(dirname(thumbDest), { recursive: true });
-    cpSync(thumbSrc, thumbDest);
+  for (const [logical, abs] of p.contents) {
+    const dest = join(target, logical);
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(abs, dest);
   }
-
-  return { target, manifest };
+  return { target };
 }
 
-const HELP = `KnockBox game packer
+/** Assemble the single-file `.kbg` package (default output). */
+function emitKbg(p, opts) {
+  const entries = [...p.contents].map(([logical, abs]) => ({ path: logical, data: readFileSync(abs) }));
+
+  let built;
+  try {
+    built = packKbg({
+      entries,
+      id: p.manifest.id,
+      name: p.manifest.name,
+      version: opts.version,
+      packedBy: `knockbox-pack ${VERSION}`,
+      packedAt: new Date().toISOString(),
+      quality: opts.quality ?? DEFAULT_QUALITY,
+    });
+  } catch (err) {
+    // Surface format-contract problems as ordinary usage errors, not stack traces.
+    if (err instanceof KbgError) throw new PackError(err.message);
+    throw err;
+  }
+
+  const target = resolveKbgPath(opts, p.manifest.id);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, built.buffer);
+
+  // Read the package straight back: verifies every CRC, that the header's file list is closed in
+  // both directions, and that each payload decompresses to its declared size and hash. Cheap
+  // (decompression is ~1000x faster than compression) and it means a corrupt write never ships.
+  try {
+    readKbg(readFileSync(target));
+  } catch (err) {
+    throw new PackError(`the package written to ${target} failed verification: ${err.message}`);
+  }
+
+  return { target, stats: built.stats, header: built.header };
+}
+
+/**
+ * Decide where the .kbg goes. `--out` may name the file itself or an existing directory; with no
+ * --out it lands in this platform's games/ dir so the dev loop stays one command.
+ */
+function resolveKbgPath(opts, id) {
+  if (!opts.out) return join(defaultOut, `${id}.kbg`);
+  const out = resolve(opts.out);
+  if (opts.out.endsWith("/") || opts.out.endsWith("\\") || (existsSync(out) && statSync(out).isDirectory())) {
+    return join(out, `${id}.kbg`);
+  }
+  if (!out.toLowerCase().endsWith(".kbg")) {
+    throw new PackError(
+      `--out must name a .kbg file or an existing directory (got "${opts.out}"). ` +
+      "To write the uncompressed folder layout instead, use --dir.");
+  }
+  return out;
+}
+
+/**
+ * Run the build (if any), validate, and emit the package.
+ * @returns { target, manifest, stats?, header? } — target is the .kbg file, or the <id>/ folder
+ *          when --dir was given.
+ */
+export async function pack(opts) {
+  if (opts.dir && opts.out) throw new PackError("--out and --dir are mutually exclusive.");
+  if (opts.clean === false && !opts.dir) throw new PackError("--no-clean only applies to --dir output.");
+  if (opts.quality !== undefined && (!Number.isInteger(opts.quality) || opts.quality < 0 || opts.quality > 11)) {
+    throw new PackError("--quality must be an integer from 0 to 11.");
+  }
+
+  const p = plan(opts);
+
+  // The two checks the static pass can't do: the module actually loads, and exports the contract.
+  // Async, hence pack()'s promise — it dynamic-imports the developer's own module in their own packer.
+  if (p.manifest.serverAuthority) {
+    await checkAuthorityModule(resolve(p.inDir, p.manifest.serverAuthority));
+  }
+
+  const emitted = opts.dir ? emitFolder(p, opts) : emitKbg(p, opts);
+  return { ...emitted, manifest: p.manifest };
+}
+
+const HELP = `KnockBox game packer ${VERSION}
 
 Usage:
   node pack-game.mjs --in <built-dir> --manifest <GAME.json> [options]
 
+Packages a game into a single <id>.kbg file. Copy it into a KnockBox server's games
+directory and it installs itself — no restart. See docs/KBG_FORMAT.md.
+
 Options:
   --in <dir>          Folder of built static files to package (required).
-  --manifest <file>   Path to GAME.json (required); copied verbatim into the output.
-  --out <dir>         Target games directory (default: this platform's games/).
+  --manifest <file>   Path to GAME.json (required); copied verbatim into the package.
+  --out <file|dir>    Where to write the .kbg (default: this platform's games/<id>.kbg).
+                      A directory gets <dir>/<id>.kbg.
+  --dir <dir>         Instead of a .kbg, write the uncompressed <dir>/<id>/ folder layout.
   --build "<cmd>"     Optional build command to run before assembling (in --cwd).
   --cwd <dir>         Working directory for --build (default: current directory).
   --thumbnail <file>  Thumbnail source override (output name stays manifest.thumbnail).
-  --no-clean          Do not wipe the target <id>/ folder first (default: wipe).
+  --version <s>       Stamp a game version into the package (shown in server logs).
+  --quality <0-11>    Brotli quality (default ${DEFAULT_QUALITY} = max). Lower is much faster to pack.
+  --no-clean          With --dir: do not wipe the target <id>/ folder first.
   -h, --help          Show this help.`;
 
 /** Minimal flag parser: --key value, plus boolean flags. Zero dependencies. */
@@ -307,9 +408,12 @@ export function parseArgs(argv) {
       case "--in": opts.in = argv[++i]; break;
       case "--manifest": opts.manifest = argv[++i]; break;
       case "--out": opts.out = argv[++i]; break;
+      case "--dir": opts.dir = argv[++i]; break;
       case "--build": opts.build = argv[++i]; break;
       case "--cwd": opts.cwd = argv[++i]; break;
       case "--thumbnail": opts.thumbnail = argv[++i]; break;
+      case "--version": opts.version = argv[++i]; break;
+      case "--quality": opts.quality = Number(argv[++i]); break;
       case "--no-clean": opts.clean = false; break;
       case "-h": case "--help": opts.help = true; break;
       default: throw new PackError(`unknown argument: ${a}`);
@@ -318,13 +422,24 @@ export function parseArgs(argv) {
   return opts;
 }
 
+const size = (n) => (n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB`
+    : `${(n / 1048576).toFixed(2)} MiB`);
+
 async function cli() {
   try {
     const opts = parseArgs(process.argv.slice(2));
     if (opts.help) { console.log(HELP); return; }
-    const { target, manifest } = await pack(opts);
-    console.log(`✓ packed "${manifest.name}" → ${target}`);
-    console.log(`  drop ${manifest.id}/ into KnockBox-Games/games/ (it hot-reloads — no restart).`);
+    const { target, manifest, stats } = await pack(opts);
+    if (stats) {
+      const pct = stats.raw === 0 ? 0 : Math.round((1 - stats.packed / stats.raw) * 100);
+      console.log(`✓ packed "${manifest.name}" → ${target}`);
+      console.log(`  ${size(stats.raw)} → ${size(stats.packed)} (${pct}% smaller, ${stats.compressed} file(s) Brotli-compressed)`);
+      console.log(`  copy ${manifest.id}.kbg into your server's games dir — it installs itself, no restart.`);
+    } else {
+      console.log(`✓ packed "${manifest.name}" → ${target}`);
+      console.log(`  drop ${manifest.id}/ into your server's games dir (it hot-reloads — no restart).`);
+    }
   } catch (err) {
     if (err instanceof PackError) {
       console.error(`✗ ${err.message}`);

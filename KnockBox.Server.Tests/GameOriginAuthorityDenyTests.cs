@@ -129,10 +129,10 @@ public class GameOriginAuthorityDenyTests : IDisposable
             ("words.txt", Compressible("apple")),
             ("data/answers.txt", Compressible("crane")),
             ("game.js", Compressible("render();")));
-        var precompressor = new GameAssetPrecompressor(_root, _compressed, gzip: true, minBytes: 1,
+        var precompressor = new GameAssetPrecompressor(_compressed, gzip: true, minBytes: 1,
             NullLogger<GameAssetPrecompressor>.Instance);
 
-        precompressor.ReconcileAll(catalog.Games);
+        precompressor.ReconcileAll(catalog.GameLocations);
 
         Assert.True(File.Exists(Path.Combine(_compressed, "wg", "game.js.br")));
         Assert.False(File.Exists(Path.Combine(_compressed, "wg", "words.txt.br")));
@@ -149,10 +149,10 @@ public class GameOriginAuthorityDenyTests : IDisposable
         var catalog = CatalogWith("sa", AuthorityGame,
             ("authority.js", Compressible("export function createAuthority(kb) { /* rules */ }")),
             ("game.js", Compressible("render();")));
-        var precompressor = new GameAssetPrecompressor(_root, _compressed, gzip: true, minBytes: 1,
+        var precompressor = new GameAssetPrecompressor(_compressed, gzip: true, minBytes: 1,
             NullLogger<GameAssetPrecompressor>.Instance);
 
-        precompressor.ReconcileAll(catalog.Games);
+        precompressor.ReconcileAll(catalog.GameLocations);
 
         Assert.True(File.Exists(Path.Combine(_compressed, "sa", "game.js.br")));
         Assert.False(File.Exists(Path.Combine(_compressed, "sa", "authority.js.br")));
@@ -169,10 +169,10 @@ public class GameOriginAuthorityDenyTests : IDisposable
         var staleDir = Path.Combine(_compressed, "sa");
         Directory.CreateDirectory(staleDir);
         File.WriteAllText(Path.Combine(staleDir, "authority.js.br"), "stale variant bytes");
-        var precompressor = new GameAssetPrecompressor(_root, _compressed, gzip: true, minBytes: 1,
+        var precompressor = new GameAssetPrecompressor(_compressed, gzip: true, minBytes: 1,
             NullLogger<GameAssetPrecompressor>.Instance);
 
-        precompressor.ReconcileAll(catalog.Games);
+        precompressor.ReconcileAll(catalog.GameLocations);
 
         Assert.False(File.Exists(Path.Combine(staleDir, "authority.js.br")));
     }

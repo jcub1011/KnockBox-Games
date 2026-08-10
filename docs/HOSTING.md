@@ -1,8 +1,18 @@
 # KnockBox Games — Hosting Guide
 
 How to run a KnockBox server as an admin: Docker (recommended) or a plain desktop app. Either way,
-hosting a game is the same: **copy its folder into your games directory** — the server discovers it
-within seconds, no restart, no code.
+hosting a game is the same: **copy it into your games directory** — the server picks it up within
+seconds, no restart, no code.
+
+A game arrives in one of two forms, and both work the same way from your side:
+
+- a **`.kbg` package** — one file, the normal way a game is distributed. The server unpacks and
+  installs it for you; you never need to unzip anything or run a command.
+- a **plain folder** — the older layout, still fully supported. Handy if you're editing a game
+  yourself.
+
+If a folder and a package ever supply the same game id, the folder wins and the server logs a warning
+naming both.
 
 > For how the platform works internally, see [INFRASTRUCTURE.md](./INFRASTRUCTURE.md). For building
 > a game, see [GAME_DEVELOPER_GUIDE.md](./GAME_DEVELOPER_GUIDE.md).
@@ -17,8 +27,8 @@ docker compose up -d --build
 # → shell at http://localhost:8080, games origin at http://localhost:8081
 ```
 
-Drop a game folder into `./games/` (or your configured games dir) and it appears in the lobby
-browser within a few seconds.
+Copy a `.kbg` game package (or a plain game folder) into `./games/` — or your configured games dir —
+and it appears in the lobby browser within a few seconds.
 
 ### Run a prebuilt image
 
@@ -96,6 +106,30 @@ instance showing exactly that pattern.
 > **On TrueNAS** (or any NAS), point both at datasets: `KNOCKBOX_GAMES_DIR` at a read-only games
 > dataset and `KNOCKBOX_COMPRESSED_DIR` at a separate **writable** dataset owned by UID `1654`. Both
 > then persist across app/image updates.
+
+> **Unpacked game packages.** The same story, for the same reason. A `.kbg` cannot be expanded inside
+> the read-only games mount, so the server extracts it to `KnockBox__GamesUnpackedRoot`
+> (`/app/games-unpacked` in the image) — also **writable** and **outside** `games/`. It is
+> regenerable, so container-local storage works, but then the whole library is re-extracted on every
+> image update. To persist it, the compose file mounts the Docker-managed `knockbox-unpacked` named
+> volume by default, or set a host path:
+>
+> ```bash
+> KNOCKBOX_UNPACKED_DIR=/srv/knockbox/games-unpacked
+> ```
+>
+> Same ownership rule: a **host path** must be `chown -R 1654`, a **named volume** handles it for you.
+> Give each instance its **own** unpacked directory when several share one library — each one extracts
+> and prunes independently and they would race. Unlike the compressed cache, an unwritable location
+> here is not merely slower: `.kbg` packages **cannot install at all**, so the home page shows a
+> configuration warning saying so (plain game folders keep working). Set
+> `KnockBox__Packages: "false"` to ignore packages entirely and support only folders.
+>
+> A **server-authoritative** game packages like any other: its `serverAuthority` module and any
+> `authorityWords` dictionaries are extracted here with the rest of the build, and the server runs
+> them from this directory. They are still never served on the game origin, so this directory holds
+> files that are readable server-side but not over HTTP — worth knowing if the games library contains
+> hidden-information answer lists.
 
 There are no secrets to configure. Player identities are anonymous, per-tab, and ephemeral by
 design: a restart mints fresh ids, which is expected — in-memory lobbies drop on restart anyway.
@@ -237,6 +271,11 @@ than showing a blank or empty site. Almost always it's **permissions** — the c
 - **Pre-compressed cache / logs not writable:** `chown -R 1654` those dirs (these are warnings, not
   fatal — the server degrades to on-the-fly compression / console logging — but fix them for a proper
   deployment). Applies on the next restart.
+- **Game packages could not be installed:** either the unpacked-package dir isn't writable
+  (`chown -R 1654` it) or a specific `.kbg` is malformed — the warning names the file and the reason,
+  and the server log carries the same message. This is treated as **fatal** when `.kbg` packages are
+  present but no games got installed, because the site then has nothing to serve; it clears on its own
+  once they install. Plain game folders are unaffected either way.
 - **Platform shell missing:** the web root has no `index.html`; verify the image/publish output or
   set `KnockBox__WebRoot`.
 
@@ -263,8 +302,9 @@ win-x64/
 ├─ KnockBox.Server.exe
 ├─ appsettings.json      # optional config (KnockBox:* keys)
 ├─ web/                  # platform shell (baked in by publish)
-├─ games/                # auto-created on first run — drop game folders here
+├─ games/                # auto-created on first run — copy .kbg packages or game folders here
 ├─ games-compressed/     # auto-created — regenerable .br/.gz asset cache (rebuilt from games/)
+├─ games-unpacked/       # auto-created — games extracted from .kbg packages (regenerable)
 └─ logs/                 # daily rolling logs
 ```
 
@@ -278,8 +318,9 @@ win-x64/
 - For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow both ports through Windows
   Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is derived from the
   same host automatically.
-- To store games (and/or the compressed cache) elsewhere — a data drive, a NAS share — set
-  `KnockBox:GamesRoot` and/or `KnockBox:GamesCompressedRoot` to your paths. Three interchangeable
+- To store games (and/or the two derived caches) elsewhere — a data drive, a NAS share — set
+  `KnockBox:GamesRoot`, `KnockBox:GamesCompressedRoot` and/or `KnockBox:GamesUnpackedRoot` to your
+  paths. Three interchangeable
   ways to supply them (later wins): the `KnockBox` section of `appsettings.json` next to the exe —
   ```json
   "KnockBox": { "GamesRoot": "D:/KnockBoxData/games", "GamesCompressedRoot": "D:/KnockBoxData/games-compressed" }
@@ -288,8 +329,10 @@ win-x64/
   (`KnockBox.Server.exe --KnockBox:GamesRoot=D:\KnockBoxData\games`). An **absolute** path is used
   as-is; a **relative** one resolves against the exe's folder. Unlike Docker these are plain on-disk
   folders, so they already survive app updates — relocate them only to put data on a chosen disk or
-  share. `games-compressed/` must be writable; it's regenerable, so deleting it just triggers a
-  rebuild. (Set `KnockBox:Precompress` to `false` to skip the cache entirely.)
+  share. `games-compressed/` and `games-unpacked/` must both be writable and stay **outside**
+  `games/` (the server refuses an overlapping configuration); both are regenerable, so deleting either
+  just triggers a rebuild. (Set `KnockBox:Precompress` or `KnockBox:Packages` to `false` to skip the
+  respective one entirely.)
 
 ---
 
@@ -304,6 +347,9 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `WebRoot` / `GamesRoot` / `LogsRoot` | auto-resolved | Override where the shell / games / logs live. Relative paths resolve against the app's content root. |
 | `Precompress` | `true` | Keep a `.br`/`.gz` cache of game assets and serve it via `Accept-Encoding`; `false` ⇒ on-the-fly compression only, writes nothing. |
 | `GamesCompressedRoot` | `/app/games-compressed` (Docker) | Where the pre-compressed cache lives. Must be **writable** and outside the read-only `games/` mount. Mount a volume / host path here to persist it across updates (see above). |
+| `Packages` | `true` | Install `.kbg` game packages copied into the games dir. `false` ⇒ only plain game folders are supported. |
+| `GamesUnpackedRoot` | `/app/games-unpacked` (Docker) | Where games extracted from `.kbg` packages live. Must be **writable** and outside the read-only `games/` mount. Mount a volume / host path here to avoid re-extracting the library on every update (see above). |
+| `MaxPackageBytes` / `MaxPackageEntries` / `MaxPackageRatio` | 512 MiB / `20000` / `200` | Ceilings that stop a malformed or malicious package filling the disk. Raise `MaxPackageBytes` only if you host a genuinely larger game; `0` disables a check. |
 | `GamesPollSeconds` | `0` (off; `10` in Docker) | Polling fallback for games hot-reload where file watching doesn't work (bind mounts). |
 | `GamesPort` / `GamesHost` / `GamesOrigin` | `5115` / — / — | How the separate game origin is addressed (port in dev, subdomain or explicit origin in prod). |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-*` from a fronting reverse proxy. |

@@ -622,6 +622,17 @@ hidden-information word game the answer list is exactly the secret. The local de
 such deny — the developer's own static server serves the file so `knockbox-local.js` can fetch it to
 emulate `kb.words`.
 
+**Packaged games (`.kbg`).** Since the package format landed, "the game folder" is no longer
+`GamesRoot/<id>`: a game installed from a `.kbg` is extracted into `GamesUnpackedRoot/<id>`, which
+`GameCatalog` searches after the games directory. Nothing here changes in substance — the module and
+word files ride inside the package and land in that folder — but the *path* must always come from the
+catalog. `ServerAuthorityManager` therefore takes a `Func<string, string?> gameDirectory` resolver
+(wired to `GameCatalog.TryGetDirectory`) rather than a games root, and `GameCatalog.Discovered`
+carries `GameLocation(Manifest, Directory)` so the word-pool and module-cache prunes key on the same
+directory the game was actually found in. The deny rule is path-based (`/games/{id}/{file}` matched
+against the catalog's manifest) and so is root-agnostic by construction; the installer additionally
+skips seeding pre-compressed variants of the denied files.
+
 ---
 
 ## 12. Testing strategy & local developer loop

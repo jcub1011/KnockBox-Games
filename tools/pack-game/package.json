@@ -1,9 +1,9 @@
 {
   "name": "knockbox-pack-game",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Engine-agnostic packer that assembles a drop-in KnockBox games/<id>/ folder.",
+  "description": "Engine-agnostic packer that builds a drop-in KnockBox .kbg game package.",
   "bin": {
     "knockbox-pack": "pack-game.mjs"
   },

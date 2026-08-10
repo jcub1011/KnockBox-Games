@@ -13,8 +13,14 @@ namespace KnockBox.Server.Games;
 /// <see cref="ConnectionManager"/> and <see cref="LobbyManager"/> — never on WebSocketHandler — so
 /// the fatal-teardown path has everything it needs with no dependency cycle.
 /// </summary>
+/// <param name="gameDirectory">
+/// Resolves a game id to the directory its files live in, or null when the game is unknown. A
+/// delegate rather than a games root, because since the <c>.kbg</c> package format a game's folder
+/// is <c>GamesRoot/&lt;id&gt;</c> OR <c>GamesUnpackedRoot/&lt;id&gt;</c> — only the catalog knows
+/// which root won. Program.cs wires this to <see cref="GameCatalog.TryGetDirectory"/>.
+/// </param>
 public sealed class ServerAuthorityManager(
-    string gamesRoot,
+    Func<string, string?> gameDirectory,
     AuthorityOptions options,
     ConnectionManager connections,
     LobbyManager lobbies,
@@ -59,7 +65,16 @@ public sealed class ServerAuthorityManager(
 
         // The catalog validated all of this at discovery; re-check cheaply because a hot-reload
         // could have swapped the folder contents between discovery and this lobby's creation.
-        var gameDir = Path.GetFullPath(Path.Combine(gamesRoot, manifest.Id));
+        // The directory comes from the catalog, never from gamesRoot/<id>: a game installed from a
+        // .kbg lives under the unpacked-package cache instead, and guessing the path there would
+        // fail every packaged authority game.
+        var resolvedDir = gameDirectory(manifest.Id);
+        if (string.IsNullOrEmpty(resolvedDir))
+        {
+            error = "The game's server-authority module is missing.";
+            return false;
+        }
+        var gameDir = Path.GetFullPath(resolvedDir);
         var modulePath = ModulePath(gameDir, manifest.ServerAuthority);
         var dirPrefix = gameDir.EndsWith(Path.DirectorySeparatorChar) ? gameDir : gameDir + Path.DirectorySeparatorChar;
         if (!modulePath.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase) || !File.Exists(modulePath))
@@ -136,12 +151,12 @@ public sealed class ServerAuthorityManager(
     /// <see cref="Words.AuthorityWordService.Prune"/>): drop parsed modules for games no longer
     /// declared, so a removed game doesn't leak a parsed AST for the process lifetime. Wired to
     /// <c>GameCatalog.Discovered</c> in Program.cs; runs inline (trivial in-memory set work).</summary>
-    public void PruneModuleCache(IReadOnlyCollection<GameManifest> games)
+    public void PruneModuleCache(IReadOnlyDictionary<string, GameCatalog.GameLocation> games)
     {
         var live = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var g in games)
-            if (!string.IsNullOrWhiteSpace(g.ServerAuthority))
-                live.Add(ModulePath(Path.GetFullPath(Path.Combine(gamesRoot, g.Id)), g.ServerAuthority));
+        foreach (var location in games.Values)
+            if (!string.IsNullOrWhiteSpace(location.Manifest.ServerAuthority))
+                live.Add(ModulePath(Path.GetFullPath(location.Directory), location.Manifest.ServerAuthority));
         _modules.Prune(live);
     }
 

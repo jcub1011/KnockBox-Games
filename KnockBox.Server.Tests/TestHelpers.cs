@@ -17,7 +17,9 @@ internal static class TestAuthorities
         string? gamesRoot = null, IConfiguration? config = null,
         TimeProvider? time = null, bool isDevelopment = false,
         IAuthorityWordService? words = null) =>
-        new(gamesRoot ?? Path.GetTempPath(),
+        // The manager resolves a game's folder through a delegate (the catalog does it for real, since
+        // a packaged game lives under the unpacked-package root); tests keep the simple layout.
+        new(id => Path.Combine(gamesRoot ?? Path.GetTempPath(), id),
             AuthorityOptions.FromConfiguration(config ?? new ConfigurationBuilder().Build()),
             connections, lobbies, time ?? TimeProvider.System,
             words ?? new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),

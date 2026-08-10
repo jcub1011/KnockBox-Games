@@ -61,7 +61,9 @@ All are registered as singletons in `Program.cs`.
 
 | Component | File | Responsibility |
 |---|---|---|
-| **GameCatalog** | `Games/GameCatalog.cs` | Scans `games/*/GAME.json`, validates each entry file, registers manifests by `Id`. **Hot-reloads** via a debounced `FileSystemWatcher`; rebuilds into a local dictionary and **atomically swaps** it so readers never see a half-built catalog. |
+| **GameCatalog** | `Games/GameCatalog.cs` | Scans `<root>/*/GAME.json` across its roots (`games/` first, then the unpacked-package cache), validates each entry file, registers manifests by `Id`. First root to claim an id wins; duplicates are warned about. **Hot-reloads** via a debounced `FileSystemWatcher`; rebuilds into a local dictionary of manifest **and** serving directory, then **atomically swaps** it so readers never see a half-built catalog or a mismatched manifest/path pair. |
+| **GamePackageInstaller** | `Games/GamePackageInstaller.cs` | Installs `.kbg` game packages copied into `games/` by extracting them into `GamesUnpackedRoot` (that mount is read-only, so they can't be expanded in place). Owns no watcher or timer: it rides `GameCatalog.Discovered` and asks for rediscovery via `ScheduleRescan`. Waits for a package to present the same size+mtime on two consecutive passes before reading it, and needs two passes without the file before uninstalling. See [`KBG_FORMAT.md`](./KBG_FORMAT.md). |
+| **GamePackageReader** | `Games/GamePackageReader.cs` | Validates and extracts a package. Treats it as **untrusted input**: full validation before any byte is written, hand-rolled entry iteration (never `ZipFile.ExtractToDirectory`), strict path rules, and byte/entry/ratio caps enforced against bytes actually written rather than the sizes the package declares. |
 | **TokenService** | `Security/TokenService.cs` | HMAC-signs/verifies the **identity token** (anti-spoof, per-tab playerId) and the **game ticket** (scoped `playerId+lobbyId+gameId` credential for the data socket). The secret is always random per process — identities are ephemeral by design, so restart-invalidated tokens are intended. |
 | **LobbyManager** | `Lobbies/LobbyManager.cs` | Tracks active lobbies in a `ConcurrentDictionary`. Short 4-char codes; the creator becomes the **host**. |
 | **Lobby** | `Lobbies/Lobby.cs` | Membership for one lobby. Thread-safe add/remove; `Players` returns a snapshot under lock so broadcasts can't race join/leave. |
@@ -249,9 +251,15 @@ ever holds a lobby-scoped ticket.
 | `/`, `/shell.js`, `/knockbox.js` (shell origin) | `web/` | Platform shell + SDK. |
 | `/games/{id}/<thumbnail>` (shell origin) | `games/{id}/<thumbnail>` | **Only** the manifest's declared thumbnail for the lobby browser; every other `/games/*` path 404s here (the full build is reachable only on the game origin). |
 | `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
+| `/games/*.kbg` (either origin) | — | Always **404**. The package's contents are public (they are the game), but serving a multi-megabyte uncacheable archive at a guessable URL is a needless bandwidth amplifier. |
 
-Files are read from disk per request, and the catalog hot-reloads, so adding/editing a game needs no
-rebuild and no restart — only C# changes do.
+Game assets resolve through a `CompositeFileProvider` over `games/` then `GamesUnpackedRoot`, in the
+same order the catalog searches — so a request's manifest and its assets always come from the same
+place. Each member is a `PhysicalFileProvider`, so ETags, range requests and `sendfile` behave exactly
+as with a single root.
+
+Files are read from disk per request, and the catalog hot-reloads, so adding/editing a game (or
+copying in a `.kbg`) needs no rebuild and no restart — only C# changes do.
 
 ---
 
@@ -309,12 +317,18 @@ into `games/` and it appears within a second or two — no restart.
 | `IdentityTokenTtlHours` | `720` (30d) | Identity-token lifetime (anti-spoof, per-tab id). |
 | `GameTicketTtlHours` | `12` | Game-ticket lifetime. Long enough for a play session + reconnects; live lobby membership is the primary check. |
 | `WebRoot` / `GamesRoot` / `LogsRoot` | auto | Where the shell / games / logs live. Precedence per root: explicit config → repo discovery (dev) → the app's own directory (published exe / container). Relative paths resolve against the content root. See `Hosting/ContentPaths.cs`. |
+| `LogRetentionDays` | `31` | Daily rolling log files kept under `LogsRoot`. |
 | `GamesPollSeconds` | `0` (off) | Polling fallback for games hot-reload where `FileSystemWatcher` doesn't fire (Docker bind mounts). The Docker image sets `10`. |
 | `Precompress` | `true` | Pre-compress each game's assets once into `GamesCompressedRoot` and serve those variants via `Accept-Encoding` negotiation, instead of compressing every full-body response on the fly. `false` ⇒ the on-the-fly `ResponseCompression` fallback only. |
 | `GamesCompressedRoot` | auto (sibling `games-compressed`) | Where the pre-compressed `.br`/`.gz` cache lives. Same precedence as `GamesRoot`. **Must be writable and stay outside the read-only `games/` mount** — it is a regenerable cache, rebuilt from `games/` on boot and on change, so ephemeral storage is fine. In Docker, mount a named volume or host path here (`KNOCKBOX_COMPRESSED_DIR`) to persist it across image updates and skip the cold-boot re-compression — a bind-mounted host path must be writable by the container's UID `1654`. See [HOSTING.md](./HOSTING.md). |
 | `PrecompressGzip` | `true` | Also emit `.gz` alongside `.br` (for the rare client without Brotli). `false` ⇒ Brotli-only; existing `.gz` variants are pruned. |
 | `PrecompressMinBytes` | `1024` | Don't pre-compress files smaller than this (compression overhead outweighs the win). |
 | `PrecompressReconcileSeconds` | `60` | Periodic cache-reconcile interval. The discovery event already covers manifest add/remove/edit; this also catches **asset-only** edits under bind-mount polling (which fingerprints `GAME.json` only) and recovers from any missed event. `0` = off (rely on the discovery event). |
+| `Packages` | `true` | Install `.kbg` game packages copied into `GamesRoot`. `false` ⇒ packages are ignored entirely and only plain game folders work. See [KBG_FORMAT.md](./KBG_FORMAT.md). |
+| `GamesUnpackedRoot` | auto (sibling `games-unpacked`) | Where games extracted from `.kbg` packages live. Same precedence as `GamesRoot`. **Must be writable and stay outside the read-only `games/` mount** (the server refuses a configuration where the two overlap) — it is regenerable, so ephemeral storage is fine, but persisting it (`KNOCKBOX_UNPACKED_DIR`) avoids re-extracting the library on every container recreation. A bind-mounted host path must be writable by the container's UID `1654`; if it isn't, packages can't install and the home page says so. See [HOSTING.md](./HOSTING.md). |
+| `MaxPackageBytes` | `536870912` (512 MiB) | Cap on a package's total uncompressed size, enforced while extracting rather than from the sizes the package declares (those are attacker-controlled). `0` = no limit. |
+| `MaxPackageEntries` | `20000` | Cap on the number of files in a package. `0` = no limit. |
+| `MaxPackageRatio` | `200` | Cap on a package's uncompressed ÷ archive size. A real game lands well under 10:1; hundreds-to-one is a decompression bomb. `0` = no limit. |
 | `GamesPort` | `5115` | Dev: the port the game origin is served on. |
 | `GamesHost` | — | Prod: the games subdomain (e.g. `games.knockbox.example`); routes by `Host` header behind a proxy where every request shares one port. |
 | `GamesOrigin` | — | Prod: explicit origin the shell embeds games from (overrides `GamesHost`/`GamesPort`). |
