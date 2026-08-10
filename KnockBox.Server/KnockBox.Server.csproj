@@ -4,7 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>0128e03a-678d-4724-8fcd-5802f2a124f7</UserSecretsId>
+    <!-- No UserSecretsId: there is nothing to keep secret. Player identity is anonymous and the token
+         signing key is generated randomly per process on purpose (see Security/TokenService.cs). -->
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
     <!-- The Dockerfile builds from the repo root (web/ must be in the build context). -->
     <DockerfileContext>..\</DockerfileContext>
