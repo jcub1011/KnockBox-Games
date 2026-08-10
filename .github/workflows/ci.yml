@@ -95,6 +95,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
+      # Needed by the .kbg smoke test below, which builds a package with the real packer. Pinned for
+      # the same reason as the other Node jobs rather than relying on the runner's default version.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/pack-game/package-lock.json
 
       # Build via buildx so the layers land in the gha cache that the publish job reuses — the
       # published image is then a cache-hit rebuild of these exact, smoke-tested layers, not a
@@ -142,6 +149,60 @@ jobs:
           docker logs kb 2>&1 | grep "Discovered game 'tictactoe'"
           # ...and its assets serve from the game origin.
           curl -fsS http://localhost:8081/games/tictactoe/GAME.json >/dev/null
+          curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
+
+      # The container's /games is mounted READ-ONLY, so this is the only place the real constraint is
+      # exercised: the server must expand the package into its own writable cache instead.
+      - name: Hot drop-in — a .kbg package installs itself into a read-only games mount
+        run: |
+          (cd tools/pack-game && npm ci --silent)
+          # --quality 4 keeps CI fast; the format is identical either way.
+          node tools/pack-game/pack-game.mjs \
+            --in games/alpha-chain --manifest games/alpha-chain/GAME.json \
+            --out /tmp/packaged.kbg --version 1.2.3 --quality 4
+          cp /tmp/packaged.kbg /tmp/kb-games/
+          for i in $(seq 1 45); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            # A distinct marker: "Discovered game" alone would match the plain-folder step above.
+            docker logs kb 2>&1 | grep -q "Installed game package 'alpha-chain'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Installed game package 'alpha-chain'"
+          # The archive filename is deliberately NOT the id — the manifest id names the folder.
+          docker logs kb 2>&1 | grep -q "Installed game package 'alpha-chain'.*1.2.3.*packaged.kbg"
+          for i in $(seq 1 30); do
+            docker logs kb 2>&1 | grep -q "Discovered game 'alpha-chain'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Discovered game 'alpha-chain'"
+          # ...and the extracted game serves from the game origin like any other.
+          curl -fsS http://localhost:8081/games/alpha-chain/GAME.json >/dev/null
+          curl -fsS http://localhost:8081/games/alpha-chain/index.html >/dev/null
+          # The package's Brotli payloads are copied straight into the serving cache, so a br request
+          # is served pre-compressed without the server ever re-running max-effort Brotli.
+          docker logs kb 2>&1 | grep -q "Seeded .* pre-compressed asset(s) for 'alpha-chain'"
+          curl -fsS -H 'Accept-Encoding: br' -D- -o /dev/null \
+            http://localhost:8081/games/alpha-chain/index.html | grep -qi '^content-encoding: br'
+          # The archive itself must not be downloadable: its contents are public, but handing out a
+          # multi-megabyte uncacheable file at a guessable URL is a pointless bandwidth amplifier.
+          ! curl -fsS http://localhost:8081/games/packaged.kbg >/dev/null
+          ! curl -fsS http://localhost:8080/games/packaged.kbg >/dev/null
+
+      - name: Removing a .kbg uninstalls its game
+        run: |
+          rm /tmp/kb-games/packaged.kbg
+          for i in $(seq 1 45); do
+            docker logs kb 2>&1 | grep -q "Uninstalled game 'alpha-chain'" && break
+            sleep 1
+          done
+          docker logs kb 2>&1 | grep "Uninstalled game 'alpha-chain'"
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8081/games/alpha-chain/GAME.json >/dev/null 2>&1 || break
+            sleep 1
+          done
+          ! curl -fsS http://localhost:8081/games/alpha-chain/GAME.json >/dev/null
+          # The plain folder dropped in earlier must be untouched by all of this.
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
 
       - name: Shell origin exposes only the thumbnail, never the full game build

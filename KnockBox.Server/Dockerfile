@@ -13,13 +13,19 @@
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0 AS base
 WORKDIR /app
 # /games is the (read-only) mount point — the server only reads it, so it needs no ownership change.
-# /app/logs and /app/games-compressed must be writable by the non-root app user, so hand them to
-# $APP_UID while still root. games-compressed is the regenerable pre-compressed asset cache — it must
-# stay OUT of the read-only /games mount. It defaults to this container-local dir (rebuilt from /games
-# on boot), but you can mount a named volume or host path onto it to PERSIST it across image updates
-# and skip re-compressing the whole library each boot (see docker-compose.yml / docs/HOSTING.md). A
-# bind-mounted host path must be writable by $APP_UID; a named volume inherits this dir's ownership.
-RUN mkdir -p /games /app/logs /app/games-compressed && chown $APP_UID /app/logs /app/games-compressed
+# /app/logs, /app/games-compressed and /app/games-unpacked must be writable by the non-root app user,
+# so hand them to $APP_UID while still root. The latter two are regenerable derived caches that must
+# stay OUT of the read-only /games mount:
+#   • games-compressed — pre-compressed .br/.gz asset variants.
+#   • games-unpacked   — games extracted from .kbg packages dropped into /games. Without this the
+#                        server can only serve plain game FOLDERS, since it cannot expand a package
+#                        into a read-only mount.
+# Both default to these container-local dirs (rebuilt from /games on boot), but you can mount a named
+# volume or host path onto either to PERSIST it across image updates and skip redoing that work each
+# boot (see docker-compose.yml / docs/HOSTING.md). A bind-mounted host path must be writable by
+# $APP_UID; a named volume inherits this dir's ownership.
+RUN mkdir -p /games /app/logs /app/games-compressed /app/games-unpacked \
+    && chown $APP_UID /app/logs /app/games-compressed /app/games-unpacked
 USER $APP_UID
 # Two plain-HTTP ports keep the two-origin model working with no proxy: 8080 = shell, 8081 = games
 # origin. Map them 1:1 on the host (or set KnockBox__GamesOrigin) — the server advertises its
@@ -27,6 +33,7 @@ USER $APP_UID
 ENV KnockBox__GamesRoot=/games \
     KnockBox__LogsRoot=/app/logs \
     KnockBox__GamesCompressedRoot=/app/games-compressed \
+    KnockBox__GamesUnpackedRoot=/app/games-unpacked \
     KnockBox__GamesPort=8081 \
     KnockBox__GamesPollSeconds=10 \
     ASPNETCORE_HTTP_PORTS="8080;8081"

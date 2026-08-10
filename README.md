@@ -1,13 +1,14 @@
 # KnockBox-Games
 
 A game hosting platform for collaborative and competitive multiplayer web games. Drop an HTML5 or
-WASM game (hand-written, or a Godot/Unity web export) into `games/` and it becomes playable — no
-server code, no restart. Games use the **KnockBox** client library (`web/knockbox.js`) to send and
+WASM game (hand-written, or a Godot/Unity web export) into `games/` — as a single `.kbg` package or a
+plain folder — and it becomes playable: no server code, no restart. Games use the **KnockBox** client library (`web/knockbox.js`) to send and
 receive messages over a websocket; the server owns discovery, lobbies, anonymous player identity,
 and message routing, while games own all logic and state.
 
 - **Players:** open the site, pick a game, create or join a lobby.
-- **Server managers:** drop a game folder into `games/`; it hot-reloads in.
+- **Server managers:** copy a `.kbg` game package (or a plain game folder) into `games/`; it installs
+  itself and appears within seconds, with no restart.
 - **Game developers:** see [`docs/GAME_DEVELOPER_GUIDE.md`](docs/GAME_DEVELOPER_GUIDE.md).
 - **Architecture:** see [`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md).
 
@@ -35,6 +36,9 @@ services:
       - type: bind                       # writable cache; must be owned by UID 1654
         source: /srv/knockbox/games-compressed
         target: /app/games-compressed
+      - type: bind                       # games unpacked from .kbg; also owned by UID 1654
+        source: /srv/knockbox/games-unpacked
+        target: /app/games-unpacked
       # - type: bind                     # optional: persist logs
       #   source: /srv/knockbox/logs
       #   target: /app/logs
@@ -42,14 +46,14 @@ services:
       KnockBox__GamesPollSeconds: "10"   # hot-reload poll (bind-mount file events don't propagate)
 ```
 
-Then open `http://<host>:8080` and drop game folders into your games directory — they hot-reload
-in. The image is `linux/amd64` only. Keep the port mappings **1:1** (the server advertises its
+Then open `http://<host>:8080` and copy `.kbg` packages (or game folders) into your games directory —
+they install themselves and appear within seconds. The image is `linux/amd64` only. Keep the port mappings **1:1** (the server advertises its
 internal game port `8081` to browsers); if you must change them, pin `KnockBox__GamesOrigin`.
 
 **On TrueNAS SCALE:** keep the long-form mounts above — the short `:ro` form gets rewritten by
 the app engine into an invalid spec. Put `source:` paths under your pool (`/mnt/<pool>/...`),
 create those directories first (the host root is read-only, so Docker can't auto-create them),
-and `chown -R 1654` the writable `games-compressed` dir.
+and `chown -R 1654` the writable `games-compressed` and `games-unpacked` dirs.
 
 See [`docs/HOSTING.md`](docs/HOSTING.md) for the full guide (TrueNAS, reverse proxy / TLS,
 persistent caches, the `.env` quick start) and the repo's [`docker-compose.yml`](docker-compose.yml)
