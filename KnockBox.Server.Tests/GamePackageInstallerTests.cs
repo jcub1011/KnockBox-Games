@@ -44,11 +44,22 @@ public class GamePackageInstallerTests : IDisposable
                 Path.Combine(_unpackedRoot, id)),
             StringComparer.OrdinalIgnoreCase);
 
+    // Every drop gets its own last-write time, one second apart. Real drops are minutes apart; these
+    // are microseconds apart, and a filesystem timestamp is far coarser than that (~15.6 ms on
+    // Windows, whole seconds on some filesystems). Since the installer keys freshness and quarantine
+    // on (mtime, length) — deliberately, to avoid re-hashing hundreds of megabytes every pass — two
+    // same-length drops inside one tick are indistinguishable to it, and any test replacing a package
+    // would pass or fail on how fast the machine ran. Stamping makes "a different drop" always mean a
+    // different stamp, which is what these tests are actually about.
+    private DateTime _dropClock = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
     /// <summary>Drops a package into the games folder and returns its path.</summary>
     private string Drop(string fileName, byte[] package)
     {
         var path = Path.Combine(_gamesRoot, fileName);
         System.IO.File.WriteAllBytes(path, package);
+        _dropClock = _dropClock.AddSeconds(1);
+        System.IO.File.SetLastWriteTimeUtc(path, _dropClock);
         return path;
     }
 
@@ -175,6 +186,8 @@ public class GamePackageInstallerTests : IDisposable
     [Fact]
     public void A_replaced_package_is_reinstalled_and_stale_files_disappear()
     {
+        // Same-length payloads on purpose: the mtime is then the only half of the freshness key that
+        // distinguishes the two, which is exactly the case Drop's stamping makes deterministic.
         Drop("demo.kbg", PackageFixture.Valid("demo", null, null, new File("old.txt", PackageFixture.Bytes("old"))));
         RunToCompletion(New());
         Assert.True(System.IO.File.Exists(Installed("demo", "old.txt")));
@@ -185,6 +198,25 @@ public class GamePackageInstallerTests : IDisposable
 
         Assert.True(System.IO.File.Exists(Installed("demo", "new.txt")));
         // The swap replaces the folder wholesale, so nothing survives from the previous version.
+        Assert.False(System.IO.File.Exists(Installed("demo", "old.txt")));
+    }
+
+    [Fact]
+    public void A_replacement_with_the_same_mtime_is_reinstalled_on_its_length()
+    {
+        // The other half of the key. A filesystem whose timestamps are coarse (whole seconds on some)
+        // can hand two consecutive writes the same mtime; length still tells them apart, so a rebuilt
+        // package of a different size installs even then.
+        Drop("demo.kbg", PackageFixture.Valid("demo", null, null, new File("old.txt", PackageFixture.Bytes("old"))));
+        RunToCompletion(New());
+        var frozen = System.IO.File.GetLastWriteTimeUtc(Path.Combine(_gamesRoot, "demo.kbg"));
+
+        var path = Drop("demo.kbg", PackageFixture.Valid("demo", null, null,
+            new File("new.txt", PackageFixture.Bytes("a payload of a very different length"))));
+        System.IO.File.SetLastWriteTimeUtc(path, frozen); // pretend the clock never moved
+
+        Assert.True(RunToCompletion(New()));
+        Assert.True(System.IO.File.Exists(Installed("demo", "new.txt")));
         Assert.False(System.IO.File.Exists(Installed("demo", "old.txt")));
     }
 
