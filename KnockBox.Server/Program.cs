@@ -16,11 +16,12 @@ var builder = WebApplication.CreateBuilder(args);
 // Where web/, games/, and logs/ live: explicit config wins, else repo discovery (dev), else the
 // app base directory (published exe / container — publish bakes web/ in, games/ sits alongside or
 // is volume-mounted). See ContentPaths for the precedence rules.
-var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot) = ContentPaths.Resolve(
+var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot) = ContentPaths.Resolve(
     builder.Configuration["KnockBox:WebRoot"],
     builder.Configuration["KnockBox:GamesRoot"],
     builder.Configuration["KnockBox:LogsRoot"],
     builder.Configuration["KnockBox:GamesCompressedRoot"],
+    builder.Configuration["KnockBox:GamesUnpackedRoot"],
     builder.Environment.ContentRootPath,
     AppContext.BaseDirectory);
 
@@ -36,14 +37,22 @@ var precompressMinBytes = builder.Configuration.GetValue("KnockBox:PrecompressMi
 // fingerprints GAME.json) and is a general safety net. 0 = off (rely on the Discovered event).
 var precompressReconcileSeconds = builder.Configuration.GetValue("KnockBox:PrecompressReconcileSeconds", 60);
 
+// Install .kbg game packages dropped into the games folder. They can't be expanded in place (that mount
+// is read-only in production), so they're extracted into gamesUnpackedRoot, which GameCatalog searches
+// after gamesRoot. Master switch — off ⇒ .kbg files are ignored entirely and only plain game folders work.
+var packagesEnabled = builder.Configuration.GetValue("KnockBox:Packages", true);
+var packageLimits = GamePackageLimits.FromConfiguration(builder.Configuration);
+
 // Best-effort: a read-only games mount (recommended in Docker) or a root-owned parent must not crash
 // startup. GameCatalog and the static-file setup below tolerate a directory that is missing OR exists
-// but is unreadable; any problem found here (and a live games-access probe) is collected in
+// but is unreadable; any problem found here (and the live probes registered later) is collected in
 // DeploymentDiagnostics and surfaced on the shell home page so a misconfigured deployment is loud.
 var diagnostics = new DeploymentDiagnostics();
-var bootstrapDirs = precompressEnabled
-    ? new[] { webRoot, gamesRoot, logsRoot, gamesCompressedRoot }
-    : new[] { webRoot, gamesRoot, logsRoot };
+// The two cache roots are independent features, so each is added on its own rather than sharing one
+// conditional — the precompressed cache can be off while packages are on, and vice versa.
+List<string> bootstrapDirs = [webRoot, gamesRoot, logsRoot];
+if (precompressEnabled) bootstrapDirs.Add(gamesCompressedRoot);
+if (packagesEnabled) bootstrapDirs.Add(gamesUnpackedRoot);
 foreach (var dir in bootstrapDirs)
 {
     try { Directory.CreateDirectory(dir); }
@@ -61,9 +70,9 @@ foreach (var dir in bootstrapDirs)
 // Probe the directories the server must WRITE to (logs always; the pre-compressed cache when enabled).
 // An unwritable/wrong-owner mount here doesn't crash — the Serilog file sink and the precompressor both
 // degrade gracefully — but the admin should know, so surface it on the warning page.
-var writableDirs = precompressEnabled
-    ? new[] { (logsRoot, "Logs folder"), (gamesCompressedRoot, "Pre-compressed cache") }
-    : new[] { (logsRoot, "Logs folder") };
+List<(string Dir, string Label)> writableDirs = [(logsRoot, "Logs folder")];
+if (precompressEnabled) writableDirs.Add((gamesCompressedRoot, "Pre-compressed cache"));
+if (packagesEnabled) writableDirs.Add((gamesUnpackedRoot, "Game package cache"));
 foreach (var (dir, label) in writableDirs)
 {
     if (!Directory.Exists(dir)) continue; // a create failure above already reported it
@@ -138,12 +147,21 @@ var limits = ServerLimits.FromConfiguration(builder.Configuration);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
+// Search order matters: the administrator's games folder first, then games extracted from .kbg
+// packages, so a hand-placed folder always wins a contested id. With packages off there is only one root.
+List<string> gameRoots = packagesEnabled ? [gamesRoot, gamesUnpackedRoot] : [gamesRoot];
 builder.Services.AddSingleton(sp =>
-    new GameCatalog(gamesRoot, sp.GetRequiredService<ILogger<GameCatalog>>()));
+    new GameCatalog(gameRoots, sp.GetRequiredService<ILogger<GameCatalog>>()));
 if (precompressEnabled)
     builder.Services.AddSingleton(sp => new GameAssetPrecompressor(
-        gamesRoot, gamesCompressedRoot, precompressGzip, precompressMinBytes,
+        gamesCompressedRoot, precompressGzip, precompressMinBytes,
         sp.GetRequiredService<ILogger<GameAssetPrecompressor>>()));
+// Registered as a singleton (rather than constructed inline) so the container disposes it on shutdown.
+if (packagesEnabled)
+    builder.Services.AddSingleton(sp => new GamePackageInstaller(
+        gamesRoot, gamesUnpackedRoot, packageLimits,
+        precompressEnabled ? sp.GetRequiredService<GameAssetPrecompressor>() : null,
+        sp.GetRequiredService<ILogger<GamePackageInstaller>>()));
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 builder.Services.AddSingleton<LobbyManager>();
@@ -169,8 +187,19 @@ builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = Compre
 var app = builder.Build();
 
 // The resolved roots are the first thing an admin needs when "my games don't show up".
-app.Logger.LogInformation("Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} (precompress: {Precompress})",
-    webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled);
+app.Logger.LogInformation(
+    "Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} " +
+    "(precompress: {Precompress}), games-unpacked: {GamesUnpackedRoot} (packages: {Packages})",
+    webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled, gamesUnpackedRoot, packagesEnabled);
+
+// A writable cache root nested inside the games folder would be self-defeating: the catalog's recursive
+// watcher would see the server's own extraction writes and re-trigger itself, and every extracted game
+// would also be found under gamesRoot, colliding with its own id.
+if (packagesEnabled && (IsUnder(gamesUnpackedRoot, gamesRoot) || IsUnder(gamesRoot, gamesUnpackedRoot)))
+    diagnostics.Report("Game package cache overlaps the games folder",
+        $"KnockBox:GamesUnpackedRoot ('{gamesUnpackedRoot}') and KnockBox:GamesRoot ('{gamesRoot}') must not contain " +
+        "one another — the cache is written by the server and must stay outside the games folder it reads.",
+        blocking: true);
 // A web root without the shell means a blank site — make the misconfiguration loud and diagnosable
 // instead of silently serving nothing. (Blocking: surfaced on the home-page warning below.)
 if (!File.Exists(Path.Combine(webRoot, "index.html")))
@@ -209,7 +238,7 @@ if (forwardedHeaders)
 var catalog = app.Services.GetRequiredService<GameCatalog>();
 // Surface the games folder's live read state on the warning page: an unreadable mount no longer
 // crashes Discover() (below), it sets ScanError, which clears once a rescan succeeds.
-diagnostics.GamesAccessError = () => catalog.ScanError;
+diagnostics.AddProbe("Games folder is not accessible", () => catalog.ScanError, blocking: true);
 
 // Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
 // Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
@@ -222,6 +251,42 @@ if (precompressor is not null)
         try { precompressor.ReconcileAll(games); }
         catch (Exception ex) { app.Logger.LogError(ex, "Pre-compression reconcile failed."); }
     });
+
+// Install .kbg packages off the same signal, for the same reason: it rides the catalog's watcher and
+// polling instead of adding a second watcher, and extraction (potentially hundreds of megabytes) is
+// offloaded so it never blocks a discovery running on a timer callback. Having changed something, it
+// asks for a rediscovery through ScheduleRescan — never Discover() directly, which has no mutual
+// exclusion and could let an older scan win the publish and hide the game just installed.
+GamePackageInstaller? installer = packagesEnabled ? app.Services.GetRequiredService<GamePackageInstaller>() : null;
+if (installer is not null)
+{
+    catalog.Discovered += _ => Task.Run(() =>
+    {
+        try
+        {
+            // Rescan on Pending too, not just Changed: a package that hasn't settled yet (still being
+            // copied) or one counting down to removal needs another pass, and this is the only thing
+            // that will schedule one when no further file events arrive.
+            var (changed, pending) = installer.Reconcile();
+            if (changed || pending) catalog.ScheduleRescan();
+        }
+        catch (Exception ex) { app.Logger.LogError(ex, "Game package install pass failed."); }
+    });
+
+    // An unwritable cache root is only a non-blocking warning, and the warning PAGE is only shown for
+    // blocking issues — so without this probe an operator who ships nothing but .kbg files to a
+    // container whose cache dir wasn't chowned would see zero games and zero explanation. Packages
+    // present but no games discovered is precisely "the server can't serve its core purpose".
+    diagnostics.AddProbe("Game packages could not be installed", () =>
+        installer.PackagesObserved > 0 && catalog.Games.Count == 0 && catalog.ScanError is null
+            ? installer.InstallFailure
+                ?? $"{installer.PackagesObserved} .kbg package(s) are in '{gamesRoot}' but no games were installed. " +
+                   $"Check that '{gamesUnpackedRoot}' is writable by the server — in Docker the container runs as UID 1654."
+            : null,
+        blocking: true);
+    // Malformed packages while other games work: worth reporting, but not worth blanking the site.
+    diagnostics.AddProbe("A game package could not be installed", () => installer.InstallFailure);
+}
 
 catalog.Discover();
 catalog.StartWatching();
@@ -239,7 +304,7 @@ if (precompressor is not null && precompressReconcileSeconds > 0)
     var interval = TimeSpan.FromSeconds(precompressReconcileSeconds);
     precompressTimer = new Timer(_ =>
     {
-        try { precompressor.ReconcileAll(catalog.Games); }
+        try { precompressor.ReconcileAll(catalog.GameDirectories); }
         catch (Exception ex) { app.Logger.LogError(ex, "Scheduled pre-compression reconcile failed."); }
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => precompressTimer.Dispose());
@@ -273,7 +338,14 @@ app.UseWebSockets();
 // PhysicalFileProvider throws when its root is missing; if directory creation failed above, fall
 // back to an empty provider so the server still starts (the LogError above tells the admin why).
 IFileProvider webFiles = Directory.Exists(webRoot) ? new PhysicalFileProvider(webRoot) : new NullFileProvider();
-IFileProvider gamesFiles = Directory.Exists(gamesRoot) ? new PhysicalFileProvider(gamesRoot) : new NullFileProvider();
+// Games are served from the games folder first and the unpacked-package cache second — the same
+// precedence GameCatalog applies, so the manifest a request resolves through and the assets it fetches
+// always come from the same place. CompositeFileProvider returns the first provider whose file exists,
+// and each member is still a PhysicalFileProvider, so ETags, ranges and sendfile behave exactly as before.
+IFileProvider gamesFiles = new CompositeFileProvider(
+    Directory.Exists(gamesRoot) ? new PhysicalFileProvider(gamesRoot) : new NullFileProvider(),
+    packagesEnabled && Directory.Exists(gamesUnpackedRoot)
+        ? new PhysicalFileProvider(gamesUnpackedRoot) : new NullFileProvider());
 // The pre-compressed cache (.br/.gz siblings). NullFileProvider when precompression is off, so the
 // negotiation middleware below always misses and serving falls back to raw + on-the-fly compression.
 IFileProvider gamesCompressedFiles = precompressEnabled && Directory.Exists(gamesCompressedRoot)
@@ -392,6 +464,20 @@ app.MapWhen(
            && !ctx.Request.Path.StartsWithSegments("/ws"),
     gameApp =>
     {
+        // .kbg packages sit in the games folder, which is served under /games — and GamesStaticOptions
+        // sets ServeUnknownFileTypes, so /games/<name>.kbg would hand out the whole archive at a
+        // guessable URL, uncached. Its CONTENTS are public (they're the game), but a multi-megabyte
+        // uncacheable download is a needless bandwidth amplifier, so refuse it. The shell origin already
+        // refuses it via the thumbnail allowlist below.
+        gameApp.Use(async (ctx, next) =>
+        {
+            if (ctx.Request.Path.Value?.EndsWith(GamePackage.Extension, StringComparison.OrdinalIgnoreCase) == true)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            await next();
+        });
         gameApp.Use(async (ctx, next) =>
         {
             ApplyCrossOriginIsolation(ctx, catalog);
@@ -489,6 +575,16 @@ static string? ProbeWritable(string dir)
         try { File.Delete(probe); } catch { /* best effort: nothing to clean up if the write never landed */ }
         return ex.Message;
     }
+}
+
+// True when `inner` is the same directory as, or nested inside, `outer`. Used to reject a configuration
+// where a server-written cache root overlaps the games folder it reads.
+static bool IsUnder(string inner, string outer)
+{
+    var innerFull = Path.GetFullPath(inner).TrimEnd(Path.DirectorySeparatorChar);
+    var outerFull = Path.GetFullPath(outer).TrimEnd(Path.DirectorySeparatorChar);
+    if (string.Equals(innerFull, outerFull, StringComparison.OrdinalIgnoreCase)) return true;
+    return innerFull.StartsWith(outerFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 }
 
 // Sets cross-origin-isolation headers for a CrossOriginIsolated game's assets so threaded

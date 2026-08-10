@@ -1,9 +1,10 @@
 namespace KnockBox.Server.Hosting;
 
 /// <summary>
-/// Resolves where the server's content lives (<c>web/</c>, <c>games/</c>, <c>logs/</c>) across the
-/// three ways it runs: <c>dotnet run</c> from the repo, a published desktop folder, and a container
-/// image. Pure (no <c>IHostEnvironment</c>) so the precedence rules are unit-testable.
+/// Resolves where the server's content lives (<c>web/</c>, <c>games/</c>, <c>logs/</c>, and the two
+/// derived caches) across the three ways it runs: <c>dotnet run</c> from the repo, a published
+/// desktop folder, and a container image. Pure (no <c>IHostEnvironment</c>) so the precedence rules
+/// are unit-testable.
 ///
 /// Per root, precedence:
 /// <list type="number">
@@ -20,14 +21,18 @@ public static class ContentPaths
 {
     private const string RepoMarker = "KnockBox-Games.slnx";
 
-    // GamesCompressedRoot is a derived, regenerable cache (pre-compressed .br/.gz siblings of each
-    // game asset) — it must stay OUTSIDE the read-only games/ mount, so it gets its own root rather
-    // than living under GamesRoot. Default sibling "games-compressed".
-    public sealed record Resolved(string WebRoot, string GamesRoot, string LogsRoot, string GamesCompressedRoot);
+    // Two of these are derived, regenerable caches that the server WRITES, so both must stay OUTSIDE
+    // the read-only games/ mount and therefore get their own roots rather than living under GamesRoot:
+    //   • GamesCompressedRoot — pre-compressed .br/.gz siblings of each game asset.
+    //     Default sibling "games-compressed".
+    //   • GamesUnpackedRoot — game folders extracted from .kbg packages dropped into GamesRoot.
+    //     Default sibling "games-unpacked".
+    public sealed record Resolved(
+        string WebRoot, string GamesRoot, string LogsRoot, string GamesCompressedRoot, string GamesUnpackedRoot);
 
     public static Resolved Resolve(
         string? webRootConfig, string? gamesRootConfig, string? logsRootConfig,
-        string? gamesCompressedRootConfig,
+        string? gamesCompressedRootConfig, string? gamesUnpackedRootConfig,
         string contentRoot, string baseDirectory)
     {
         var anchor = FindRepoRoot(contentRoot) ?? FindRepoRoot(baseDirectory) ?? baseDirectory;
@@ -35,7 +40,8 @@ public static class ContentPaths
             ResolveOne(webRootConfig, "web", contentRoot, anchor),
             ResolveOne(gamesRootConfig, "games", contentRoot, anchor),
             ResolveOne(logsRootConfig, "logs", contentRoot, anchor),
-            ResolveOne(gamesCompressedRootConfig, "games-compressed", contentRoot, anchor));
+            ResolveOne(gamesCompressedRootConfig, "games-compressed", contentRoot, anchor),
+            ResolveOne(gamesUnpackedRootConfig, "games-unpacked", contentRoot, anchor));
     }
 
     private static string ResolveOne(string? configured, string name, string contentRoot, string anchor) =>
