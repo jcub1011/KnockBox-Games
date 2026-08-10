@@ -47,7 +47,8 @@ public class DeploymentDiagnosticsTests
     public void Live_games_access_error_is_appended_blocking_then_clears_when_resolved()
     {
         string? gamesError = "denied";
-        var d = new DeploymentDiagnostics { GamesAccessError = () => gamesError };
+        var d = new DeploymentDiagnostics();
+        d.AddProbe("Games folder is not accessible", () => gamesError, blocking: true);
 
         Assert.Contains(d.Current(), i => i.Title == "Games folder is not accessible" && i.Blocking);
         Assert.True(d.HasBlockingIssue());
@@ -55,6 +56,39 @@ public class DeploymentDiagnosticsTests
         gamesError = null; // permissions fixed, a rescan succeeded
         Assert.Empty(d.Current());
         Assert.False(d.HasBlockingIssue());
+    }
+
+    [Fact]
+    public void Several_probes_are_reported_independently_alongside_startup_issues()
+    {
+        string? packages = "demo.kbg is corrupt";
+        var d = new DeploymentDiagnostics();
+        d.Report("Logs folder is not writable", "permission denied");
+        d.AddProbe("Games folder is not accessible", () => null, blocking: true);
+        d.AddProbe("A game package could not be installed", () => packages);
+
+        var issues = d.Current();
+        Assert.Equal(2, issues.Count);
+        Assert.Contains(issues, i => i.Title == "Logs folder is not writable");
+        Assert.Contains(issues, i => i.Title == "A game package could not be installed" && !i.Blocking);
+        // A non-blocking package failure must not blank a site that is otherwise serving games.
+        Assert.False(d.HasBlockingIssue());
+
+        packages = null;
+        Assert.Single(d.Current());
+    }
+
+    [Fact]
+    public void A_throwing_probe_does_not_take_the_warning_page_down()
+    {
+        // The warning page is the only channel that tells an operator what is wrong, so a broken probe
+        // must degrade to a message rather than throwing out of Current().
+        var d = new DeploymentDiagnostics();
+        d.AddProbe("Games folder is not accessible", () => throw new IOException("mount vanished"), blocking: true);
+
+        var issue = Assert.Single(d.Current());
+        Assert.Contains("mount vanished", issue.Detail);
+        Assert.True(issue.Blocking);
     }
 
     [Fact]

@@ -4,7 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>0128e03a-678d-4724-8fcd-5802f2a124f7</UserSecretsId>
+    <!-- No UserSecretsId: there is nothing to keep secret. Player identity is anonymous and the token
+         signing key is generated randomly per process on purpose (see Security/TokenService.cs). -->
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
     <!-- The Dockerfile builds from the repo root (web/ must be in the build context). -->
     <DockerfileContext>..\</DockerfileContext>
@@ -28,8 +29,12 @@
     <Content Include="..\web\**" Exclude="..\web\node_modules\**;..\web\__tests__\**;..\web\package.json;..\web\package-lock.json" LinkBase="web" CopyToOutputDirectory="Never" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Microsoft.AspNetCore.OpenApi is deliberately absent: this server exposes no REST endpoints to
+       describe (only static files and /ws), so nothing ever called AddOpenApi/MapOpenApi. It also
+       pins Microsoft.OpenApi to an exact version with a published high-severity advisory
+       (GHSA-v5pm-xwqc-g5wc) that no 10.0.x bump moves off, which failed the AOT job's /warnaserror
+       gate via NuGet audit. Don't re-add it without an endpoint that needs it. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
   </ItemGroup>

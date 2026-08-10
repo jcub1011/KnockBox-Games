@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using KnockBox.Contracts;
 
 namespace KnockBox.Server.Games;
 
@@ -17,7 +16,7 @@ namespace KnockBox.Server.Games;
 /// reflected with no restart. The cache is fully regenerable, so it can live on ephemeral storage.
 /// </summary>
 public sealed class GameAssetPrecompressor(
-    string gamesRoot, string compressedRoot, bool gzip, int minBytes,
+    string compressedRoot, bool gzip, int minBytes,
     ILogger<GameAssetPrecompressor> logger)
 {
     // Contents already compressed by their own format — re-compressing wastes CPU and rarely shrinks.
@@ -25,7 +24,7 @@ public sealed class GameAssetPrecompressor(
     {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico",
         ".mp3", ".ogg", ".wav", ".mp4", ".webm", ".woff2",
-        ".br", ".gz", ".zip",
+        ".br", ".gz", ".zip", GamePackage.Extension,
     };
 
     // Coalescing gate: at most one reconcile runs at a time. A request that arrives mid-run sets
@@ -34,14 +33,20 @@ public sealed class GameAssetPrecompressor(
     private readonly Lock _gate = new();
     private bool _running;
     private bool _rerun;
-    private IReadOnlyCollection<GameManifest> _latest = [];
+    private IReadOnlyDictionary<string, string> _latest = new Dictionary<string, string>();
 
     /// <summary>
-    /// Reconciles the cache to <paramref name="games"/>. Per-file errors are logged and skipped so one
-    /// bad asset never aborts the pass. Re-entrant calls coalesce: a second caller records the new state
-    /// and returns immediately while the first caller loops to pick it up.
+    /// Reconciles the cache to <paramref name="games"/>, an id → source-directory map (take it from
+    /// <see cref="GameCatalog.GameDirectories"/> or the <c>Discovered</c> event). Per-file errors are
+    /// logged and skipped so one bad asset never aborts the pass. Re-entrant calls coalesce: a second
+    /// caller records the new state and returns immediately while the first caller loops to pick it up.
     /// </summary>
-    public void ReconcileAll(IReadOnlyCollection<GameManifest> games)
+    /// <remarks>
+    /// The caller supplies directories rather than ids-plus-a-root because a game's files may live
+    /// under the administrator's games directory OR under the unpacked-package cache. Keeping this
+    /// class root-agnostic means it never has to know which.
+    /// </remarks>
+    public void ReconcileAll(IReadOnlyDictionary<string, string> games)
     {
         lock (_gate)
         {
@@ -54,7 +59,7 @@ public sealed class GameAssetPrecompressor(
         {
             while (true)
             {
-                IReadOnlyCollection<GameManifest> snapshot;
+                IReadOnlyDictionary<string, string> snapshot;
                 lock (_gate) { snapshot = _latest; _rerun = false; }
 
                 ReconcileOnce(snapshot);
@@ -72,15 +77,13 @@ public sealed class GameAssetPrecompressor(
         }
     }
 
-    private void ReconcileOnce(IReadOnlyCollection<GameManifest> games)
+    private void ReconcileOnce(IReadOnlyDictionary<string, string> games)
     {
-        var liveIds = new HashSet<string>(games.Select(g => g.Id), StringComparer.OrdinalIgnoreCase);
         var compressed = 0;
-        var removed = PruneRemovedGames(liveIds);
+        var removed = PruneRemovedGames(games);
 
-        foreach (var id in liveIds)
+        foreach (var (id, srcDir) in games)
         {
-            var srcDir = Path.Combine(gamesRoot, id);
             if (!Directory.Exists(srcDir)) continue;
             compressed += CompressGameDir(id, srcDir);
             removed += PruneOrphanVariants(id, srcDir);
@@ -94,14 +97,19 @@ public sealed class GameAssetPrecompressor(
     }
 
     // Deletes games-compressed/<id> for any id no longer in the catalog or whose source folder is gone.
-    private int PruneRemovedGames(HashSet<string> liveIds)
+    //
+    // The source-folder test MUST use the catalog's resolved directory, not gamesRoot/<id>: a game
+    // installed from a .kbg lives under the unpacked root instead, and testing the wrong path would
+    // mark it removed on every pass — deleting its cache and forcing a full SmallestSize recompress
+    // each time the timer fires. Keep this in step with ReconcileOnce.
+    private int PruneRemovedGames(IReadOnlyDictionary<string, string> games)
     {
         if (!Directory.Exists(compressedRoot)) return 0;
         var removed = 0;
         foreach (var dir in Directory.EnumerateDirectories(compressedRoot))
         {
             var id = new DirectoryInfo(dir).Name;
-            if (liveIds.Contains(id) && Directory.Exists(Path.Combine(gamesRoot, id))) continue;
+            if (games.TryGetValue(id, out var srcDir) && Directory.Exists(srcDir)) continue;
             try { Directory.Delete(dir, recursive: true); removed++; }
             catch (Exception ex) { logger.LogWarning(ex, "Could not remove stale compressed dir {Dir}.", dir); }
         }
@@ -158,6 +166,92 @@ public sealed class GameAssetPrecompressor(
 
         SaveIndex(dir, newIndex);
         return count;
+    }
+
+    /// <summary>
+    /// Seeds the cache for one game straight from a <c>.kbg</c> package, whose payloads are already
+    /// Brotli streams. Saves re-compressing them at <see cref="CompressionLevel.SmallestSize"/>, which
+    /// takes ~50 seconds for a large WASM export and would otherwise happen on this server's next
+    /// reconcile after every install.
+    ///
+    /// Call it AFTER the game's files are in place, because freshness is keyed to the extracted file's
+    /// (mtime, length) — exactly what <see cref="CompressGameDir"/> compares on later passes, so a
+    /// seeded game is then skipped instead of recompressed.
+    /// </summary>
+    /// <param name="id">The game id; names the cache directory.</param>
+    /// <param name="sourceDir">Where the game's extracted files live.</param>
+    /// <param name="entries">
+    /// One item per packaged file: its path relative to <paramref name="sourceDir"/>, and the Brotli
+    /// blob to store (or null when the package stored that file uncompressed).
+    /// </param>
+    /// <returns>The number of variants written.</returns>
+    public int SeedFromPackage(string id, string sourceDir, IEnumerable<(string Relative, Func<Stream>? OpenBrotli)> entries)
+    {
+        var dir = Path.Combine(compressedRoot, id);
+        var index = new Dictionary<string, IndexEntry>(StringComparer.Ordinal);
+        var written = 0;
+
+        foreach (var (relative, openBrotli) in entries)
+        {
+            try
+            {
+                var src = Path.Combine(sourceDir, relative);
+                var info = new FileInfo(src);
+                if (!info.Exists) continue; // extraction skipped it; nothing to key freshness against
+                if (!ShouldCompress(info.Name, info.Length, minBytes)) continue;
+
+                if (openBrotli is null)
+                {
+                    // The packer judged this file not worth compressing. Record it as "tried, not
+                    // beneficial" — the same state Compress() returning false produces — so later
+                    // passes don't keep re-attempting it.
+                    index[relative] = new IndexEntry(info.LastWriteTimeUtc.Ticks, info.Length, Produced: false);
+                    continue;
+                }
+
+                var dest = Path.Combine(dir, relative + ".br");
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                var tmp = dest + ".tmp";
+                try
+                {
+                    using (var blob = openBrotli())
+                    using (var output = File.Create(tmp))
+                    {
+                        blob.CopyTo(output);
+                    }
+                    File.Move(tmp, dest, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best effort: orphan retried next reconcile */ } }
+                }
+
+                // A package ships Brotli only, but the index row below records Produced: true, and
+                // CompressGameDir treats "produced" as meaning EVERY expected variant is on disk (see
+                // VariantsPresent). Leaving .gz absent while gzip is enabled therefore makes the very next
+                // reconcile judge this file stale and recompress BOTH variants at SmallestSize — undoing
+                // the seed and re-paying the ~49s-per-large-asset Brotli this whole path exists to avoid.
+                // So produce the .gz here. Gzip is roughly two orders of magnitude cheaper than
+                // Brotli-11, runs once per install, and never touches the request path.
+                if (gzip) Compress(src, Path.Combine(dir, relative + ".gz"), CompressionAlgo.Gzip);
+
+                index[relative] = new IndexEntry(info.LastWriteTimeUtc.Ticks, info.Length, Produced: true);
+                written++;
+            }
+            catch (Exception ex)
+            {
+                // Leave it out of the index so the ordinary reconcile compresses it the usual way.
+                logger.LogWarning(ex, "Could not seed pre-compressed variant for {Game}/{File}; it will be compressed normally.",
+                    id, relative);
+            }
+        }
+
+        SaveIndex(dir, index);
+        if (written > 0 && logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation(
+                "Seeded {Count} pre-compressed asset(s) for '{Id}' from its package, skipping max-effort re-compression.",
+                written, id);
+        return written;
     }
 
     // True when the variants we expect for a produced file are present (so a hand-deleted .br/.gz is

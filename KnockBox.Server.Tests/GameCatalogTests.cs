@@ -128,4 +128,174 @@ public class GameCatalogTests : IDisposable
         Assert.False(catalog.TryGet("ttt", out _));
         Assert.Empty(catalog.Games);
     }
+
+    [Fact]
+    public void Skips_a_game_whose_folder_name_does_not_match_its_id()
+    {
+        // Assets are served at /games/{id}/…, so a mismatch would 404 every load. The catalog must
+        // refuse it rather than publish a game that can never load.
+        var dir = Path.Combine(_root, "wrong-folder");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "GAME.json"),
+            """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        File.WriteAllText(Path.Combine(dir, "index.html"), "<html></html>");
+
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.False(catalog.TryGet("ttt", out _));
+        Assert.Empty(catalog.Games);
+    }
+
+    [Theory]
+    [InlineData("../escape.html")]
+    [InlineData("../../etc/passwd")]
+    public void Skips_a_game_whose_entry_escapes_the_game_folder(string entry)
+    {
+        // The escape target is made to EXIST, so only the traversal check can reject this.
+        File.WriteAllText(Path.Combine(_root, "escape.html"), "<html></html>");
+        WriteGame("evil", $$"""{ "id": "evil", "name": "E", "entry": "{{entry}}", "maxPlayers": 2 }""");
+
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.False(catalog.TryGet("evil", out _));
+    }
+
+    [Fact]
+    public void TryGetDirectory_reports_where_a_games_files_live()
+    {
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGetDirectory("ttt", out var dir));
+        Assert.Equal(Path.Combine(_root, "ttt"), dir);
+        Assert.False(catalog.TryGetDirectory("nope", out _));
+        Assert.Equal(dir, catalog.GameDirectories["ttt"]);
+    }
+
+    // ── Multiple roots ────────────────────────────────────────────────────────────────────────────
+    // The second root is where .kbg packages get extracted. It is searched after the administrator's
+    // games directory, so a hand-placed folder always wins.
+
+    private string SecondRoot()
+    {
+        var dir = Path.Combine(_root, "..", "kb-unpacked-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return Path.GetFullPath(dir);
+    }
+
+    private static void WriteGameIn(string root, string id, string name)
+    {
+        var dir = Path.Combine(root, id);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "GAME.json"),
+            $$"""{ "id": "{{id}}", "name": "{{name}}", "entry": "index.html", "maxPlayers": 2 }""");
+        File.WriteAllText(Path.Combine(dir, "index.html"), "<html></html>");
+    }
+
+    [Fact]
+    public void Discovers_games_from_every_root()
+    {
+        var second = SecondRoot();
+        try
+        {
+            WriteGameIn(_root, "from-folder", "Folder Game");
+            WriteGameIn(second, "from-package", "Package Game");
+
+            using var catalog = new GameCatalog([_root, second], NullLogger<GameCatalog>.Instance);
+            catalog.Discover();
+
+            Assert.True(catalog.TryGet("from-folder", out _));
+            Assert.True(catalog.TryGet("from-package", out _));
+            Assert.Equal(Path.Combine(second, "from-package"), catalog.GameDirectories["from-package"]);
+        }
+        finally { Directory.Delete(second, recursive: true); }
+    }
+
+    [Fact]
+    public void The_first_root_wins_a_duplicate_id()
+    {
+        var second = SecondRoot();
+        try
+        {
+            WriteGameIn(_root, "dup", "Administrator's Folder");
+            WriteGameIn(second, "dup", "Extracted Package");
+
+            using var catalog = new GameCatalog([_root, second], NullLogger<GameCatalog>.Instance);
+            catalog.Discover();
+
+            Assert.True(catalog.TryGet("dup", out var m));
+            Assert.Equal("Administrator's Folder", m.Name);
+            // Crucially the DIRECTORY matches the winning manifest too: serving a mixture of one
+            // folder's manifest and another's assets is the failure this ordering prevents.
+            Assert.Equal(Path.Combine(_root, "dup"), catalog.GameDirectories["dup"]);
+            Assert.Single(catalog.Games);
+        }
+        finally { Directory.Delete(second, recursive: true); }
+    }
+
+    [Fact]
+    public void An_unreadable_secondary_root_does_not_set_a_blocking_scan_error()
+    {
+        // A derived cache root that can't be read degrades .kbg installs, but the plain folders in the
+        // games directory still work — so it must never blank a working site via ScanError.
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        var missing = Path.Combine(_root, "..", "kb-absent-" + Guid.NewGuid().ToString("N"));
+
+        using var catalog = new GameCatalog([_root, Path.GetFullPath(missing)], NullLogger<GameCatalog>.Instance);
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("ttt", out _));
+        Assert.Null(catalog.ScanError);
+    }
+
+    [Fact]
+    public void A_missing_primary_root_still_discovers_from_a_later_root()
+    {
+        // Ordering must not depend on the primary root existing: a container whose games mount hasn't
+        // appeared yet should still serve packages already extracted into the cache.
+        var second = SecondRoot();
+        try
+        {
+            WriteGameIn(second, "from-package", "Package Game");
+            Directory.Delete(_root, recursive: true);
+
+            using var catalog = new GameCatalog([_root, second], NullLogger<GameCatalog>.Instance);
+            catalog.Discover();
+
+            Assert.True(catalog.TryGet("from-package", out _));
+            Assert.Null(catalog.ScanError);
+        }
+        finally { Directory.Delete(second, recursive: true); }
+    }
+
+    [Fact]
+    public void Requires_at_least_one_root()
+    {
+        Assert.Throws<ArgumentException>(() => new GameCatalog([], NullLogger<GameCatalog>.Instance));
+    }
+
+    [Fact]
+    public async Task Polling_notices_a_dropped_package_file()
+    {
+        // A .kbg creates no directory and touches no GAME.json, so the manifest-only fingerprint used
+        // to miss it entirely. On a Docker bind mount this poll is the ONLY signal that fires, so
+        // without packages in the fingerprint they would never install there. Assert the signal
+        // reaches a Discovered handler; extraction itself is GamePackageInstaller's job.
+        using var catalog = NewCatalog();
+        catalog.Discover();
+        var rescans = 0;
+        catalog.Discovered += _ => Interlocked.Increment(ref rescans);
+        catalog.StartPolling(TimeSpan.FromMilliseconds(50));
+
+        File.WriteAllBytes(Path.Combine(_root, "something.kbg"), [1, 2, 3, 4]);
+
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && Volatile.Read(ref rescans) == 0)
+            await Task.Delay(50);
+
+        Assert.True(Volatile.Read(ref rescans) > 0, "dropping a .kbg should trigger a rescan");
+    }
 }
