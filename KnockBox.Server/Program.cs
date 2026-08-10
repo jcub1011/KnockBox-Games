@@ -374,7 +374,7 @@ StaticFileOptions GamesStaticOptions() => new()
         ctx.Context.Response.Headers.CacheControl = "public, max-age=0, must-revalidate",
 };
 
-// Serves a pre-compressed variant after NegotiateGameAssetEncoding has rewritten the path to the
+// Serves a pre-compressed variant after GameAssetNegotiation.Negotiate has rewritten the path to the
 // `.br`/`.gz` file and stashed the negotiated encoding + original content-type in HttpContext.Items.
 // We reuse StaticFileMiddleware (free ETag/304/range/Content-Length on the variant bytes) and just fix
 // up the headers in OnPrepareResponse: the body is the encoded representation, so we advertise
@@ -490,7 +490,7 @@ app.MapWhen(
         {
             gameApp.Use(async (ctx, next) =>
             {
-                NegotiateGameAssetEncoding(ctx, gamesCompressedFiles, gameContentTypes, precompressGzip);
+                GameAssetNegotiation.Negotiate(ctx, gamesCompressedFiles, gameContentTypes, precompressGzip);
                 await next();
             });
             gameApp.UseStaticFiles(GamesCompressedStaticOptions());
@@ -624,35 +624,4 @@ static bool IsAllowedThumbnail(string path, GameCatalog catalog)
 // For a GET/HEAD of /games/{id}/…, if a pre-compressed variant the client accepts exists in the cache,
 // rewrite the request to it and stash the negotiated encoding + the original (decompressed) content-type
 // so GamesCompressedStaticOptions can set the right headers. A miss leaves the request untouched.
-static void NegotiateGameAssetEncoding(
-    HttpContext ctx, IFileProvider compressedFiles,
-    Microsoft.AspNetCore.StaticFiles.IContentTypeProvider contentTypes, bool gzipEnabled)
-{
-    if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method)) return;
-    var path = ctx.Request.Path.Value;
-    if (string.IsNullOrEmpty(path)
-        || !path.StartsWith("/games/", StringComparison.OrdinalIgnoreCase)
-        || path.EndsWith('/')) return; // directory request — no single variant to serve
 
-    var encoding = GameAssetPrecompressor.NegotiateEncoding(ctx.Request.Headers.AcceptEncoding.ToString(), gzipEnabled);
-    if (encoding is null) return;
-
-    var ext = encoding == "br" ? ".br" : ".gz";
-    // PhysicalFileProvider.GetFileInfo is traversal-safe (blocks "..", rooted paths); the subpath is
-    // relative to the provider root, mirroring the "/games" RequestPath the static options use.
-    var variant = compressedFiles.GetFileInfo(path["/games".Length..] + ext);
-    if (!variant.Exists || variant.IsDirectory) return;
-
-    ctx.Items[GameAssetNegotiation.EncodingItem] = encoding;
-    ctx.Items[GameAssetNegotiation.ContentTypeItem] =
-        contentTypes.TryGetContentType(path, out var contentType) ? contentType : "application/octet-stream";
-    ctx.Request.Path = path + ext;
-}
-
-// HttpContext.Items keys passing negotiated state from NegotiateGameAssetEncoding to the static-file
-// OnPrepareResponse hook.
-internal static class GameAssetNegotiation
-{
-    public const string EncodingItem = "kb.precompressed.encoding";
-    public const string ContentTypeItem = "kb.precompressed.contentType";
-}

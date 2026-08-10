@@ -226,10 +226,14 @@ public sealed class GameAssetPrecompressor(
                     if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best effort: orphan retried next reconcile */ } }
                 }
 
-                // Gzip is NOT shipped in a package (Brotli only). Leave it to the normal reconcile,
-                // which is cheap for gzip relative to Brotli — but drop a stale variant now so a
-                // client can never be handed a .gz from a previous version of this game.
-                if (gzip) DeleteIfExists(Path.Combine(dir, relative + ".gz"));
+                // A package ships Brotli only, but the index row below records Produced: true, and
+                // CompressGameDir treats "produced" as meaning EVERY expected variant is on disk (see
+                // VariantsPresent). Leaving .gz absent while gzip is enabled therefore makes the very next
+                // reconcile judge this file stale and recompress BOTH variants at SmallestSize — undoing
+                // the seed and re-paying the ~49s-per-large-asset Brotli this whole path exists to avoid.
+                // So produce the .gz here. Gzip is roughly two orders of magnitude cheaper than
+                // Brotli-11, runs once per install, and never touches the request path.
+                if (gzip) Compress(src, Path.Combine(dir, relative + ".gz"), CompressionAlgo.Gzip);
 
                 index[relative] = new IndexEntry(info.LastWriteTimeUtc.Ticks, info.Length, Produced: true);
                 written++;

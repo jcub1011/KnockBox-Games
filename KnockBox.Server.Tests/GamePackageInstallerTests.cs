@@ -424,21 +424,31 @@ public class GamePackageInstallerTests : IDisposable
         Assert.Equal(payload, ms.ToArray());
     }
 
-    [Fact]
-    public void A_seeded_asset_is_not_recompressed_by_the_next_reconcile()
+    [Theory]
+    [InlineData(true)]   // the DEFAULT (KnockBox:PrecompressGzip), and the case that regressed
+    [InlineData(false)]
+    public void A_seeded_asset_is_not_recompressed_by_the_next_reconcile(bool gzip)
     {
         // Seeding writes an index row keyed to the extracted file's (mtime, length) — the same thing the
         // ordinary pass compares — so the asset must read as fresh rather than being redone.
+        //
+        // Both gzip settings are covered deliberately. This test originally ran only with gzip:false and
+        // so missed a real bug: CompressGameDir treats "produced" as "every expected variant is present"
+        // (VariantsPresent), so seeding only the .br left every asset looking stale under the default
+        // configuration and the next reconcile recompressed it at SmallestSize — exactly the cost seeding
+        // exists to avoid. Caught by installing a real game, not by this suite.
         Drop("demo.kbg", PackageFixture.Valid("demo", null, null,
             new File("code.js", PackageFixture.Filler(), Brotli: true)));
 
         var precompressor = new GameAssetPrecompressor(
-            _compressedRoot, gzip: false, minBytes: 16, NullLogger<GameAssetPrecompressor>.Instance);
+            _compressedRoot, gzip, minBytes: 16, NullLogger<GameAssetPrecompressor>.Instance);
         RunToCompletion(New(precompressor));
 
         var variant = Path.Combine(_compressedRoot, "demo", "code.js.br");
         var before = System.IO.File.GetLastWriteTimeUtc(variant);
         var bytesBefore = System.IO.File.ReadAllBytes(variant);
+        // With gzip on, seeding must also lay down the .gz, or the freshness check can never pass.
+        Assert.Equal(gzip, System.IO.File.Exists(Path.Combine(_compressedRoot, "demo", "code.js.gz")));
 
         precompressor.ReconcileAll(new Dictionary<string, string> { ["demo"] = Path.Combine(_unpackedRoot, "demo") });
 
@@ -456,7 +466,7 @@ public class GamePackageInstallerTests : IDisposable
             new File("code.js", PackageFixture.Filler(), Brotli: true)));
 
         var precompressor = new GameAssetPrecompressor(
-            _compressedRoot, gzip: false, minBytes: 16, NullLogger<GameAssetPrecompressor>.Instance);
+            _compressedRoot, gzip: true, minBytes: 16, NullLogger<GameAssetPrecompressor>.Instance);
         RunToCompletion(New(precompressor));
 
         var games = new Dictionary<string, string> { ["demo"] = Path.Combine(_unpackedRoot, "demo") };
