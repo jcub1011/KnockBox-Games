@@ -145,6 +145,46 @@ environment:
   KnockBox__GamesOrigin: "http://your-host:8091"
 ```
 
+The **admin** port is exempt: nothing advertises it to a browser, so you can remap 8082 to any host port
+you like (keeping it bound to `127.0.0.1`).
+
+### The admin portal
+
+A **third** origin (container port **8082**, `5116` for the desktop exe) serves an operator dashboard:
+uptime, active lobbies, registered games, memory. It is a separate origin so that no page a player can
+browse can reach it — every `/admin*` path returns 404 on the shell and games origins.
+
+**It is claim-on-first-use.** There are no accounts: until a password is set the portal is *unclaimed*,
+and the first person to open it sets the password. So:
+
+- **Do not publish the admin port.** `docker-compose.yml` maps it to `127.0.0.1:8082:8082` deliberately —
+  reachable from the host only. Reach a remote server over an SSH tunnel instead:
+  `ssh -L 8082:localhost:8082 you@server`, then open `http://localhost:8082`.
+- **Claim it right after the first `docker compose up`**, before anything else can.
+- If you do want it reachable over the network, put it behind your proxy with its own authentication and
+  set `KnockBox__AdminHost`/`KnockBox__AdminOrigin` — don't simply widen the port mapping.
+
+**Where the password lives.** Hashed (PBKDF2-HMAC-SHA256, 600k iterations) into
+`KnockBox__AdminPasswordPath` — `/app/data/admin.secret` in the image, on the `knockbox-admin` volume
+(override with `KNOCKBOX_ADMIN_DIR`). Unlike the two asset caches this is **not** regenerable: lose it and
+the portal reverts to unclaimed. Keep the volume, and note that the path must be writable by UID `1654`
+if you bind-mount a host directory.
+
+**To reset a forgotten password**, delete the secret file and reload the portal — it returns to setup mode:
+
+```bash
+docker compose exec knockbox rm -f /app/data/admin.secret
+```
+
+**Admin sessions end on restart.** The session-cookie signing key is generated per process (like the
+player token secret), so restarting the server logs every admin out. `KnockBox__AdminSessionTtlHours`
+(default 8) bounds a session otherwise.
+
+> `KnockBox__AdminHost` routes by `Host` header, exactly like `GamesHost`. Once it is set, **any** request
+> carrying that host reaches the admin app — including one arriving on the public port, where the `/admin*`
+> 404 gate no longer applies. Only set it behind a proxy you trust to set `Host`, together with
+> `KnockBox__ForwardedHeaders: "true"`.
+
 ### Behind a reverse proxy (TLS)
 
 Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-HTTP behind it:
@@ -156,6 +196,9 @@ Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-
    (the server routes by `Host` header).
 3. Lock down origins: `KnockBox__AllowedOrigins__0/1` to your two public origins.
 4. Make sure the proxy allows WebSocket upgrade on `/ws`.
+5. Leave the **admin** port (8082) out of the proxy unless you are deliberately exposing the portal —
+   see [The admin portal](#the-admin-portal). Publishing it also makes the session cookie `Secure`
+   automatically, since the server sees the forwarded `https` scheme.
 
 ### Behind Cloudflare Tunnel (cloudflared)
 
@@ -305,19 +348,28 @@ win-x64/
 ├─ games/                # auto-created on first run — copy .kbg packages or game folders here
 ├─ games-compressed/     # auto-created — regenerable .br/.gz asset cache (rebuilt from games/)
 ├─ games-unpacked/       # auto-created — games extracted from .kbg packages (regenerable)
+├─ admin.secret          # created when you set an admin password — NOT regenerable; delete to reset
 └─ logs/                 # daily rolling logs
 ```
 
-- With no configuration the exe serves the shell at `http://localhost:5114` and the games origin at
-  `http://localhost:5115` — open `http://localhost:5114`. (Both origins must be served for games to
-  load; the exe binds both automatically when you haven't set ports yourself.)
-- To change the ports, set `ASPNETCORE_URLS` (e.g. `http://0.0.0.0:5114;http://0.0.0.0:5115`) together
-  with `KnockBox:GamesPort` so the games origin matches. (The Docker image instead uses
-  `ASPNETCORE_HTTP_PORTS="8080;8081"` — same effect, the newer port-only form.) Any explicit setting
-  takes over from the built-in default above.
-- For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow both ports through Windows
-  Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is derived from the
-  same host automatically.
+- With no configuration the exe serves the shell at `http://localhost:5114`, the games origin at
+  `http://localhost:5115`, and the admin portal at `http://localhost:5116` — open
+  `http://localhost:5114`. (The first two must both be served for games to load; the exe binds all
+  three automatically when you haven't set ports yourself.)
+- To change the ports, set `ASPNETCORE_URLS` — listing **every** origin, e.g.
+  `http://0.0.0.0:5114;http://0.0.0.0:5115;http://0.0.0.0:5116` — together with `KnockBox:GamesPort`
+  and `KnockBox:AdminPort` so those origins match. (The Docker image instead uses
+  `ASPNETCORE_HTTP_PORTS="8080;8081;8082"` — same effect, the newer port-only form.) **Any explicit
+  setting takes over from the built-in default above completely**: it replaces the port list rather
+  than adding to it, so an origin you leave out is never listened on and answers `connection refused`
+  — even though `GamesPort`/`AdminPort` still route it. Watch the startup log: it prints the address
+  each origin actually bound, and warns `Admin portal is UNREACHABLE …` when the admin port isn't
+  among them.
+- For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow the **shell and games** ports
+  through Windows Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is
+  derived from the same host automatically. Leave the **admin** port on `localhost` (don't add
+  `0.0.0.0:5116`, don't open it in the firewall) unless you have set an admin password already — see
+  [The admin portal](#the-admin-portal).
 - To store games (and/or the two derived caches) elsewhere — a data drive, a NAS share — set
   `KnockBox:GamesRoot`, `KnockBox:GamesCompressedRoot` and/or `KnockBox:GamesUnpackedRoot` to your
   paths. Three interchangeable
@@ -352,6 +404,9 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `MaxPackageBytes` / `MaxPackageEntries` / `MaxPackageRatio` | 512 MiB / `20000` / `200` | Ceilings that stop a malformed or malicious package filling the disk. Raise `MaxPackageBytes` only if you host a genuinely larger game; `0` disables a check. |
 | `GamesPollSeconds` | `0` (off; `10` in Docker) | Polling fallback for games hot-reload where file watching doesn't work (bind mounts). |
 | `GamesPort` / `GamesHost` / `GamesOrigin` | `5115` / — / — | How the separate game origin is addressed (port in dev, subdomain or explicit origin in prod). |
+| `AdminPort` / `AdminHost` / `AdminOrigin` | `5116` (`8082` Docker) / — / — | How the admin portal origin is addressed. Do **not** expose it publicly — see [The admin portal](#the-admin-portal). |
+| `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. |
+| `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-*` from a fronting reverse proxy. |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist — set for production. |
 

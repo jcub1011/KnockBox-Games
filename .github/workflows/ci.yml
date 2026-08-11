@@ -121,7 +121,7 @@ jobs:
         run: |
           mkdir -p /tmp/kb-games
           docker run -d --name kb \
-            -p 8080:8080 -p 8081:8081 \
+            -p 8080:8080 -p 8081:8081 -p 8082:8082 \
             -v /tmp/kb-games:/games:ro \
             -e KnockBox__GamesPollSeconds=2 \
             knockbox:ci
@@ -135,6 +135,46 @@ jobs:
           curl -fsS http://localhost:8080/ | grep -qi '<html'
           curl -fsS http://localhost:8080/shell.js >/dev/null
           curl -fsS http://localhost:8081/knockbox.js >/dev/null
+
+      # The admin portal is a THIRD origin, and the only thing that makes it reachable is its port being
+      # listed in the image's ASPNETCORE_HTTP_PORTS — an explicit port list REPLACES the built-in defaults
+      # in Program.cs rather than adding to them. It once shipped routed-but-never-bound, answering
+      # "connection refused" while the startup log claimed it was up, so assert the socket end to end here:
+      # unit tests can only cover the routing predicates, never whether Kestrel actually bound the port.
+      - name: Admin portal is reachable on its own origin, and only there
+        run: |
+          curl -fsS http://localhost:8082/ | grep -qi '<html'
+          curl -fsS http://localhost:8082/admin.js >/dev/null
+          curl -fsS http://localhost:8082/admin.css >/dev/null
+          # Unclaimed on a fresh container: no password set yet, nobody authenticated.
+          curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"configured":false'
+          curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"authenticated":false'
+          # Privileged data needs a session — an unauthenticated poll must be refused, not served.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8082/admin/api/system/status)" = "401" ]
+          # ...and the portal must be invisible from the two PUBLIC origins, which players can reach.
+          ! curl -fsS http://localhost:8080/admin/ >/dev/null
+          ! curl -fsS http://localhost:8080/admin/admin.js >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/auth/status >/dev/null
+          ! curl -fsS http://localhost:8081/admin/ >/dev/null
+
+      - name: Admin password can be set, and only once
+        run: |
+          # The claim-on-first-use setup path, plus the session cookie it issues. Also pins that the
+          # password lands on the /app/data volume rather than the read-only-ish image dir: if the write
+          # failed, setup would report success:false and this step would catch it.
+          curl -fsS -c /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"ci-admin-password"}' \
+            http://localhost:8082/admin/api/auth/setup | grep -q '"success":true'
+          grep -q kb_admin_session /tmp/kb-admin-cookies
+          docker exec kb test -f /app/data/admin.secret
+          # Now claimed, so a second setup attempt must be refused — otherwise anyone could re-claim it.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"attacker"}' http://localhost:8082/admin/api/auth/setup)" = "400" ]
+          # A wrong password is rejected; the right one authenticates and unlocks the dashboard data.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"wrong"}' http://localhost:8082/admin/api/auth/login)" = "401" ]
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/system/status \
+            | grep -q '"uptime"'
 
       - name: Hot drop-in — game appears via the polling fallback
         run: |
@@ -298,10 +338,14 @@ jobs:
           ! curl -fsS http://localhost:8080/games/tictactoe/index.html >/dev/null
           ! curl -fsS http://localhost:8080/games/tictactoe/GAME.json >/dev/null
 
-      - name: Startup logs are sane (no blank-site error, roots resolved)
+      - name: Startup logs are sane (no blank-site error, roots resolved, admin origin bound)
         run: |
           docker logs kb 2>&1 | grep -q "Content roots"
           ! docker logs kb 2>&1 | grep -q "has no index.html"
+          # The admin origin reports the address Kestrel actually bound. The warning is the signal that a
+          # port list somewhere dropped an origin, which is how the portal once shipped unreachable.
+          docker logs kb 2>&1 | grep -q "Admin portal listening at"
+          ! docker logs kb 2>&1 | grep -q "Admin portal is UNREACHABLE"
 
       - name: Dump container logs
         if: always()

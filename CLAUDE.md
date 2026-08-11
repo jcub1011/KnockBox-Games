@@ -39,8 +39,10 @@ Docker does not build locally on this machine — verify container changes via G
 - `web` — shell + SDK Vitest tests.
 - `clients-phaser` — Phaser client lint + tests.
 - `pack-game` — packer tool tests.
-- `docker` — image build + smoke test (boots the container, checks shell/SDK serving and
-  hot-reload discovery). Build context is the repo root; `web/` must be present.
+- `docker` — image build + smoke test (boots the container, checks shell/SDK serving, hot-reload
+  discovery, and that the admin portal binds its own port, claims a password once and stays 404 on the
+  public origins — the only place a real listener is exercised). Build context is the repo root;
+  `web/` must be present.
 
 Deployment: the `games/` directory is mounted **read-only** from a stable host path
 **outside** the image, so it survives image updates (see `docs/HOSTING.md`). That read-only-ness is
@@ -78,11 +80,28 @@ Outside the .NET solution, two Node subprojects (each its own npm package, Vites
   lobby-scoped ticket, then relays `Game{to, payload}` messages where `to` ∈
   `{"host","all","<playerId>"}`; the server stamps `from` and fans out. Handled by `RunDataAsync`.
 
-### Two origins
+### Three origins
 Shell origin (5114 dev) serves the shell UI + SDK; game origin (5115 dev, a subdomain in
 prod) serves `/games/{id}/…` builds. Games run in **cross-origin iframes** so untrusted game
 code cannot read the shell's identity token. `Hosting/OriginRouting.cs` resolves which origin
 a request is on; `Hosting/ContentPaths.cs` resolves the web/games/logs locations.
+
+Third: the **admin origin** (`AdminPort`, 5116 dev / 8082 image; `AdminHost`/`AdminOrigin` as a subdomain
+in prod), an operator dashboard served from `web/admin/` at that origin's **root**, API under
+`/admin/api/*`, claimed in a `MapWhen` branch ahead of the game and shell pipelines. Every `/admin*` path
+404s on the two public origins. Auth is one PBKDF2-hashed password in `AdminPasswordPath`
+(`Security/AdminAuthService.cs`) plus an HMAC session cookie whose key is per-process — **claim-on-first-use**:
+while no password is set, whoever reaches the origin sets it, which is why compose binds 8082 to loopback.
+
+**Port-binding trap (this shipped broken once):** `Program.cs` binds all three origins itself *only* when
+nothing else set ports. Any explicit `ASPNETCORE_URLS` / `ASPNETCORE_HTTP_PORTS` / `Kestrel:Endpoints`
+**replaces** that list instead of adding to it, and `GamesPort`/`AdminPort` only tell the *router* which
+port maps to which origin — they bind nothing. So every origin must be listed in `launchSettings.json`
+`applicationUrl`, the Dockerfile's `ASPNETCORE_HTTP_PORTS`, and any env you set, or it is routed but never
+listened on and answers `connection refused`. A startup check logs the address each origin actually bound
+and warns when the admin port isn't among them; `OriginPortBindingTests` asserts the repo's own files stay
+in sync. NOTE: `launchSettings.json` is parsed as **strict JSON** — a `//` comment there makes the whole
+profile silently fail to apply (falling back to Production + the built-in ports).
 
 ### Identity & tickets (ephemeral by design)
 `Security/TokenService.cs` issues HMAC-SHA256 signed tokens. The signing secret is **random
@@ -254,7 +273,9 @@ setup carefully to keep the `aot` CI job green.
 
 All knobs use the `KnockBox:` prefix (env: `KnockBox__Key`, `__` for nesting). Full reference
 in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`LogsRoot`,
-`GamesPort`/`GamesHost`/`GamesOrigin` (origin routing), `GamesPollSeconds` (hot-reload
+`GamesPort`/`GamesHost`/`GamesOrigin` and `AdminPort`/`AdminHost`/`AdminOrigin` (origin routing),
+`AdminPasswordPath`/`AdminSessionTtlHours` (admin portal; the path must be writable and, in a container,
+on a persisted volume outside the image), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
 (`.kbg` install; the root must be writable and outside `games/`), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),

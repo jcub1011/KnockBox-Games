@@ -218,10 +218,10 @@ truth.
 
 ---
 
-## 6. The two browser origins
+## 6. The browser origins
 
 For isolation, the **shell** and **games** are served from different origins (a second port in dev,
-a subdomain in prod):
+a subdomain in prod). A third, operator-only **admin** origin sits alongside them — see below:
 
 - **Shell origin** — `web/shell.js` + `index.html`. Owns the single **control** socket, identity
   (per-tab token in `sessionStorage`), the lobby browser, and the waiting room. When a game starts
@@ -242,6 +242,32 @@ ever holds a lobby-scoped ticket.
 └──────────────────────────────┘        └──────────────────────────────┘
 ```
 
+### The admin origin (operators only)
+
+A **third** origin serves the operator dashboard: `AdminPort` (`5116` dev, `8082` in the image), or
+`AdminHost`/`AdminOrigin` as a subdomain in prod. `Hosting/OriginRouting.cs` `IsAdminOrigin` decides it the
+same way `IsGameOrigin` decides the game origin — by `Connection.LocalPort`, or by `Host` header when
+`AdminHost` is set — and `Program.cs` claims those requests in a `MapWhen` branch **before** the game and
+shell pipelines.
+
+- **Files:** `web/admin/` is served at the branch's **root**, so the portal is `/` on the admin origin
+  (`web/admin/index.html`), with its API under `/admin/api/*`. Players' files, `/games/*` builds and
+  thumbnails are not served here at all.
+- **Invisible from the public origins:** every `/admin*` path returns **404** on the shell and game
+  origins — including `web/admin`'s own assets, which the shell's `web/`-rooted file provider would
+  otherwise happily serve at `/admin/…`.
+- **Auth:** a single password, hashed with PBKDF2-HMAC-SHA256 (600k iterations, 16-byte salt) into
+  `AdminPasswordPath`. There are no accounts. On first run the portal is **unclaimed** and whoever reaches
+  it sets the password, so the admin origin must not be publicly reachable before that happens — see
+  [HOSTING.md](./HOSTING.md). Sessions are an HMAC-signed cookie (`HttpOnly`, `SameSite=Strict`, `Secure`
+  whenever the request is HTTPS) whose signing key is per-process, so a restart logs admins out.
+- **Not on the games/shell path:** because the branch is selected before them, an admin request never
+  touches the precompressed-asset negotiation, the `.kbg` gate, or COOP/COEP handling.
+
+Note that `/ws` is mapped ahead of all three branches so the one socket endpoint is reachable on every
+origin — that is deliberate for the game origin (the data socket connects back to it) and simply
+inherited by the admin origin, which never opens one.
+
 ---
 
 ## 7. Static file serving
@@ -251,7 +277,9 @@ ever holds a lobby-scoped ticket.
 | `/`, `/shell.js`, `/knockbox.js` (shell origin) | `web/` | Platform shell + SDK. |
 | `/games/{id}/<thumbnail>` (shell origin) | `games/{id}/<thumbnail>` | **Only** the manifest's declared thumbnail for the lobby browser; every other `/games/*` path 404s here (the full build is reachable only on the game origin). |
 | `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
-| `/games/*.kbg` (either origin) | — | Always **404**. The package's contents are public (they are the game), but serving a multi-megabyte uncacheable archive at a guessable URL is a needless bandwidth amplifier. |
+| `/games/*.kbg` (any origin) | — | Always **404**. The package's contents are public (they are the game), but serving a multi-megabyte uncacheable archive at a guessable URL is a needless bandwidth amplifier. |
+| `/`, `/admin.js`, `/admin.css` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. |
+| `/admin*` (shell **or** game origin) | — | Always **404**, so the portal is unreachable from any origin a player can browse. |
 
 Game assets resolve through a `CompositeFileProvider` over `games/` then `GamesUnpackedRoot`, in the
 same order the catalog searches — so a request's manifest and its assets always come from the same
@@ -302,7 +330,8 @@ shell constrains what else it can embed. Turn it on only when hosting threaded e
 ```bash
 # From the repo root:
 dotnet run --project KnockBox.Server --launch-profile http
-# → shell at http://localhost:5114, games at http://localhost:5115
+# → shell at http://localhost:5114, games at http://localhost:5115,
+#   admin portal at http://localhost:5116
 ```
 
 On startup you should see `Discovered game 'tictactoe' (Tic-Tac-Toe)` and
@@ -332,6 +361,11 @@ into `games/` and it appears within a second or two — no restart.
 | `GamesPort` | `5115` | Dev: the port the game origin is served on. |
 | `GamesHost` | — | Prod: the games subdomain (e.g. `games.knockbox.example`); routes by `Host` header behind a proxy where every request shares one port. |
 | `GamesOrigin` | — | Prod: explicit origin the shell embeds games from (overrides `GamesHost`/`GamesPort`). |
+| `AdminPort` | `5116` | Dev: the port the **admin portal** origin is served on (`8082` in the Docker image). Whatever you set here must also be a port the host actually binds — see the warning below the table. |
+| `AdminHost` | — | Prod: the admin subdomain (e.g. `admin.knockbox.example`), routed by `Host` header exactly like `GamesHost`. Set this **only** behind a proxy you trust to set `Host` (with `ForwardedHeaders`): once set, any request carrying that `Host` reaches the admin app, including one arriving on the public port. |
+| `AdminOrigin` | — | Prod: explicit admin origin (overrides `AdminHost`/`AdminPort`). |
+| `AdminPasswordPath` | `admin.secret` next to the binary | Where the admin password hash is stored. Must be **writable** and, in a container, on a **persisted volume outside the image** — otherwise the password is lost on every image update and the portal reverts to unclaimed. The Docker image sets `/app/data/admin.secret`. Deleting this file is the password-reset path. |
+| `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. Sessions are also invalidated by a restart (the signing key is per-process, like the player token secret). |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-For/Proto/Host` from a fronting reverse proxy so the game origin resolves to `https`/`wss` and per-IP limits see real client IPs. Opt-in: only enable behind a trusted proxy. |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist (defense-in-depth; the token/ticket is the real auth). An empty `Origin` is always allowed — native engine clients send none. |
 | `IsolateShell` | `false` | Serve the shell cross-origin isolated (COOP/COEP) for threaded engine exports — see §8. |
@@ -352,6 +386,17 @@ into `games/` and it appears within a second or two — no restart.
 | `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
 | `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
 | `MemoryLogSeconds` | `0` (off) | Interval for a periodic memory-diagnostics log line (working set, managed heap, GC-committed bytes, gen0/1/2 collection counts, live lobby & authority-actor counts). Use it to correlate footprint with concurrent server-authority lobbies and confirm memory falls back after lobbies close. |
+
+> **Setting ports explicitly replaces the defaults — it does not add to them.** With no port
+> configuration at all, the server binds all three origins itself (`5114`, `GamesPort`, `AdminPort`), so a
+> bare published exe works out of the box. The moment **any** explicit setting appears — `ASPNETCORE_URLS`,
+> `--urls`, `ASPNETCORE_HTTP_PORTS`, or a `Kestrel:Endpoints` section — the server stops choosing and that
+> list is the whole truth. `GamesPort`/`AdminPort` then only tell the **router** which port belongs to
+> which origin; they don't cause anything to be bound. An origin missing from the list is routed but never
+> listened on, and answers `connection refused`. So every port must appear in every place that sets ports:
+> `launchSettings.json`'s `applicationUrl`, the Dockerfile's `ASPNETCORE_HTTP_PORTS`, your own env.
+> The server warns at startup (`Admin portal is UNREACHABLE: nothing is listening on admin port …`)
+> when the admin origin is routed to an unbound port; `OriginPortBindingTests` pins the repo's own files.
 
 ### Memory footprint (server-authority games)
 

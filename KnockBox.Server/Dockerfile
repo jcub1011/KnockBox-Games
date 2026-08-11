@@ -24,19 +24,32 @@ WORKDIR /app
 # volume or host path onto either to PERSIST it across image updates and skip redoing that work each
 # boot (see docker-compose.yml / docs/HOSTING.md). A bind-mounted host path must be writable by
 # $APP_UID; a named volume inherits this dir's ownership.
-RUN mkdir -p /games /app/logs /app/games-compressed /app/games-unpacked \
-    && chown $APP_UID /app/logs /app/games-compressed /app/games-unpacked
+#
+# /app/data holds the ADMIN PASSWORD HASH (admin.secret). Unlike the two caches it is NOT regenerable:
+# losing it returns the admin portal to its unclaimed state, where the next visitor sets the password.
+# It needs its own dir because the service's default (next to the binary, /app) is root-owned while the
+# app runs as $APP_UID — the write would fail — and /app lives inside the image, so the password would
+# be lost on every image update. Mount a volume here to persist it (see docker-compose.yml).
+RUN mkdir -p /games /app/logs /app/games-compressed /app/games-unpacked /app/data \
+    && chown $APP_UID /app/logs /app/games-compressed /app/games-unpacked /app/data
 USER $APP_UID
-# Two plain-HTTP ports keep the two-origin model working with no proxy: 8080 = shell, 8081 = games
-# origin. Map them 1:1 on the host (or set KnockBox__GamesOrigin) — the server advertises its
-# INTERNAL games port to browsers. TLS belongs to a fronting proxy (set KnockBox__ForwardedHeaders).
+# Three plain-HTTP ports keep the three-origin model working with no proxy: 8080 = shell, 8081 = games
+# origin, 8082 = admin portal. Map the first two 1:1 on the host (or set KnockBox__GamesOrigin) — the
+# server advertises its INTERNAL games port to browsers. The admin port should NOT be published to the
+# world: until a password is set, the first visitor to reach it claims the portal (docs/HOSTING.md), so
+# compose binds it to loopback only. TLS belongs to a fronting proxy (set KnockBox__ForwardedHeaders).
+#
+# EVERY origin must appear in ASPNETCORE_HTTP_PORTS. Setting it suppresses the UseUrls fallback in
+# Program.cs wholesale, so an origin omitted here simply never binds and refuses connections.
 ENV KnockBox__GamesRoot=/games \
     KnockBox__LogsRoot=/app/logs \
     KnockBox__GamesCompressedRoot=/app/games-compressed \
     KnockBox__GamesUnpackedRoot=/app/games-unpacked \
     KnockBox__GamesPort=8081 \
     KnockBox__GamesPollSeconds=10 \
-    ASPNETCORE_HTTP_PORTS="8080;8081"
+    KnockBox__AdminPort=8082 \
+    KnockBox__AdminPasswordPath=/app/data/admin.secret \
+    ASPNETCORE_HTTP_PORTS="8080;8081;8082"
 # GC footprint: the GC mode and the ConserveMemory knob are baked into the binary at publish (see
 # KnockBox.Server.csproj) and honored under Native AOT, so nothing is needed here by default. Server
 # GC + DATAS (heap-count adaptation, on by default) does the footprint work; the main lever is a
@@ -46,6 +59,7 @@ ENV KnockBox__GamesRoot=/games \
 #   ENV DOTNET_gcServer=1 DOTNET_GCConserveMemory=5   # leave heap count to DATAS
 EXPOSE 8080
 EXPOSE 8081
+EXPOSE 8082
 
 # Build + publish. The solution file is deliberately NOT copied: its absence inside the image is
 # what makes the server's path resolution fall through to the app directory (see ContentPaths).

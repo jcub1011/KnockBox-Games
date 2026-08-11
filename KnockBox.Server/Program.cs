@@ -1,11 +1,16 @@
 using System.IO.Compression;
 using System.Net.WebSockets;
+using System.Text.Json;
 using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using KnockBox.Server.Serialization;
+using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.StaticFiles;
@@ -111,22 +116,31 @@ builder.Host.UseSerilog((context, services, config) => config
 // socket — while still keeping a real origin (engine storage / COOP-COEP work). The game's own
 // data-role websocket connects back to this origin's /ws.
 var gamesPort = builder.Configuration.GetValue("KnockBox:GamesPort", 5115);
+var adminPort = builder.Configuration.GetValue("KnockBox:AdminPort", 5116);
 // In prod the game origin is a subdomain rather than a port; set these so routing and the origin
 // handed to the shell work behind a reverse proxy where every request shares one local port.
 var gamesHost = builder.Configuration["KnockBox:GamesHost"];           // e.g. "games.knockbox.example"
 var gamesOrigin = builder.Configuration["KnockBox:GamesOrigin"];       // explicit override, e.g. "https://games.knockbox.example"
+var adminHost = builder.Configuration["KnockBox:AdminHost"];           // e.g. "admin.knockbox.example"
+var adminOrigin = builder.Configuration["KnockBox:AdminOrigin"];       // explicit override, e.g. "https://admin.knockbox.example"
 
 // launchSettings (dev) and ASPNETCORE_HTTP_PORTS (Docker) tell Kestrel which ports to bind; a bare
 // published exe gets neither, so Kestrel would bind only the single framework default and the games
-// origin (GamesPort) would refuse connections. When the host wasn't told what to bind, bind BOTH
-// origins ourselves so the exe works out of the box. Anything explicit (URLS/HTTP_PORTS/Kestrel
-// endpoints) wins and we stay out of the way — so dev and Docker are unaffected.
+// origin (GamesPort) would refuse connections. When the host wasn't told what to bind, bind ALL THREE
+// origins (shell, games, admin) ourselves so the exe works out of the box. Anything explicit
+// (URLS/HTTP_PORTS/Kestrel endpoints) wins and we stay out of the way — so dev and Docker are unaffected.
+//
+// THE TRAP: because an explicit setting replaces this list wholesale rather than adding to it, every
+// origin must appear in EVERY place that sets ports — launchSettings.json `applicationUrl`, the
+// Dockerfile's ASPNETCORE_HTTP_PORTS, any Kestrel:Endpoints section. An origin omitted from one of those
+// simply never binds and answers "connection refused". The ApplicationStarted check below turns that
+// silent hole into a startup warning; keep it if you add a fourth origin.
 var portsConfigured =
     !string.IsNullOrEmpty(builder.Configuration["urls"])          // ASPNETCORE_URLS / --urls
     || !string.IsNullOrEmpty(builder.Configuration["http_ports"]) // ASPNETCORE_HTTP_PORTS
     || builder.Configuration.GetSection("Kestrel:Endpoints").Exists();
 if (!portsConfigured)
-    builder.WebHost.UseUrls("http://localhost:5114", $"http://localhost:{gamesPort}");
+    builder.WebHost.UseUrls("http://localhost:5114", $"http://localhost:{gamesPort}", $"http://localhost:{adminPort}");
 
 // When true, the shell page itself is served cross-origin isolated (COOP/COEP) so threaded engine
 // exports embedded in a cross-origin iframe can use SharedArrayBuffer. Off by default — single-
@@ -188,6 +202,7 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
     builder.Environment.IsDevelopment(),
     sp.GetRequiredService<ILoggerFactory>()));
 builder.Services.AddSingleton<WebSocketHandler>();
+builder.Services.AddSingleton<AdminAuthService>();
 
 // Compress responses (game bundles are large). Brotli + Gzip, including the engine asset
 // types that are off the default list. Level = Fastest to bound the CPU cost of compressing
@@ -213,6 +228,46 @@ app.Logger.LogInformation(
     "Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} " +
     "(precompress: {Precompress}), games-unpacked: {GamesUnpackedRoot} (packages: {Packages})",
     webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled, gamesUnpackedRoot, packagesEnabled);
+
+// Where the admin portal actually is — read from Kestrel's BOUND addresses, not from configuration.
+// Announcing a configured-but-unbound URL is exactly how the portal came to answer "connection refused"
+// while the log insisted it was up, so this waits for ApplicationStarted (the bound set isn't known
+// before then) and warns when the admin port isn't among them. See the port-binding trap above.
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    // Host-routed deployments share the public port, so there is no separate admin port to look for —
+    // the configured origin IS the answer, and its scheme is whatever the fronting proxy terminates.
+    if (!string.IsNullOrWhiteSpace(adminOrigin))
+    {
+        app.Logger.LogInformation("Admin portal served on {AdminOrigin} (host-routed).", adminOrigin.TrimEnd('/'));
+        return;
+    }
+    if (!string.IsNullOrWhiteSpace(adminHost))
+    {
+        app.Logger.LogInformation(
+            "Admin portal served on host {AdminHost} (host-routed; scheme follows your proxy). Any request " +
+            "carrying this Host reaches the admin app, including one arriving on the public port — keep " +
+            "KnockBox:ForwardedHeaders and your proxy's Host handling correct.", adminHost);
+        return;
+    }
+
+    var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses;
+    var adminAddress = addresses?.FirstOrDefault(a => BoundPort(a) == adminPort);
+    if (adminAddress is not null)
+    {
+        app.Logger.LogInformation("Admin portal listening at {AdminUrl}", adminAddress);
+        return;
+    }
+
+    app.Logger.LogWarning(
+        "Admin portal is UNREACHABLE: nothing is listening on admin port {AdminPort} (Kestrel bound: {BoundAddresses}). " +
+        "An explicit ASPNETCORE_URLS / ASPNETCORE_HTTP_PORTS / Kestrel:Endpoints setting REPLACES the built-in port " +
+        "defaults instead of adding to them, so the admin port has to be listed there too. Add it, or point " +
+        "KnockBox:AdminPort at a port that is bound, or set KnockBox:AdminHost / KnockBox:AdminOrigin to route the " +
+        "admin origin by host instead of by port.",
+        adminPort,
+        addresses is null || addresses.Count == 0 ? "(unknown)" : string.Join(", ", addresses));
+});
 
 // A writable cache root nested inside the games folder would be self-defeating: the catalog's recursive
 // watcher would see the server's own extraction writes and re-trigger itself, and every extracted game
@@ -414,6 +469,8 @@ app.UseWebSockets();
 // PhysicalFileProvider throws when its root is missing; if directory creation failed above, fall
 // back to an empty provider so the server still starts (the LogError above tells the admin why).
 IFileProvider webFiles = Directory.Exists(webRoot) ? new PhysicalFileProvider(webRoot) : new NullFileProvider();
+var adminWebRoot = Path.Combine(webRoot, "admin");
+IFileProvider adminWebFiles = Directory.Exists(adminWebRoot) ? new PhysicalFileProvider(adminWebRoot) : new NullFileProvider();
 // Games are served from the games folder first and the unpacked-package cache second — the same
 // precedence GameCatalog applies, so the manifest a request resolves through and the assets it fetches
 // always come from the same place. CompositeFileProvider returns the first provider whose file exists,
@@ -529,6 +586,153 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
     {
         ipGate.Exit(clientIp);
     }
+});
+
+// ── Admin origin (separate port in dev, subdomain in prod) ─────────────────────
+// Dedicated admin portal. Public player files, game bundles (/games), and /ws are excluded.
+app.MapWhen(
+    ctx => OriginRouting.IsAdminOrigin(ctx.Connection.LocalPort, ctx.Request.Host.Host, adminPort, adminHost),
+    adminApp =>
+    {
+        // Resolved once while the pipeline is built, never per request. `catalog` is already resolved
+        // above and reused here.
+        var authService = app.Services.GetRequiredService<AdminAuthService>();
+        var lobbyManager = app.Services.GetRequiredService<LobbyManager>();
+        // Read once: Process.GetCurrentProcess() allocates a handle on every call, and the dashboard
+        // polls /admin/api/system/status every few seconds — resolving it per request leaked a handle
+        // per poll. The start time can't change, so there is nothing to re-read.
+        DateTime processStartedUtc;
+        using (var self = System.Diagnostics.Process.GetCurrentProcess())
+            processStartedUtc = self.StartTime.ToUniversalTime();
+
+        adminApp.Use(async (ctx, next) =>
+        {
+            var path = ctx.Request.Path.Value ?? "";
+
+            if (string.Equals(path, "/admin/api/auth/status", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsGet(ctx.Request.Method))
+            {
+                var configured = authService.IsConfigured;
+                var authenticated = false;
+                if (ctx.Request.Cookies.TryGetValue(AdminAuthService.SessionCookieName, out var sessionCookie))
+                {
+                    authenticated = authService.ValidateSessionToken(sessionCookie);
+                }
+                ctx.Response.ContentType = "application/json";
+                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminAuthStatusResponse(configured, authenticated), KnockBoxProtocolContext.Default.AdminAuthStatusResponse);
+                return;
+            }
+
+            if (string.Equals(path, "/admin/api/auth/setup", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsPost(ctx.Request.Method))
+            {
+                var req = await JsonSerializer.DeserializeAsync(ctx.Request.Body, KnockBoxProtocolContext.Default.AdminPasswordRequest);
+                if (req is null || string.IsNullOrWhiteSpace(req.Password))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    ctx.Response.ContentType = "application/json";
+                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Password required."), KnockBoxProtocolContext.Default.AdminApiResponse);
+                    return;
+                }
+
+                if (!authService.SetupPassword(req.Password))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    ctx.Response.ContentType = "application/json";
+                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Server is already configured or password is invalid."), KnockBoxProtocolContext.Default.AdminApiResponse);
+                    return;
+                }
+
+                AppendAdminSessionCookie(ctx, authService.CreateSessionToken());
+
+                ctx.Response.ContentType = "application/json";
+                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(true), KnockBoxProtocolContext.Default.AdminApiResponse);
+                return;
+            }
+
+            if (string.Equals(path, "/admin/api/auth/login", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsPost(ctx.Request.Method))
+            {
+                var req = await JsonSerializer.DeserializeAsync(ctx.Request.Body, KnockBoxProtocolContext.Default.AdminPasswordRequest);
+                if (req is null || string.IsNullOrWhiteSpace(req.Password) || !authService.VerifyPassword(req.Password))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    ctx.Response.ContentType = "application/json";
+                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Invalid admin password."), KnockBoxProtocolContext.Default.AdminApiResponse);
+                    return;
+                }
+
+                AppendAdminSessionCookie(ctx, authService.CreateSessionToken());
+
+                ctx.Response.ContentType = "application/json";
+                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(true), KnockBoxProtocolContext.Default.AdminApiResponse);
+                return;
+            }
+
+            if (string.Equals(path, "/admin/api/auth/logout", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsPost(ctx.Request.Method))
+            {
+                // Deleting a cookie is really a Set-Cookie with an expiry, and the browser only replaces
+                // the existing one when the attributes match how it was issued — so mirror them.
+                ctx.Response.Cookies.Delete(AdminAuthService.SessionCookieName, new CookieOptions
+                {
+                    HttpOnly = true,
+                    SameSite = SameSiteMode.Strict,
+                    Secure = ctx.Request.IsHttps,
+                    Path = "/"
+                });
+                ctx.Response.ContentType = "application/json";
+                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(true), KnockBoxProtocolContext.Default.AdminApiResponse);
+                return;
+            }
+
+            if (string.Equals(path, "/admin/api/system/status", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsGet(ctx.Request.Method))
+            {
+                if (!ctx.Request.Cookies.TryGetValue(AdminAuthService.SessionCookieName, out var sessionCookie) || !authService.ValidateSessionToken(sessionCookie))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    ctx.Response.ContentType = "application/json";
+                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Unauthorized."), KnockBoxProtocolContext.Default.AdminApiResponse);
+                    return;
+                }
+
+                var uptime = DateTime.UtcNow - processStartedUtc;
+                var uptimeStr = $"{uptime.Days}d {uptime.Hours}h {uptime.Minutes}m {uptime.Seconds}s";
+
+                var workingSetMb = Environment.WorkingSet / (1024 * 1024);
+                var managedHeapMb = GC.GetTotalMemory(false) / (1024 * 1024);
+
+                var status = new AdminSystemStatusResponse(
+                    uptimeStr,
+                    lobbyManager.Count,
+                    catalog.Games.Count,
+                    workingSetMb,
+                    managedHeapMb,
+                    DateTime.UtcNow.ToString("O")
+                );
+
+                ctx.Response.ContentType = "application/json";
+                await JsonSerializer.SerializeAsync(ctx.Response.Body, status, KnockBoxProtocolContext.Default.AdminSystemStatusResponse);
+                return;
+            }
+
+            await next();
+        });
+
+        adminApp.UseDefaultFiles(new DefaultFilesOptions { FileProvider = adminWebFiles });
+        adminApp.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = adminWebFiles,
+            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate"
+        });
+    });
+
+// Gate public origins to return 404 for any /admin* request
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path.Value;
+    if (path is not null && (path.Equals("/admin", StringComparison.OrdinalIgnoreCase) || path.StartsWith("/admin/", StringComparison.OrdinalIgnoreCase)))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+    await next();
 });
 
 // ── Game origin (separate port in dev, subdomain in prod) ──────────────────────
@@ -665,6 +869,28 @@ static string? ProbeWritable(string dir)
         try { File.Delete(probe); } catch { /* best effort: nothing to clean up if the write never landed */ }
         return ex.Message;
     }
+}
+
+// Issues the admin session cookie. One place for it so the setup and login paths can't drift apart.
+// HttpOnly keeps the token away from script; SameSite=Strict means it never rides a cross-site request;
+// Secure follows the CURRENT request's scheme, so the cookie hardens behind TLS without breaking the
+// plain-HTTP loopback the portal is reached over in dev and in Docker (where it binds 127.0.0.1 only).
+static void AppendAdminSessionCookie(HttpContext ctx, string token) =>
+    ctx.Response.Cookies.Append(AdminAuthService.SessionCookieName, token, new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        Secure = ctx.Request.IsHttps,
+        Path = "/"
+    });
+
+// The port out of one of Kestrel's bound addresses ("http://localhost:5116", "http://[::]:8082"), or null
+// if it can't be parsed. Only ever used to decide whether to warn, so an unparseable address must not
+// throw its way out of the ApplicationStarted callback.
+static int? BoundPort(string address)
+{
+    try { return BindingAddress.Parse(address).Port; }
+    catch (Exception) { return null; }
 }
 
 // True when `inner` is the same directory as, or nested inside, `outer`. Used to reject a configuration

@@ -1,6 +1,8 @@
-﻿using KnockBox.Contracts;
+using KnockBox.Contracts;
 using KnockBox.Server.Games;
+using KnockBox.Server.Hosting;
 using System.Text.Json.Serialization;
+using static KnockBox.Server.Security.AdminAuthService;
 using static KnockBox.Server.Security.TokenService;
 
 namespace KnockBox.Server.Serialization;
@@ -16,6 +18,11 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(IReadOnlyDictionary<string, AuthorityWordDeclaration>))]
 [JsonSerializable(typeof(TicketPayload))]
 [JsonSerializable(typeof(IdentityPayload))]
+[JsonSerializable(typeof(AdminSessionPayload))]
+[JsonSerializable(typeof(AdminAuthStatusResponse))]
+[JsonSerializable(typeof(AdminPasswordRequest))]
+[JsonSerializable(typeof(AdminApiResponse))]
+[JsonSerializable(typeof(AdminSystemStatusResponse))]
 // The roster projection handed to an authority module's init(players) (ServerAuthorityManager).
 [JsonSerializable(typeof(IReadOnlyList<Player>))]
 // Not a wire type, but it goes through the same source-generated serializer for the same reason:

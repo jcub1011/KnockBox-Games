@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KnockBox — Admin Management Portal</title>
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header / Navigation Bar -->
+    <header class="admin-header">
+      <div class="header-brand">
+        <div class="brand-badge">ADMIN</div>
+        <span class="brand-title">KnockBox<span class="brand-accent">Portal</span></span>
+      </div>
+      <div class="header-actions">
+        <div class="status-pill" id="server-status-pill">
+          <span class="status-dot"></span>
+          <span id="server-status-text">Connecting...</span>
+        </div>
+        <button id="logout-btn" class="btn btn-secondary hidden">Log Out</button>
+      </div>
+    </header>
+
+    <!-- Main Content Body -->
+    <main class="admin-container">
+
+      <!-- View 1: Password Setup (Unconfigured Mode) -->
+      <section id="setup-view" class="view-card hidden">
+        <div class="card-header">
+          <h2>Initialize Admin Password</h2>
+          <p>This server is unconfigured. Set an administrative password to secure this portal.</p>
+        </div>
+        <form id="setup-form" class="auth-form">
+          <div class="form-group">
+            <label for="setup-password">Admin Password</label>
+            <input type="password" id="setup-password" required placeholder="Enter a strong password" minlength="8" autocomplete="new-password" />
+          </div>
+          <div class="form-group">
+            <label for="confirm-password">Confirm Password</label>
+            <input type="password" id="confirm-password" required placeholder="Re-enter password" minlength="8" autocomplete="new-password" />
+          </div>
+          <div id="setup-error" class="error-banner hidden"></div>
+          <button type="submit" class="btn btn-primary">Save & Continue</button>
+        </form>
+        <div class="info-note">
+          <strong>Password Reset Note:</strong> In server environments, deleting the <code>admin.secret</code> file on disk resets authentication state back to setup mode.
+        </div>
+      </section>
+
+      <!-- View 2: Admin Login -->
+      <section id="login-view" class="view-card hidden">
+        <div class="card-header">
+          <h2>Admin Login</h2>
+          <p>Please enter your admin password to access portal diagnostics and controls.</p>
+        </div>
+        <form id="login-form" class="auth-form">
+          <div class="form-group">
+            <label for="login-password">Password</label>
+            <input type="password" id="login-password" required placeholder="Enter admin password" autocomplete="current-password" />
+          </div>
+          <div id="login-error" class="error-banner hidden"></div>
+          <button type="submit" class="btn btn-primary">Sign In</button>
+        </form>
+      </section>
+
+      <!-- View 3: Admin Dashboard (Authenticated) -->
+      <section id="dashboard-view" class="dashboard-grid hidden">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar-nav">
+          <button class="nav-item active" data-tab="overview">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+            Overview
+          </button>
+          <button class="nav-item disabled" data-tab="lobbies" title="Coming in future update">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+            Active Lobbies
+          </button>
+          <button class="nav-item disabled" data-tab="games" title="Coming in future update">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4m-2-2v4m10-2h.01m-3 0h.01"></path></svg>
+            Game Catalog
+          </button>
+          <button class="nav-item disabled" data-tab="logs" title="Coming in future update">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+            System Logs
+          </button>
+        </aside>
+
+        <!-- Main Dashboard Panel -->
+        <div class="dashboard-panel">
+          <div class="panel-header">
+            <h1>System Overview</h1>
+            <span class="refresh-indicator" id="last-updated">Updating metrics...</span>
+          </div>
+
+          <!-- Metric Cards Grid -->
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-label">Server Uptime</div>
+              <div class="metric-value" id="metric-uptime">--</div>
+              <div class="metric-sub">Process runtime</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="metric-label">Active Lobbies</div>
+              <div class="metric-value" id="metric-lobbies">0</div>
+              <div class="metric-sub">Live game rooms</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="metric-label">Registered Games</div>
+              <div class="metric-value" id="metric-games">0</div>
+              <div class="metric-sub">Installed catalog</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="metric-label">Memory Working Set</div>
+              <div class="metric-value" id="metric-memory">-- MB</div>
+              <div class="metric-sub" id="metric-heap">Managed heap: -- MB</div>
+            </div>
+          </div>
+
+          <!-- Portal Isolation Banner -->
+          <div class="info-card">
+            <h3>Network Port Isolation Active</h3>
+            <p>This administrative portal is executing on a dedicated network port. Admin APIs and portal static pages are strictly inaccessible over public player or game origin ports.</p>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/admin.js" type="module"></script>
+</body>
+</html>
