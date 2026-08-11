@@ -164,11 +164,19 @@ and the first person to open it sets the password. So:
 - If you do want it reachable over the network, put it behind your proxy with its own authentication and
   set `KnockBox__AdminHost`/`KnockBox__AdminOrigin` — don't simply widen the port mapping.
 
+**Password rules.** Minimum 12 characters. Attempts are rate-limited to
+`KnockBox__AdminLoginAttemptsPerMinute` (default 10) per client IP, and a throttled attempt gets `429` with
+`Retry-After`. That limit is doing more than stopping password guessing: each attempt deliberately costs a
+600k-iteration PBKDF2 (~0.4 s of one core), so without it anyone who can reach the port could saturate your
+CPU with unauthenticated requests and starve the game relay. Behind a proxy, set
+`KnockBox__ForwardedHeaders: "true"` or every request shares the proxy's IP and one bucket.
+
 **Where the password lives.** Hashed (PBKDF2-HMAC-SHA256, 600k iterations) into
 `KnockBox__AdminPasswordPath` — `/app/data/admin.secret` in the image, on the `knockbox-admin` volume
 (override with `KNOCKBOX_ADMIN_DIR`). Unlike the two asset caches this is **not** regenerable: lose it and
 the portal reverts to unclaimed. Keep the volume, and note that the path must be writable by UID `1654`
-if you bind-mount a host directory.
+if you bind-mount a host directory. The file is created mode `600` so another account on the box can't read
+the hash and attack it offline — if you bind-mount a host directory, don't loosen that.
 
 **To reset a forgotten password**, delete the secret file and reload the portal — it returns to setup mode:
 
@@ -176,9 +184,19 @@ if you bind-mount a host directory.
 docker compose exec knockbox rm -f /app/data/admin.secret
 ```
 
-**Admin sessions end on restart.** The session-cookie signing key is generated per process (like the
-player token secret), so restarting the server logs every admin out. `KnockBox__AdminSessionTtlHours`
-(default 8) bounds a session otherwise.
+**Resetting also revokes every admin session immediately.** The session-cookie signing key is derived from
+a per-process secret *and* a fingerprint of the stored hash, so any change to that file invalidates
+outstanding cookies — resetting a password you believe is compromised really does lock the other party out,
+rather than leaving their session working until the next restart. A restart ends every session too, and
+`KnockBox__AdminSessionTtlHours` (default 8) bounds one otherwise.
+
+> **The secret file is the credential.** Anyone who can write it controls the portal — they can delete it
+> and claim a new password, or restore an old copy to bring an old password back. That is true of any
+> file-backed credential without external state (`/etc/shadow` included), and it is not something the
+> server can detect: a rollback check would need state the same attacker could roll back. **Filesystem
+> permissions on that path are the real security boundary**, so keep the volume owned by UID `1654` and
+> off any share other people can write. What the server does guarantee is that sessions follow the current
+> file exactly, so a swap never leaves both the old and new holders logged in.
 
 > `KnockBox__AdminHost` routes by `Host` header, exactly like `GamesHost`. Once it is set, **any** request
 > carrying that host reaches the admin app — including one arriving on the public port, where the `/admin*`
@@ -421,3 +439,4 @@ Defaults are sized for casual play; `0` disables any of them:
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection in-game message rate; sustained violation closes the socket terminally (`1008`). |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for shell/lobby traffic. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation rate (rejects the create, keeps the connection). |
+| `AdminLoginAttemptsPerMinute` | `10` | Per-IP admin password attempts (`429` + `Retry-After` over the limit). Guards CPU as much as the password: each attempt costs ~0.4 s of a core. Needs `ForwardedHeaders` behind a proxy. |

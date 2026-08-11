@@ -256,11 +256,24 @@ shell pipelines.
 - **Invisible from the public origins:** every `/admin*` path returns **404** on the shell and game
   origins — including `web/admin`'s own assets, which the shell's `web/`-rooted file provider would
   otherwise happily serve at `/admin/…`.
-- **Auth:** a single password, hashed with PBKDF2-HMAC-SHA256 (600k iterations, 16-byte salt) into
-  `AdminPasswordPath`. There are no accounts. On first run the portal is **unclaimed** and whoever reaches
-  it sets the password, so the admin origin must not be publicly reachable before that happens — see
-  [HOSTING.md](./HOSTING.md). Sessions are an HMAC-signed cookie (`HttpOnly`, `SameSite=Strict`, `Secure`
-  whenever the request is HTTPS) whose signing key is per-process, so a restart logs admins out.
+- **Auth:** a single password (minimum 12 characters), hashed with PBKDF2-HMAC-SHA256 (600k iterations,
+  16-byte salt) into `AdminPasswordPath`, which is created **owner-read/write only** on Unix so a shell on
+  the box can't copy the hash and crack it offline. There are no accounts. On first run the portal is
+  **unclaimed** and whoever reaches it sets the password, so the admin origin must not be publicly
+  reachable before that happens — see [HOSTING.md](./HOSTING.md). Attempts are rate-limited per IP
+  (`AdminLoginAttemptsPerMinute`) *before* any hashing, since the hash is expensive by design.
+- **Sessions** are an HMAC-signed cookie (`HttpOnly`, `SameSite=Strict`, `Secure` whenever the request is
+  HTTPS). The signing key is derived from a per-process secret **and a fingerprint of the stored password
+  hash**, which gives two properties: a restart logs admins out, and *any* change to the secret file
+  immediately revokes every outstanding session. So resetting a compromised password actually locks the
+  intruder out instead of leaving their session live until the next restart.
+
+  The secret file **is** the credential, so write access to it is total control — whoever can replace it can
+  just delete it and claim a new password. That is inherent to a file-backed credential with no external
+  state (as with `/etc/shadow`), and detecting a rollback would require monotonic state the attacker doesn't
+  also control; filesystem permissions are the boundary. The guarantee that *is* enforced is that sessions
+  are valid for exactly the secret currently on disk, so a swap can never leave two sets of sessions live at
+  once (pinned by `AdminAuthServiceTests`).
 - **Not on the games/shell path:** because the branch is selected before them, an admin request never
   touches the precompressed-asset negotiation, the `.kbg` gate, or COOP/COEP handling.
 
@@ -374,6 +387,7 @@ into `games/` and it appears within a second or two — no restart.
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection token bucket on inbound data-role frames (each relayed frame fans out O(lobby size)). Sustained violation → `Error{rate_limited}` + terminal close `1008`. `0` disables. |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
+| `AdminLoginAttemptsPerMinute` | `10` | Per-IP bucket on `/admin/api/auth/{login,setup}` (`Networking/IpRateLimiter.cs`), checked **before** any hashing. Unlike the limits above this guards **CPU**, not bandwidth: each attempt runs a 600k-iteration PBKDF2 (~0.4 s of one core), so without it an unauthenticated caller can both guess passwords and saturate every core — starving the WebSocket relay. Over the limit ⇒ `429` + `Retry-After`, at ~7 ms instead of ~420 ms. `0` disables. Only meaningful behind a proxy with `ForwardedHeaders` on; otherwise every request shares the proxy's IP (which fails *closed*). |
 | `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
 | `AuthorityEnabled` | `true` | Master switch for server-authoritative mode (games with `GAME.json` `serverAuthority`, see SERVER_AUTHORITY_DESIGN.md). `false` ⇒ creating a lobby for such a game fails with a clear error — never a silent downgrade to host mode. |
 | `AuthorityMaxMemoryBytes` | `33554432` (32 MB) | Per-engine memory budget for the sandboxed authority runtime (Jint `LimitMemory`; a per-invocation allocation budget, see design §8). |

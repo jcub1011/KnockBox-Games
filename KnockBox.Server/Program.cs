@@ -604,10 +604,39 @@ app.MapWhen(
         DateTime processStartedUtc;
         using (var self = System.Diagnostics.Process.GetCurrentProcess())
             processStartedUtc = self.StartTime.ToUniversalTime();
+        // Every password attempt costs a 600k-iteration PBKDF2 (~0.4s of a core, by design), so these two
+        // endpoints are the only unauthenticated way to make this server do real work. Without a throttle
+        // that is both a guessing oracle and a CPU-exhaustion lever that starves the game relay — a handful
+        // of requests per second saturates every core. Checked BEFORE any hashing, so a refused attempt is
+        // free. Burst = the per-minute allowance: a human typo-ing a password is unaffected.
+        var adminAuthLimiter = new IpRateLimiter(
+            limits.AdminLoginAttemptsPerMinute / 60.0, limits.AdminLoginAttemptsPerMinute,
+            app.Services.GetRequiredService<TimeProvider>());
 
         adminApp.Use(async (ctx, next) =>
         {
             var path = ctx.Request.Path.Value ?? "";
+
+            // Both password endpoints share one bucket: they are equally expensive, and an attacker who
+            // could spend the login budget on setup attempts would just have two budgets.
+            var isPasswordAttempt =
+                HttpMethods.IsPost(ctx.Request.Method) &&
+                (string.Equals(path, "/admin/api/auth/login", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(path, "/admin/api/auth/setup", StringComparison.OrdinalIgnoreCase));
+            if (isPasswordAttempt &&
+                !adminAuthLimiter.TryTake(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"))
+            {
+                app.Logger.LogWarning(
+                    "Throttled an admin password attempt from {Ip} ({Path}): more than {Limit} per minute.",
+                    ctx.Connection.RemoteIpAddress, path, limits.AdminLoginAttemptsPerMinute);
+                ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                ctx.Response.Headers.RetryAfter = "60";
+                ctx.Response.ContentType = "application/json";
+                await JsonSerializer.SerializeAsync(ctx.Response.Body,
+                    new AdminApiResponse(false, "Too many attempts. Wait a minute and try again."),
+                    KnockBoxProtocolContext.Default.AdminApiResponse);
+                return;
+            }
 
             if (string.Equals(path, "/admin/api/auth/status", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsGet(ctx.Request.Method))
             {
@@ -633,11 +662,28 @@ app.MapWhen(
                     return;
                 }
 
-                if (!authService.SetupPassword(req.Password))
+                // Distinct messages per outcome: "already configured" is an expected race, a too-short
+                // password is the operator's to fix, but an unwritable secret file is a DEPLOYMENT fault
+                // (wrong owner on the mount) that previously hid behind the same "already configured or
+                // invalid" text — the single most confusing way this could fail.
+                var setup = authService.SetupPassword(req.Password);
+                if (setup != AdminAuthService.SetupOutcome.Success)
                 {
-                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    var (status, error) = setup switch
+                    {
+                        AdminAuthService.SetupOutcome.AlreadyConfigured =>
+                            (StatusCodes.Status409Conflict,
+                             "An admin password is already set. Delete the secret file on the server to reset it."),
+                        AdminAuthService.SetupOutcome.PasswordTooWeak =>
+                            (StatusCodes.Status400BadRequest,
+                             $"Password must be at least {AdminAuthService.MinPasswordLength} characters."),
+                        _ => (StatusCodes.Status500InternalServerError,
+                             $"Could not save the password to '{authService.SecretFilePath}'. Check that the path exists " +
+                             "and is writable by the server (in Docker, the container runs as UID 1654)."),
+                    };
+                    ctx.Response.StatusCode = status;
                     ctx.Response.ContentType = "application/json";
-                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Server is already configured or password is invalid."), KnockBoxProtocolContext.Default.AdminApiResponse);
+                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, error), KnockBoxProtocolContext.Default.AdminApiResponse);
                     return;
                 }
 

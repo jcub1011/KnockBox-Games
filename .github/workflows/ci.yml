@@ -159,22 +159,52 @@ jobs:
 
       - name: Admin password can be set, and only once
         run: |
+          # A password under the minimum must be refused BEFORE the portal is claimed — otherwise the
+          # first hurried password (this is claim-on-first-use) could be trivially weak.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"short"}' http://localhost:8082/admin/api/auth/setup)" = "400" ]
+          curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"configured":false'
           # The claim-on-first-use setup path, plus the session cookie it issues. Also pins that the
-          # password lands on the /app/data volume rather than the read-only-ish image dir: if the write
-          # failed, setup would report success:false and this step would catch it.
+          # password lands on the /app/data volume rather than the root-owned image dir: if that write
+          # failed the response would carry success:false and this step would catch it.
           curl -fsS -c /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
             -d '{"password":"ci-admin-password"}' \
             http://localhost:8082/admin/api/auth/setup | grep -q '"success":true'
           grep -q kb_admin_session /tmp/kb-admin-cookies
           docker exec kb test -f /app/data/admin.secret
+          # The stored hash must not be world-readable: anyone with a shell in the container (or on a
+          # bind-mounted host path) could otherwise copy it and crack it offline at their leisure.
+          [ "$(docker exec kb stat -c '%a' /app/data/admin.secret)" = "600" ]
           # Now claimed, so a second setup attempt must be refused — otherwise anyone could re-claim it.
+          # 409, distinct from the 400 above, so the portal can tell "reset it" from "pick a better one".
           [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-            -d '{"password":"attacker"}' http://localhost:8082/admin/api/auth/setup)" = "400" ]
+            -d '{"password":"attacker-password"}' http://localhost:8082/admin/api/auth/setup)" = "409" ]
           # A wrong password is rejected; the right one authenticates and unlocks the dashboard data.
           [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-            -d '{"password":"wrong"}' http://localhost:8082/admin/api/auth/login)" = "401" ]
+            -d '{"password":"wrong-password"}' http://localhost:8082/admin/api/auth/login)" = "401" ]
           curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/system/status \
             | grep -q '"uptime"'
+
+      - name: Admin password attempts are rate-limited
+        run: |
+          # Each attempt costs a 600k-iteration PBKDF2 (~0.4s of a core), so an unthrottled endpoint is an
+          # unauthenticated CPU-exhaustion lever as much as a guessing oracle. The default allowance is 10
+          # per minute per IP; this loop must therefore start returning 429 well before it finishes.
+          # (The container has already spent part of the budget on the step above, so 429 comes quickly.)
+          got429=0
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+              -d "{\"password\":\"guess-number-$i\"}" http://localhost:8082/admin/api/auth/login)
+            if [ "$code" = "429" ]; then got429=1; break; fi
+          done
+          [ "$got429" = "1" ] || { echo "Login was never throttled — the PBKDF2 DoS lever is open."; exit 1; }
+          docker logs kb 2>&1 | grep -q "Throttled an admin password attempt"
+          # A throttled attempt must be refused, not silently allowed: the correct password must still be
+          # rejected with 429 while the bucket is empty.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"ci-admin-password"}' http://localhost:8082/admin/api/auth/login)" = "429" ]
+          # ...and the throttle must not break the already-authenticated dashboard poll.
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/system/status | grep -q '"uptime"'
 
       - name: Hot drop-in — game appears via the polling fallback
         run: |

@@ -17,7 +17,11 @@ public sealed record ServerLimits(
     int MaxConnectionsPerIp,
     // Grace window a member is kept in their lobby after their shell socket drops, so a tab refresh
     // or brief network blip doesn't kick them out. 0 disables grace (immediate removal on drop).
-    TimeSpan DisconnectGrace)
+    TimeSpan DisconnectGrace,
+    // Per-IP cap on admin password attempts. Unlike the limits above this guards CPU rather than
+    // bandwidth: each attempt runs a 600k-iteration PBKDF2 (~0.4s of one core), so an unthrottled
+    // endpoint lets an unauthenticated caller both guess passwords and starve the game relay.
+    int AdminLoginAttemptsPerMinute)
 {
     public static ServerLimits FromConfiguration(IConfiguration config) => new(
         TimeSpan.FromSeconds(config.GetValue("KnockBox:HandshakeTimeoutSeconds", 10)),
@@ -27,5 +31,6 @@ public sealed record ServerLimits(
         config.GetValue("KnockBox:ControlMessagesBurst", 10.0),
         config.GetValue("KnockBox:LobbyCreatesPerMinute", 10),
         config.GetValue("KnockBox:MaxConnectionsPerIp", 32),
-        TimeSpan.FromSeconds(config.GetValue("KnockBox:DisconnectGraceSeconds", 60)));
+        TimeSpan.FromSeconds(config.GetValue("KnockBox:DisconnectGraceSeconds", 60)),
+        config.GetValue("KnockBox:AdminLoginAttemptsPerMinute", 10));
 }

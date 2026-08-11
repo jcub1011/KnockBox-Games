@@ -89,9 +89,16 @@ a request is on; `Hosting/ContentPaths.cs` resolves the web/games/logs locations
 Third: the **admin origin** (`AdminPort`, 5116 dev / 8082 image; `AdminHost`/`AdminOrigin` as a subdomain
 in prod), an operator dashboard served from `web/admin/` at that origin's **root**, API under
 `/admin/api/*`, claimed in a `MapWhen` branch ahead of the game and shell pipelines. Every `/admin*` path
-404s on the two public origins. Auth is one PBKDF2-hashed password in `AdminPasswordPath`
-(`Security/AdminAuthService.cs`) plus an HMAC session cookie whose key is per-process — **claim-on-first-use**:
-while no password is set, whoever reaches the origin sets it, which is why compose binds 8082 to loopback.
+404s on the two public origins. Auth is one PBKDF2-hashed password (min 12 chars, file created mode `600`) in `AdminPasswordPath`
+(`Security/AdminAuthService.cs`) — **claim-on-first-use**: while no password is set, whoever reaches the
+origin sets it, which is why compose binds 8082 to loopback. The session cookie's HMAC key is derived from a
+per-process secret **plus a fingerprint of the stored hash**, so any change to that file revokes all
+sessions (a reset actually locks an intruder out). The file *is* the credential — write access to it is
+total control, and rollback is deliberately not defended against (it needs state the attacker doesn't
+control); filesystem permissions are the boundary. Password attempts are rate-limited per IP
+(`AdminLoginAttemptsPerMinute`, `Networking/IpRateLimiter.cs`) **before** hashing: at 600k PBKDF2 iterations
+(~0.4s of a core) an unthrottled endpoint is an unauthenticated CPU-exhaustion lever, not just a guessing
+oracle.
 
 **Port-binding trap (this shipped broken once):** `Program.cs` binds all three origins itself *only* when
 nothing else set ports. Any explicit `ASPNETCORE_URLS` / `ASPNETCORE_HTTP_PORTS` / `Kestrel:Endpoints`

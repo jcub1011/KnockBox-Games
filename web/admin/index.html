@@ -30,16 +30,19 @@
       <section id="setup-view" class="view-card hidden">
         <div class="card-header">
           <h2>Initialize Admin Password</h2>
-          <p>This server is unconfigured. Set an administrative password to secure this portal.</p>
+          <p>This server is unconfigured. Set an administrative password to secure this portal &mdash; until
+             you do, anyone who can reach this page can claim it. Minimum 12 characters.</p>
         </div>
         <form id="setup-form" class="auth-form">
           <div class="form-group">
             <label for="setup-password">Admin Password</label>
-            <input type="password" id="setup-password" required placeholder="Enter a strong password" minlength="8" autocomplete="new-password" />
+            <!-- minlength must match AdminAuthService.MinPasswordLength, or the browser lets through a
+                 password the server then rejects. -->
+            <input type="password" id="setup-password" required placeholder="At least 12 characters" minlength="12" autocomplete="new-password" />
           </div>
           <div class="form-group">
             <label for="confirm-password">Confirm Password</label>
-            <input type="password" id="confirm-password" required placeholder="Re-enter password" minlength="8" autocomplete="new-password" />
+            <input type="password" id="confirm-password" required placeholder="Re-enter password" minlength="12" autocomplete="new-password" />
           </div>
           <div id="setup-error" class="error-banner hidden"></div>
           <button type="submit" class="btn btn-primary">Save & Continue</button>
