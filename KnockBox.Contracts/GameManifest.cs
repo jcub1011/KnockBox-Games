@@ -30,6 +30,16 @@ namespace KnockBox.Contracts;
 /// server-side enforcement is never silently downgraded to the cheatable host mode. The game
 /// origin never serves this file.
 /// </param>
+/// <param name="Version">
+/// Optional build label the game declares for itself, conventionally semantic-version shaped
+/// (<c>"1.2.3"</c>, or <c>"1.2.3-beta.1"</c>). Purely informational to the server — it is never
+/// validated and never affects whether a game loads, because a hand-written game is free to label
+/// its builds however it likes. Its one consumer is the marketplace: an installed game's
+/// <c>Version</c> is what an "is there a newer release?" check compares against the catalog, and a
+/// value that isn't semver-parseable simply reports as an unknown installed version rather than
+/// hiding the game. Packagers should set it — <c>knockbox-pack</c> copies it into the
+/// <c>.kbg</c> header automatically so the two can't disagree.
+/// </param>
 /// <param name="AuthorityWords">
 /// Optional immutable word dictionaries the game's authority module queries through
 /// <c>kb.words</c> (validate a word, pick a word by index) — keyed by a game-chosen dictionary key.
@@ -50,7 +60,8 @@ public sealed record GameManifest(
     string? ThemeColor = null,
     string? ThemeTextColor = null,
     string? ServerAuthority = null,
-    IReadOnlyDictionary<string, AuthorityWordDeclaration>? AuthorityWords = null);
+    IReadOnlyDictionary<string, AuthorityWordDeclaration>? AuthorityWords = null,
+    string? Version = null);
 
 /// <summary>
 /// One entry in <see cref="GameManifest.AuthorityWords"/>: the game-relative path of a line-delimited

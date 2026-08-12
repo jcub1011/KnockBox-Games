@@ -258,6 +258,54 @@ public static class GamePackageReader
             "<>\"|?*" + new string([.. Enumerable.Range(0, 32).Select(c => (char)c)]));
 
     /// <summary>
+    /// Decodes just the package's <c>GAME.json</c> into memory, without extracting anything.
+    /// </summary>
+    /// <remarks>
+    /// The marketplace needs to read a downloaded package's declared version before deciding whether
+    /// to keep it, and extracting a few hundred megabytes to disk to read one small file would be an
+    /// absurd way to answer that. <see cref="Read"/> has already proved the entry exists and closed
+    /// the header against the archive, so the only new risk here is expansion size — capped at
+    /// <see cref="MaxManifestBytes"/>, well above any real manifest and far below anything that could
+    /// pressure memory.
+    /// </remarks>
+    /// <exception cref="GamePackageException">The manifest is missing, oversized, or corrupt.</exception>
+    public static byte[] ReadManifestBytes(PackagePlan plan)
+    {
+        var manifest = plan.Files.FirstOrDefault(f =>
+            f.LogicalPath.Equals(GamePackage.ManifestEntryName, StringComparison.Ordinal))
+            ?? throw new GamePackageException($"the package contains no {GamePackage.ManifestEntryName}.");
+
+        if (manifest.Size > MaxManifestBytes)
+        {
+            throw new GamePackageException(
+                $"{GamePackage.ManifestEntryName} declares {manifest.Size} bytes, over the {MaxManifestBytes}-byte limit.");
+        }
+
+        using var entryStream = manifest.Entry.Open();
+        using Stream source = manifest.Brotli ? new BrotliStream(entryStream, CompressionMode.Decompress) : entryStream;
+        using var buffer = new MemoryStream();
+
+        // Read one byte past the cap so an entry that lies about its size is caught here rather than
+        // being allowed to expand freely — declared sizes are attacker-controlled (see CopyCounted).
+        var chunk = new byte[8192];
+        int read;
+        while ((read = source.Read(chunk, 0, chunk.Length)) > 0)
+        {
+            buffer.Write(chunk, 0, read);
+            if (buffer.Length > MaxManifestBytes)
+            {
+                throw new GamePackageException(
+                    $"{GamePackage.ManifestEntryName} expands past the {MaxManifestBytes}-byte limit.");
+            }
+        }
+
+        return buffer.ToArray();
+    }
+
+    /// <summary>Ceiling on an in-memory <c>GAME.json</c>. Real manifests are well under a kilobyte.</summary>
+    private const int MaxManifestBytes = 256 * 1024;
+
+    /// <summary>
     /// Extracts a validated plan into <paramref name="destination"/>, which must be empty. Verifies each
     /// file's byte count (and SHA-256 when the package declares one) as it copies, and enforces
     /// <paramref name="limits"/> against bytes ACTUALLY written rather than the sizes the package claims.

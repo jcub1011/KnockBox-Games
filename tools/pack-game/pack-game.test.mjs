@@ -60,6 +60,25 @@ describe("pack → .kbg (default output)", () => {
     expect(readKbg(readFileSync(target)).header.version).toBe("4.5.6");
   });
 
+  it("defaults the stamped version to GAME.json's own 'version'", async () => {
+    // The two must agree: a marketplace compares its catalog version (taken from GAME.json) with
+    // what is installed, so a header claiming a different build would misreport staleness.
+    const { target } = await pack({ in: work.src, manifest: manifest({ ...VALID, version: "1.2.3" }), out: work.out + "/" });
+    expect(readKbg(readFileSync(target)).header.version).toBe("1.2.3");
+  });
+
+  it("lets an explicit --version override GAME.json's 'version'", async () => {
+    const { target } = await pack({
+      in: work.src, manifest: manifest({ ...VALID, version: "1.2.3" }), out: work.out + "/", version: "9.9.9",
+    });
+    expect(readKbg(readFileSync(target)).header.version).toBe("9.9.9");
+  });
+
+  it("omits the version when neither the manifest nor --version supplies one", async () => {
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out + "/" });
+    expect(readKbg(readFileSync(target)).header.version).toBeUndefined();
+  });
+
   it("accepts --out naming the file itself", async () => {
     const explicit = join(work.root, "custom-name.kbg");
     const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: explicit });
@@ -164,6 +183,13 @@ describe("pack (contract validation — mirrors GameCatalog)", () => {
   it("rejects crossOriginIsolated that is not a boolean", async () => {
     await expect(pack({ in: work.src, manifest: manifest({ ...VALID, crossOriginIsolated: "yes" }), dir: work.out }))
       .rejects.toThrow(PackError);
+  });
+
+  it("rejects a version that is not a string", async () => {
+    // 1.2 as a bare number would be copied into KBG.json as a JSON number, where the server's
+    // string-typed header field cannot read it — the whole package would fail to install.
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, version: 1.2 }), dir: work.out }))
+      .rejects.toThrow(/'version' must be a non-empty string/);
   });
 
   it("rejects an entry file that does not exist in --in", async () => {

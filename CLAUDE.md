@@ -151,7 +151,8 @@ which `Hosting/DeploymentDiagnostics.cs` surfaces (with other file-access proble
 bootstrap) by replacing the shell home page with `Hosting/DeploymentWarningPage.cs` — see the
 home-page warning middleware in `Program.cs` and `docs/HOSTING.md`.
 
-GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
+GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`, `version` (optional,
+never validated — the marketplace's installed-side version, see below),
 `crossOriginIsolated` (optional, for threaded engine exports), and `themeColor` /
 `themeTextColor` (optional CSS colors the shell tints the in-game header chrome with;
 shell-validated, so invalid values are ignored — no CSS injection).
@@ -180,6 +181,37 @@ manual entry iteration (**never** `ZipFile.ExtractToDirectory` — no caps, can'
 .NET 7+ it restores the entry's Unix file mode), strict path rules, and byte caps counted **while
 copying** because declared sizes are attacker-controlled. Tests: `GamePackageReaderTests` (validation),
 `GamePackageInstallerTests` (lifecycle), `PackageFixture` (builds deliberately malformed packages).
+
+### The official marketplace (`KnockBox.Server/Marketplace/`)
+Where admins get games from: a catalog index (`.plugins/CATALOG.json` in the separate
+`jcub1011/KnockBox-Games-Marketplace` repo) listing one entry per published game, each pointing at a
+`.kbg` on a GitHub release. `MarketplaceClient` is the **only outbound HTTP in the server** — a plain
+singleton `HttpClient` over a `SocketsHttpHandler` with `PooledConnectionLifetime`, deliberately not
+`IHttpClientFactory`, so no new package has to clear the AOT gate. Spec + trust model:
+`docs/MARKETPLACE.md`. **No UI and no automation yet** — nothing polls, and `DownloadAsync` installs
+nothing; the drop-a-`.kbg`-in flow stays the only path to a playable game.
+
+**The catalog's commit history is the trust root, not the release** — a release asset can be
+re-uploaded in place, so what the catalog commits to is a **`sha256`, which is required** (schema and
+server) and enforced on every download. URLs are **derived**
+(`{DownloadBaseUrl}/{repo}/releases/download/{tag}/{asset}`), never carried in the schema, so a
+tampered entry has nothing to point elsewhere; `repo`/`tag`/`asset` are pattern-checked *before* any
+request leaves the process. No GitHub API is used — deriving the URL dodges the 60/hr unauthenticated
+limit, at the cost of making a malformed `asset` a hard error (it named `GAME.json` once; the schema
+now requires `.kbg`). A download must also re-pass **the same `GamePackageReader.Read`** the installer
+uses, and match the entry's id *and* version — never a second, weaker copy of that validation.
+Catalog DTOs are all-nullable like `GamePackageHeader` (untrusted input must never throw on parse);
+checking splits three ways — `Parse` (is it a catalog?), `ValidateEntry` (is it safe to act on?),
+`PluginUpdateEvaluator` (is it meaningful?).
+
+`GameManifest.Version` (new, optional, never validated) is a game's self-declared build label and the
+installed side of the update check; `SemVer` in `PluginVersion.cs` implements real semver 2.0.0
+precedence because string comparison inverts both `0.9.0 < 0.10.0` and `1.0.0-rc.1 < 1.0.0`.
+`Incompatible` (min/maxAppVersion vs `Hosting/KnockBoxVersion.cs`, read off the assembly so csproj
+`<Version>` is the one source of truth) **outranks** `UpdateAvailable` — never offer an update that
+can't run; and an unparseable bound counts as incompatible, since a constraint we can't read isn't no
+constraint. `InstalledVersionUnknown` is deliberately distinct from `UpdateAvailable`: every
+hand-made game has no version, and nagging about all of them is noise.
 
 ### Serving game assets & pre-compression
 Game builds are served with stock `UseStaticFiles` (ETag + `must-revalidate`, so unchanged
@@ -351,7 +383,9 @@ in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`Log
 on a persisted volume outside the image), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
-(`.kbg` install; the root must be writable and outside `games/`), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
+(`.kbg` install; the root must be writable and outside `games/`),
+`Marketplace{Enabled,CatalogUrl,DownloadBaseUrl,MaxCatalogBytes,MaxDownloadBytes,CatalogTimeoutSeconds,DownloadTimeoutSeconds}`
+(official marketplace; `Enabled=false` ⇒ no outbound HttpClient at all), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`KnownProxies`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
 default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,

@@ -72,7 +72,7 @@ Required. UTF-8 JSON object, stored uncompressed.
 | `id` | ✅ | string | The game id. Must equal `GAME.json`'s `id`. Names the installed folder. |
 | `name` | ✅ | string | Display name. Should equal `GAME.json`'s `name`; informational only. |
 | `files` | ✅ | array | The authoritative content list. See below. |
-| `version` | — | string | Free-form build/version label for the *game*, e.g. `"1.4.0"`. Purely informational, but it is the only way an operator can tell which build is installed, so writers should set it. |
+| `version` | — | string | Build/version label for the *game*, e.g. `"1.4.0"`. Informational to the reader — nothing is rejected on it — but writers should set it, and `knockbox-pack` now defaults it to `GAME.json`'s own `version` so the header and the manifest cannot disagree. The **manifest's** copy is the one a marketplace compares against a catalog entry (see [MARKETPLACE.md](./MARKETPLACE.md)); this one is what shows up in server logs at install time. |
 | `packedBy` | — | string | Tool name and version that produced the file. |
 | `packedAt` | — | string | RFC 3339 / ISO 8601 UTC timestamp of packing. |
 

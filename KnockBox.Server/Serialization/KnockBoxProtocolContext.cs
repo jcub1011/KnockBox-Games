@@ -1,6 +1,7 @@
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
 using KnockBox.Server.Hosting;
+using KnockBox.Server.Marketplace;
 using System.Text.Json.Serialization;
 using static KnockBox.Server.Security.AdminAuthService;
 using static KnockBox.Server.Security.TokenService;
@@ -28,4 +29,10 @@ namespace KnockBox.Server.Serialization;
 // Not a wire type, but it goes through the same source-generated serializer for the same reason:
 // reflection-based JSON is not Native-AOT-safe. See docs/KBG_FORMAT.md.
 [JsonSerializable(typeof(GamePackageHeader))]
+// The marketplace catalog index (docs/MARKETPLACE.md). Its camelCase matches the policy above, and
+// MarketplaceAuthor carries its own hand-written converter because the schema allows two shapes.
+[JsonSerializable(typeof(MarketplaceCatalog))]
+[JsonSerializable(typeof(MarketplacePlugin))]
+[JsonSerializable(typeof(MarketplaceSource))]
+[JsonSerializable(typeof(MarketplaceAuthor))]
 public partial class KnockBoxProtocolContext : JsonSerializerContext { }

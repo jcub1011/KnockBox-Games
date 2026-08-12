@@ -52,6 +52,7 @@ can be dropped into a server's games directory.
 {
   "id": "your-game-id",        // unique key; MUST match the folder name
   "name": "Your Game",         // shown in the lobby browser
+  "version": "1.0.0",          // optional; semver. Set it if you publish to the marketplace
   "entry": "index.html",       // the HTML file loaded in the iframe
   "thumbnail": "thumb.svg",    // optional; served from your folder
   "maxPlayers": 2,             // joins are rejected beyond this
@@ -63,6 +64,7 @@ can be dropped into a server's games directory.
 |---|---|---|
 | `id` | ✅ | Catalog key **and** URL segment. Your files are served at `/games/{id}/…`, so the folder name must equal `id`. |
 | `name` | ✅ | Display name. |
+| `version` | — | Your build's version, conventionally semver (`"1.2.3"`, `"1.2.3-beta.1"`). The platform never validates it and it never affects whether your game loads. It matters if you publish to the official marketplace: it is what an operator's server compares to decide whether their copy is out of date, and the catalog entry is generated from it. `knockbox-pack` copies it into the `.kbg` header too, so the two can't disagree. See [MARKETPLACE.md](./MARKETPLACE.md). |
 | `entry` | ✅ | HTML file the iframe loads, relative to your folder. |
 | `thumbnail` | — | Path (relative to your folder) to an image for the game card. |
 | `maxPlayers` | ✅ | The platform refuses joins past this count. |

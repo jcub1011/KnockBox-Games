@@ -3,6 +3,7 @@ using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
+using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using Microsoft.AspNetCore.Connections;
@@ -45,6 +46,9 @@ var precompressReconcileSeconds = builder.Configuration.GetValue("KnockBox:Preco
 // after gamesRoot. Master switch — off ⇒ .kbg files are ignored entirely and only plain game folders work.
 var packagesEnabled = builder.Configuration.GetValue("KnockBox:Packages", true);
 var packageLimits = GamePackageLimits.FromConfiguration(builder.Configuration);
+
+// Official marketplace: where admins browse and download game packages from. See docs/MARKETPLACE.md.
+var marketplaceOptions = MarketplaceOptions.FromConfiguration(builder.Configuration);
 
 // Best-effort: a read-only games mount (recommended in Docker) or a root-owned parent must not crash
 // startup. GameCatalog and the static-file setup below tolerate a directory that is missing OR exists
@@ -190,6 +194,17 @@ if (packagesEnabled)
         gamesRoot, gamesUnpackedRoot, packageLimits,
         precompressEnabled ? sp.GetRequiredService<GameAssetPrecompressor>() : null,
         sp.GetRequiredService<ILogger<GamePackageInstaller>>()));
+// The official game marketplace: fetch the catalog and download packages from it. Nothing calls
+// this yet (there is no admin UI for it), and it starts no timer and makes no request on its own —
+// registering it now just means the eventual UI is a route table addition. Off ⇒ the server holds no
+// HttpClient at all, which is the posture an air-gapped deployment wants.
+if (marketplaceOptions.Enabled)
+{
+    builder.Services.AddSingleton(marketplaceOptions);
+    builder.Services.AddSingleton(sp => new MarketplaceClient(
+        MarketplaceClient.CreateHttpClient(marketplaceOptions), marketplaceOptions, packageLimits,
+        sp.GetRequiredService<ILogger<MarketplaceClient>>()));
+}
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 builder.Services.AddSingleton<LobbyManager>();

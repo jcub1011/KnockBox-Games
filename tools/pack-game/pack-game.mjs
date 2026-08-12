@@ -127,6 +127,12 @@ export function validate(manifest, manifestPath, inDir) {
   if (crossOriginIsolated !== undefined && typeof crossOriginIsolated !== "boolean") {
     throw new PackError("GAME.json: 'crossOriginIsolated' must be a boolean when present.");
   }
+  // version (optional): the build label. Becomes KBG.json's `version` unless --version overrides it,
+  // and is what a marketplace compares an installed copy against, so it has to be a string — a bare
+  // number here would land in the header as a JSON number and fail to deserialize server-side.
+  if (manifest.version !== undefined && (typeof manifest.version !== "string" || manifest.version.trim() === "")) {
+    throw new PackError("GAME.json: 'version' must be a non-empty string when present (e.g. \"1.0.0\").");
+  }
 
   // The entry must resolve to a file inside the built dir — never escape it (path traversal).
   const inFull = resolve(inDir);
@@ -308,7 +314,12 @@ function emitKbg(p, opts) {
       entries,
       id: p.manifest.id,
       name: p.manifest.name,
-      version: opts.version,
+      // Default the header's build label to the manifest's own `version`. Two version strings that
+      // can silently disagree is a trap for anything reading the package — the marketplace compares
+      // the catalog's version (derived from GAME.json) against what the server has installed, so
+      // KBG.json claiming something else would make an up-to-date package look stale. An explicit
+      // --version still wins, for builds that want a label the manifest doesn't carry.
+      version: opts.version ?? p.manifest.version,
       packedBy: `knockbox-pack ${VERSION}`,
       packedAt: new Date().toISOString(),
       quality: opts.quality ?? DEFAULT_QUALITY,
@@ -395,6 +406,7 @@ Options:
   --cwd <dir>         Working directory for --build (default: current directory).
   --thumbnail <file>  Thumbnail source override (output name stays manifest.thumbnail).
   --version <s>       Stamp a game version into the package (shown in server logs).
+                      Defaults to GAME.json's own "version" when it declares one.
   --quality <0-11>    Brotli quality (default ${DEFAULT_QUALITY} = max). Lower is much faster to pack.
   --no-clean          With --dir: do not wipe the target <id>/ folder first.
   -h, --help          Show this help.`;
