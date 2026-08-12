@@ -92,7 +92,6 @@
         </div>
       </header>
       <div class="game-body">
-        <div id="waiting"></div>
         <div id="frame-host"></div>
       </div>
     </div>
@@ -126,8 +125,27 @@
     </div>
   </div>
 
+  <!-- ── Game launch overlay (covers click → game document loaded) ───────────── -->
+  <!-- Fixed to the viewport, so it lives OUTSIDE #game-view: the click happens while that section
+       is still display:none. role="status" (not dialog) — it must never trap focus.
+       #launch-tile is the clicked game tile continuing its journey: shell.js flies it here from the
+       tile's own grid position, so nothing large ever arrives on screen. -->
+  <div class="launch-overlay" id="launch-overlay" hidden role="status" aria-live="polite">
+    <div class="launch-stage">
+      <div class="launch-tile" id="launch-tile" hidden>
+        <img class="launch-art" id="launch-art" alt="" draggable="false" />
+      </div>
+      <div class="launch-status">
+        <div class="launch-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="launch-title" id="launch-title">Starting game…</p>
+        <p class="launch-hint" id="launch-hint" hidden>Still going — a big game can take a while the first time.</p>
+        <button type="button" class="launch-cancel" id="launch-cancel" hidden>Back to games</button>
+      </div>
+    </div>
+  </div>
+
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module">import { bootstrap } from '/shell.js?v=5'; bootstrap();</script>
+  <script type="module">import { bootstrap } from '/shell.js?v=9'; bootstrap();</script>
 </body>
 </html>

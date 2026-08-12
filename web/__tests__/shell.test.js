@@ -8,9 +8,13 @@
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, stubClipboard, tick } from './helpers.js';
-import { FAVICONS } from '../kb-core.js';
+import { FAVICONS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
 
 const el = (id) => document.getElementById(id);
+
+// The overlay is retired synchronously (.is-leaving goes on at once) but only becomes `hidden` once
+// its cross-fade has played. Most tests care about "this launch is over", which is the class.
+const launchRetired = () => el('launch-overlay').hidden || el('launch-overlay').classList.contains('is-leaving');
 
 let getWs;   // () => latest FakeWebSocket the module created
 let shell;   // the freshly-imported module namespace
@@ -450,7 +454,7 @@ describe('roster updates', () => {
     // current lobby — applied
     shell.handle({ type: 'PlayerJoined', lobbyId: 'AB12', player: { id: 'p2', displayName: 'Bob' } });
     shell.handle({ type: 'PlayerLeft', lobbyId: 'AB12', playerId: 'p2' });
-    expect(el('waiting').textContent).toBe('Loading game…'); // updateWaiting ran without error
+    expect(el('lobby-code').textContent).toBe('AB12'); // roster churn didn't disturb the room view
   });
 });
 
@@ -481,7 +485,8 @@ describe('enterGame (EnterGame)', () => {
     expect(frame.src.startsWith('http://games.test/games/ttt/')).toBe(true);
     expect(frame.src.includes('#')).toBe(true);
     expect(frame.src.includes('?')).toBe(false); // creds in the fragment, never the query string
-    expect(el('waiting').style.display).toBe('none');
+    // The overlay stays up past iframe creation — the asset download is the slow part.
+    expect(el('launch-overlay').hidden).toBe(false);
   });
 
   it('sets the cross-origin-isolated allow attribute when the manifest asks for it', async () => {
@@ -492,6 +497,361 @@ describe('enterGame (EnterGame)', () => {
     ws._recv({ cid: req.cid, type: 'Ticket', ticket: 't' });
     await tick();
     expect(el('game-frame').allow).toBe('cross-origin-isolated');
+  });
+});
+
+describe('launch overlay', () => {
+  // Drive enterGame to a live iframe. Returns the frame element.
+  async function embedGame(ws, { lobbyId = 'AB12', gameId = 'ttt' } = {}) {
+    shell.enterGame({ type: 'EnterGame', lobbyId, gameId, hostId: 'p1', players: [] });
+    const req = ws.sent.find((f) => f.type === 'RequestTicket');
+    ws._recv({ cid: req.cid, type: 'Ticket', ticket: 't' });
+    await tick();
+    return el('game-frame');
+  }
+
+  describe('with a name entered', () => {
+    beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
+
+    it('appears the instant a tile is clicked, named, before any reply', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+
+      el('games').querySelector('.game-tile').click();
+
+      // showLaunchOverlay runs before createLobby's first await — no tick() here on purpose.
+      expect(el('launch-overlay').hidden).toBe(false);
+      expect(el('launch-title').textContent).toBe('Starting Tic Tac Toe…');
+      expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(true);
+    });
+
+    it('shows the tile art when the manifest declares a thumbnail', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      shell.createLobby('ttt');
+      expect(el('launch-tile').hidden).toBe(false);
+      expect(el('launch-art').getAttribute('src')).toBe('/games/ttt/tile.png');
+    });
+
+    it('leaves the tile out entirely when the manifest has no thumbnail', async () => {
+      await importShell();
+      await bootWithGames();
+      shell.createLobby('ttt');
+      // Nothing to fly — the dots and the title carry the launch on their own.
+      expect(el('launch-tile').hidden).toBe(true);
+      expect(el('launch-art').hasAttribute('src')).toBe(false);
+    });
+
+    // jsdom has no layout, so every getBoundingClientRect is zeros — the flight has to be given real
+    // rects to measure. Returns the clicked tile button.
+    function stubLayout({ tile = { left: 40, top: 200, width: 240, height: 160 } } = {}) {
+      const btn = el('games').querySelector('.game-tile');
+      btn.getBoundingClientRect = () => ({ ...tile, right: tile.left + tile.width, bottom: tile.top + tile.height });
+      el('launch-tile').getBoundingClientRect =
+        () => ({ left: 350, top: 300, width: 300, height: 200, right: 650, bottom: 500 });
+      return btn;
+    }
+
+    it('flies the clicked tile from its place in the grid to the centre', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      const btn = stubLayout();
+      btn.click();
+
+      // The launch tile starts life sitting exactly on the one that was clicked; CSS carries it home
+      // once the inline transform is cleared, which happens in the same tick.
+      expect(el('launch-tile').hidden).toBe(false);
+      expect(el('launch-tile').style.transform).toBe('');
+      expect(el('launch-tile').classList.contains('no-transition')).toBe(false);
+      // The original is hidden so it doesn't double-image beneath the copy flying off it.
+      expect(btn.style.visibility).toBe('hidden');
+      // ...and handed back when the launch is over, or the grid would come home with a hole in it.
+      shell.showLobbyView();
+      expect(btn.style.visibility).toBe('');
+    });
+
+    it('arrives in place when there is no tile to fly from', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      // A rejoin: EnterGame with no preceding click, so no source rect exists.
+      shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+      expect(el('launch-tile').classList.contains('is-popping')).toBe(true);
+      expect(el('launch-tile').style.transform).toBe('');   // never NaN from a zero rect
+    });
+
+    it('dissolves the home view behind the launch, and restores it afterwards', async () => {
+      await importShell();
+      await bootWithGames();
+      el('games').querySelector('.game-tile').click();
+      expect(el('lobby-view').classList.contains('is-launching')).toBe(true);
+
+      shell.showLobbyView();
+      // A stuck is-launching would leave the home page rendered at opacity 0 — a dead-looking app.
+      expect(el('lobby-view').classList.contains('is-launching')).toBe(false);
+    });
+
+    it('stays up across the lobby round trip and the ticket round trip', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      expect(el('launch-overlay').hidden).toBe(false);  // survived showRoom
+
+      await embedGame(ws);
+      expect(el('launch-overlay').hidden).toBe(false);  // survived iframe creation
+    });
+
+    it('comes down when the game iframe finishes loading', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      const frame = await embedGame(ws);
+
+      frame.dispatchEvent(new Event('load'));
+      expect(launchRetired()).toBe(true);
+    });
+
+    // jsdom has no Web Animations API, so stand in for Element.animate and hand back a morph whose
+    // completion the test controls. Returns the recorded call plus the resolver.
+    function stubMorphAnimation() {
+      const rec = { calls: [], cancelled: 0 };
+      let finish;
+      rec.finish = () => { finish(); };
+      el('game-view').animate = (keyframes, options) => {
+        rec.calls.push({ keyframes, options });
+        return { finished: new Promise((res) => { finish = res; }), cancel: () => { rec.cancelled++; } };
+      };
+      return rec;
+    }
+
+    // Drive a click-launched game all the way to a live iframe, with layout stubbed so the tile flies.
+    async function launchWithTile(ws) {
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+      const reply = ws.sent.find((f) => f.type === 'CreateLobby');
+      ws._recv({ cid: reply.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+      await tick();
+      const frame = await embedGame(ws);
+      // The tile has reached (or is passing through) this rect; the game must take it over exactly.
+      el('launch-tile').getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 });
+      el('game-view').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 800 });
+      return frame;
+    }
+
+    it('hands the tile over to the game, which expands to fullscreen from that exact rect', async () => {
+      await importShell();
+      const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      const frame = await launchWithTile(ws);
+      const morph = stubMorphAnimation();
+
+      frame.dispatchEvent(new Event('load'));
+
+      // No loading screen is left over a game that has arrived — the overlay is gone in the same frame.
+      expect(el('launch-overlay').hidden).toBe(true);
+      expect(el('launch-overlay').classList.contains('is-leaving')).toBe(false);
+      expect(el('game-view').classList.contains('launch-veil')).toBe(false);
+      expect(el('game-view').classList.contains('launch-morph')).toBe(true);
+      // Starts on the tile's rect — scaled 400/1000 by 200/800, offset to (100, 50) — and ends at rest.
+      const { keyframes, options } = morph.calls[0];
+      expect(keyframes[0].transform).toBe('translate(100px, 50px) scale(0.4, 0.25)');
+      expect(keyframes[1].transform).toBe('none');
+      // Corner radii are pre-divided by each axis' scale so the squashed corner still reads as 16px.
+      expect(keyframes[0].borderRadius).toBe('40px / 64px');
+      expect(options.duration).toBe(LAUNCH_MORPH_MS);
+      expect(el('game-view').style.transformOrigin).toBe('0 0');
+      // The background waits: swapping it now would snap the atmosphere behind a game that is still
+      // only part of the screen.
+      expect(document.body.classList.contains('in-game')).toBe(false);
+
+      morph.finish();
+      await tick();
+      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
+      expect(el('game-view').style.transformOrigin).toBe('');   // no remnants
+      expect(el('game-view').style.overflow).toBe('');
+      expect(document.body.classList.contains('in-game')).toBe(true);
+    });
+
+    it('swaps the background even if the expand never reports finishing', async () => {
+      await importShell();
+      const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      const frame = await launchWithTile(ws);
+      stubMorphAnimation();   // never resolved
+
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      frame.dispatchEvent(new Event('load'));
+      expect(document.body.classList.contains('in-game')).toBe(false);
+
+      vi.advanceTimersByTime(LAUNCH_MORPH_MS + 200);
+      expect(document.body.classList.contains('in-game')).toBe(true);
+      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
+    });
+
+    it('falls back to a fade when there is no tile to hand over from', async () => {
+      await importShell();
+      const ws = await bootWithGames();   // no thumbnail, so no tile was ever shown
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      const frame = await embedGame(ws);
+
+      // shouldAdvanceTime keeps tick()'s setTimeout(0) working while still allowing a manual jump.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      frame.dispatchEvent(new Event('load'));
+
+      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
+      expect(el('game-view').classList.contains('launch-veil')).toBe(false);
+      expect(document.body.classList.contains('in-game')).toBe(true);
+      expect(el('launch-overlay').classList.contains('is-leaving')).toBe(true);
+
+      vi.advanceTimersByTime(LAUNCH_EXIT_MS);
+      expect(el('launch-overlay').hidden).toBe(true);
+    });
+
+    it('cancels the expand and leaves nothing behind when a player leaves mid-morph', async () => {
+      await importShell();
+      const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      const frame = await launchWithTile(ws);
+      const morph = stubMorphAnimation();
+      frame.dispatchEvent(new Event('load'));
+      expect(el('game-view').classList.contains('launch-morph')).toBe(true);
+
+      shell.showLobbyView();
+      // A half-scaled game view left running would break the next session.
+      expect(morph.cancelled).toBe(1);
+      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
+      expect(el('game-view').style.transformOrigin).toBe('');
+      expect(el('game-view').style.overflow).toBe('');
+    });
+
+    it('veils the game view while the launch is up, so it is never seen half-built', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+      // In the layout (so the iframe can download) but not visible, and the background has not swapped.
+      expect(el('game-view').style.display).toBe('block');
+      expect(el('game-view').classList.contains('launch-veil')).toBe(true);
+      expect(document.body.classList.contains('in-game')).toBe(false);
+    });
+
+    it('ignores a load from a torn-down frame, so it cannot clear a newer launch', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      const stale = await embedGame(ws);
+
+      shell.showLobbyView();          // tears the frame down and retires that launch
+      shell.createLobby('ttt');       // a fresh one is now on screen
+      expect(el('launch-overlay').hidden).toBe(false);
+
+      stale.dispatchEvent(new Event('load'));
+      expect(el('launch-overlay').hidden).toBe(false);
+      expect(el('launch-overlay').classList.contains('is-leaving')).toBe(false);
+    });
+
+    it('comes down when lobby creation is rejected', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      const p = shell.createLobby('ttt');
+      const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+      ws._recv({ cid: frame.cid, type: 'Error', reason: 'Rate limited.' });
+      await p;
+
+      expect(launchRetired()).toBe(true);
+      expect(document.querySelector('.home-error-toast').textContent).toContain('Rate limited.');
+    });
+
+    it('comes down when EnterGame names a game we do not have', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      shell.handle({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'nope', hostId: 'p1', players: [] });
+      await tick();
+      expect(launchRetired()).toBe(true);
+    });
+
+    it('comes down on leave and restores the home view', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      el('leave').click();
+      expect(launchRetired()).toBe(true);
+      // The home view must not be left faded out; that would look like a dead app.
+      expect(el('lobby-view').classList.contains('is-launching')).toBe(false);
+      expect(el('lobby-view').style.display).toBe('block');
+    });
+
+    it('covers a rejoin, where the click (and showRoom) never happened', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+
+      shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+      expect(el('launch-overlay').hidden).toBe(false);
+      expect(el('launch-title').textContent).toBe('Starting Tic Tac Toe…');
+      expect(ws.sent.some((f) => f.type === 'RequestTicket')).toBe(true);
+    });
+
+    it('starts generic on join-by-code, then takes the name from EnterGame', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      el('room-code-input').value = 'ab12';
+      el('join-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+      expect(el('launch-overlay').hidden).toBe(false);
+      expect(el('launch-title').textContent).toBe('Starting game…');
+
+      const join = ws.sent.find((f) => f.type === 'JoinLobby');
+      ws._recv({ cid: join.cid, type: 'LobbyJoined', lobbyId: 'AB12' });
+      await tick();
+      shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p2', players: [] });
+      expect(el('launch-title').textContent).toBe('Starting Tic Tac Toe…');
+    });
+
+    it('escalates to a hint and an escape hatch once the launch is clearly slow', async () => {
+      await importShell();
+      await bootWithGames();
+      vi.useFakeTimers();
+      shell.createLobby('ttt');
+
+      expect(el('launch-hint').hidden).toBe(true);
+      expect(el('launch-cancel').hidden).toBe(true);
+
+      vi.advanceTimersByTime(LAUNCH_SLOW_MS);
+      expect(el('launch-hint').hidden).toBe(false);
+      expect(el('launch-cancel').hidden).toBe(false);
+      expect(el('launch-overlay').hidden).toBe(false); // escalated, not dismissed
+    });
+
+    it('force-dismisses a launch that never resolves, so it cannot hide a running game', async () => {
+      await importShell();
+      await bootWithGames();
+      vi.useFakeTimers();
+      shell.createLobby('ttt');
+
+      vi.advanceTimersByTime(LAUNCH_MAX_MS);
+      expect(el('launch-overlay').classList.contains('is-leaving')).toBe(true);
+      vi.advanceTimersByTime(LAUNCH_EXIT_MS);
+      expect(el('launch-overlay').hidden).toBe(true);
+    });
+
+    it('stands down when the player backs out mid-launch, and leaves the orphaned lobby', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      const p = shell.createLobby('ttt');
+
+      el('launch-cancel').click();          // the escape hatch — abandons this launch
+      const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+      ws._recv({ cid: frame.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+      await p;
+
+      expect(el('game-view').style.display).not.toBe('block'); // never dragged into it
+      expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
+    });
+  });
+
+  it('does not appear when no name has been entered', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await shell.createLobby('ttt');
+    expect(el('launch-overlay').hidden).toBe(true);
+    expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(false);
   });
 });
 

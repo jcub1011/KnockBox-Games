@@ -11,6 +11,8 @@ import {
   sanitizeGameOrigin,
   buildGameSrc,
   buildJoinLink,
+  launchFlipFrom,
+  launchMessage,
   luminance,
   pickContrastText,
   dominantColorFromPixels,
@@ -20,6 +22,7 @@ import {
   normalizeReady,
   rosterAdd,
   rosterRemove,
+  rotationFromMatrix,
   appendPlayLog,
   PLAY_LOG_MAX,
   PLAY_LOG_STANDARD_KEYS,
@@ -409,6 +412,80 @@ describe('buildJoinLink', () => {
 
   it('percent-encodes the code', () => {
     expect(buildJoinLink('http://localhost:5114', 'A B')).toBe('http://localhost:5114/?join=A%20B');
+  });
+});
+
+describe('launchMessage', () => {
+  it('names the game being started', () => {
+    expect(launchMessage('Tic Tac Toe')).toBe('Starting Tic Tac Toe…');
+  });
+
+  it('trims surrounding whitespace out of the name', () => {
+    expect(launchMessage('  Quiplash  ')).toBe('Starting Quiplash…');
+  });
+
+  // Join-by-code doesn't know the game until EnterGame lands, so there must be a generic label
+  // rather than "Starting …" with a hole in it.
+  it('falls back to a generic label when the game is not known yet', () => {
+    expect(launchMessage(null)).toBe('Starting game…');
+    expect(launchMessage(undefined)).toBe('Starting game…');
+    expect(launchMessage('')).toBe('Starting game…');
+    expect(launchMessage('   ')).toBe('Starting game…');
+  });
+
+  it('ignores a non-string name instead of interpolating it', () => {
+    expect(launchMessage(42)).toBe('Starting game…');
+    expect(launchMessage({})).toBe('Starting game…');
+  });
+});
+
+describe('launchFlipFrom', () => {
+  // The centred launch tile, 300x200 in a 1000x800 viewport.
+  const dest = { left: 350, top: 300, width: 300, height: 200 };
+
+  it('maps the destination back onto the source tile', () => {
+    // A grid tile up and to the left, 240x160.
+    const flip = launchFlipFrom({ left: 60, top: 100, width: 240, height: 160 }, dest);
+    expect(flip.dx).toBe((60 + 120) - (350 + 150));   // -320
+    expect(flip.dy).toBe((100 + 80) - (300 + 100));   // -220
+    expect(flip.scale).toBe(0.8);
+  });
+
+  it('is the identity when the source is already the destination', () => {
+    expect(launchFlipFrom({ ...dest }, dest)).toEqual({ dx: 0, dy: 0, scale: 1 });
+  });
+
+  // A degenerate rect is a normal outcome — a tile scrolled out of view, or jsdom, where every
+  // getBoundingClientRect is zeros. The caller falls back to arriving in place.
+  it('declines a degenerate rect rather than producing NaN', () => {
+    expect(launchFlipFrom({ left: 0, top: 0, width: 0, height: 0 }, dest)).toBe(null);
+    expect(launchFlipFrom({ left: 0, top: 0, width: 240, height: 0 }, dest)).toBe(null);
+    expect(launchFlipFrom({ left: 0, top: 0, width: 240, height: 160 }, { ...dest, width: 0 })).toBe(null);
+    expect(launchFlipFrom(null, dest)).toBe(null);
+    expect(launchFlipFrom({ ...dest }, null)).toBe(null);
+  });
+});
+
+describe('rotationFromMatrix', () => {
+  it('reads the angle out of a 2D matrix', () => {
+    // rotate(-1deg): cos(-1°)=0.999848, sin(-1°)=-0.017452
+    expect(rotationFromMatrix('matrix(0.999848, -0.0174524, 0.0174524, 0.999848, 0, 0)'))
+      .toBeCloseTo(-1, 4);
+    expect(rotationFromMatrix('matrix(0, 1, -1, 0, 0, 0)')).toBeCloseTo(90, 6);
+  });
+
+  it('reads the angle out of a matrix3d as well', () => {
+    expect(rotationFromMatrix('matrix3d(0.999848, -0.0174524, 0, 0, 0.0174524, 0.999848, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)'))
+      .toBeCloseTo(-1, 4);
+  });
+
+  // An unrotated tile, or anything unparseable: the flourish is skipped, never a broken transform.
+  it('falls back to square for an unrotated or unreadable transform', () => {
+    expect(rotationFromMatrix('none')).toBe(0);
+    expect(rotationFromMatrix('')).toBe(0);
+    expect(rotationFromMatrix(null)).toBe(0);
+    expect(rotationFromMatrix(undefined)).toBe(0);
+    expect(rotationFromMatrix('matrix(nonsense)')).toBe(0);
   });
 });
 

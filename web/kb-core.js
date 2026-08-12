@@ -229,6 +229,67 @@ export function rosterRemove(players, playerId) {
   return players.filter((p) => p.id !== playerId);
 }
 
+// ── Game launch overlay ─────────────────────────────────────────────────────────
+// How long a launch may run before we admit it's slow (escalate the copy and offer a way out), and
+// the hard ceiling after which the shell drops the overlay regardless — a missed iframe `load` must
+// never leave a game that actually started hidden behind it.
+export const LAUNCH_SLOW_MS = 8000;
+export const LAUNCH_MAX_MS = 45000;
+
+// How the launch ends. Nothing holds either exit back — making a game that has finished loading wait
+// out an animation reads as clunky. Both MIRROR durations in home.css; change them together.
+//
+// MORPH: the good ending. The tile is replaced by the game in the very rect it occupied, which then
+//   expands to fill the screen like a video going fullscreen. The overlay is gone from the first
+//   frame of it, so nothing of the launch is ever drawn over a running game.
+// EXIT:  the fallback fade, for an ending with no tile to hand over from (join-by-code before the
+//   game is named, a rejoin) or no game to hand over to (an error, a deliberate bail-out).
+export const LAUNCH_MORPH_MS = 300;
+export const LAUNCH_EXIT_MS = 220;
+
+// The morph's curve. Eased IN: the tile flight's ease-out suits a small object arriving somewhere, but
+// on a full-screen expand it spends most of its travel in the first few frames, which lands as a jolt.
+// This is at 4% / 10% / 36% by 40 / 60 / 100ms — a gentle start that still decelerates into the finish
+// rather than slamming against the viewport edge at peak speed. (A stronger ease-in overshoots the
+// other way: so little early movement that it reads as a hitch.)
+export const LAUNCH_MORPH_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
+
+// "Starting Tic Tac Toe…". The join-by-code path doesn't learn which game it is until EnterGame
+// arrives, so fall back to a generic label rather than rendering "Starting …" with a hole in it.
+export function launchMessage(gameName) {
+  const name = typeof gameName === 'string' ? gameName.trim() : '';
+  return name ? `Starting ${name}…` : 'Starting game…';
+}
+
+// FLIP: the transform that puts `dest` (the centred launch tile, at its final size) back on top of
+// `src` (the clicked grid tile). Applying it, then removing it, animates the one into the other.
+// Rects are {left, top, width, height} — DOMRects, or plain objects in tests.
+//
+// Returns null when either rect is degenerate: a tile scrolled out of view, a display:none ancestor,
+// or jsdom, where getBoundingClientRect is all zeros. That's a normal outcome, not an error — the
+// caller falls back to a centre pop-in, which is also the join-by-code and rejoin path.
+export function launchFlipFrom(src, dest) {
+  if (!src || !dest || !src.width || !src.height || !dest.width) return null;
+  return {
+    dx: (src.left + src.width / 2) - (dest.left + dest.width / 2),
+    dy: (src.top + src.height / 2) - (dest.top + dest.height / 2),
+    scale: src.width / dest.width,
+  };
+}
+
+// Degrees of rotation in a CSSOM transform value ("none", "matrix(a, b, c, d, e, f)", or the 3d
+// form). The grid tiles each carry a ±1deg nth-child rotation; the flying tile starts at its source
+// tile's angle and settles to square, so picking a game up off the table straightens it. Anything
+// unparseable yields 0 — a missing flourish, never a broken transform.
+export function rotationFromMatrix(transform) {
+  const m = (transform || '').match(/matrix(3d)?\(([^)]+)\)/);
+  if (!m) return 0;
+  const n = m[2].split(',').map((v) => parseFloat(v));
+  // matrix(a,b,…) and matrix3d(a,b,…) both start with the first column of the 2D sub-matrix.
+  if (!Number.isFinite(n[0]) || !Number.isFinite(n[1])) return 0;
+  return Math.atan2(n[1], n[0]) * 180 / Math.PI;
+}
+
 // ── Play Log ────────────────────────────────────────────────────────────────────
 // Games push play-log entries via KnockBox.logPlay(metadata); the server stamps gameId/timestamp/
 // isHost and forwards them to the shell, which persists the most-recent few in the browser and

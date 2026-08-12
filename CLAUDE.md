@@ -27,7 +27,11 @@ Solution file is `KnockBox-Games.slnx` (modern `.slnx`, not legacy `.sln`). All 
 - Desktop publish (self-contained win-x64 exe): `dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop`
 
 The `web/` frontend is plain ES modules — **no build step**; it is served directly and baked
-into publish/Docker output. Only `web/kb-core.js` (pure protocol logic) is unit-tested.
+into publish/Docker output. Unit-tested under `web/__tests__/`: `web/kb-core.js` (pure protocol
+logic, Node env) plus `shell.js` and `knockbox.js` (jsdom, against the **real** `index.html` —
+`helpers.js` injects it, so element ids stay in sync with production markup). `index.html` loads
+`/shell.js?v=N` — **bump `N` whenever you change `shell.js`**, or browsers serve the stale module
+against new markup.
 
 ## Docker / CI
 
@@ -279,8 +283,55 @@ forwards it to that player's **control** socket, where the shell persists the mo
 `localStorage` (`kb.playLog`) and renders them in the home-page Play Log).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested
 protocol helpers (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
-`partitionPlayLogMetadata`, `ordinal`). Close code **1008** is terminal (no reconnect); other
-closes back off exponentially.
+`partitionPlayLogMetadata`, `ordinal`; launch copy: `launchMessage`). Close code **1008** is
+terminal (no reconnect); other closes back off exponentially.
+
+**Launch overlay.** Clicking a game tile is covered by a "Starting {GameName}…" overlay
+(`#launch-overlay`) from the click until the game iframe's `load` event — two socket round trips
+plus, on a first play, a multi-megabyte asset download, all of which used to look like a frozen
+page. Determinate progress is deliberately *not* attempted: the iframe is cross-origin (no
+resource-timing) and `GameManifest` carries no asset sizes. It is raised in `createLobby`/
+`joinByCode` (name known synchronously from the catalog) and in `enterGame` (which is the *only*
+path on a rejoin — `tryRejoin` ignores its reply), and retired by the `load` handler,
+`showError`, `showLobbyView`, or a hard `LAUNCH_MAX_MS` ceiling so a missed event can't hide a
+running game. Two counters guard it: `launchSeq` drops a stale `load`, and `launchAbortSeq` makes a
+deliberate bail-out reject the in-flight reply (and leave the lobby the server made anyway).
+
+It is presented as a **continuity transition, not a card**: the clicked tile itself is flown from its
+grid rect to the centre (a FLIP — `launchFlipFrom`/`rotationFromMatrix` in `kb-core.js` do the math,
+`flyLaunchTile` sets one inline start transform and clears it after a forced reflow), straightening
+out of its `nth-child` rotation, while `#lobby-view` dissolves and the dot ticker rises. Nothing large
+arrives, so a warm launch reads as a lift rather than a flash. The destination size is derived from the
+source (1.25×, viewport-capped) — a *fixed* size is a shrink on a wide window, since the grid columns
+are elastic. Three consequences worth knowing before touching it:
+- **`z-index: 100`, above** `.game-header`'s `99` (which competes in the root stacking context). The
+  header must not slide in over the flying tile at a moment network timing decides, so the launch owns
+  the screen and `#launch-cancel` is the only way out of a stall.
+- **There is no scrim.** The overlay is transparent so `body::before/::after` keep running in phase —
+  a scrim of our own could not be phase-matched to the scrolling stripes. That means the game view has
+  to be revealed (it must be in the layout to download) but veiled: `#game-view.launch-veil`, plus
+  `body.in-game` withheld, both released as the overlay fades. `visibility`, never `display:none`,
+  which would entitle the iframe to defer loading.
+- **Nothing of the launch is ever drawn over a running game.** On the iframe's `load` —
+  `hideLaunchOverlay(true)`, the only caller that passes it — the tile *hands over*: `startGameMorph`
+  drops the overlay outright and in the same frame plants `#game-view` in the exact rect the tile had
+  reached (mid-flight or settled, rounded corners and all), then expands it to fullscreen like a video
+  (`LAUNCH_MORPH_MS`/`LAUNCH_MORPH_EASING`). That expand is a **Web Animations call, not a CSS
+  transition** — a transition has to be armed by writing a start value and clearing it, which made it
+  a hostage of style-recalc ordering and was seen sticking at the start matrix with `playState`
+  `running` and `transition-duration: 0s`, freezing the game at tile size. Its safety timer is held
+  outside `launchTimers` so ending the morph cancels it; a stray one strips the class off whatever
+  launch is running by then. The scale is deliberately
+  **non-uniform** — matching the tile's rect on both axes is what sells it, and a uniform scale would
+  start the game at nearly full height on a portrait phone. `body.in-game` is withheld until the morph
+  ends, because that's the first moment the game covers the screen and the background can swap
+  unseen. Every other ending (an error, a bail-out, the `LAUNCH_MAX_MS` ceiling, a launch that never
+  had a tile) takes the `LAUNCH_EXIT_MS` fade instead. Fading a loading screen away over a game that
+  has already arrived was tried and rejected as clunky — don't reintroduce it.
+- Both durations mirror `home.css`; change them together. `clearGameMorph` runs from `showLobbyView`
+  and `showLaunchOverlay` as well as on completion — a stranded inline transform on `#game-view`
+  breaks the next session. And `#lobby-view.is-launching` is cleared in two places on purpose: leave
+  it stuck and the home page renders at `opacity: 0`.
 
 ### Logging (server side)
 Serilog is the host logger (`builder.Host.UseSerilog` in `Program.cs`): console + a **daily**

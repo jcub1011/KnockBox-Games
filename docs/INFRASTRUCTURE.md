@@ -225,7 +225,11 @@ a subdomain in prod). A third, operator-only **admin** origin sits alongside the
 
 - **Shell origin** — `web/shell.js` + `index.html`. Owns the single **control** socket, identity
   (per-tab token in `sessionStorage`), the lobby browser, and the waiting room. When a game starts
-  it requests a ticket and embeds the game iframe on the game origin. It does **not** bridge
+  it requests a ticket and embeds the game iframe on the game origin, covering the wait with a
+  "Starting {GameName}…" launch overlay — up from the click, taken down on the iframe's `load`
+  event (the only signal a cross-origin frame gives the parent), which flies the clicked tile itself
+  to the centre rather than dropping a card over the page, and on `load` hands that tile over to the
+  game, expanding it from the tile's rect to fullscreen. It does **not** bridge
   gameplay — there is no `postMessage` relay; the game talks to the server directly.
 - **Game origin** — serves each game's build under `/games/{id}/…` plus `knockbox.js`. The SDK opens
   the game's own data socket using the ticket from its URL.
