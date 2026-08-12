@@ -115,25 +115,6 @@ public class OriginRoutingTests
             adminPort: 5116, adminHost: "admin.knockbox.test"));
     }
 
-    // ── ResolveAdminOrigin ─────────────────────────────────────────────────────
-    [Fact]
-    public void Explicit_admin_origin_wins()
-    {
-        var origin = OriginRouting.ResolveAdminOrigin("http", "localhost", 5116, adminHost: null, adminOrigin: "https://admin.example.com/");
-        Assert.Equal("https://admin.example.com", origin); // trailing slash trimmed
-    }
-
-    [Fact]
-    public void Admin_host_is_used_when_no_explicit_origin()
-    {
-        var origin = OriginRouting.ResolveAdminOrigin("https", "knockbox.example", 5116, adminHost: "admin.knockbox.example", adminOrigin: null);
-        Assert.Equal("https://admin.knockbox.example", origin);
-    }
-
-    [Fact]
-    public void Falls_back_to_host_and_admin_port_in_dev()
-    {
-        var origin = OriginRouting.ResolveAdminOrigin("http", "localhost", 5116, adminHost: null, adminOrigin: null);
-        Assert.Equal("http://localhost:5116", origin);
-    }
+    // No ResolveAdminOrigin cases: the helper was deleted with the tests that were its only callers —
+    // see the note at the bottom of OriginRouting for why the admin origin has no resolver.
 }

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 using System.Threading.Channels;
 using KnockBox.Contracts;
@@ -307,17 +308,19 @@ public sealed class ServerAuthority
     }
 
     // Full-state push to everyone: one shared snapshot, or per-member projections in
-    // per-recipient (hidden information) mode.
+    // per-recipient (hidden information) mode. ONE member snapshot per broadcast — Lobby.Players
+    // allocates a fresh list on every read, and per-recipient mode reads it once per member.
     private void BroadcastState()
     {
+        var members = _lobby.Players;
         if (_runtime.Config.PerRecipient)
         {
-            foreach (var p in _lobby.Players)
-                SendEnvelope(p.Id, StateEnvelope(Snapshot(p.Id)));
+            foreach (var p in members)
+                SendEnvelope(p.Id, StateEnvelope(Snapshot(p.Id)), members);
         }
         else
         {
-            SendEnvelope("all", StateEnvelope(Snapshot(null)));
+            SendEnvelope("all", StateEnvelope(Snapshot(null)), members);
         }
     }
 
@@ -330,11 +333,11 @@ public sealed class ServerAuthority
 
     /// <summary>Serializes once and fans out over the lobby's member snapshot with the reserved
     /// sender id "server". Enforces the wire's message-size cap outbound (inbound-only today).</summary>
-    private void SendEnvelope(string to, string envelopeJson)
+    private void SendEnvelope(string to, string envelopeJson) => SendEnvelope(to, envelopeJson, _lobby.Players);
+
+    private void SendEnvelope(string to, string envelopeJson, IReadOnlyList<Player> members)
     {
-        byte[] bytes;
-        using (var doc = JsonDocument.Parse(envelopeJson))
-            bytes = ConnectionManager.Serialize(new GameMessage(to, doc.RootElement.Clone(), From: "server"));
+        var bytes = SerializeGameFrame(to, envelopeJson);
 
         if (bytes.Length > WebSocketHandler.MaxMessageBytes)
         {
@@ -344,9 +347,48 @@ public sealed class ServerAuthority
         }
 
         if (to == "all")
-            foreach (var p in _lobby.Players) _connections.SendRawToGame(p.Id, bytes);
+            foreach (var p in members) _connections.SendRawToGame(p.Id, bytes);
         else
             _connections.SendRawToGame(to, bytes);
+    }
+
+    /// <summary>
+    /// The <c>GameMessage</c> wire frame, written directly around an envelope that is ALREADY JSON.
+    /// </summary>
+    /// <remarks>
+    /// The same frame <c>ConnectionManager.Serialize(new GameMessage(to, payload, "server"))</c> produces —
+    /// discriminator first, then camelCase properties in declaration order — but without materializing the
+    /// payload as a JsonDocument, deep-cloning it into a detached JsonElement and then serializing it a
+    /// third time. That round trip cost three full passes over the payload where one will do, on the tick
+    /// path: a 20 Hz game with a 40 KB snapshot pays it twenty times a second per lobby, multiplied by the
+    /// member count in per-recipient mode.
+    ///
+    /// One deliberate difference, pinned by ServerAuthorityFrameTests: the payload is copied verbatim, so
+    /// it keeps whatever escaping the module's own serializer chose, where the round trip re-encoded it
+    /// with <c>JavaScriptEncoder.Default</c> (non-ASCII and HTML-sensitive characters as <c>\uXXXX</c>).
+    /// Both are the same JSON value to any parser, and these frames go straight into a WebSocket rather
+    /// than into markup, which is the only thing that escaping buys. It also makes the frames smaller.
+    ///
+    /// <see cref="Utf8JsonWriter.WriteRawValue(string, bool)"/> keeps its default validation. The payload
+    /// is valid by construction (the runtime's own serializer, or an envelope this class built with
+    /// JsonEncodedText), so validation should never fire — but skipping it would turn a hypothetical bug
+    /// into malformed JSON at the client instead of a server-side throw, which is a strictly worse trade
+    /// for one scan of a buffer we are copying anyway.
+    /// </remarks>
+    internal static byte[] SerializeGameFrame(string to, string envelopeJson)
+    {
+        var buffer = new ArrayBufferWriter<byte>(envelopeJson.Length + 64);
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", "Game");
+            writer.WriteString("to", to);
+            writer.WritePropertyName("payload");
+            writer.WriteRawValue(envelopeJson);
+            writer.WriteString("from", "server");
+            writer.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
     }
 
     // ── Deferred effects (design §3) ─────────────────────────────────────────

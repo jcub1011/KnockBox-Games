@@ -117,6 +117,42 @@ public class GameCatalogTests : IDisposable
         }
     }
 
+    [Fact]
+    public void An_unreadable_games_folder_keeps_the_previous_catalog_and_notifies_nobody()
+    {
+        if (OperatingSystem.IsWindows()) return; // POSIX permission bits only
+
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        var catalog = NewCatalog();
+        catalog.Discover();
+        Assert.Single(catalog.Games);
+
+        var notifications = 0;
+        catalog.Discovered += _ => Interlocked.Increment(ref notifications);
+
+        File.SetUnixFileMode(_root, UnixFileMode.None);
+        try
+        {
+            try { _ = Directory.EnumerateDirectories(_root).Any(); return; } // running as root: can't test
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* denied, as intended */ }
+
+            catalog.Discover();
+
+            // A failed scan is not an empty library. Every Discovered subscriber maintains derived state
+            // keyed on "which games exist" — the compressed cache, the word pools, the parsed authority
+            // modules — and each treats an absent id as "delete what you built for it". So a mount that
+            // blips for one pass must neither empty the catalog nor tell anyone it did, or the whole
+            // games-compressed tree is deleted and re-compressed at max effort when access returns.
+            Assert.Single(catalog.Games);
+            Assert.NotNull(catalog.ScanError);
+            Assert.Equal(0, notifications);
+        }
+        finally
+        {
+            File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
     // ── serverAuthority validation ────────────────────────────────────────────
     // A manifest that declares serverAuthority but fails any check skips the WHOLE game: silently
     // downgrading a game that asked for server-side enforcement to host mode would betray the opt-in.
@@ -318,7 +354,7 @@ public class GameCatalogTests : IDisposable
         Assert.True(catalog.TryGetDirectory("ttt", out var dir));
         Assert.Equal(Path.Combine(_root, "ttt"), dir);
         Assert.False(catalog.TryGetDirectory("nope", out _));
-        Assert.Equal(dir, catalog.GameDirectories["ttt"]);
+        Assert.Equal(dir, catalog.GameLocations["ttt"].Directory);
     }
 
     // ── Multiple roots ────────────────────────────────────────────────────────────────────────────
@@ -355,7 +391,7 @@ public class GameCatalogTests : IDisposable
 
             Assert.True(catalog.TryGet("from-folder", out _));
             Assert.True(catalog.TryGet("from-package", out _));
-            Assert.Equal(Path.Combine(second, "from-package"), catalog.GameDirectories["from-package"]);
+            Assert.Equal(Path.Combine(second, "from-package"), catalog.GameLocations["from-package"].Directory);
         }
         finally { Directory.Delete(second, recursive: true); }
     }
@@ -408,7 +444,7 @@ public class GameCatalogTests : IDisposable
             Assert.Equal("Administrator's Folder", m.Name);
             // Crucially the DIRECTORY matches the winning manifest too: serving a mixture of one
             // folder's manifest and another's assets is the failure this ordering prevents.
-            Assert.Equal(Path.Combine(_root, "dup"), catalog.GameDirectories["dup"]);
+            Assert.Equal(Path.Combine(_root, "dup"), catalog.GameLocations["dup"].Directory);
             Assert.Single(catalog.Games);
         }
         finally { Directory.Delete(second, recursive: true); }

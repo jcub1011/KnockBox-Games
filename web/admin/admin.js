@@ -34,7 +34,7 @@ async function checkAuthStatus() {
       return;
     }
     const data = await res.json();
-    updateServerStatus(true);
+    showOkStatus();
 
     if (!data.configured) {
       showView(setupView);
@@ -61,22 +61,22 @@ function showView(viewElement) {
   viewElement.classList.remove('hidden');
 }
 
-function updateServerStatus(online) {
-  if (online) {
-    serverStatusText.textContent = 'Admin Port Active';
-    serverStatusDot.style.backgroundColor = 'var(--success-color)';
-    serverStatusDot.style.boxShadow = '0 0 8px var(--success-color)';
-  } else {
-    serverStatusText.textContent = 'Disconnected';
-    serverStatusDot.style.backgroundColor = 'var(--error-color)';
-    serverStatusDot.style.boxShadow = '0 0 8px var(--error-color)';
-  }
+// One function per state, both routed through setStatus. The previous shape was an
+// updateServerStatus(online) whose offline branch nothing ever reached — every offline path called
+// showErrorStatus — so the file carried two ways to paint the dot red and a reader had to check both to
+// learn which one ran.
+function showOkStatus() {
+  setStatus('Admin Port Active', 'var(--success-color)');
 }
 
 function showErrorStatus(msg) {
-  serverStatusText.textContent = msg;
-  serverStatusDot.style.backgroundColor = 'var(--error-color)';
-  serverStatusDot.style.boxShadow = '0 0 8px var(--error-color)';
+  setStatus(msg, 'var(--error-color)');
+}
+
+function setStatus(text, color) {
+  serverStatusText.textContent = text;
+  serverStatusDot.style.backgroundColor = color;
+  serverStatusDot.style.boxShadow = `0 0 8px ${color}`;
 }
 
 // Setup Form Submission

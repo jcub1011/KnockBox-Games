@@ -21,7 +21,14 @@ public sealed record ServerLimits(
     // Per-IP cap on admin password attempts. Unlike the limits above this guards CPU rather than
     // bandwidth: each attempt runs a 600k-iteration PBKDF2 (~0.4s of one core), so an unthrottled
     // endpoint lets an unauthenticated caller both guess passwords and starve the game relay.
-    int AdminLoginAttemptsPerMinute)
+    int AdminLoginAttemptsPerMinute,
+    // Cap on admin password attempts across ALL callers. The per-IP limit above is only as trustworthy
+    // as the IP it keys on, and behind a proxy that IP comes from X-Forwarded-For — a header the client
+    // writes. An attacker rotating it gets a fresh per-IP budget per request, which turns the per-IP cap
+    // into no cap at all for the one thing that actually costs the server: PBKDF2. This bound holds
+    // regardless of what any caller claims to be, so it is the CPU ceiling; the per-IP cap remains what
+    // keeps one bad actor from spending everyone else's share of it.
+    int AdminLoginAttemptsPerMinuteGlobal)
 {
     public static ServerLimits FromConfiguration(IConfiguration config) => new(
         TimeSpan.FromSeconds(config.GetValue("KnockBox:HandshakeTimeoutSeconds", 10)),
@@ -32,5 +39,8 @@ public sealed record ServerLimits(
         config.GetValue("KnockBox:LobbyCreatesPerMinute", 10),
         config.GetValue("KnockBox:MaxConnectionsPerIp", 32),
         TimeSpan.FromSeconds(config.GetValue("KnockBox:DisconnectGraceSeconds", 60)),
-        config.GetValue("KnockBox:AdminLoginAttemptsPerMinute", 10));
+        config.GetValue("KnockBox:AdminLoginAttemptsPerMinute", 10),
+        // 60/min ≈ one hash per second ≈ 40% of one core spent on PBKDF2 at the very worst — enough
+        // headroom that a room full of operators never notices, low enough that the relay keeps running.
+        config.GetValue("KnockBox:AdminLoginAttemptsPerMinuteGlobal", 60));
 }

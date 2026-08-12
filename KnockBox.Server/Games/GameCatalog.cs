@@ -103,6 +103,13 @@ public sealed class GameCatalog : IDisposable
 
     public IReadOnlyCollection<GameManifest> Games => [.. _games.Values.Select(e => e.Manifest)];
 
+    /// <summary>
+    /// How many games are discovered. Cheap — unlike <c>Games.Count</c>, which builds and throws away a
+    /// list of every manifest just to read its length, on a path the admin dashboard polls every few
+    /// seconds and the home-page diagnostics probe re-evaluates per request.
+    /// </summary>
+    public int Count => _games.Count;
+
     public bool TryGet(string id, out GameManifest manifest)
     {
         if (_games.TryGetValue(id, out var entry)) { manifest = entry.Manifest; return true; }
@@ -121,10 +128,6 @@ public sealed class GameCatalog : IDisposable
         directory = "";
         return false;
     }
-
-    /// <summary>Snapshot of id → serving directory for every discovered game.</summary>
-    public IReadOnlyDictionary<string, string> GameDirectories =>
-        _games.ToDictionary(kv => kv.Key, kv => kv.Value.Directory, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Snapshot of id → manifest + serving directory: the same payload <see cref="Discovered"/>
@@ -177,6 +180,22 @@ public sealed class GameCatalog : IDisposable
         }
 
         _scanError = primaryError;
+
+        // A primary root that EXISTS but can't be read is a failed scan, not an empty library, so keep
+        // the catalog we already published and say nothing to the Discovered subscribers. They maintain
+        // derived state keyed on "which games exist" — the pre-compressed cache, the word pools, the
+        // parsed authority modules, the unpacked packages — and every one of them treats an absent id as
+        // "delete what you built for it". Publishing an empty map because a bind mount blipped for a
+        // second would therefore delete the entire games-compressed tree and re-pay max-effort Brotli
+        // over the whole library once the mount came back. The next rescan recovers the real state.
+        if (primaryError is not null)
+        {
+            _logger.LogWarning(
+                "Keeping the previously discovered {Count} game(s): the games folder could not be read this pass.",
+                _games.Count);
+            return;
+        }
+
         _games = next; // atomic publish
         if (_logger.IsEnabled(LogLevel.Information))
             _logger.LogInformation("Game catalog ready: {Count} game(s) [{Ids}]", next.Count, string.Join(", ", next.Keys));

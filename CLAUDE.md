@@ -87,18 +87,28 @@ code cannot read the shell's identity token. `Hosting/OriginRouting.cs` resolves
 a request is on; `Hosting/ContentPaths.cs` resolves the web/games/logs locations.
 
 Third: the **admin origin** (`AdminPort`, 5116 dev / 8082 image; `AdminHost`/`AdminOrigin` as a subdomain
-in prod), an operator dashboard served from `web/admin/` at that origin's **root**, API under
-`/admin/api/*`, claimed in a `MapWhen` branch ahead of the game and shell pipelines. Every `/admin*` path
-404s on the two public origins. Auth is one PBKDF2-hashed password (min 12 chars, file created mode `600`) in `AdminPasswordPath`
+in prod), an operator dashboard served from `web/admin/` at that origin's **root**, claimed in a `MapWhen`
+branch ahead of the game and shell pipelines. Every `/admin*` path 404s on the two public origins. The API
+under `/admin/api/*` lives in `Hosting/AdminApi.cs` (`MapAdminApi`), not in `Program.cs`: one `WriteJson`
+helper, one `RequireSession` wrapper and a route table, so an endpoint's handler is only the part specific
+to it. A missing `web/admin` is reported through `DeploymentDiagnostics` **and** answered with an
+explanatory 503 at the origin, because the warning page only replaces the *shell* home page.
+Auth is one PBKDF2-hashed password (min 12 chars, file created mode `600`) in `AdminPasswordPath`
 (`Security/AdminAuthService.cs`) — **claim-on-first-use**: while no password is set, whoever reaches the
-origin sets it, which is why compose binds 8082 to loopback. The session cookie's HMAC key is derived from a
+origin sets it, which is why compose binds 8082 to loopback. Claiming writes with `FileMode.CreateNew`, so
+concurrent setups yield one winner and one 409 — a check-then-write let both "succeed" and left the loser
+holding a cookie signed under a key that no longer existed. The session cookie's HMAC key is derived from a
 per-process secret **plus a fingerprint of the stored hash**, so any change to that file revokes all
-sessions (a reset actually locks an intruder out). The file *is* the credential — write access to it is
+sessions (a reset actually locks an intruder out); its `Secure` flag follows the request scheme **or** an
+`https://` `AdminOrigin`, since behind a TLS proxy without `ForwardedHeaders` the request here is plain
+HTTP. The file *is* the credential — write access to it is
 total control, and rollback is deliberately not defended against (it needs state the attacker doesn't
-control); filesystem permissions are the boundary. Password attempts are rate-limited per IP
-(`AdminLoginAttemptsPerMinute`, `Networking/IpRateLimiter.cs`) **before** hashing: at 600k PBKDF2 iterations
-(~0.4s of a core) an unthrottled endpoint is an unauthenticated CPU-exhaustion lever, not just a guessing
-oracle.
+control); filesystem permissions are the boundary. Password attempts are rate-limited **before** hashing —
+at 600k PBKDF2 iterations (~0.4s of a core) an unthrottled endpoint is an unauthenticated CPU-exhaustion
+lever, not just a guessing oracle — by **two** buckets: per IP
+(`AdminLoginAttemptsPerMinute`, `Networking/IpRateLimiter.cs`) for fair share, plus a server-wide one
+(`AdminLoginAttemptsPerMinuteGlobal`, `TokenBucket`) that bounds CPU regardless. The second exists because
+the first keys on an address `X-Forwarded-For` can invent unless `KnownProxies` names the proxy.
 
 **Port-binding trap (this shipped broken once):** `Program.cs` binds all three origins itself *only* when
 nothing else set ports. Any explicit `ASPNETCORE_URLS` / `ASPNETCORE_HTTP_PORTS` / `Kestrel:Endpoints`
@@ -128,8 +138,9 @@ a warning on duplicates. Only `roots[0]` is watched/polled — the installer own
 triggers rediscovery itself. The folder name **must equal** the manifest `id`, and `entry` is
 path-traversal–checked to stay inside the game folder. **One** dictionary of `GameEntry(manifest,
 directory)` is swapped atomically — two parallel dictionaries could not be swapped together, letting a
-reader pair a pre-swap manifest with a post-swap path. `TryGetDirectory`/`GameDirectories` expose the
-resolved path (never put it on `GameManifest`, which goes over the wire). A games dir
+reader pair a pre-swap manifest with a post-swap path. `TryGetDirectory`/`GameLocations` expose the
+resolved path (never put it on `GameManifest`, which goes over the wire); `Count` reads the game count
+without `Games`' snapshot allocation. A games dir
 that is missing OR present-but-unreadable (e.g. a Docker mount the UID-1654 user can't read) does
 **not** crash startup: `Discover()` catches the access error and exposes `GameCatalog.ScanError`,
 which `Hosting/DeploymentDiagnostics.cs` surfaces (with other file-access problems found at
@@ -172,8 +183,8 @@ assets — esp. the large `.wasm` — return `304`). To avoid re-compressing the
 on every cold request, `Games/GameAssetPrecompressor.cs` keeps a derived cache of max-effort
 (`CompressionLevel.SmallestSize`) `.br`/`.gz` variants under `GamesCompressedRoot`
 (default sibling `games-compressed/`, **writable, outside the read-only `games/` mount**).
-`GameAssetPrecompressor` is **root-agnostic** — `ReconcileAll` takes an id→directory map (from
-`GameCatalog.GameDirectories`), because a game's files may sit under either root. Both former uses of
+`GameAssetPrecompressor` is **root-agnostic** — `ReconcileAll` takes an id→manifest+directory map (from
+`GameCatalog.GameLocations`), because a game's files may sit under either root. Both former uses of
 `gamesRoot` had to change together: fixing the compression side alone would leave the prune side
 deleting every package-backed game's cache each pass and recompressing it at max effort.
 Reconciliation is driven by `GameCatalog.Discovered` plus a periodic timer
@@ -210,7 +221,11 @@ configurable and disabled with `0`.
 
 ### Server-authoritative mode (`Games/ServerAuthority*.cs`, `Games/*AuthorityRuntime*.cs`)
 Optional, per-game. A game opts in with `GAME.json` `serverAuthority: "authority.js"` (validated
-like `entry`; the game origin never serves the module — `Hosting/GameOriginAssetGate.cs` → 404).
+like `entry`; the game origin never serves the module — `Hosting/GameOriginAssetGate.cs` → 404). That gate
+compares **canonical** paths on both sides via `Hosting/GameAssetPath.cs` (the one parser for
+`/games/{id}/{relative}`, also used by the thumbnail allowlist, the COOP/COEP header hook and the
+pre-compressed negotiation): raw string equality denied `…/authority.js` but waved through
+`…//authority.js`, which `PhysicalFileProvider` then resolved to the very same file.
 On lobby creation `ServerAuthorityManager` loads the module into a per-lobby sandboxed **Jint**
 engine (`JsAuthorityRuntime` behind `IAuthorityRuntime`; `Date` deleted, no CLR, memory/timeout/
 statement/recursion budgets — AOT-clean via `TrimmerRootAssembly`) wrapped in a `ServerAuthority`
@@ -286,9 +301,9 @@ on a persisted volume outside the image), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
 (`.kbg` install; the root must be writable and outside `games/`), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
-`ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
+`ForwardedHeaders`/`KnownProxies`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
 default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,
-`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`), and the server-authority knobs (`AuthorityEnabled`
+`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`, `AdminLoginAttemptsPerMinute`/`…Global`), and the server-authority knobs (`AuthorityEnabled`
 master switch, `AuthorityMax{MemoryBytes,Statements,ScriptBytes,WordFileBytes,Lobbies}`,
 `AuthorityCallTimeoutMs`, `AuthorityRecursionLimit`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).

@@ -97,3 +97,73 @@ public class IpRateLimiterTests
         Assert.Equal(1, limiter.TrackedIps);
     }
 }
+
+/// <summary>
+/// The admin password throttle: a per-IP bucket for fair share plus a server-wide bucket for the CPU
+/// ceiling. The second exists because the first keys on an address a client can choose.
+/// </summary>
+public class AdminLoginThrottleTests
+{
+    [Fact]
+    public void One_client_is_held_to_the_per_ip_allowance()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var throttle = new AdminLoginThrottle(perIpPerMinute: 10, globalPerMinute: 60, clock);
+
+        for (var i = 0; i < 10; i++) Assert.Null(throttle.Refuse("10.0.0.1"));
+
+        Assert.Equal("per-IP", throttle.Refuse("10.0.0.1"));
+    }
+
+    [Fact]
+    public void A_rotating_client_address_still_hits_the_server_wide_ceiling()
+    {
+        // The bypass this bucket exists for: with ForwardedHeaders on and no KnownProxies, X-Forwarded-For
+        // is whatever the caller writes, so every request can present a brand-new address and draw a fresh
+        // per-IP budget. Without a global bound that is 600k-iteration PBKDF2 on demand, from an
+        // unauthenticated request, until every core is busy and the game relay starves.
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var throttle = new AdminLoginThrottle(perIpPerMinute: 10, globalPerMinute: 60, clock);
+
+        var granted = 0;
+        for (var i = 0; i < 500; i++)
+            if (throttle.Refuse($"198.51.100.{i % 256}.{i}") is null) granted++;
+
+        Assert.Equal(60, granted);
+        Assert.Equal("server-wide", throttle.Refuse("203.0.113.9"));
+    }
+
+    [Fact]
+    public void A_real_operator_is_unaffected_by_someone_else_burning_their_own_budget()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var throttle = new AdminLoginThrottle(perIpPerMinute: 10, globalPerMinute: 60, clock);
+
+        for (var i = 0; i < 20; i++) throttle.Refuse("203.0.113.9");
+        Assert.Equal("per-IP", throttle.Refuse("203.0.113.9"));
+
+        Assert.Null(throttle.Refuse("10.0.0.1"));
+    }
+
+    [Fact]
+    public void Both_limits_refill_over_time()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var throttle = new AdminLoginThrottle(perIpPerMinute: 10, globalPerMinute: 60, clock);
+
+        for (var i = 0; i < 10; i++) throttle.Refuse("10.0.0.1");
+        Assert.NotNull(throttle.Refuse("10.0.0.1"));
+
+        clock.Advance(TimeSpan.FromSeconds(7)); // 10/min ⇒ a token every 6s, plus rounding margin
+        Assert.Null(throttle.Refuse("10.0.0.1"));
+    }
+
+    [Fact]
+    public void Zero_disables_either_limit()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var throttle = new AdminLoginThrottle(perIpPerMinute: 0, globalPerMinute: 0, clock);
+
+        for (var i = 0; i < 500; i++) Assert.Null(throttle.Refuse("10.0.0.1"));
+    }
+}

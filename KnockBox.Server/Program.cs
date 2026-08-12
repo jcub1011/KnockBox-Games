@@ -1,13 +1,10 @@
 using System.IO.Compression;
-using System.Net.WebSockets;
-using System.Text.Json;
 using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
-using KnockBox.Server.Serialization;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -156,6 +153,11 @@ var allowedOrigins = builder.Configuration.GetSection("KnockBox:AllowedOrigins")
 // (KnockBox:ForwardedHeaders=true) because trusting X-Forwarded-* from arbitrary clients lets them
 // spoof their IP past the per-IP connection cap.
 var forwardedHeaders = builder.Configuration.GetValue("KnockBox:ForwardedHeaders", false);
+// Which addresses may set X-Forwarded-*: IPs and/or CIDR ranges. Naming your proxy here is what makes
+// every per-IP limit on this server mean anything, because otherwise the address they key on is one the
+// client writes. Empty keeps the historical "trust any forwarder" behaviour (with a warning), so
+// enabling ForwardedHeaders never silently breaks an existing deployment.
+var knownProxies = builder.Configuration.GetSection("KnockBox:KnownProxies").Get<string[]>() ?? [];
 
 // Abuse-protection limits (handshake deadline, per-connection rate limits, per-IP connection cap).
 var limits = ServerLimits.FromConfiguration(builder.Configuration);
@@ -283,6 +285,17 @@ if (!File.Exists(Path.Combine(webRoot, "index.html")))
     diagnostics.Report("Platform shell is missing",
         $"No index.html under the web root '{webRoot}', so the shell can't be served. Verify the install/publish output, or set KnockBox:WebRoot to the folder containing the shell.",
         blocking: true);
+// The admin portal's files get the same treatment. Silence here produced the worst kind of failure: an
+// operator pointing KnockBox:WebRoot at a directory that predates the portal got a bound, reachable,
+// completely blank origin, while the startup log still announced the portal as up. Non-blocking, because
+// the shell and the games are unaffected — and the warning PAGE only replaces the shell home page, which
+// is why the admin origin also explains itself in its own response (see the MapWhen branch below).
+var adminWebRoot = Path.Combine(webRoot, "admin");
+if (!Directory.Exists(adminWebRoot))
+    diagnostics.Report("Admin portal files are missing",
+        $"No 'admin' folder under the web root '{webRoot}', so the admin portal has nothing to serve and every " +
+        "request to it answers 503. Verify the install/publish output, or set KnockBox:WebRoot to the folder " +
+        "containing the shell.");
 
 // Log every bootstrap problem so it's visible without opening the site: blocking ones as errors,
 // degraded-but-functional ones as warnings. (The live games-access error is logged by GameCatalog.)
@@ -302,13 +315,46 @@ if (forwardedHeaders)
         ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
                          | ForwardedHeaders.XForwardedHost,
     };
-    // The proxy's address isn't knowable here (it differs per deployment); the explicit opt-in flag
-    // is the admin's statement that a trusted proxy fronts this server.
+    // Start from empty rather than the loopback default, then add whatever the operator named. With both
+    // collections empty ASP.NET Core skips the known-forwarder check entirely and takes X-Forwarded-* from
+    // anyone — which is why an unset KnownProxies is a warning, not a default worth being quiet about: it
+    // lets any caller choose the address every per-IP limit on this server keys on.
     fho.KnownIPNetworks.Clear();
     fho.KnownProxies.Clear();
+    var rejectedProxies = new List<string>();
+    foreach (var entry in knownProxies)
+    {
+        if (System.Net.IPNetwork.TryParse(entry, out var network)) fho.KnownIPNetworks.Add(network);
+        else if (System.Net.IPAddress.TryParse(entry, out var address)) fho.KnownProxies.Add(address);
+        else rejectedProxies.Add(entry);
+    }
+    if (rejectedProxies.Count > 0)
+        app.Logger.LogError(
+            "KnockBox:KnownProxies has {Count} unparseable entr(ies) — {Entries}. Each must be an IP address " +
+            "(1.2.3.4, ::1) or a CIDR range (10.0.0.0/8). They are IGNORED, so the proxy they were meant to " +
+            "name is not trusted.", rejectedProxies.Count, string.Join(", ", rejectedProxies));
+
     app.UseForwardedHeaders(fho);
-    app.Logger.LogInformation("ForwardedHeaders enabled — trusting X-Forwarded-For/Proto/Host from the fronting proxy.");
+    if (fho.KnownProxies.Count > 0 || fho.KnownIPNetworks.Count > 0)
+        app.Logger.LogInformation(
+            "ForwardedHeaders enabled — trusting X-Forwarded-For/Proto/Host from {Count} configured proxy address(es)/range(s).",
+            fho.KnownProxies.Count + fho.KnownIPNetworks.Count);
+    else
+        app.Logger.LogWarning(
+            "ForwardedHeaders enabled with no KnockBox:KnownProxies — X-Forwarded-For is trusted from ANY caller, so a " +
+            "client can pick the IP the per-IP connection cap and the admin login throttle key on. Set " +
+            "KnockBox:KnownProxies to your proxy's address or range.");
 }
+
+// Host-routing the admin portal means a proxy fronts it, and a proxy that isn't trusted to speak for the
+// client degrades two things quietly: Request.IsHttps reads false, so the session cookie is issued without
+// Secure unless the configured origin is explicitly https, and every login attempt buckets under the
+// proxy's single address instead of the caller's.
+if (!forwardedHeaders && (!string.IsNullOrWhiteSpace(adminHost) || !string.IsNullOrWhiteSpace(adminOrigin)))
+    app.Logger.LogWarning(
+        "The admin portal is host-routed but KnockBox:ForwardedHeaders is off, so the request scheme and client IP " +
+        "seen here are the proxy's connection, not the browser's. Enable it (with KnockBox:KnownProxies naming your " +
+        "proxy) so the session cookie is marked Secure behind TLS and the login throttle can tell callers apart.");
 
 // Discover games at startup, then watch the folder so dropping in (or removing) a game needs no
 // restart — server managers add games with no code and no downtime.
@@ -376,7 +422,7 @@ if (installer is not null)
     // container whose cache dir wasn't chowned would see zero games and zero explanation. Packages
     // present but no games discovered is precisely "the server can't serve its core purpose".
     diagnostics.AddProbe("Game packages could not be installed", () =>
-        installer.PackagesObserved > 0 && catalog.Games.Count == 0 && catalog.ScanError is null
+        installer.PackagesObserved > 0 && catalog.Count == 0 && catalog.ScanError is null
             ? installer.InstallFailure
                 ?? $"{installer.PackagesObserved} .kbg package(s) are in '{gamesRoot}' but no games were installed. " +
                    $"Check that '{gamesUnpackedRoot}' is writable by the server — in Docker the container runs as UID 1654."
@@ -469,7 +515,6 @@ app.UseWebSockets();
 // PhysicalFileProvider throws when its root is missing; if directory creation failed above, fall
 // back to an empty provider so the server still starts (the LogError above tells the admin why).
 IFileProvider webFiles = Directory.Exists(webRoot) ? new PhysicalFileProvider(webRoot) : new NullFileProvider();
-var adminWebRoot = Path.Combine(webRoot, "admin");
 IFileProvider adminWebFiles = Directory.Exists(adminWebRoot) ? new PhysicalFileProvider(adminWebRoot) : new NullFileProvider();
 // Games are served from the games folder first and the unpacked-package cache second — the same
 // precedence GameCatalog applies, so the manifest a request resolves through and the assets it fetches
@@ -594,179 +639,44 @@ app.MapWhen(
     ctx => OriginRouting.IsAdminOrigin(ctx.Connection.LocalPort, ctx.Request.Host.Host, adminPort, adminHost),
     adminApp =>
     {
-        // Resolved once while the pipeline is built, never per request. `catalog` is already resolved
-        // above and reused here.
-        var authService = app.Services.GetRequiredService<AdminAuthService>();
-        var lobbyManager = app.Services.GetRequiredService<LobbyManager>();
-        // Read once: Process.GetCurrentProcess() allocates a handle on every call, and the dashboard
-        // polls /admin/api/system/status every few seconds — resolving it per request leaked a handle
-        // per poll. The start time can't change, so there is nothing to re-read.
-        DateTime processStartedUtc;
-        using (var self = System.Diagnostics.Process.GetCurrentProcess())
-            processStartedUtc = self.StartTime.ToUniversalTime();
-        // Every password attempt costs a 600k-iteration PBKDF2 (~0.4s of a core, by design), so these two
-        // endpoints are the only unauthenticated way to make this server do real work. Without a throttle
-        // that is both a guessing oracle and a CPU-exhaustion lever that starves the game relay — a handful
-        // of requests per second saturates every core. Checked BEFORE any hashing, so a refused attempt is
-        // free. Burst = the per-minute allowance: a human typo-ing a password is unaffected.
-        var adminAuthLimiter = new IpRateLimiter(
-            limits.AdminLoginAttemptsPerMinute / 60.0, limits.AdminLoginAttemptsPerMinute,
-            app.Services.GetRequiredService<TimeProvider>());
+        // The API itself lives in Hosting/AdminApi.cs — an HTTP API in the composition root is how its
+        // fifth endpoint comes to disagree with its first four. `catalog` is already resolved above.
+        adminApp.MapAdminApi(new AdminApi.Options(
+            app.Services.GetRequiredService<AdminAuthService>(),
+            app.Services.GetRequiredService<LobbyManager>(),
+            catalog,
+            app.Services.GetRequiredService<TimeProvider>(),
+            app.Logger,
+            limits.AdminLoginAttemptsPerMinute,
+            limits.AdminLoginAttemptsPerMinuteGlobal,
+            // An https admin origin means a proxy terminates TLS in front of us, so the session cookie
+            // must be Secure even though the request reaching Kestrel is plain HTTP.
+            CookieAlwaysSecure: adminOrigin?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) == true));
 
-        adminApp.Use(async (ctx, next) =>
+        // No web/admin in the web root ⇒ the portal's files aren't there. Say so at the origin itself:
+        // this is reported through DeploymentDiagnostics too, but the warning PAGE only replaces the
+        // SHELL home page, so an operator staring at the admin origin would otherwise get an empty 404
+        // from the static-file middleware and no explanation anywhere.
+        if (adminWebFiles is NullFileProvider)
         {
-            var path = ctx.Request.Path.Value ?? "";
-
-            // Both password endpoints share one bucket: they are equally expensive, and an attacker who
-            // could spend the login budget on setup attempts would just have two budgets.
-            var isPasswordAttempt =
-                HttpMethods.IsPost(ctx.Request.Method) &&
-                (string.Equals(path, "/admin/api/auth/login", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(path, "/admin/api/auth/setup", StringComparison.OrdinalIgnoreCase));
-            if (isPasswordAttempt &&
-                !adminAuthLimiter.TryTake(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"))
+            adminApp.Run(async ctx =>
             {
-                app.Logger.LogWarning(
-                    "Throttled an admin password attempt from {Ip} ({Path}): more than {Limit} per minute.",
-                    ctx.Connection.RemoteIpAddress, path, limits.AdminLoginAttemptsPerMinute);
-                ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                ctx.Response.Headers.RetryAfter = "60";
-                ctx.Response.ContentType = "application/json";
-                await JsonSerializer.SerializeAsync(ctx.Response.Body,
-                    new AdminApiResponse(false, "Too many attempts. Wait a minute and try again."),
-                    KnockBoxProtocolContext.Default.AdminApiResponse);
-                return;
-            }
-
-            if (string.Equals(path, "/admin/api/auth/status", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsGet(ctx.Request.Method))
-            {
-                var configured = authService.IsConfigured;
-                var authenticated = false;
-                if (ctx.Request.Cookies.TryGetValue(AdminAuthService.SessionCookieName, out var sessionCookie))
-                {
-                    authenticated = authService.ValidateSessionToken(sessionCookie);
-                }
-                ctx.Response.ContentType = "application/json";
-                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminAuthStatusResponse(configured, authenticated), KnockBoxProtocolContext.Default.AdminAuthStatusResponse);
-                return;
-            }
-
-            if (string.Equals(path, "/admin/api/auth/setup", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsPost(ctx.Request.Method))
-            {
-                var req = await JsonSerializer.DeserializeAsync(ctx.Request.Body, KnockBoxProtocolContext.Default.AdminPasswordRequest);
-                if (req is null || string.IsNullOrWhiteSpace(req.Password))
-                {
-                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
-                    ctx.Response.ContentType = "application/json";
-                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Password required."), KnockBoxProtocolContext.Default.AdminApiResponse);
-                    return;
-                }
-
-                // Distinct messages per outcome: "already configured" is an expected race, a too-short
-                // password is the operator's to fix, but an unwritable secret file is a DEPLOYMENT fault
-                // (wrong owner on the mount) that previously hid behind the same "already configured or
-                // invalid" text — the single most confusing way this could fail.
-                var setup = authService.SetupPassword(req.Password);
-                if (setup != AdminAuthService.SetupOutcome.Success)
-                {
-                    var (status, error) = setup switch
-                    {
-                        AdminAuthService.SetupOutcome.AlreadyConfigured =>
-                            (StatusCodes.Status409Conflict,
-                             "An admin password is already set. Delete the secret file on the server to reset it."),
-                        AdminAuthService.SetupOutcome.PasswordTooWeak =>
-                            (StatusCodes.Status400BadRequest,
-                             $"Password must be at least {AdminAuthService.MinPasswordLength} characters."),
-                        _ => (StatusCodes.Status500InternalServerError,
-                             $"Could not save the password to '{authService.SecretFilePath}'. Check that the path exists " +
-                             "and is writable by the server (in Docker, the container runs as UID 1654)."),
-                    };
-                    ctx.Response.StatusCode = status;
-                    ctx.Response.ContentType = "application/json";
-                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, error), KnockBoxProtocolContext.Default.AdminApiResponse);
-                    return;
-                }
-
-                AppendAdminSessionCookie(ctx, authService.CreateSessionToken());
-
-                ctx.Response.ContentType = "application/json";
-                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(true), KnockBoxProtocolContext.Default.AdminApiResponse);
-                return;
-            }
-
-            if (string.Equals(path, "/admin/api/auth/login", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsPost(ctx.Request.Method))
-            {
-                var req = await JsonSerializer.DeserializeAsync(ctx.Request.Body, KnockBoxProtocolContext.Default.AdminPasswordRequest);
-                if (req is null || string.IsNullOrWhiteSpace(req.Password) || !authService.VerifyPassword(req.Password))
-                {
-                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    ctx.Response.ContentType = "application/json";
-                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Invalid admin password."), KnockBoxProtocolContext.Default.AdminApiResponse);
-                    return;
-                }
-
-                AppendAdminSessionCookie(ctx, authService.CreateSessionToken());
-
-                ctx.Response.ContentType = "application/json";
-                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(true), KnockBoxProtocolContext.Default.AdminApiResponse);
-                return;
-            }
-
-            if (string.Equals(path, "/admin/api/auth/logout", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsPost(ctx.Request.Method))
-            {
-                // Deleting a cookie is really a Set-Cookie with an expiry, and the browser only replaces
-                // the existing one when the attributes match how it was issued — so mirror them.
-                ctx.Response.Cookies.Delete(AdminAuthService.SessionCookieName, new CookieOptions
-                {
-                    HttpOnly = true,
-                    SameSite = SameSiteMode.Strict,
-                    Secure = ctx.Request.IsHttps,
-                    Path = "/"
-                });
-                ctx.Response.ContentType = "application/json";
-                await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(true), KnockBoxProtocolContext.Default.AdminApiResponse);
-                return;
-            }
-
-            if (string.Equals(path, "/admin/api/system/status", StringComparison.OrdinalIgnoreCase) && HttpMethods.IsGet(ctx.Request.Method))
-            {
-                if (!ctx.Request.Cookies.TryGetValue(AdminAuthService.SessionCookieName, out var sessionCookie) || !authService.ValidateSessionToken(sessionCookie))
-                {
-                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    ctx.Response.ContentType = "application/json";
-                    await JsonSerializer.SerializeAsync(ctx.Response.Body, new AdminApiResponse(false, "Unauthorized."), KnockBoxProtocolContext.Default.AdminApiResponse);
-                    return;
-                }
-
-                var uptime = DateTime.UtcNow - processStartedUtc;
-                var uptimeStr = $"{uptime.Days}d {uptime.Hours}h {uptime.Minutes}m {uptime.Seconds}s";
-
-                var workingSetMb = Environment.WorkingSet / (1024 * 1024);
-                var managedHeapMb = GC.GetTotalMemory(false) / (1024 * 1024);
-
-                var status = new AdminSystemStatusResponse(
-                    uptimeStr,
-                    lobbyManager.Count,
-                    catalog.Games.Count,
-                    workingSetMb,
-                    managedHeapMb,
-                    DateTime.UtcNow.ToString("O")
-                );
-
-                ctx.Response.ContentType = "application/json";
-                await JsonSerializer.SerializeAsync(ctx.Response.Body, status, KnockBoxProtocolContext.Default.AdminSystemStatusResponse);
-                return;
-            }
-
-            await next();
-        });
-
-        adminApp.UseDefaultFiles(new DefaultFilesOptions { FileProvider = adminWebFiles });
-        adminApp.UseStaticFiles(new StaticFileOptions
+                ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                ctx.Response.ContentType = "text/plain; charset=utf-8";
+                await ctx.Response.WriteAsync(
+                    $"The admin portal's files are missing: no 'admin' folder under the web root '{webRoot}'.\n" +
+                    "Verify the install/publish output, or point KnockBox:WebRoot at the folder containing the shell.\n");
+            });
+        }
+        else
         {
-            FileProvider = adminWebFiles,
-            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate"
-        });
+            adminApp.UseDefaultFiles(new DefaultFilesOptions { FileProvider = adminWebFiles });
+            adminApp.UseStaticFiles(new StaticFileOptions
+            {
+                FileProvider = adminWebFiles,
+                OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate"
+            });
+        }
     });
 
 // Gate public origins to return 404 for any /admin* request
@@ -917,19 +827,6 @@ static string? ProbeWritable(string dir)
     }
 }
 
-// Issues the admin session cookie. One place for it so the setup and login paths can't drift apart.
-// HttpOnly keeps the token away from script; SameSite=Strict means it never rides a cross-site request;
-// Secure follows the CURRENT request's scheme, so the cookie hardens behind TLS without breaking the
-// plain-HTTP loopback the portal is reached over in dev and in Docker (where it binds 127.0.0.1 only).
-static void AppendAdminSessionCookie(HttpContext ctx, string token) =>
-    ctx.Response.Cookies.Append(AdminAuthService.SessionCookieName, token, new CookieOptions
-    {
-        HttpOnly = true,
-        SameSite = SameSiteMode.Strict,
-        Secure = ctx.Request.IsHttps,
-        Path = "/"
-    });
-
 // The port out of one of Kestrel's bound addresses ("http://localhost:5116", "http://[::]:8082"), or null
 // if it can't be parsed. Only ever used to decide whether to warn, so an unparseable address must not
 // throw its way out of the ApplicationStarted callback.
@@ -956,31 +853,24 @@ static bool IsUnder(string inner, string outer)
 // none of this.)
 static void ApplyCrossOriginIsolation(HttpContext ctx, GameCatalog catalog)
 {
-    var path = ctx.Request.Path.Value;
-    if (path is null || !path.StartsWith("/games/", StringComparison.OrdinalIgnoreCase)) return;
-
-    var rest = path["/games/".Length..];
-    var slash = rest.IndexOf('/');
-    var id = slash < 0 ? rest : rest[..slash];
-    if (string.IsNullOrEmpty(id) || !catalog.TryGet(id, out var manifest) || !manifest.CrossOriginIsolated) return;
+    if (GameAssetPath.GameId(ctx.Request.Path.Value) is not { } id) return;
+    if (!catalog.TryGet(id, out var manifest) || !manifest.CrossOriginIsolated) return;
 
     ctx.Response.Headers["Cross-Origin-Opener-Policy"] = "same-origin";
     ctx.Response.Headers["Cross-Origin-Embedder-Policy"] = "require-corp";
     ctx.Response.Headers["Cross-Origin-Resource-Policy"] = "cross-origin";
 }
 
-// True only for "/games/{id}/{thumb}" where {thumb} exactly equals game {id}'s declared thumbnail.
-// The exact-string whitelist is the control; PhysicalFileProvider also blocks any traversal.
+// True only for "/games/{id}/{thumb}" where {thumb} names game {id}'s declared thumbnail. Both sides
+// are canonicalized (GameAssetPath) so a non-canonical spelling of the SAME file still matches, while
+// the comparison itself stays ordinal — this is an allowlist, and a case-insensitive one would admit
+// more than the manifest declared. PhysicalFileProvider also blocks any traversal.
 static bool IsAllowedThumbnail(string path, GameCatalog catalog)
 {
-    var rest = path["/games/".Length..];
-    var slash = rest.IndexOf('/');
-    if (slash < 0) return false;
-    var id = rest[..slash];
-    var file = rest[(slash + 1)..];
+    if (!GameAssetPath.TryParse(path, out var id, out var file)) return false;
     return catalog.TryGet(id, out var manifest)
-        && !string.IsNullOrEmpty(manifest.Thumbnail)
-        && string.Equals(file, manifest.Thumbnail, StringComparison.Ordinal);
+        && GameAssetPath.Canonicalize(manifest.Thumbnail) is { } thumbnail
+        && string.Equals(file, thumbnail, StringComparison.Ordinal);
 }
 
 // For a GET/HEAD of /games/{id}/…, if a pre-compressed variant the client accepts exists in the cache,

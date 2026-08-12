@@ -125,6 +125,42 @@ public class ServerAuthorityErrorPolicyTests : IDisposable
     }
 
     [Fact]
+    public async Task An_unserializable_result_is_contained_not_fatal()
+    {
+        // The module's call SUCCEEDS; what fails is turning its result into JSON (a back-reference here).
+        // Because serialization used to sit outside the classifying try/catch, that arrived at the actor as
+        // an unclassified exception and took the whole lobby down on the first occurrence — where the
+        // documented policy is to drop the work, re-broadcast the unchanged snapshot, and tolerate five.
+        var rig = Start("""
+            export function createAuthority(kb) {
+              let state = { count: 0 };
+              return {
+                init() {},
+                applyIntent(fromId, action) {
+                  if (action.kind !== 'cycle') { state.count += 1; return { count: state.count }; }
+                  const patch = { count: state.count };
+                  patch.self = patch;
+                  return patch;
+                },
+                snapshot() { return state; },
+              };
+            }
+            """);
+        rig.Actor.PostIntent("p1", """{"_kb":"intent","action":{"kind":"cycle"}}""");
+        rig.Actor.PostIntent("p1", """{"_kb":"intent","action":{"kind":"fine"}}""");
+        rig.Actor.Stop();
+        await rig.Actor.Completion;
+        var (ctrl, game) = await rig.FlushAsync();
+
+        var frames = game.OfType<GameMessage>().Where(g => g.From == "server").ToList();
+        Assert.Equal(2, frames.Count);
+        Assert.Equal("state", frames[0].Payload.GetProperty("_kb").GetString()); // convergence re-sync
+        Assert.Equal("delta", frames[1].Payload.GetProperty("_kb").GetString()); // the engine survived
+        Assert.Empty(ctrl.OfType<LobbyClosedMessage>());
+        Assert.NotNull(rig.Lobbies.Get(rig.Lobby.Id));
+    }
+
+    [Fact]
     public async Task Five_consecutive_contained_failures_escalate_to_fatal()
     {
         var rig = Start(FlakyModule);

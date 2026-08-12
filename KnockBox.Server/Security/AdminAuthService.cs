@@ -102,6 +102,15 @@ public sealed class AdminAuthService
     /// and "your storage isn't writable" need very different operator responses and had previously been
     /// reported to the portal as the same message.
     /// </summary>
+    /// <remarks>
+    /// The <see cref="IsConfigured"/> test is a fast path, NOT the guard — the guard is the atomic
+    /// <see cref="FileMode.CreateNew"/> below. Check-then-write is a race on the one path that matters
+    /// here: this endpoint is claim-on-first-use, so two callers can both find it unconfigured, both
+    /// "succeed", and both be handed a session — except the session key is derived from a fingerprint of
+    /// the stored hash, so whichever write lost is holding a cookie signed under a key that no longer
+    /// exists. That caller is locked out of a portal it was just told it had claimed, and cannot re-run
+    /// setup either. Letting the filesystem arbitrate makes exactly one caller the winner.
+    /// </remarks>
     public SetupOutcome SetupPassword(string password)
     {
         if (string.IsNullOrWhiteSpace(password) || password.Length < MinPasswordLength)
@@ -122,6 +131,13 @@ public sealed class AdminAuthService
             _logger.LogInformation("Admin password successfully set in secret file at '{Path}'.", _secretFilePath);
             return SetupOutcome.Success;
         }
+        catch (IOException) when (File.Exists(_secretFilePath))
+        {
+            // CreateNew lost the race (or the file appeared between the check and the write): someone
+            // else claimed the portal. Same answer as the fast path above.
+            _logger.LogWarning("Refused a concurrent admin password setup: '{Path}' was claimed first.", _secretFilePath);
+            return SetupOutcome.AlreadyConfigured;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to write admin password secret file at '{Path}'.", _secretFilePath);
@@ -132,13 +148,14 @@ public sealed class AdminAuthService
     /// <summary>
     /// Writes the secret with owner-only permissions where the platform has them. The mode is set at CREATE
     /// time rather than afterwards: a write-then-chmod leaves a window where the hash sits world-readable,
-    /// and on a shared host that window is the whole attack.
+    /// and on a shared host that window is the whole attack. <see cref="FileMode.CreateNew"/> rather than
+    /// <c>Create</c> so an existing secret is never truncated — see <see cref="SetupPassword"/>.
     /// </summary>
     private void WriteSecretFile(string fileContent)
     {
         var options = new FileStreamOptions
         {
-            Mode = FileMode.Create,
+            Mode = FileMode.CreateNew,
             Access = FileAccess.Write,
         };
         // UnixCreateMode is rejected outright on Windows, where the file instead inherits the directory ACL.

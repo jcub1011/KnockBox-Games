@@ -38,8 +38,16 @@ public sealed class GamePackageInstaller(
 
     // A package must present the SAME (mtime, length) on two consecutive passes before it is installed.
     // A large file still being copied in changes between passes, so this is what stops a half-copied
-    // archive from being read at all — cheaper and far more reliable than any timing heuristic.
+    // archive from being read at all — cheaper and far more reliable than any timing heuristic. It only
+    // works if consecutive passes are separated by real time, which is why Reconcile() runs exactly ONE
+    // pass per call and defers the next one to the caller's debounced rescan.
     private readonly Dictionary<string, (long Mtime, long Length)> _lastSeen = new(StringComparer.OrdinalIgnoreCase);
+
+    // Source file name -> the id it installed. Lets an unchanged pass verify the extracted folder's
+    // marker without opening the archive at all: recovering the id was the ONLY reason the no-change
+    // path used to seek to the end of a potentially huge ZIP and inflate its header. Empty after a
+    // restart, which just means the first pass pays the old cost once.
+    private readonly Dictionary<string, string> _installedIds = new(StringComparer.OrdinalIgnoreCase);
 
     // A package whose source file has been gone for this many consecutive passes is uninstalled.
     // Requiring more than one pass matters because an operator replacing a package by delete-then-copy
@@ -48,10 +56,12 @@ public sealed class GamePackageInstaller(
     private const int PassesBeforeUninstall = 2;
     private readonly Dictionary<string, int> _absentPasses = new(StringComparer.OrdinalIgnoreCase);
 
-    // Packages that failed validation, keyed by identity (path + mtime + length) so an edited or
-    // replaced file is retried while a broken one isn't re-read every 60 seconds. Process-lifetime
-    // only: a restart SHOULD retry, in case the failure was environmental.
-    private readonly HashSet<string> _quarantined = new(StringComparer.OrdinalIgnoreCase);
+    // Packages that failed validation: path -> the (mtime, length) that failed, so an edited or replaced
+    // file is retried while a broken one isn't re-read every 60 seconds. Keyed by PATH (with the stamp
+    // as the value rather than part of the key) so a retry replaces the row instead of adding one, and
+    // so the sweep at the end of a pass can drop rows for packages that are gone. Process-lifetime only:
+    // a restart SHOULD retry, in case the failure was environmental.
+    private readonly Dictionary<string, (long Mtime, long Length)> _quarantined = new(StringComparer.OrdinalIgnoreCase);
 
     // Coalescing gate: at most one pass runs at a time, and a request arriving mid-pass sets _rerun so
     // the newest state is still processed once. Same shape as GameAssetPrecompressor.
@@ -72,6 +82,13 @@ public sealed class GamePackageInstaller(
     /// </summary>
     public string? InstallFailure { get; private set; }
 
+    /// <summary>
+    /// Per-package bookkeeping rows currently held (settle stamps, quarantine stamps, installed ids). For
+    /// tests/diagnostics — proves <see cref="Forget"/> actually reclaims rows for packages that are gone.
+    /// Only meaningful between passes: the maps are touched solely on the (serialized) reconcile pass.
+    /// </summary>
+    internal int TrackedPackages => _lastSeen.Count + _quarantined.Count + _installedIds.Count;
+
     /// <summary>The outcome of a pass, and whether another one is owed.</summary>
     /// <param name="Changed">Something was installed or uninstalled: the catalog should rediscover.</param>
     /// <param name="Pending">
@@ -88,26 +105,33 @@ public sealed class GamePackageInstaller(
     /// changed ones, uninstalls those whose file is gone. Safe to call often — a pass where nothing
     /// changed costs one directory listing plus a stat per package.
     /// </summary>
+    /// <remarks>
+    /// Exactly ONE pass runs per call. A request that arrives mid-pass is reported back as
+    /// <c>Pending</c> instead of being served by an immediate second pass, because both of this
+    /// class's guards — settle-before-install and absent-before-uninstall — compare a pass against
+    /// the state the PREVIOUS pass recorded. Two passes microseconds apart make a 400 MB archive that
+    /// is still being copied look settled, and drive the uninstall countdown to completion inside one
+    /// call. The caller turns Pending into another rescan through the catalog's 500 ms debounce, which
+    /// is where the real elapsed time between passes comes from.
+    /// </remarks>
     public ReconcileResult Reconcile()
     {
         lock (_gate)
         {
             if (_running) { _rerun = true; return default; }
             _running = true;
+            _rerun = false;
         }
 
         try
         {
-            var changed = false;
-            while (true)
+            var pass = ReconcileOnce();
+            lock (_gate)
             {
-                var pass = ReconcileOnce();
-                changed |= pass.Changed;
-                lock (_gate)
-                {
-                    if (!_rerun) { _running = false; return new ReconcileResult(changed, pass.Pending); }
-                    _rerun = false;
-                }
+                var owed = _rerun;
+                _rerun = false;
+                _running = false;
+                return new ReconcileResult(pass.Changed, pass.Pending || owed);
             }
         }
         catch
@@ -163,15 +187,21 @@ public sealed class GamePackageInstaller(
         // rather than depending on directory-enumeration order.
         packages.Sort(StringComparer.OrdinalIgnoreCase);
 
-        // Source file name -> id, for the prune step and for detecting two packages claiming one id.
-        var installedBy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Game id -> the package file that claimed it, so a second package claiming the same id is
+        // reported and ignored rather than fighting over one extracted folder.
         var claimedIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Every package file that was PRESENT this pass, whatever came of it. This is what the prune step
+        // treats as live. It used to be the set of packages that installed SUCCESSFULLY — but a package
+        // that hasn't settled yet, or one that is quarantined, never gets that far, so "still being
+        // copied" and "malformed replacement" both read as "the package is gone" and deleted the
+        // extracted game that was serving players perfectly well.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var path in packages)
         {
             try
             {
-                var outcome = Install(path, claimedIds, installedBy);
+                var outcome = Install(path, claimedIds, seen);
                 changed |= outcome.Changed;
                 pending |= outcome.Pending;
             }
@@ -190,9 +220,11 @@ public sealed class GamePackageInstaller(
             }
         }
 
-        var uninstall = Uninstall(installedBy);
+        var uninstall = Uninstall(seen);
         changed |= uninstall.Changed;
         pending |= uninstall.Pending;
+
+        Forget(packages, seen);
 
         InstallFailure = failures.Count == 0
             ? null
@@ -200,11 +232,35 @@ public sealed class GamePackageInstaller(
         return new ReconcileResult(changed, pending);
     }
 
+    /// <summary>
+    /// Drops per-package bookkeeping for files that are no longer in the games folder, so the maps
+    /// describe what is on disk rather than everything ever seen. Without it, an operator iterating on
+    /// a broken package leaves one quarantine row per attempt, and every package name ever dropped in
+    /// keeps a settle row for the process lifetime. (<c>_absentPasses</c> is already cleaned as part of
+    /// install/uninstall.)
+    /// </summary>
+    private void Forget(List<string> packages, HashSet<string> seen)
+    {
+        var live = new HashSet<string>(packages, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var stale in _lastSeen.Keys.Where(p => !live.Contains(p)).ToList())
+            _lastSeen.Remove(stale);
+        foreach (var stale in _quarantined.Keys.Where(p => !live.Contains(p)).ToList())
+            _quarantined.Remove(stale);
+        // Keyed by file NAME, not full path, so it is swept against the pass's seen-set instead.
+        foreach (var stale in _installedIds.Keys.Where(f => !seen.Contains(f)).ToList())
+            _installedIds.Remove(stale);
+    }
+
     /// <summary>Installs one package if it is settled, not quarantined, and not already current.</summary>
-    private ReconcileResult Install(string path, Dictionary<string, string> claimedIds, Dictionary<string, string> installedBy)
+    private ReconcileResult Install(string path, Dictionary<string, string> claimedIds, HashSet<string> seen)
     {
         var info = new FileInfo(path);
         if (!info.Exists) return default; // deleted between listing and now
+        var fileName = Path.GetFileName(path);
+        // Record the file as PRESENT before any early return below. Every one of them leaves an
+        // already-extracted game in place, so the prune step must not read them as "package gone".
+        seen.Add(fileName);
         var stamp = (info.LastWriteTimeUtc.Ticks, info.Length);
 
         // Settle check: only proceed when this pass sees exactly what the previous pass saw. Pending, not
@@ -214,14 +270,27 @@ public sealed class GamePackageInstaller(
         _lastSeen[path] = stamp;
         if (!settled)
         {
-            logger.LogDebug("Waiting for {File} to settle before installing it.", Path.GetFileName(path));
+            logger.LogDebug("Waiting for {File} to settle before installing it.", fileName);
             return new ReconcileResult(Changed: false, Pending: true);
         }
 
-        if (_quarantined.Contains(QuarantineKey(path, stamp)))
+        if (_quarantined.TryGetValue(path, out var badStamp) && badStamp == stamp)
         {
             // Settled and known-bad: nothing more to do until the file itself changes, so NOT pending —
             // otherwise a single malformed package would keep the rescan loop running forever.
+            return default;
+        }
+
+        // Fast path for the overwhelmingly common "nothing changed" pass: if we know which id this file
+        // installed and that folder's marker still matches, the archive answers no question worth
+        // opening it for. Recovering the id is the only thing the open bought us, and a ZIP's central
+        // directory lives at the END of the file — so this is what makes Reconcile's documented cost
+        // (a listing plus a stat per package) true rather than aspirational.
+        if (_installedIds.TryGetValue(fileName, out var knownId)
+            && IsCurrent(Path.Combine(unpackedRoot, knownId), path, stamp))
+        {
+            if (!TryClaim(knownId, path, claimedIds)) return default;
+            logger.LogDebug("Game package {File} is already installed and current.", fileName);
             return default;
         }
 
@@ -233,23 +302,18 @@ public sealed class GamePackageInstaller(
 
         var (header, id) = GamePackageReader.PeekIdentity(archive);
 
-        if (claimedIds.TryGetValue(id, out var winner))
-        {
-            logger.LogWarning(
-                "Both {Winner} and {Loser} contain the game id '{Id}'. Keeping {Winner} and ignoring {Loser} — " +
-                "remove one of them.", Path.GetFileName(winner), Path.GetFileName(path), id, Path.GetFileName(winner),
-                Path.GetFileName(path));
-            return default;
-        }
-        claimedIds[id] = path;
+        if (!TryClaim(id, path, claimedIds)) return default;
 
+        // No _absentPasses bookkeeping here: that map is keyed by the extracted DIRECTORY name (the game
+        // id), not by the package file name, and Uninstall already clears a game's countdown the moment it
+        // sees the game's marker source among this pass's live packages. Resetting it from here only ever
+        // looked like it was doing something.
         var target = Path.Combine(unpackedRoot, id);
-        installedBy[Path.GetFileName(path)] = id;
-        _absentPasses.Remove(Path.GetFileName(path));
 
         if (IsCurrent(target, path, stamp))
         {
-            logger.LogDebug("Game package {File} is already installed and current.", Path.GetFileName(path));
+            _installedIds[fileName] = id; // seed the fast path (e.g. first pass after a restart)
+            logger.LogDebug("Game package {File} is already installed and current.", fileName);
             return default;
         }
 
@@ -263,8 +327,9 @@ public sealed class GamePackageInstaller(
             SwapIntoPlace(staging, target);
 
             logger.LogInformation("Installed game package '{Id}' ({Name}{Version}) from {File}: {Count} file(s).",
-                id, header.Name ?? id, header.Version is null ? "" : " " + header.Version, Path.GetFileName(path), written.Count);
+                id, header.Name ?? id, header.Version is null ? "" : " " + header.Version, fileName, written.Count);
 
+            _installedIds[fileName] = id;
             Seed(plan, id, target);
             return new ReconcileResult(Changed: true, Pending: false);
         }
@@ -272,6 +337,25 @@ public sealed class GamePackageInstaller(
         {
             TryDelete(staging);
         }
+    }
+
+    /// <summary>
+    /// Claims an id for one package file, or logs the collision and refuses. Two packages cannot share
+    /// an id: the loser's assets would still be reachable by path while the catalog served the winner's
+    /// manifest.
+    /// </summary>
+    private bool TryClaim(string id, string path, Dictionary<string, string> claimedIds)
+    {
+        if (claimedIds.TryGetValue(id, out var winner))
+        {
+            logger.LogWarning(
+                "Both {Winner} and {Loser} contain the game id '{Id}'. Keeping {Winner} and ignoring {Loser} — " +
+                "remove one of them.", Path.GetFileName(winner), Path.GetFileName(path), id, Path.GetFileName(winner),
+                Path.GetFileName(path));
+            return false;
+        }
+        claimedIds[id] = path;
+        return true;
     }
 
     private static ZipArchive OpenArchive(Stream stream, string path)
@@ -304,7 +388,7 @@ public sealed class GamePackageInstaller(
 
             // Entries are opened lazily and one at a time, while the archive is still open.
             precompressor.SeedFromPackage(id, target, plan.Files
-                .Where(f => !denied.Contains(f.LogicalPath))
+                .Where(f => !GameAssetPrecompressor.IsExcluded(f.LogicalPath, denied))
                 .Select(f =>
                     (f.LogicalPath.Replace('/', Path.DirectorySeparatorChar),
                      f.Brotli ? (Func<Stream>?)(() => f.Entry.Open()) : null)));
@@ -317,35 +401,34 @@ public sealed class GamePackageInstaller(
     }
 
     /// <summary>
-    /// The package-logical paths (<c>/</c> separators) of the extracted game's never-served files: its
-    /// serverAuthority module and any authorityWords dictionaries. An unreadable or invalid manifest
-    /// yields an EMPTY set on purpose — this runs before the catalog has validated the game, and the
-    /// only cost of a wrong guess here is a redundant compressed variant, which the next reconcile
-    /// prunes. The authoritative gate is <see cref="Hosting.GameOriginAssetGate"/>.
+    /// The never-served files of the extracted game — its serverAuthority module and any authorityWords
+    /// dictionaries — read from the manifest we just wrote and normalized by
+    /// <see cref="GameAssetPrecompressor.DeniedRelatives"/>, which is also what the reconcile pass
+    /// compares against. Deliberately NOT a second implementation of that rule: a third normalization of
+    /// "which files are never served" is how one of them ends up writing a compressed copy of a
+    /// deliberately secret word list. An unreadable or invalid manifest yields an EMPTY set on purpose —
+    /// this runs before the catalog has validated the game, and the only cost of a wrong guess is a
+    /// redundant variant, which the next reconcile prunes. The authoritative gate is
+    /// <see cref="Hosting.GameOriginAssetGate"/>.
     /// </summary>
-    private static HashSet<string> DeniedRelatives(string gameDir)
+    private static IReadOnlySet<string> DeniedRelatives(string gameDir)
     {
-        var denied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             var manifestPath = Path.Combine(gameDir, GamePackage.ManifestEntryName);
-            if (!File.Exists(manifestPath)) return denied;
+            if (!File.Exists(manifestPath)) return EmptyDenied;
             var manifest = JsonSerializer.Deserialize(
                 File.ReadAllText(manifestPath), KnockBoxProtocolContext.Default.GameManifest);
-            if (manifest is null) return denied;
-
-            if (!string.IsNullOrEmpty(manifest.ServerAuthority))
-                denied.Add(manifest.ServerAuthority.Replace('\\', '/'));
-            if (manifest.AuthorityWords is { } words)
-                foreach (var decl in words.Values)
-                    if (!string.IsNullOrEmpty(decl?.File)) denied.Add(decl.File.Replace('\\', '/'));
+            return manifest is null ? EmptyDenied : GameAssetPrecompressor.DeniedRelatives(manifest);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
             // Nothing to do: seed everything, and let the reconcile pass sort it out.
+            return EmptyDenied;
         }
-        return denied;
     }
+
+    private static readonly IReadOnlySet<string> EmptyDenied = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>
     /// Replaces <paramref name="target"/> with <paramref name="staging"/> as close to atomically as the
@@ -382,8 +465,15 @@ public sealed class GamePackageInstaller(
         if (movedAside) TryDelete(aside);
     }
 
-    /// <summary>Uninstalls extracted games whose source package has been gone for long enough.</summary>
-    private ReconcileResult Uninstall(Dictionary<string, string> installedBy)
+    /// <summary>
+    /// Uninstalls extracted games whose source package has been gone for long enough.
+    /// </summary>
+    /// <param name="live">
+    /// The package file names that were PRESENT this pass — not the ones that installed successfully.
+    /// A package still being copied, or one quarantined as malformed, is very much still there, and its
+    /// previously-extracted game must survive until the file itself is actually removed.
+    /// </param>
+    private ReconcileResult Uninstall(HashSet<string> live)
     {
         if (!Directory.Exists(unpackedRoot)) return default;
 
@@ -398,7 +488,6 @@ public sealed class GamePackageInstaller(
             return default;
         }
 
-        var live = new HashSet<string>(installedBy.Keys, StringComparer.OrdinalIgnoreCase);
         var removed = false;
         var countingDown = false;
 
@@ -486,11 +575,8 @@ public sealed class GamePackageInstaller(
     private void Quarantine(string path)
     {
         var info = new FileInfo(path);
-        if (info.Exists) _quarantined.Add(QuarantineKey(path, (info.LastWriteTimeUtc.Ticks, info.Length)));
+        if (info.Exists) _quarantined[path] = (info.LastWriteTimeUtc.Ticks, info.Length);
     }
-
-    private static string QuarantineKey(string path, (long Mtime, long Length) stamp) =>
-        $"{path}|{stamp.Mtime}|{stamp.Length}";
 
     /// <summary>Clears staging leftovers from a crashed or interrupted pass.</summary>
     private void SweepStaging()

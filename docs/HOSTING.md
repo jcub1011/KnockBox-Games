@@ -165,11 +165,21 @@ and the first person to open it sets the password. So:
   set `KnockBox__AdminHost`/`KnockBox__AdminOrigin` — don't simply widen the port mapping.
 
 **Password rules.** Minimum 12 characters. Attempts are rate-limited to
-`KnockBox__AdminLoginAttemptsPerMinute` (default 10) per client IP, and a throttled attempt gets `429` with
-`Retry-After`. That limit is doing more than stopping password guessing: each attempt deliberately costs a
-600k-iteration PBKDF2 (~0.4 s of one core), so without it anyone who can reach the port could saturate your
-CPU with unauthenticated requests and starve the game relay. Behind a proxy, set
-`KnockBox__ForwardedHeaders: "true"` or every request shares the proxy's IP and one bucket.
+`KnockBox__AdminLoginAttemptsPerMinute` (default 10) per client IP **and**
+`KnockBox__AdminLoginAttemptsPerMinuteGlobal` (default 60) across all callers; a throttled attempt gets
+`429` with `Retry-After`. Those limits are doing more than stopping password guessing: each attempt
+deliberately costs a 600k-iteration PBKDF2 (~0.4 s of one core), so without them anyone who can reach the
+port could saturate your CPU with unauthenticated requests and starve the game relay. Behind a proxy, set
+`KnockBox__ForwardedHeaders: "true"` **and** `KnockBox__KnownProxies` (your proxy's IP or CIDR range) —
+otherwise every request either shares the proxy's single bucket, or, if the proxy passes a client-supplied
+`X-Forwarded-For` through, gets a fresh per-IP bucket per request. The global bucket is what holds either
+way.
+
+**Behind TLS.** Also set `KnockBox__ForwardedHeaders: "true"` (or an `https://`
+`KnockBox__AdminOrigin`) when a proxy terminates TLS in front of the portal. The request that reaches the
+server is plain HTTP, so without one of those the session cookie is issued without `Secure` and a browser
+will send the admin session token over plain `http://`. Startup logs a warning when the portal is
+host-routed and forwarded headers are off.
 
 **Where the password lives.** Hashed (PBKDF2-HMAC-SHA256, 600k iterations) into
 `KnockBox__AdminPasswordPath` — `/app/data/admin.secret` in the image, on the `knockbox-admin` volume
@@ -426,6 +436,7 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-*` from a fronting reverse proxy. |
+| `KnownProxies` | `[]` (any forwarder) | Which addresses may set `X-Forwarded-*` — IPs and/or CIDR ranges. Set it whenever `ForwardedHeaders` is on: empty means a client can pick the IP your per-IP limits key on. |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist — set for production. |
 
 ### Abuse protection (public servers)
@@ -439,4 +450,5 @@ Defaults are sized for casual play; `0` disables any of them:
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection in-game message rate; sustained violation closes the socket terminally (`1008`). |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for shell/lobby traffic. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation rate (rejects the create, keeps the connection). |
-| `AdminLoginAttemptsPerMinute` | `10` | Per-IP admin password attempts (`429` + `Retry-After` over the limit). Guards CPU as much as the password: each attempt costs ~0.4 s of a core. Needs `ForwardedHeaders` behind a proxy. |
+| `AdminLoginAttemptsPerMinute` | `10` | Per-IP admin password attempts (`429` + `Retry-After` over the limit). Guards CPU as much as the password: each attempt costs ~0.4 s of a core. Needs `ForwardedHeaders` + `KnownProxies` behind a proxy. |
+| `AdminLoginAttemptsPerMinuteGlobal` | `60` | The same cap across all callers — the CPU ceiling that holds even when the per-IP key is a header the caller wrote. |

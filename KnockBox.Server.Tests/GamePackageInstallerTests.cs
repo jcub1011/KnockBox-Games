@@ -275,6 +275,121 @@ public class GamePackageInstallerTests : IDisposable
     }
 
     [Fact]
+    public void A_package_still_being_copied_over_does_not_uninstall_the_live_game()
+    {
+        // The routine upgrade: an operator copies a new build over the old file. Every pass sees a
+        // different (mtime, length) while the copy is in flight, so the package never settles and never
+        // reaches the install registration — which the prune step used to read as "the package is gone"
+        // and act on within two passes, deleting the game that was serving players perfectly well.
+        Drop("demo.kbg", PackageFixture.Valid("demo"));
+        var installer = New();
+        RunToCompletion(installer);
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+
+        var path = Path.Combine(_gamesRoot, "demo.kbg");
+        for (var i = 0; i < 4; i++)
+        {
+            System.IO.File.AppendAllText(path, "more bytes arriving");
+            installer.Reconcile();
+            Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")),
+                $"pass {i + 1}: a package mid-copy is still present, so its extracted game must survive");
+        }
+    }
+
+    [Fact]
+    public void A_quarantined_replacement_does_not_uninstall_the_live_game()
+    {
+        // Worse than the mid-copy case, because it is permanent: the replacement is settled but malformed,
+        // so it is quarantined and never registers. Treating that as "package gone" deleted a working game
+        // for good, in exchange for an operator's typo.
+        Drop("demo.kbg", PackageFixture.Valid("demo"));
+        var installer = New();
+        RunToCompletion(installer);
+
+        Drop("demo.kbg", PackageFixture.Build("demo", "Broken",
+            [new File("GAME.json", PackageFixture.Bytes(PackageFixture.DefaultManifest))], formatVersion: 99));
+        string? reported = null;
+        for (var i = 0; i < 5; i++)
+        {
+            installer.Reconcile();
+            reported ??= installer.InstallFailure;
+        }
+
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")),
+            "a malformed replacement must be refused, not paid for with the working installation");
+        // Reported once, on the pass that read it — later passes stay quiet because it's quarantined.
+        Assert.Contains("demo.kbg", reported);
+    }
+
+    [Fact]
+    public async Task Concurrent_passes_do_not_collapse_the_settle_guard()
+    {
+        // Both guards compare a pass against what the PREVIOUS pass recorded, so they only mean anything
+        // if passes are separated by real time. The coalescing gate used to run a second pass immediately
+        // on behalf of a caller that arrived mid-pass, which made a package dropped microseconds ago look
+        // settled — defeating the one check that stops a half-copied archive from being read.
+        Drop("demo.kbg", PackageFixture.Valid("demo"));
+        var installer = New();
+
+        using var barrier = new Barrier(2);
+        await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            barrier.SignalAndWait();
+            installer.Reconcile();
+        })));
+
+        Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "demo")),
+            "a package must never install within a single burst of overlapping passes");
+    }
+
+    [Fact]
+    public void An_unchanged_pass_does_not_open_the_archive()
+    {
+        // Reconcile's contract is "a pass where nothing changed costs one directory listing plus a stat per
+        // package". Recovering the id was the only reason the no-change path opened the file — and a ZIP's
+        // central directory is at the END, so that was a seek through a potentially huge archive, per
+        // package, per pass. Holding the file exclusively proves the pass no longer touches it.
+        Drop("demo.kbg", PackageFixture.Valid("demo"));
+        var installer = New();
+        RunToCompletion(installer);
+
+        var path = Path.Combine(_gamesRoot, "demo.kbg");
+        using (var _ = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            // Prove the lock denies readers on this platform, or the assertion below proves nothing.
+            try
+            {
+                using var reader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return;
+            }
+            catch (IOException) { /* denied, as intended */ }
+
+            var result = installer.Reconcile();
+
+            Assert.False(result.Changed);
+            Assert.Null(installer.InstallFailure);
+        }
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+    }
+
+    [Fact]
+    public void Bookkeeping_for_a_package_that_is_gone_is_forgotten()
+    {
+        // Settle stamps and quarantine rows used to accumulate for the process lifetime: every package name
+        // ever dropped in kept a row, and an operator iterating on a broken build added one per attempt.
+        Drop("bad.kbg", PackageFixture.Build("bad", "Bad",
+            [new File("GAME.json", PackageFixture.Bytes(PackageFixture.DefaultManifest))], formatVersion: 99));
+        var installer = New();
+        RunToCompletion(installer);
+        Assert.True(installer.TrackedPackages > 0);
+
+        System.IO.File.Delete(Path.Combine(_gamesRoot, "bad.kbg"));
+        installer.Reconcile();
+
+        Assert.Equal(0, installer.TrackedPackages);
+    }
+
+    [Fact]
     public void An_unreadable_games_folder_uninstalls_nothing()
     {
         if (OperatingSystem.IsWindows()) return; // POSIX permission bits only
@@ -518,6 +633,61 @@ public class GamePackageInstallerTests : IDisposable
         precompressor.ReconcileAll(games);
 
         Assert.True(System.IO.File.Exists(Path.Combine(_compressedRoot, "demo", "code.js.br")));
+    }
+
+    [Fact]
+    public void An_upgrade_that_stores_a_file_raw_drops_the_previous_variant()
+    {
+        // v1's payload compresses; v2's is dense, so the packer stores it identity and the seed records
+        // "tried, not beneficial". Recording that outcome without ALSO dropping the old variant (which is
+        // what Compress() does when it returns false) left v1's .br on disk permanently: a not-produced
+        // index row is skipped by every later pass and is not an orphan to the pruner, so every
+        // br-accepting client kept receiving v1's bytes at v2's URL.
+        Drop("demo.kbg", PackageFixture.Valid("demo", null, null,
+            new File("code.js", PackageFixture.Filler(), Brotli: true)));
+
+        var precompressor = new GameAssetPrecompressor(
+            _compressedRoot, gzip: true, minBytes: 16, NullLogger<GameAssetPrecompressor>.Instance);
+        RunToCompletion(New(precompressor));
+
+        var variant = Path.Combine(_compressedRoot, "demo", "code.js.br");
+        Assert.True(System.IO.File.Exists(variant));
+
+        Drop("demo.kbg", PackageFixture.Valid("demo", null, null,
+            new File("code.js", PackageFixture.Bytes("already-dense bytes the packer stored raw"))));
+        Assert.True(RunToCompletion(New(precompressor)));
+
+        Assert.False(System.IO.File.Exists(variant),
+            "the previous version's variant must not survive an upgrade that stores the file raw");
+    }
+
+    [Fact]
+    public void A_reconcile_that_predates_discovery_keeps_the_freshly_seeded_cache()
+    {
+        // The installer seeds the cache and only THEN asks for a rediscovery, so for the debounce plus scan
+        // that follows, the id is in no catalog map — and the pruner's rule is "absent from the catalog ⇒
+        // delete the directory". A reconcile landing in that window (the periodic timer, or the sibling
+        // Discovered handler still carrying the pre-install map) deleted the seed it had just written, and
+        // the next pass re-paid the max-effort Brotli the seed exists to avoid.
+        Drop("demo.kbg", PackageFixture.Valid("demo", null, null,
+            new File("code.js", PackageFixture.Filler(), Brotli: true)));
+
+        var precompressor = new GameAssetPrecompressor(
+            _compressedRoot, gzip: true, minBytes: 16, NullLogger<GameAssetPrecompressor>.Instance);
+        RunToCompletion(New(precompressor));
+        var variant = Path.Combine(_compressedRoot, "demo", "code.js.br");
+        Assert.True(System.IO.File.Exists(variant));
+
+        var beforeDiscovery = new Dictionary<string, GameCatalog.GameLocation>(StringComparer.OrdinalIgnoreCase);
+        precompressor.ReconcileAll(beforeDiscovery);
+
+        Assert.True(System.IO.File.Exists(variant), "a not-yet-discovered game's seed must survive a reconcile");
+
+        // The grace is not a permanent exemption: once the extracted game is actually gone, so is its cache.
+        Directory.Delete(Path.Combine(_unpackedRoot, "demo"), recursive: true);
+        precompressor.ReconcileAll(beforeDiscovery);
+
+        Assert.False(Directory.Exists(Path.Combine(_compressedRoot, "demo")));
     }
 
     [Fact]

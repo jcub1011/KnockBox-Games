@@ -51,15 +51,11 @@ public static class OriginRouting
         (!string.IsNullOrEmpty(adminHost) &&
          string.Equals(requestHost, adminHost, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>
-    /// The admin portal origin. Precedence: explicit configured origin, else configured admin host/subdomain,
-    /// else dev fallback of the host on the admin port.
-    /// </summary>
-    public static string ResolveAdminOrigin(
-        string scheme, string requestHost, int adminPort, string? adminHost, string? adminOrigin)
-    {
-        if (!string.IsNullOrWhiteSpace(adminOrigin)) return adminOrigin.TrimEnd('/');
-        if (!string.IsNullOrWhiteSpace(adminHost)) return $"{scheme}://{adminHost}";
-        return $"{scheme}://{requestHost}:{adminPort}";
-    }
+    // There is deliberately no ResolveAdminOrigin twin of ResolveGameOrigin. The shell must be TOLD the
+    // game origin (it embeds iframes from it and the game socket dials it), whereas nothing is ever told
+    // the admin origin — an operator navigates to it. The only code that needs to name it is the startup
+    // log, and it cannot use a shared resolver honestly: when the portal is host-routed the scheme
+    // belongs to the fronting proxy, so the log says which HOST serves the portal rather than inventing a
+    // URL. A resolver here would be a second, divergent copy of that precedence with tests covering only
+    // the copy nothing calls.
 }

@@ -61,6 +61,40 @@ public class AdminAuthServiceTests : IDisposable
         Assert.Equal(AdminAuthService.SetupOutcome.AlreadyConfigured, service.SetupPassword("SecondPassword"));
     }
 
+    [Fact]
+    public void Concurrent_setups_produce_exactly_one_winner_whose_session_still_works()
+    {
+        // Claim-on-first-use is the one path where a check-then-write race is reachable by design: two
+        // callers can both find the portal unconfigured. Both used to "succeed" and both got a cookie —
+        // but the session key fingerprints the STORED hash, so the caller whose write lost was holding a
+        // token signed under a key that no longer existed. It was locked out of a portal it had just been
+        // told it claimed, and could neither log in (wrong password) nor re-run setup (409).
+        var services = Enumerable.Range(0, 8)
+            .Select(_ => new AdminAuthService(_config, _clock, NullLogger<AdminAuthService>.Instance))
+            .ToArray();
+        var tokens = new string?[services.Length];
+        var outcomes = new AdminAuthService.SetupOutcome[services.Length];
+
+        using var barrier = new Barrier(services.Length);
+        Parallel.For(0, services.Length, i =>
+        {
+            barrier.SignalAndWait();
+            outcomes[i] = services[i].SetupPassword($"Password-Number-{i}");
+            if (outcomes[i] == AdminAuthService.SetupOutcome.Success)
+                tokens[i] = services[i].CreateSessionToken();
+        });
+
+        var winner = Array.IndexOf(outcomes, AdminAuthService.SetupOutcome.Success);
+        Assert.NotEqual(-1, winner);
+        Assert.Equal(1, outcomes.Count(o => o == AdminAuthService.SetupOutcome.Success));
+        Assert.All(outcomes.Where((_, i) => i != winner),
+            o => Assert.Equal(AdminAuthService.SetupOutcome.AlreadyConfigured, o));
+
+        // The winner's password is the one on disk, and the session it was handed still verifies.
+        Assert.True(services[winner].VerifyPassword($"Password-Number-{winner}"));
+        Assert.True(services[winner].ValidateSessionToken(tokens[winner]));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]

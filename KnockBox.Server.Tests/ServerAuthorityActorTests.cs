@@ -11,6 +11,55 @@ using Xunit;
 namespace KnockBox.Server.Tests;
 
 /// <summary>
+/// The hand-written outbound frame must be the frame the source-generated serializer would produce for the
+/// equivalent <see cref="GameMessage"/>. Writing it directly is what removes the parse + deep-clone +
+/// re-serialize round trip from the tick path; this is the check that keeps "directly" from meaning
+/// "differently".
+/// </summary>
+public class ServerAuthorityFrameTests
+{
+    private static byte[] ViaSerializer(string to, string payloadJson)
+    {
+        using var doc = JsonDocument.Parse(payloadJson);
+        return ConnectionManager.Serialize(new GameMessage(to, doc.RootElement.Clone(), From: "server"));
+    }
+
+    [Theory]
+    [InlineData("all", """{"_kb":"state","state":{"count":1}}""")]
+    [InlineData("p1", """{"_kb":"delta","patch":{"a":[1,2,{"b":null}]}}""")]
+    [InlineData("p-with-\"quote\"", """{"_kb":"error","message":"it broke"}""")]
+    [InlineData("all", """{"_kb":"state","state":null}""")]
+    [InlineData("all", """{"_kb":"state","state":{"deep":{"er":{"est":[[],{},""]}}}}""")]
+    public void Matches_the_serializer_byte_for_byte_for_ascii_payloads(string to, string payloadJson) =>
+        Assert.Equal(ViaSerializer(to, payloadJson), ServerAuthority.SerializeGameFrame(to, payloadJson));
+
+    [Theory]
+    [InlineData("all", """{"_kb":"state","state":{"unicode":"héllo ✓","esc":"line\nbreak"}}""")]
+    [InlineData("all", """{"_kb":"state","state":{"html":"<b>&'x'</b>","plus":"a+b"}}""")]
+    public void Copies_the_payload_verbatim_rather_than_re_encoding_it(string to, string payloadJson)
+    {
+        // The one deliberate difference: the round trip re-encoded string contents with
+        // JavaScriptEncoder.Default (non-ASCII and HTML-sensitive characters as \uXXXX); copying the
+        // payload raw keeps whatever the module's serializer wrote. Same JSON value either way, and these
+        // frames go into a WebSocket rather than into markup — which is the only thing that escaping buys.
+        var frame = ServerAuthority.SerializeGameFrame(to, payloadJson);
+        Assert.True(frame.Length < ViaSerializer(to, payloadJson).Length, "the verbatim copy should be shorter");
+
+        // What matters is that both decode to the same message. Compared as VALUES, not raw text: the
+        // escaping is exactly what differs, and é and é are the same character to any parser.
+        var mine = Assert.IsType<GameMessage>(
+            JsonSerializer.Deserialize(frame, KnockBoxProtocolContext.Default.IMessage));
+        var theirs = Assert.IsType<GameMessage>(
+            JsonSerializer.Deserialize(ViaSerializer(to, payloadJson), KnockBoxProtocolContext.Default.IMessage));
+        Assert.Equal(theirs.To, mine.To);
+        Assert.Equal(theirs.From, mine.From);
+        Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(
+            System.Text.Json.Nodes.JsonNode.Parse(mine.Payload.GetRawText()),
+            System.Text.Json.Nodes.JsonNode.Parse(theirs.Payload.GetRawText())));
+    }
+}
+
+/// <summary>
 /// Actor unit tests (design §12b item 2): inline module sources, real Jint, real
 /// ConnectionManager fan-out captured on fake sockets. Determinism: post work, Stop() the actor,
 /// await Completion (the channel drains fully before the task ends), then flush the capture

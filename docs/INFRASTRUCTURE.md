@@ -260,10 +260,17 @@ shell pipelines.
   16-byte salt) into `AdminPasswordPath`, which is created **owner-read/write only** on Unix so a shell on
   the box can't copy the hash and crack it offline. There are no accounts. On first run the portal is
   **unclaimed** and whoever reaches it sets the password, so the admin origin must not be publicly
-  reachable before that happens — see [HOSTING.md](./HOSTING.md). Attempts are rate-limited per IP
-  (`AdminLoginAttemptsPerMinute`) *before* any hashing, since the hash is expensive by design.
+  reachable before that happens — see [HOSTING.md](./HOSTING.md). Claiming it is an atomic
+  create-if-absent, so two simultaneous setup requests produce one winner and one `409` rather than two
+  "successes" of which only one holds a usable session. Attempts are rate-limited *before* any hashing,
+  since the hash is expensive by design: per IP (`AdminLoginAttemptsPerMinute`) for fair share, plus a
+  server-wide bucket (`AdminLoginAttemptsPerMinuteGlobal`) that bounds CPU even when the per-IP key is a
+  header the caller wrote.
 - **Sessions** are an HMAC-signed cookie (`HttpOnly`, `SameSite=Strict`, `Secure` whenever the request is
-  HTTPS). The signing key is derived from a per-process secret **and a fingerprint of the stored password
+  HTTPS **or** `AdminOrigin` is an `https://` URL — behind a TLS-terminating proxy without
+  `ForwardedHeaders` the request Kestrel sees is plain HTTP, and deriving the flag from it alone would
+  hand out a non-Secure session token in exactly the deployment HOSTING.md recommends). The signing key is
+  derived from a per-process secret **and a fingerprint of the stored password
   hash**, which gives two properties: a restart logs admins out, and *any* change to the secret file
   immediately revokes every outstanding session. So resetting a compromised password actually locks the
   intruder out instead of leaving their session live until the next restart.
@@ -379,7 +386,8 @@ into `games/` and it appears within a second or two — no restart.
 | `AdminOrigin` | — | Prod: explicit admin origin (overrides `AdminHost`/`AdminPort`). |
 | `AdminPasswordPath` | `admin.secret` next to the binary | Where the admin password hash is stored. Must be **writable** and, in a container, on a **persisted volume outside the image** — otherwise the password is lost on every image update and the portal reverts to unclaimed. The Docker image sets `/app/data/admin.secret`. Deleting this file is the password-reset path. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. Sessions are also invalidated by a restart (the signing key is per-process, like the player token secret). |
-| `ForwardedHeaders` | `false` | Trust `X-Forwarded-For/Proto/Host` from a fronting reverse proxy so the game origin resolves to `https`/`wss` and per-IP limits see real client IPs. Opt-in: only enable behind a trusted proxy. |
+| `ForwardedHeaders` | `false` | Trust `X-Forwarded-For/Proto/Host` from a fronting reverse proxy so the game origin resolves to `https`/`wss` and per-IP limits see real client IPs. Opt-in: only enable behind a trusted proxy, and name that proxy in `KnownProxies`. |
+| `KnownProxies` | `[]` (trust any forwarder) | Addresses allowed to set `X-Forwarded-*`: IPs (`10.0.0.7`, `::1`) and/or CIDR ranges (`10.0.0.0/8`). Only consulted when `ForwardedHeaders` is on. **Leaving it empty means any caller can choose the IP every per-IP limit keys on** — including the admin login throttle, whose per-IP bucket a rotating `X-Forwarded-For` then defeats entirely; startup logs a warning saying so. Unparseable entries are logged as errors and ignored (the proxy they name is *not* trusted). |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist (defense-in-depth; the token/ticket is the real auth). An empty `Origin` is always allowed — native engine clients send none. |
 | `IsolateShell` | `false` | Serve the shell cross-origin isolated (COOP/COEP) for threaded engine exports — see §8. |
 | `HandshakeTimeoutSeconds` | `10` | A `/ws` socket must send its first frame (`Hello`/`Attach`) within this deadline or it is closed (anti socket-squatting). `0` disables. |
@@ -387,7 +395,8 @@ into `games/` and it appears within a second or two — no restart.
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection token bucket on inbound data-role frames (each relayed frame fans out O(lobby size)). Sustained violation → `Error{rate_limited}` + terminal close `1008`. `0` disables. |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for control-role (shell) frames. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation bucket; a violation rejects the create with `rate_limited` but keeps the connection. `0` disables. |
-| `AdminLoginAttemptsPerMinute` | `10` | Per-IP bucket on `/admin/api/auth/{login,setup}` (`Networking/IpRateLimiter.cs`), checked **before** any hashing. Unlike the limits above this guards **CPU**, not bandwidth: each attempt runs a 600k-iteration PBKDF2 (~0.4 s of one core), so without it an unauthenticated caller can both guess passwords and saturate every core — starving the WebSocket relay. Over the limit ⇒ `429` + `Retry-After`, at ~7 ms instead of ~420 ms. `0` disables. Only meaningful behind a proxy with `ForwardedHeaders` on; otherwise every request shares the proxy's IP (which fails *closed*). |
+| `AdminLoginAttemptsPerMinute` | `10` | Per-IP bucket on `/admin/api/auth/{login,setup}` (`Networking/IpRateLimiter.cs`), checked **before** any hashing. Unlike the limits above this guards **CPU**, not bandwidth: each attempt runs a 600k-iteration PBKDF2 (~0.4 s of one core), so without it an unauthenticated caller can both guess passwords and saturate every core — starving the WebSocket relay. Over the limit ⇒ `429` + `Retry-After`, at ~7 ms instead of ~420 ms. `0` disables. Fair-share only: it is exactly as trustworthy as the IP it keys on, so behind a proxy it needs `ForwardedHeaders` **and** `KnownProxies` — without the latter a client rotating `X-Forwarded-For` gets a fresh bucket per request. The CPU ceiling is `AdminLoginAttemptsPerMinuteGlobal`. |
+| `AdminLoginAttemptsPerMinuteGlobal` | `60` | Cap on admin password attempts across **all** callers, checked after the per-IP bucket and still before any hashing. This is the one that bounds CPU no matter what a caller claims its address to be: 60/min ≈ one hash per second ≈ 40% of one core at worst. `0` disables. |
 | `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
 | `AuthorityEnabled` | `true` | Master switch for server-authoritative mode (games with `GAME.json` `serverAuthority`, see SERVER_AUTHORITY_DESIGN.md). `false` ⇒ creating a lobby for such a game fails with a clear error — never a silent downgrade to host mode. |
 | `AuthorityMaxMemoryBytes` | `33554432` (32 MB) | Per-engine memory budget for the sandboxed authority runtime (Jint `LimitMemory`; a per-invocation allocation budget, see design §8). |
