@@ -1,0 +1,701 @@
+// @vitest-environment jsdom
+//
+// The admin portal's DOM orchestration: which view the auth state selects, the tab router the dead
+// data-tab attributes were always for, per-tab polling, and the confirm-then-POST path every destructive
+// action goes through.
+//
+// admin.js is side-effecting on import in the same way shell.js is, so each test resets modules, injects
+// the REAL admin/index.html (so element ids can't drift from production markup), stubs fetch, and then
+// imports the module fresh. Assertions read rendered DOM text and the recorded fetch calls.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { installFakeFetch, loadAdminDom, tick } from './helpers.js';
+
+const el = (id) => document.getElementById(id);
+
+let admin;
+
+async function importAdmin() {
+  admin = await import('../admin/admin.js');
+  return admin;
+}
+
+// The payloads the four endpoints return, with just enough shape to render.
+const STATUS = {
+  uptime: '0d 1h 2m 3s',
+  activeLobbies: 2,
+  registeredGames: 4,
+  workingSetMb: 61,
+  managedHeapMb: 3,
+  hostTime: '2026-08-12T20:00:00.000Z',
+  connectedPlayers: 5,
+  gameSockets: 3,
+  authorityLobbies: 1,
+  maintenanceMode: false,
+  maintenanceMessage: null,
+  cpuPercentLifetime: 0.42,
+  cpuSecondsTotal: 12.5,
+  processorCount: 16,
+  gen0Collections: 7,
+  gen1Collections: 2,
+  gen2Collections: 1,
+  scanError: null,
+  settingsError: null,
+  diagnostics: [],
+};
+
+const LOBBIES = {
+  staleAfterMinutes: 30,
+  hostTime: '2026-08-12T20:00:00.000Z',
+  lobbies: [
+    {
+      code: 'AB12', gameId: 'tictactoe', gameName: 'Tic-Tac-Toe', gameVersion: null,
+      players: 2, maxPlayers: 2, disconnected: 0, hostId: 'p1', open: true, serverAuthority: true,
+      createdAt: '2026-08-12T19:00:00.000Z', ageSeconds: 3600, idleSeconds: 12, status: 'waiting',
+      members: [
+        { playerId: 'p1', displayName: 'Ada', isHost: true, connected: true, disconnectedSeconds: 0 },
+        { playerId: 'p2', displayName: 'Grace', isHost: false, connected: false, disconnectedSeconds: 20 },
+      ],
+    },
+    {
+      code: 'CD34', gameId: 'word-rush', gameName: 'Word Rush', gameVersion: '1.2.0',
+      players: 1, maxPlayers: 8, disconnected: 0, hostId: 'p3', open: false, serverAuthority: false,
+      createdAt: '2026-08-12T19:30:00.000Z', ageSeconds: 1800, idleSeconds: 4000, status: 'stale',
+      members: [{ playerId: 'p3', displayName: 'Linus', isHost: true, connected: true, disconnectedSeconds: 0 }],
+    },
+  ],
+};
+
+const GAMES = {
+  gamesRoot: '/srv/games',
+  packagesRoot: '/app/games-unpacked',
+  scanError: null,
+  diskMeasuredAt: '2026-08-12T20:00:00.000Z',
+  compressedCacheBytes: 2_800_000,
+  logsBytes: 500_000,
+  games: [
+    {
+      id: 'tictactoe', name: 'Tic-Tac-Toe', version: null, availability: 'available', maxPlayers: 2,
+      serverAuthority: false, directory: '/srv/games/tictactoe', root: 'games', packageBacked: false,
+      diskBytes: 12_685, directoryBytes: 7_756, compressedBytes: 4_929, packageBytes: 0,
+      activeLobbies: 1, activePlayers: 2, deletable: true, deleteBlockedReason: null,
+    },
+    {
+      id: 'word-rush', name: 'Word Rush', version: '1.2.0', availability: 'disabled', maxPlayers: 8,
+      serverAuthority: true, directory: '/app/games-unpacked/word-rush', root: 'packages', packageBacked: true,
+      diskBytes: 1_048_576, directoryBytes: 800_000, compressedBytes: 148_576, packageBytes: 100_000,
+      activeLobbies: 0, activePlayers: 0, deletable: false,
+      deleteBlockedReason: "'/srv/games' is not writable by the server (read-only mount).",
+    },
+  ],
+};
+
+const LOGS = {
+  entries: [
+    {
+      seq: 1, time: '2026-08-12T20:00:00.000Z', level: 'Information',
+      category: 'KnockBox.Server.Games.GameCatalog', message: 'Game catalog ready: 4 game(s)', exception: null,
+    },
+    {
+      seq: 2, time: '2026-08-12T20:00:01.000Z', level: 'Warning',
+      category: 'KnockBox.GameLog', message: 'Skipping game code-word', exception: null,
+    },
+  ],
+  lastSequence: 2,
+  totalWritten: 41,
+  buffered: 2,
+};
+
+const METRICS = {
+  games: [{
+    gameId: 'tictactoe', framesIn: 100, framesOut: 200, bytesIn: 5000, bytesOut: 10_000,
+    framesDropped: 0, fanOut: 2, lobbies: 1, players: 2,
+    socketFramesSent: 200, socketBytesSent: 10_000, socketFramesDropped: 0,
+  }],
+  controlSockets: 5,
+  gameSockets: 3,
+  outboundFramesSent: 500,
+  outboundBytesSent: 20_000,
+  outboundFramesDropped: 0,
+  trackedRateLimitIps: 0,
+  hostTime: '2026-08-12T20:00:00.000Z',
+};
+
+// The happy path: configured, authenticated, every read endpoint answering.
+function authedRoutes(overrides = {}) {
+  return {
+    'GET /admin/api/auth/status': { body: { configured: true, authenticated: true } },
+    'GET /admin/api/system/status': { body: STATUS },
+    'GET /admin/api/metrics': { body: METRICS },
+    'GET /admin/api/lobbies': { body: LOBBIES },
+    'GET /admin/api/games': { body: GAMES },
+    'GET /admin/api/logs': { body: LOGS },
+    'GET /admin/api/logs/files': { body: { files: [{ name: 'knockbox-20260812.log', bytes: 254_000, modified: '2026-08-12T20:00:00.000Z' }], logsRoot: '/logs', error: null } },
+    ...overrides,
+  };
+}
+
+let fake;
+
+beforeEach(() => {
+  vi.resetModules();
+  loadAdminDom();
+  // Each test starts at the default tab unless it says otherwise.
+  window.location.hash = '';
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('auth state selects the view', () => {
+  it('shows the setup form on an unclaimed server', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } } });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    expect(el('setup-view').classList.contains('hidden')).toBe(false);
+    expect(el('login-view').classList.contains('hidden')).toBe(true);
+    expect(el('dashboard-view').classList.contains('hidden')).toBe(true);
+    // Nothing to log out of yet.
+    expect(el('logout-btn').classList.contains('hidden')).toBe(true);
+  });
+
+  it('shows the login form on a claimed server with no session', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: true, authenticated: false } } });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    expect(el('login-view').classList.contains('hidden')).toBe(false);
+    expect(el('logout-btn').classList.contains('hidden')).toBe(true);
+  });
+
+  it('shows the dashboard once authenticated', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
+    expect(el('logout-btn').classList.contains('hidden')).toBe(false);
+  });
+
+  it('reports an unreachable server on the status pill instead of a blank page', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { status: 500, body: {} } });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    expect(el('server-status-text').textContent).toMatch(/unreachable/i);
+  });
+});
+
+describe('overview', () => {
+  it('renders the platform counters from system status', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    expect(el('metric-uptime').textContent).toBe('0d 1h 2m 3s');
+    expect(el('metric-lobbies').textContent).toBe('2');
+    expect(el('metric-players').textContent).toBe('5');
+    expect(el('metric-games').textContent).toBe('4');
+    expect(el('metric-memory').textContent).toBe('61 MB');
+    expect(el('metric-sockets').textContent).toContain('3');
+    expect(el('metric-lobbies-sub').textContent).toContain('1 server-authority');
+  });
+
+  it('shows a dash for CPU on the first poll, because a rate needs two samples', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    expect(el('metric-cpu').textContent).toBe('--');
+    // The lifetime average IS available immediately, so it fills the sub-line.
+    expect(el('metric-cpu-sub').textContent).toContain('0.42% lifetime');
+  });
+
+  it('surfaces deployment diagnostics rather than leaving them on the player site', async () => {
+    fake = installFakeFetch(authedRoutes({
+      'GET /admin/api/system/status': {
+        body: {
+          ...STATUS,
+          diagnostics: [{ title: 'Games folder is not accessible', detail: 'permission denied', blocking: true }],
+        },
+      },
+    }));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    const banner = el('diagnostics-banner');
+    expect(banner.classList.contains('hidden')).toBe(false);
+    expect(banner.textContent).toContain('Games folder is not accessible');
+    expect(banner.textContent).toContain('permission denied');
+    expect(banner.querySelector('.diagnostic-blocking')).not.toBeNull();
+  });
+
+  it('folds a settings-file read failure into the same banner', async () => {
+    fake = installFakeFetch(authedRoutes({
+      'GET /admin/api/system/status': { body: { ...STATUS, settingsError: 'settings.json could not be read' } },
+    }));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    // Otherwise "my disabled game came back" is the only symptom the operator ever sees.
+    expect(el('diagnostics-banner').textContent).toContain('settings.json could not be read');
+  });
+
+  it('reflects maintenance mode on the toggle', async () => {
+    fake = installFakeFetch(authedRoutes({
+      'GET /admin/api/system/status': { body: { ...STATUS, maintenanceMode: true, maintenanceMessage: 'Back at 09:00.' } },
+    }));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    expect(el('maintenance-badge').textContent).toBe('On');
+    expect(el('maintenance-toggle').textContent).toBe('Turn Off');
+    expect(el('maintenance-message').value).toBe('Back at 09:00.');
+  });
+
+  it('renders the per-game relay table', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    const row = el('metrics-body').querySelector('tr');
+    expect(row.textContent).toContain('tictactoe');
+    expect(row.textContent).toContain('2.00x'); // fan-out: one broadcast, two recipients
+    expect(el('metrics-empty').classList.contains('hidden')).toBe(true);
+  });
+});
+
+describe('tab router', () => {
+  it('starts on overview and switches on a nav click', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('tab-overview').classList.contains('hidden')).toBe(false);
+    expect(el('panel-title').textContent).toBe('System Overview');
+
+    document.querySelector('.nav-item[data-tab="lobbies"]').click();
+    await tick();
+    await tick();
+
+    expect(el('tab-lobbies').classList.contains('hidden')).toBe(false);
+    expect(el('tab-overview').classList.contains('hidden')).toBe(true);
+    expect(el('panel-title').textContent).toBe('Active Lobbies');
+    // The fragment follows, so a reload or a bookmark lands back here.
+    expect(window.location.hash).toBe('#lobbies');
+  });
+
+  it('honours the fragment on load', async () => {
+    window.location.hash = '#games';
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    expect(el('tab-games').classList.contains('hidden')).toBe(false);
+    expect(el('panel-title').textContent).toBe('Game Catalog');
+  });
+
+  it('marks the active nav item so the sidebar matches the panel', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    document.querySelector('.nav-item[data-tab="logs"]').click();
+    await tick();
+
+    const active = [...document.querySelectorAll('.nav-item.active')];
+    expect(active).toHaveLength(1);
+    expect(active[0].dataset.tab).toBe('logs');
+  });
+
+  it('polls only the visible tab', async () => {
+    vi.useFakeTimers();
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await vi.advanceTimersByTimeAsync(1);
+
+    const pathsBefore = new Set(fake.calls.map((c) => c.path));
+    expect(pathsBefore.has('/admin/api/system/status')).toBe(true);
+    // Four tabs each polling would quadruple the request rate for three panels nobody is looking at —
+    // and the games one can trigger a disk walk.
+    expect(pathsBefore.has('/admin/api/lobbies')).toBe(false);
+    expect(pathsBefore.has('/admin/api/games')).toBe(false);
+
+    const before = fake.calls.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fake.calls.length).toBeGreaterThan(before);
+    expect(fake.calls.some((c) => c.path === '/admin/api/lobbies')).toBe(false);
+  });
+});
+
+describe('lobby directory', () => {
+  async function openLobbies(overrides) {
+    fake = installFakeFetch(authedRoutes(overrides));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    admin.selectTab('lobbies');
+    await tick();
+    await tick();
+  }
+
+  it('renders a row per lobby with its members', async () => {
+    await openLobbies();
+    const rows = el('lobbies-body').querySelectorAll('tr');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('AB12');
+    expect(rows[0].textContent).toContain('Tic-Tac-Toe');
+    expect(rows[0].textContent).toContain('Ada (owner)');
+    expect(rows[0].textContent).toContain('Grace');
+    // A member inside the reconnect grace window is marked rather than hidden — they are still a member.
+    expect(rows[0].querySelector('.member-dropped')).not.toBeNull();
+  });
+
+  it('badges a stale lobby differently from a healthy one', async () => {
+    await openLobbies();
+    const rows = el('lobbies-body').querySelectorAll('tr');
+    expect(rows[0].querySelector('.badge-ok').textContent).toBe('waiting');
+    expect(rows[1].querySelector('.badge-warning').textContent).toBe('stale');
+  });
+
+  it('filters client-side without another request', async () => {
+    await openLobbies();
+    const before = fake.calls.length;
+
+    el('lobby-filter-code').value = 'cd';
+    el('lobby-filter-code').dispatchEvent(new Event('input', { bubbles: true }));
+
+    const rows = el('lobbies-body').querySelectorAll('tr');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain('CD34');
+    // Typing in a filter box must not cost a round trip.
+    expect(fake.calls.length).toBe(before);
+  });
+
+  it('explains an empty filter result differently from an empty server', async () => {
+    await openLobbies();
+    el('lobby-filter-code').value = 'zzzz';
+    el('lobby-filter-code').dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(el('lobbies-empty').classList.contains('hidden')).toBe(false);
+    expect(el('lobbies-empty').textContent).toMatch(/match/i);
+  });
+
+  it('asks for confirmation before closing a lobby, and does nothing if cancelled', async () => {
+    await openLobbies();
+    el('lobbies-body').querySelector('tr .btn-danger').click();
+
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-body').textContent).toContain('AB12');
+
+    el('confirm-cancel').click();
+    await tick();
+
+    expect(fake.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  it('POSTs the close once confirmed', async () => {
+    await openLobbies({ 'POST /admin/api/lobbies/AB12/close': { body: { success: true, affected: 1 } } });
+    el('lobbies-body').querySelector('tr .btn-danger').click();
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST');
+    expect(post.path).toBe('/admin/api/lobbies/AB12/close');
+    // The server's mutation guard requires a JSON content type.
+    expect(post.init.headers['Content-Type']).toBe('application/json');
+  });
+
+  it('kicks a single member without closing the lobby', async () => {
+    await openLobbies({ 'POST /admin/api/lobbies/AB12/kick': { body: { success: true, affected: 1 } } });
+    el('lobbies-body').querySelector('tr .chip-action').click();
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST');
+    expect(post.path).toBe('/admin/api/lobbies/AB12/kick');
+    expect(post.body).toEqual({ playerId: 'p1' });
+  });
+
+  it('reports a failed action as an error toast', async () => {
+    await openLobbies({ 'POST /admin/api/lobbies/AB12/close': { status: 404, body: { success: false, error: 'No active lobby with code AB12.' } } });
+    el('lobbies-body').querySelector('tr .btn-danger').click();
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    const toast = el('toast-host').querySelector('.toast-error');
+    expect(toast).not.toBeNull();
+    expect(toast.textContent).toContain('No active lobby');
+  });
+});
+
+describe('game catalog', () => {
+  async function openGames(overrides) {
+    fake = installFakeFetch(authedRoutes(overrides));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    admin.selectTab('games');
+    await tick();
+    await tick();
+  }
+
+  it('renders a card per game with its disk breakdown and live counts', async () => {
+    await openGames();
+    const cards = el('games-list').querySelectorAll('.game-card');
+    expect(cards).toHaveLength(2);
+    expect(cards[0].textContent).toContain('Tic-Tac-Toe');
+    expect(cards[0].textContent).toContain('12 KB');   // total
+    expect(cards[0].textContent).toContain('7.6 KB');  // files
+    expect(cards[0].textContent).toContain('1 lobby/lobbies');
+  });
+
+  it('shows the availability each game is actually in', async () => {
+    await openGames();
+    const selects = el('games-list').querySelectorAll('select');
+    expect(selects[0].value).toBe('available');
+    expect(selects[1].value).toBe('disabled');
+  });
+
+  it('disables Delete and says why when the deployment forbids it', async () => {
+    await openGames();
+    const wordRush = el('games-list').querySelectorAll('.game-card')[1];
+    const remove = [...wordRush.querySelectorAll('button')].find((b) => b.textContent === 'Delete');
+
+    // Offering a button that always fails on a read-only games mount is worse than not offering it.
+    expect(remove.disabled).toBe(true);
+    expect(wordRush.textContent).toContain('not writable');
+    expect(wordRush.textContent).toMatch(/disable the game instead/i);
+  });
+
+  it('confirms before hiding a game that has players in it, and says what survives', async () => {
+    await openGames({ 'POST /admin/api/games/tictactoe/availability': { body: { success: true } } });
+    const select = el('games-list').querySelector('select');   // tictactoe, 1 running lobby
+    select.value = 'staged';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(false);
+    // The nuance that trips operators up: hiding a game does NOT end the sessions already playing it.
+    expect(el('confirm-body').textContent).toMatch(/keep playing until they finish/i);
+
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST');
+    expect(post.path).toBe('/admin/api/games/tictactoe/availability');
+    expect(post.body).toEqual({ state: 'staged' });
+  });
+
+  it('changes a game with nobody playing it without stopping to ask', async () => {
+    await openGames({ 'POST /admin/api/games/word-rush/availability': { body: { success: true } } });
+    const select = el('games-list').querySelectorAll('select')[1];  // word-rush, 0 running lobbies
+    select.value = 'available';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+    await tick();
+
+    // Nothing is at stake, so a confirmation would just be a click to dismiss.
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(true);
+    expect(fake.calls.find((c) => c.method === 'POST').path)
+      .toBe('/admin/api/games/word-rush/availability');
+  });
+
+  it('warns when a policy change was applied but not persisted', async () => {
+    await openGames({
+      'POST /admin/api/games/tictactoe/availability': {
+        body: { success: true, warning: 'The change is active now but could not be saved, so it will be lost on restart.' },
+      },
+    });
+    const select = el('games-list').querySelector('select');
+    select.value = 'disabled';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    el('confirm-ok').click();   // tictactoe has a running lobby, so this asks first
+    await tick();
+    await tick();
+
+    const toast = el('toast-host').querySelector('.toast-warning');
+    expect(toast).not.toBeNull();
+    expect(toast.textContent).toMatch(/lost on restart/i);
+  });
+
+  it('confirms a delete before sending it', async () => {
+    await openGames({ 'POST /admin/api/games/tictactoe/delete': { body: { success: true, detail: 'Deleted.' } } });
+    const remove = [...el('games-list').querySelectorAll('.game-card')[0].querySelectorAll('button')]
+      .find((b) => b.textContent === 'Delete');
+    remove.click();
+
+    expect(el('confirm-body').textContent).toContain('Tic-Tac-Toe');
+    expect(el('confirm-body').textContent).toMatch(/cannot be undone/i);
+
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    expect(fake.calls.find((c) => c.method === 'POST').path).toBe('/admin/api/games/tictactoe/delete');
+  });
+});
+
+describe('log stream', () => {
+  async function openLogs(overrides) {
+    fake = installFakeFetch(authedRoutes(overrides));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    admin.selectTab('logs');
+    await tick();
+    await tick();
+  }
+
+  it('renders entries with a level tag and a shortened subsystem', async () => {
+    await openLogs();
+    const lines = el('log-stream').querySelectorAll('.log-line');
+    expect(lines).toHaveLength(2);
+    expect(lines[0].querySelector('.log-level').textContent).toBe('INF');
+    // The full category is long and repetitive; the last segment identifies the subsystem.
+    expect(lines[0].querySelector('.log-category').textContent).toBe('GameCatalog');
+    expect(lines[0].querySelector('.log-category').title).toBe('KnockBox.Server.Games.GameCatalog');
+    expect(lines[1].classList.contains('log-warning')).toBe(true);
+  });
+
+  it('sends the filters as query parameters', async () => {
+    await openLogs();
+    el('log-filter-level').value = 'Warning';
+    el('log-filter-level').dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+    await tick();
+
+    const call = [...fake.calls].reverse().find((c) => c.path === '/admin/api/logs');
+    expect(call.url).toContain('level=Warning');
+  });
+
+  it('re-reads from the start of the buffer when a filter changes', async () => {
+    await openLogs();
+    // The first read establishes a cursor; a later poll carries it.
+    el('log-filter-q').value = 'catalog';
+    el('log-filter-q').dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    await tick();
+
+    const call = [...fake.calls].reverse().find((c) => c.path === '/admin/api/logs');
+    // Without resetting the cursor, a filter change would apply only to entries logged AFTER it.
+    expect(call.url).not.toContain('after=');
+    expect(call.url).toContain('q=catalog');
+  });
+
+  it('reports how much of the buffer is shown', async () => {
+    await openLogs();
+    expect(el('logs-note').textContent).toContain('41'); // total logged since start
+  });
+
+  it('lists downloadable log files with real download links', async () => {
+    await openLogs();
+    el('log-files-btn').click();
+    await tick();
+    await tick();
+
+    expect(el('files-backdrop').classList.contains('hidden')).toBe(false);
+    const row = el('files-list').querySelector('a.file-row');
+    expect(row.getAttribute('href')).toBe('/admin/api/logs/files/knockbox-20260812.log');
+    expect(row.download).toBe('knockbox-20260812.log');
+  });
+});
+
+describe('session expiry', () => {
+  it('returns to the login view when any request 401s', async () => {
+    let authenticated = true;
+    fake = installFakeFetch({
+      ...authedRoutes(),
+      'GET /admin/api/auth/status': () => ({ body: { configured: true, authenticated } }),
+      'GET /admin/api/system/status': () => (authenticated ? { body: STATUS } : { status: 401, body: {} }),
+    });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
+
+    // The session goes away — an expiry, or the password file changing, which revokes every session.
+    authenticated = false;
+    await admin.checkAuthStatus();
+    await tick();
+
+    expect(el('login-view').classList.contains('hidden')).toBe(false);
+    expect(el('dashboard-view').classList.contains('hidden')).toBe(true);
+  });
+});
+
+describe('setup and login forms', () => {
+  it('refuses mismatched passwords without asking the server', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } } });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    el('setup-password').value = 'a-long-enough-password';
+    el('confirm-password').value = 'a-different-password';
+    el('setup-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await tick();
+
+    expect(el('setup-error').classList.contains('hidden')).toBe(false);
+    expect(el('setup-error').textContent).toMatch(/do not match/i);
+    expect(fake.calls.some((c) => c.path === '/admin/api/auth/setup')).toBe(false);
+  });
+
+  it('surfaces the server error text on a rejected login', async () => {
+    fake = installFakeFetch({
+      'GET /admin/api/auth/status': { body: { configured: true, authenticated: false } },
+      'POST /admin/api/auth/login': { status: 401, body: { success: false, error: 'Invalid admin password.' } },
+    });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    el('login-password').value = 'wrong';
+    el('login-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await tick();
+    await tick();
+
+    expect(el('login-error').textContent).toBe('Invalid admin password.');
+  });
+});

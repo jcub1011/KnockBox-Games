@@ -1,4 +1,5 @@
 using KnockBox.Contracts;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Lobbies;
@@ -45,7 +46,9 @@ public class ServerAuthorityLocationTests : IDisposable
     private ServerAuthorityManager Manager(Func<string, string?> gameDirectory) =>
         new(gameDirectory,
             AuthorityOptions.FromConfiguration(ConfigFactory.FromPairs()),
-            new ConnectionManager(), new LobbyManager(), TimeProvider.System,
+            new ConnectionManager(),
+            new LobbyCloser(new LobbyManager(), new ConnectionManager(), NullLogger<LobbyCloser>.Instance),
+            TimeProvider.System,
             new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),
             isDevelopment: false, NullLoggerFactory.Instance);
 

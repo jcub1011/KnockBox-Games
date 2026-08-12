@@ -10,7 +10,8 @@ namespace KnockBox.Server.Lobbies;
 /// authority module and HostId is only the owner of the two lobby powers (SetLobbyOpen,
 /// KickPlayer) — reassignable by the module via kb.setOwner (<see cref="TrySetHost"/>).
 /// </summary>
-public sealed class Lobby(string id, string gameId, string hostId, int maxPlayers, bool isServerAuthority = false)
+public sealed class Lobby(string id, string gameId, string hostId, int maxPlayers, DateTimeOffset createdAt,
+    bool isServerAuthority = false)
 {
     private readonly List<Player> _players = [];
     // Players the host has kicked. A kick is permanent for this lobby: kicked ids are refused by
@@ -26,6 +27,17 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
     public string Id { get; } = id;
     public string GameId { get; } = gameId;
     public int MaxPlayers { get; } = maxPlayers;
+
+    /// <summary>When the lobby was created, for session-duration reporting in the admin portal.
+    /// Passed in rather than read from a clock here, matching <see cref="MarkDisconnected"/>: time
+    /// enters this class from the caller so tests can drive it.</summary>
+    public DateTimeOffset CreatedAt { get; } = createdAt;
+
+    // Last sign of life: stamped on every relayed game frame and on join/leave. Deliberately NOT
+    // guarded by _gate — a relay would otherwise take the lobby lock for every frame of every game
+    // purely for bookkeeping. A long read/written atomically is enough: the only consumer is the
+    // admin portal's staleness check, which cannot care about sub-tick ordering.
+    private long _lastActivityTicks = createdAt.UtcTicks;
 
     /// <summary>Whether the server runs this game's authority module (stamped at creation from the
     /// manifest). The relay keys the to:"host" divert on this mode, never on actor presence.</summary>
@@ -67,6 +79,14 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
         get { lock (_gate) return _open; }
         set { lock (_gate) _open = value; }
     }
+
+    /// <summary>Last time a game frame was relayed for this lobby, or a member joined or left —
+    /// the "is anything actually happening here" signal the admin portal's stale-lobby detection
+    /// reads. Falls back to <see cref="CreatedAt"/> for a lobby nothing has happened in yet.</summary>
+    public DateTimeOffset LastActivityUtc => new(Volatile.Read(ref _lastActivityTicks), TimeSpan.Zero);
+
+    /// <summary>Records a sign of life. Cheap and lock-free by design — this runs on the relay path.</summary>
+    public void Touch(DateTimeOffset now) => Interlocked.Exchange(ref _lastActivityTicks, now.UtcTicks);
 
     public IReadOnlyList<Player> Players { get { lock (_gate) return [.. _players]; } }
 
@@ -182,5 +202,17 @@ public sealed class Lobby(string id, string gameId, string hostId, int maxPlayer
     {
         lock (_gate)
             return [.. _disconnectedSince.Where(kv => kv.Value <= cutoff).Select(kv => kv.Key)];
+    }
+
+    /// <summary>A currently-disconnected member and when their control socket dropped.</summary>
+    public readonly record struct DisconnectedMember(string PlayerId, DateTimeOffset Since);
+
+    /// <summary>Snapshot of every member currently inside the reconnect grace window, with the
+    /// timestamp of their drop. <see cref="ExpiredDisconnects"/> answers "who has timed out"; the
+    /// admin portal needs "who is missing and for how long", which that one throws away.</summary>
+    public IReadOnlyList<DisconnectedMember> DisconnectedMembers()
+    {
+        lock (_gate)
+            return [.. _disconnectedSince.Select(kv => new DisconnectedMember(kv.Key, kv.Value))];
     }
 }

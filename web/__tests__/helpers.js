@@ -77,6 +77,45 @@ export function installFakeWebSocket() {
   return () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
 }
 
+// Same trick for the admin portal's markup. It is a separate page served at the ADMIN origin's root, so
+// it has its own file and its own element ids — but the reason for loading the real thing is identical: a
+// hand-maintained fixture drifts, and admin.js is one long list of getElementById calls.
+const ADMIN_HTML = readFileSync(resolve(process.cwd(), 'admin/index.html'), 'utf8');
+
+export function loadAdminDom() {
+  document.documentElement.innerHTML = ADMIN_HTML
+    .replace(/^[\s\S]*?<html[^>]*>/i, '')
+    .replace(/<\/html>\s*$/i, '');
+}
+
+/**
+ * Installs a fake `fetch` that answers from a route table, and records what was asked for.
+ *
+ * The admin portal is the first part of this codebase to talk HTTP rather than WebSocket, so this is the
+ * suite's first fetch stub. Routes are matched by "METHOD /path" (query string ignored) with a `*` method
+ * wildcard; anything unrouted answers 404 rather than hanging, so a missing route fails a test loudly
+ * instead of timing out.
+ */
+export function installFakeFetch(routes = {}) {
+  const calls = [];
+  const fetchMock = vi.fn(async (url, init = {}) => {
+    const method = (init.method || 'GET').toUpperCase();
+    const path = String(url).split('?')[0];
+    calls.push({ method, url: String(url), path, body: init.body ? JSON.parse(init.body) : null, init });
+
+    const route = routes[`${method} ${path}`] ?? routes[`* ${path}`];
+    const resolved = typeof route === 'function' ? await route(calls[calls.length - 1]) : route;
+    const { status = 200, body = {} } = resolved ?? { status: 404, body: { success: false, error: 'no route' } };
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    };
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return { calls, fetchMock, routes };
+}
+
 // navigator.clipboard.writeText spy that resolves (success) or rejects (failure) on demand.
 export function stubClipboard({ fail = false } = {}) {
   const writeText = fail

@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net.WebSockets;
 using System.Text.Json;
 using KnockBox.Contracts;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Security;
@@ -28,6 +29,8 @@ public sealed class WebSocketHandler(
     ServerAuthorityManager authorities,
     TokenService tokens,
     ServerLimits limits,
+    IPlatformPolicy policy,
+    RelayMetrics relay,
     TimeProvider time,
     ILoggerFactory loggerFactory,
     ILogger<WebSocketHandler> logger)
@@ -203,7 +206,16 @@ public sealed class WebSocketHandler(
                 break;
 
             case ListGamesMessage m:
-                conn.Send(ConnectionManager.Serialize(new GameCatalogMessage(m.Cid, [.. catalog.Games])));
+                // Operator policy is applied here rather than in the catalog: discovery answers "does this
+                // game exist", availability answers "should players see it". A disabled or staged game is
+                // filtered out, which is what removes its tile from the shell grid — its running lobbies
+                // are untouched, since only listing and creation are policy-gated.
+                //
+                // `Include` re-admits ONE staged game by id, for the direct link that is a staged game's
+                // only way in. Never a disabled one: that state means "players may not start this", and
+                // handing back the manifest would just move the refusal to the create round trip.
+                conn.Send(ConnectionManager.Serialize(new GameCatalogMessage(m.Cid,
+                    [.. catalog.Games.Where(g => policy.IsListed(g.Id) || IsRequestedStagedGame(g.Id, m.Include))])));
                 break;
 
             case CreateLobbyMessage m:
@@ -239,11 +251,37 @@ public sealed class WebSocketHandler(
         }
     }
 
+    // Whether this game is the one staged game the client asked to have re-admitted to its catalog.
+    // Keyed on CanCreateLobby rather than on the availability enum so the answer can never disagree with
+    // the gate in HandleCreateLobby — a manifest handed out here must be startable.
+    private bool IsRequestedStagedGame(string gameId, string? include) =>
+        include is not null
+        && string.Equals(gameId, include, StringComparison.OrdinalIgnoreCase)
+        && policy.CanCreateLobby(gameId);
+
     private void HandleCreateLobby(Connection conn, CreateLobbyMessage m)
     {
         if (!catalog.TryGet(m.GameId, out var game))
         {
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid, $"Unknown game '{m.GameId}'")));
+            return;
+        }
+
+        // Operator policy gates CREATION only — a lobby already running plays on through both maintenance
+        // mode and a game being disabled (spec §3.1). Refused before LeaveLobbiesExcept, so a player who
+        // is told "no" is not also silently ejected from the lobby they were already in.
+        // Two distinct messages on purpose: "the platform is down" and "this game is off" send the
+        // operator to different places, and the shell shows whichever reason it is given.
+        if (policy.MaintenanceMode)
+        {
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
+                policy.MaintenanceMessage ?? "The platform is in maintenance mode; new games can't be started right now.")));
+            return;
+        }
+        if (!policy.CanCreateLobby(game.Id))
+        {
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
+                $"'{game.Name}' is currently unavailable.")));
             return;
         }
 
@@ -330,6 +368,9 @@ public sealed class WebSocketHandler(
         }
 
         conn.LobbyId = lobby.Id;
+        // A join is a sign of life even before any game frame flows, so a lobby someone just walked into
+        // is never reported stale.
+        lobby.Touch(time.GetUtcNow());
         conn.Send(ConnectionManager.Serialize(new LobbyJoinedMessage(cid, lobby.Id)));
 
         // If this is a returning member who was flagged disconnected (grace window), clear the flag
@@ -628,12 +669,18 @@ public sealed class WebSocketHandler(
                 {
                     // There is no host player to deliver it to; the _kb envelope IS the documented
                     // contract for server-mode games.
+                    relay.RecordDropped(lobby.GameId);
                     if (logger.IsEnabled(LogLevel.Debug))
                         logger.LogDebug("Dropping non-_kb payload to 'host' in server-authority lobby {LobbyId}", lobby.Id);
                 }
                 else if (authorities.TryGet(lobby.Id, out var authority))
                 {
                     authority.PostIntent(conn.PlayerId, m.Payload.GetRawText());
+                    lobby.Touch(time.GetUtcNow());
+                }
+                else
+                {
+                    relay.RecordDropped(lobby.GameId);
                 }
                 return;
             }
@@ -643,6 +690,7 @@ public sealed class WebSocketHandler(
             // mode's entire premise. Other client-to-client chatter (cursors, emotes) relays as-is.
             if (kbKind is "delta" or "state")
             {
+                relay.RecordDropped(lobby.GameId);
                 if (logger.IsEnabled(LogLevel.Debug))
                     logger.LogDebug("Dropping client-sent _kb '{Kind}' from {PlayerId} in server-authority lobby {LobbyId}",
                         kbKind, conn.PlayerId, lobby.Id);
@@ -652,18 +700,33 @@ public sealed class WebSocketHandler(
 
         var bytes = ConnectionManager.Serialize(m with { From = conn.PlayerId });
 
+        // Recipients are counted as the fan-out happens, so the relay metrics reflect sockets actually
+        // written to rather than roster size — a member with no attached game socket costs nothing.
+        var recipients = 0;
         switch (m.To)
         {
             case "all":
-                foreach (var p in lobby.Players) connections.SendRawToGame(p.Id, bytes);
+                foreach (var p in lobby.Players)
+                    if (connections.HasGameConnection(p.Id)) { connections.SendRawToGame(p.Id, bytes); recipients++; }
                 break;
             case "host":
-                connections.SendRawToGame(lobby.HostId, bytes);
+                if (connections.HasGameConnection(lobby.HostId))
+                {
+                    connections.SendRawToGame(lobby.HostId, bytes);
+                    recipients++;
+                }
                 break;
             default: // a specific playerId, only if they are in this lobby
-                if (lobby.Contains(m.To)) connections.SendRawToGame(m.To, bytes);
+                if (lobby.Contains(m.To) && connections.HasGameConnection(m.To))
+                {
+                    connections.SendRawToGame(m.To, bytes);
+                    recipients++;
+                }
                 break;
         }
+
+        relay.RecordRelay(lobby.GameId, recipients, bytes.Length);
+        lobby.Touch(time.GetUtcNow());
     }
 
     // ── Shared lobby helpers ──────────────────────────────────────────────────
@@ -791,6 +854,7 @@ public sealed class WebSocketHandler(
 
         if (lobby.Remove(conn.PlayerId))
         {
+            lobby.Touch(time.GetUtcNow()); // membership changed: the lobby is live, not abandoned
             Broadcast(lobby, new PlayerLeftMessage(lobby.Id, conn.PlayerId));
             BroadcastToGame(lobby, new GamePlayerLeftMessage(conn.PlayerId));
             PostAuthorityRoster(lobby, a => a.PostPlayerLeft(conn.PlayerId));

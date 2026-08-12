@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
@@ -20,7 +21,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Where web/, games/, and logs/ live: explicit config wins, else repo discovery (dev), else the
 // app base directory (published exe / container — publish bakes web/ in, games/ sits alongside or
 // is volume-mounted). See ContentPaths for the precedence rules.
-var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot) = ContentPaths.Resolve(
+var contentPaths = ContentPaths.Resolve(
     builder.Configuration["KnockBox:WebRoot"],
     builder.Configuration["KnockBox:GamesRoot"],
     builder.Configuration["KnockBox:LogsRoot"],
@@ -28,6 +29,7 @@ var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot) = Con
     builder.Configuration["KnockBox:GamesUnpackedRoot"],
     builder.Environment.ContentRootPath,
     AppContext.BaseDirectory);
+var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot) = contentPaths;
 
 // Pre-compress game assets once into gamesCompressedRoot and serve those variants via Accept-Encoding
 // negotiation, instead of re-compressing every full-body response on the fly (see the ResponseCompression
@@ -97,6 +99,12 @@ foreach (var (dir, label) in writableDirs)
 // we roll once per day, the retained-file count equals the retained-day count. All existing
 // ILogger<T> usage routes through this unchanged.
 var logRetentionDays = builder.Configuration.GetValue("KnockBox:LogRetentionDays", 31);
+// The admin portal's live log view reads from this ring rather than tailing the rolling file, so level
+// and subsystem stay structured fields instead of text to re-parse. Constructed here (not resolved from
+// DI) because Serilog is configured while the host is still being built; it is registered below so the
+// admin API can read it.
+var adminLogBuffer = new AdminLogBuffer(
+    builder.Configuration.GetValue("KnockBox:AdminLogBufferSize", AdminLogBuffer.DefaultCapacity));
 // Levels are configured in code, NOT via ReadFrom.Configuration: that pulls in
 // Serilog.Settings.Configuration, whose assembly scanning (DependencyContext / Assembly.Location) is
 // not Native-AOT-safe and emits IL2104/IL3002/IL3053 at publish. ReadFrom.Services is DI-only and fine.
@@ -106,6 +114,7 @@ builder.Host.UseSerilog((context, services, config) => config
     .ReadFrom.Services(services)
     .Enrich.FromLogContext()
     .WriteTo.Console()
+    .WriteTo.Sink(adminLogBuffer)
     .WriteTo.File(
         Path.Combine(logsRoot, "knockbox-.log"),
         rollingInterval: RollingInterval.Day,
@@ -124,6 +133,13 @@ var gamesHost = builder.Configuration["KnockBox:GamesHost"];           // e.g. "
 var gamesOrigin = builder.Configuration["KnockBox:GamesOrigin"];       // explicit override, e.g. "https://games.knockbox.example"
 var adminHost = builder.Configuration["KnockBox:AdminHost"];           // e.g. "admin.knockbox.example"
 var adminOrigin = builder.Configuration["KnockBox:AdminOrigin"];       // explicit override, e.g. "https://admin.knockbox.example"
+// How long a lobby may go without a relayed frame, a join or a leave before the admin portal calls it
+// stale and "purge stale" collects it. Independent of DisconnectGraceSeconds, which is about one player's
+// socket dropping; this is about a whole session nobody is playing any more (a tab left open on a
+// finished game). 0 disables the idle test, leaving only "nobody is connected" as staleness.
+var adminStaleAfter = TimeSpan.FromMinutes(
+    builder.Configuration.GetValue("KnockBox:AdminStaleLobbyMinutes",
+        (int)AdminOperations.DefaultStaleAfter.TotalMinutes));
 
 // launchSettings (dev) and ASPNETCORE_HTTP_PORTS (Docker) tell Kestrel which ports to bind; a bare
 // published exe gets neither, so Kestrel would bind only the single framework default and the games
@@ -176,6 +192,11 @@ var memoryLogSeconds = builder.Configuration.GetValue("KnockBox:MemoryLogSeconds
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
+// The resolved content roots as one object: the admin API needs LogsRoot for the log downloads and all
+// three game roots for disk-usage reporting, which is less error-prone than threading four strings
+// through AdminApi.Options.
+builder.Services.AddSingleton(contentPaths);
+builder.Services.AddSingleton(adminLogBuffer);
 builder.Services.AddSingleton(authorityOptions);
 // Search order matters: the administrator's games folder first, then games extracted from .kbg
 // packages, so a hand-placed folder always wins a contested id. With packages off there is only one root.
@@ -207,19 +228,30 @@ if (marketplaceOptions.Enabled)
 }
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
-builder.Services.AddSingleton<LobbyManager>();
+// Explicit factory (not AddSingleton<LobbyManager>) so the clock that stamps Lobby.CreatedAt — which
+// the admin portal reports session duration from — is the registered TimeProvider, not the fallback.
+builder.Services.AddSingleton(sp => new LobbyManager(sp.GetRequiredService<TimeProvider>()));
+builder.Services.AddSingleton<LobbyCloser>();
 builder.Services.AddSingleton(sp => new ServerAuthorityManager(
     // Where a game's files live is the catalog's answer, not gamesRoot/<id>: a game installed from a
     // .kbg is served out of the unpacked-package cache instead.
     id => sp.GetRequiredService<GameCatalog>().TryGetDirectory(id, out var dir) ? dir : null,
     authorityOptions,
-    sp.GetRequiredService<ConnectionManager>(), sp.GetRequiredService<LobbyManager>(),
+    sp.GetRequiredService<ConnectionManager>(), sp.GetRequiredService<LobbyCloser>(),
     sp.GetRequiredService<TimeProvider>(),
     sp.GetRequiredService<IAuthorityWordService>(),
     builder.Environment.IsDevelopment(),
     sp.GetRequiredService<ILoggerFactory>()));
+builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
+builder.Services.AddSingleton<AdminSettingsStore>();
+// The relay asks the policy questions through the narrow IPlatformPolicy; the settings store is the
+// implementation. Forwarded to the same instance so a toggle in the portal is seen by the next
+// lobby-create immediately, with no second copy of the state to keep in step.
+builder.Services.AddSingleton<IPlatformPolicy>(sp => sp.GetRequiredService<AdminSettingsStore>());
+builder.Services.AddSingleton<DiskUsageReporter>();
+builder.Services.AddSingleton<AdminOperations>();
 
 // Compress responses (game bundles are large). Brotli + Gzip, including the engine asset
 // types that are off the default list. Level = Fastest to bound the CPU cost of compressing
@@ -378,6 +410,12 @@ var catalog = app.Services.GetRequiredService<GameCatalog>();
 // crashes Discover() (below), it sets ScanError, which clears once a rescan succeeds.
 diagnostics.AddProbe("Games folder is not accessible", () => catalog.ScanError, blocking: true);
 
+// Saved operator policy (disabled games, maintenance mode) that couldn't be read is the sort of failure
+// that looks like nothing: the platform runs fine, but a game the operator disabled is serving players
+// again. A probe rather than Report() so it clears as soon as a successful save replaces the bad file.
+var adminSettings = app.Services.GetRequiredService<AdminSettingsStore>();
+diagnostics.AddProbe("Admin settings could not be read", () => adminSettings.LoadError);
+
 // Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
 // Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
 // background task because SmallestSize over a large .wasm is slow and must never block discovery
@@ -409,6 +447,21 @@ catalog.Discovered += games =>
 {
     try { authorityManager.PruneModuleCache(games); }
     catch (Exception ex) { app.Logger.LogError(ex, "Authority module-cache prune failed."); }
+};
+
+// Closing a live lobby has to stop its authority actor too, or a server-authority lobby leaks its Jint
+// engine for the process lifetime. The dependency runs closer <- manager (the manager's fatal path uses
+// the closer), so the manager can't also be a constructor argument to it — hence this one-time hook,
+// the same shape as the manager's own gameDirectory resolver. Set before any request is served.
+app.Services.GetRequiredService<LobbyCloser>().OnClosing = authorityManager.Stop;
+
+// Drop relay counters for games that no longer exist, so an uninstalled game doesn't hold a row in the
+// metrics view forever. Inline like the two prunes above, and guarded for the same reason.
+var relayMetrics = app.Services.GetRequiredService<RelayMetrics>();
+catalog.Discovered += games =>
+{
+    try { relayMetrics.Prune(games.Keys); }
+    catch (Exception ex) { app.Logger.LogError(ex, "Relay-metrics prune failed."); }
 };
 
 // Install .kbg packages off the same signal, for the same reason: it rides the catalog's watcher and
@@ -659,14 +712,28 @@ app.MapWhen(
         adminApp.MapAdminApi(new AdminApi.Options(
             app.Services.GetRequiredService<AdminAuthService>(),
             app.Services.GetRequiredService<LobbyManager>(),
+            app.Services.GetRequiredService<LobbyCloser>(),
             catalog,
+            adminSettings,
+            app.Services.GetRequiredService<AdminOperations>(),
+            adminLogBuffer,
+            app.Services.GetRequiredService<DiskUsageReporter>(),
+            relayMetrics,
+            app.Services.GetRequiredService<ConnectionManager>(),
+            // Optional: with AuthorityEnabled=false the manager still exists, but keeping this nullable is
+            // what lets the portal report "0 authority lobbies" instead of the origin failing to build if
+            // the registration ever becomes conditional like the marketplace's.
+            app.Services.GetService<ServerAuthorityManager>(),
+            contentPaths,
+            diagnostics,
             app.Services.GetRequiredService<TimeProvider>(),
             app.Logger,
             limits.AdminLoginAttemptsPerMinute,
             limits.AdminLoginAttemptsPerMinuteGlobal,
             // An https admin origin means a proxy terminates TLS in front of us, so the session cookie
             // must be Secure even though the request reaching Kestrel is plain HTTP.
-            CookieAlwaysSecure: adminOrigin?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) == true));
+            CookieAlwaysSecure: adminOrigin?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) == true,
+            StaleAfter: adminStaleAfter));
 
         // No web/admin in the web root ⇒ the portal's files aren't there. Say so at the origin itself:
         // this is reported through DeploymentDiagnostics too, but the warning PAGE only replaces the

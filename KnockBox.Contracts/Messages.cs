@@ -84,7 +84,14 @@ public sealed record WelcomeMessage(string PlayerId, string Token, string GameOr
 public sealed record SetNameMessage(string DisplayName) : IMessage;
 
 // ── Catalog (over WebSocket) ─────────────────────────────────────────────────
-public sealed record ListGamesMessage(string Cid) : IMessage;
+/// <param name="Include">
+/// One extra game id to include even though an operator has marked it "staged" (hidden from the
+/// catalog). Games disabled by an operator are never returned regardless. This exists because the shell
+/// allowlists every launch against the catalog it was given, so a staged game reached through its direct
+/// link has to arrive in that list or the shell rejects its own EnterGame as an unknown game. Optional
+/// and additive, so a pre-existing client that never sends it is unaffected.
+/// </param>
+public sealed record ListGamesMessage(string Cid, string? Include = null) : IMessage;
 public sealed record GameCatalogMessage(string Cid, IReadOnlyList<GameManifest> Games) : IMessage;
 
 // ── Lobby ops (cid-correlated request/response) ──────────────────────────────

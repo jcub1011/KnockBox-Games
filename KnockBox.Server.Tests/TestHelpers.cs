@@ -19,12 +19,17 @@ internal static class TestAuthorities
         ConnectionManager connections, LobbyManager lobbies,
         string? gamesRoot = null, IConfiguration? config = null,
         TimeProvider? time = null, bool isDevelopment = false,
-        IAuthorityWordService? words = null) =>
+        IAuthorityWordService? words = null, LobbyCloser? closer = null) =>
         // The manager resolves a game's folder through a delegate (the catalog does it for real, since
         // a packaged game lives under the unpacked-package root); tests keep the simple layout.
+        // It tears lobbies down through a LobbyCloser rather than the LobbyManager directly (that
+        // teardown is shared with the admin portal), so build one over the manager the caller gave us —
+        // callers that don't care about teardown stay unchanged.
         new(id => Path.Combine(gamesRoot ?? Path.GetTempPath(), id),
             AuthorityOptions.FromConfiguration(config ?? new ConfigurationBuilder().Build()),
-            connections, lobbies, time ?? TimeProvider.System,
+            connections,
+            closer ?? new LobbyCloser(lobbies, connections, NullLogger<LobbyCloser>.Instance),
+            time ?? TimeProvider.System,
             words ?? new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),
             isDevelopment, NullLoggerFactory.Instance);
 }
@@ -202,13 +207,17 @@ internal sealed class FakeWebSocket(bool blockSends = false) : WebSocket
         Sent.Add([.. buffer]);
     }
 
-    public override WebSocketState State => WebSocketState.Open;
+    /// <summary>True once <see cref="Abort"/> has been called — how a test checks that a teardown path
+    /// actually cut the socket rather than merely stopping its send loop.</summary>
+    public bool Aborted { get; private set; }
+
+    public override WebSocketState State => Aborted ? WebSocketState.Aborted : WebSocketState.Open;
 
     // Unused members for these tests.
     public override WebSocketCloseStatus? CloseStatus => null;
     public override string? CloseStatusDescription => null;
     public override string? SubProtocol => null;
-    public override void Abort() { }
+    public override void Abort() => Aborted = true;
     public override Task CloseAsync(WebSocketCloseStatus s, string? d, CancellationToken c) => Task.CompletedTask;
     public override Task CloseOutputAsync(WebSocketCloseStatus s, string? d, CancellationToken c) => Task.CompletedTask;
     public override void Dispose() { }

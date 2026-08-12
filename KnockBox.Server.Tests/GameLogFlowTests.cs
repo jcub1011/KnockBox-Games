@@ -1,4 +1,5 @@
 using KnockBox.Contracts;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
@@ -32,7 +33,7 @@ public class GameLogFlowTests
         var limits = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
         var handler = new WebSocketHandler(connections, lobbies, catalog,
             TestAuthorities.Manager(connections, lobbies), tokens, limits,
-            new MutableTimeProvider(Now), NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
+            PlatformPolicy.OpenPlatform, new RelayMetrics(), new MutableTimeProvider(Now), NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
         return (handler, connections, lobbies, tokens);
     }
 

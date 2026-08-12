@@ -150,9 +150,21 @@ you like (keeping it bound to `127.0.0.1`).
 
 ### The admin portal
 
-A **third** origin (container port **8082**, `5116` for the desktop exe) serves an operator dashboard:
-uptime, active lobbies, registered games, memory. It is a separate origin so that no page a player can
-browse can reach it — every `/admin*` path returns 404 on the shell and games origins.
+A **third** origin (container port **8082**, `5116` for the desktop exe) serves an operator dashboard: the
+platform's health, the live lobby directory, the game catalogue, and the server log. It is a separate origin
+so that no page a player can browse can reach it — every `/admin*` path returns 404 on the shell and games
+origins. What each tab does is documented in [ADMIN.md](./ADMIN.md); this section is about getting it
+reachable and keeping it locked.
+
+Two things about it are worth knowing before you rely on it:
+
+- **Operator policy persists, so it also outlives your attention.** Disabling a game or turning on
+  maintenance mode writes to `admin-settings.json` next to the password file, and survives restarts and
+  image updates. That is the point — but it means a maintenance mode you forgot to turn off is still on
+  after tomorrow's deploy, silently refusing every new game. The Overview tab shows the state plainly.
+- **Deleting a game does not work on this deployment.** `games/` is mounted read-only below (`:ro`), which
+  is the recommendation, so the portal disables Delete and names the blocking path. Use **Disabled**
+  instead, or remove the file from the host directory and let hot-reload notice it has gone.
 
 **It is claim-on-first-use.** There are no accounts: until a password is set the portal is *unclaimed*,
 and the first person to open it sets the password. So:
@@ -188,10 +200,24 @@ the portal reverts to unclaimed. Keep the volume, and note that the path must be
 if you bind-mount a host directory. The file is created mode `600` so another account on the box can't read
 the hash and attack it offline — if you bind-mount a host directory, don't loosen that.
 
+**Where operator policy lives.** Alongside it, in `KnockBox__AdminSettingsPath` —
+`/app/data/admin-settings.json` in the image, on the same volume for the same reason. It holds per-game
+availability and maintenance mode. It is **not** a secret (nothing in it is sensitive) but it *is* the one
+piece of state this server keeps across a restart, so back up the volume if your policy is non-trivial. It
+is indented and safe to hand-edit while the server is stopped; if it can't be read, the server boots with
+platform defaults and says so on the portal's Overview tab rather than failing.
+
 **To reset a forgotten password**, delete the secret file and reload the portal — it returns to setup mode:
 
 ```bash
 docker compose exec knockbox rm -f /app/data/admin.secret
+```
+
+**To reset all policy** (re-enable every game, clear maintenance mode), delete the settings file and
+restart:
+
+```bash
+docker compose exec knockbox rm -f /app/data/admin-settings.json && docker compose restart knockbox
 ```
 
 **Resetting also revokes every admin session immediately.** The session-cookie signing key is derived from
@@ -377,6 +403,7 @@ win-x64/
 ├─ games-compressed/     # auto-created — regenerable .br/.gz asset cache (rebuilt from games/)
 ├─ games-unpacked/       # auto-created — games extracted from .kbg packages (regenerable)
 ├─ admin.secret          # created when you set an admin password — NOT regenerable; delete to reset
+├─ admin-settings.json   # operator policy (game availability, maintenance mode); delete to reset it
 └─ logs/                 # daily rolling logs
 ```
 
@@ -435,6 +462,10 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `AdminPort` / `AdminHost` / `AdminOrigin` | `5116` (`8082` Docker) / — / — | How the admin portal origin is addressed. Do **not** expose it publicly — see [The admin portal](#the-admin-portal). |
 | `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
+| `AdminSettingsPath` | `admin-settings.json` next to the password file | Persisted operator policy: per-game availability and maintenance mode. Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to reset all policy. |
+| `AdminStaleLobbyMinutes` | `30` | Idle minutes before the portal calls a lobby stale (and "Purge Stale" collects it). `0` judges staleness only by "nobody in it is connected". |
+| `AdminLogBufferSize` | `2000` | Log events kept in memory for the portal's live log view. Older entries are only in the rolling files under `LogsRoot`. |
+| `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. `0` measures on every read. |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-*` from a fronting reverse proxy. |
 | `KnownProxies` | `[]` (any forwarder) | Which addresses may set `X-Forwarded-*` — IPs and/or CIDR ranges. Set it whenever `ForwardedHeaders` is on: empty means a client can pick the IP your per-IP limits key on. |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist — set for production. |

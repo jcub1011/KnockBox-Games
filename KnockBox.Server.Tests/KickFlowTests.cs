@@ -1,4 +1,5 @@
 using KnockBox.Contracts;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
@@ -31,7 +32,8 @@ public class KickFlowTests
         var tokens = new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance);
         var limits = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
         var handler = new WebSocketHandler(connections, lobbies, catalog,
-            TestAuthorities.Manager(connections, lobbies), tokens, limits, TimeProvider.System,
+            TestAuthorities.Manager(connections, lobbies), tokens, limits,
+            PlatformPolicy.OpenPlatform, new RelayMetrics(), TimeProvider.System,
             NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
 
         // A lobby with a host and a guest.

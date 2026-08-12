@@ -58,8 +58,12 @@ public sealed class Connection
                     ? BoundedChannelFullMode.DropOldest
                     : BoundedChannelFullMode.Wait,
             },
-            itemDropped: _ => _logger.LogWarning(
-                "Outbound queue full for {PlayerId}; dropped oldest frame (slow or stuck socket).", PlayerId));
+            itemDropped: _ =>
+            {
+                Interlocked.Increment(ref _droppedFrames);
+                _logger.LogWarning(
+                    "Outbound queue full for {PlayerId}; dropped oldest frame (slow or stuck socket).", PlayerId);
+            });
     }
 
     public string PlayerId { get; }
@@ -67,6 +71,24 @@ public sealed class Connection
 
     /// <summary>The single lobby this client is currently in (one at a time in the skeleton).</summary>
     public string? LobbyId { get; set; }
+
+    // ── Per-socket delivery counters (admin portal) ────────────────────────────
+    // Relaying is not free: every socket holds this bounded queue plus a writer task, and a fan-out
+    // serializes once but sends per recipient. These make that cost visible per game (the portal maps
+    // LobbyId → gameId to aggregate) and, more usefully, expose the drops the DropOldest policy
+    // otherwise only mentions in a log line nobody is watching.
+    private long _droppedFrames;
+    private long _sentFrames;
+    private long _sentBytes;
+
+    /// <summary>Frames evicted unsent because the outbound queue was full (DropOldest role only).</summary>
+    public long DroppedFrames => Volatile.Read(ref _droppedFrames);
+
+    /// <summary>Frames actually written to the socket.</summary>
+    public long SentFrames => Volatile.Read(ref _sentFrames);
+
+    /// <summary>Bytes actually written to the socket.</summary>
+    public long SentBytes => Volatile.Read(ref _sentBytes);
 
     /// <summary>Enqueue a pre-serialized frame. Non-blocking; safe to call from any thread.</summary>
     public void Send(byte[] bytes)
@@ -83,7 +105,11 @@ public sealed class Connection
         try
         {
             await foreach (var frame in _outbound.Reader.ReadAllAsync(ct))
+            {
                 await _socket.SendAsync(frame, WebSocketMessageType.Text, endOfMessage: true, ct);
+                Interlocked.Increment(ref _sentFrames);
+                Interlocked.Add(ref _sentBytes, frame.Length);
+            }
         }
         catch (OperationCanceledException) { }
         catch (WebSocketException ex)

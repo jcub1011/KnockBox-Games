@@ -6,7 +6,7 @@ namespace KnockBox.Server.Tests;
 
 public class LobbyTests
 {
-    private static Lobby New(int max = 2) => new("ABCD", "ttt", "host", max);
+    private static Lobby New(int max = 2) => new("ABCD", "ttt", "host", max, DateTimeOffset.UnixEpoch);
 
     [Fact]
     public void Open_defaults_to_true()
@@ -18,7 +18,8 @@ public class LobbyTests
     public void Server_authority_defaults_to_false_and_is_stamped_at_creation()
     {
         Assert.False(New().IsServerAuthority);
-        Assert.True(new Lobby("ABCD", "ttt", "host", 2, isServerAuthority: true).IsServerAuthority);
+        Assert.True(new Lobby("ABCD", "ttt", "host", 2, DateTimeOffset.UnixEpoch, isServerAuthority: true)
+            .IsServerAuthority);
     }
 
     [Fact]

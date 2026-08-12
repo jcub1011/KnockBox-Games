@@ -23,7 +23,22 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminAuthStatusResponse))]
 [JsonSerializable(typeof(AdminPasswordRequest))]
 [JsonSerializable(typeof(AdminApiResponse))]
+[JsonSerializable(typeof(AdminActionResponse))]
 [JsonSerializable(typeof(AdminSystemStatusResponse))]
+// The dashboard's read models. Each needs its own entry: source generation covers a registered type's
+// members, so the nested element types (AdminLobbyMember, AdminLogEntry, …) are pulled in via their
+// containing response — but registering the responses is what makes any of it exist at publish time.
+[JsonSerializable(typeof(AdminLobbiesResponse))]
+[JsonSerializable(typeof(AdminGamesResponse))]
+[JsonSerializable(typeof(AdminMetricsResponse))]
+[JsonSerializable(typeof(AdminLogsResponse))]
+[JsonSerializable(typeof(AdminLogFilesResponse))]
+// Request bodies.
+[JsonSerializable(typeof(AdminCloseLobbiesRequest))]
+[JsonSerializable(typeof(AdminPurgeStaleRequest))]
+[JsonSerializable(typeof(AdminKickRequest))]
+[JsonSerializable(typeof(AdminAvailabilityRequest))]
+[JsonSerializable(typeof(AdminMaintenanceRequest))]
 // The roster projection handed to an authority module's init(players) (ServerAuthorityManager).
 [JsonSerializable(typeof(IReadOnlyList<Player>))]
 // Not a wire type, but it goes through the same source-generated serializer for the same reason:

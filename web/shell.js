@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -31,10 +31,20 @@ let gameOrigin = null;                                // where game iframes/sock
 // sessionStorage, so it would inherit the opener's identity token (and saved lobby). Clear them so
 // this tab gets a fresh server-minted identity; we join the code once connected (see Welcome).
 let pendingJoinCode = parseJoinParam(location.search);
+// A staged game's direct link ("?game=<id>"). Staged games are withheld from the catalog, so this id is
+// also what ListGames must be told to re-admit — otherwise the shell's own launch allowlist, built from
+// that catalog, rejects the EnterGame it asked for. Read before the URL is tidied below.
+//
+// Unlike ?join=, this does NOT reset identity: that reset exists because a middle-clicked join tab
+// inherits the opener's sessionStorage and has to become a distinct player. A staged link is an ordinary
+// navigation, and clearing the token here would sign the operator out of the session they were in.
+const stagedGameId = parseGameParam(location.search);
 if (pendingJoinCode) {
   sessionStorage.removeItem('kb.token');
   sessionStorage.removeItem('kb.lobbyId');
   token = null;
+}
+if (pendingJoinCode || stagedGameId) {
   history.replaceState(null, '', location.pathname); // tidy URL so a refresh won't re-trigger
 }
 
@@ -319,7 +329,9 @@ function applyGate() {
 }
 
 export async function refreshGames() {
-  const reply = await request('ListGames');
+  // `include` asks the server to re-admit one staged game — the one this tab was linked to. Omitted
+  // (undefined, so it isn't serialized) on a normal load, which is every load but a staged link.
+  const reply = await request('ListGames', stagedGameId ? { include: stagedGameId } : {});
   games = new Map((reply.games || []).map((g) => [g.id, g]));
   const host = el('games');
   host.innerHTML = '';
@@ -332,6 +344,13 @@ export async function refreshGames() {
     btn.className = 'game-tile';
     btn.type = 'button';
     btn.setAttribute('aria-label', g.name);
+    // The staged game this tab was linked to: present in the grid only because we asked for it, and
+    // marked so whoever is testing it can tell it apart from the public tiles. No auto-launch — it goes
+    // through the same click, the same name gate and the same launch overlay as everything else.
+    if (stagedGameId && g.id === stagedGameId) {
+      btn.classList.add('is-staged');
+      btn.title = `${g.name} — unlisted (staged) game`;
+    }
     if (g.thumbnail) {
       const img = document.createElement('img');
       img.className = 'game-tile-img game-tile-surface';

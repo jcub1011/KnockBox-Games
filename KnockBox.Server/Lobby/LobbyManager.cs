@@ -4,8 +4,12 @@ using System.Diagnostics.CodeAnalysis;
 namespace KnockBox.Server.Lobbies;
 
 /// <summary>Tracks active lobbies in memory. A server restart drops them all by design.</summary>
-public sealed class LobbyManager
+/// <param name="clock">Stamps <see cref="Lobby.CreatedAt"/>. Optional so the many tests that build a
+/// bare manager keep working; production passes the registered <see cref="TimeProvider"/>.</param>
+public sealed class LobbyManager(TimeProvider? clock = null)
 {
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
     private const int MAX_CODE_GENERATION_ATTEMPTS = 5;
     // Unambiguous alphabet (no 0/O/1/I) for human-readable 4-char lobby codes.
     private const string IdAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -22,10 +26,11 @@ public sealed class LobbyManager
     public bool TryCreate(string gameId, string hostId, int maxPlayers, [NotNullWhen(true)] out Lobby? lobby,
         bool isServerAuthority = false)
     {
+        var now = _clock.GetUtcNow();
         int attempt = 0;
         while (attempt++ < MAX_CODE_GENERATION_ATTEMPTS)
         {
-            lobby = new Lobby(NewId(), gameId, hostId, maxPlayers, isServerAuthority);
+            lobby = new Lobby(NewId(), gameId, hostId, maxPlayers, now, isServerAuthority);
             if (_lobbies.TryAdd(lobby.Id, lobby)) return true;
         }
 

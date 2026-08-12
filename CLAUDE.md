@@ -95,7 +95,77 @@ in prod), an operator dashboard served from `web/admin/` at that origin's **root
 branch ahead of the game and shell pipelines. Every `/admin*` path 404s on the two public origins. The API
 under `/admin/api/*` lives in `Hosting/AdminApi.cs` (`MapAdminApi`), not in `Program.cs`: one `WriteJson`
 helper, one `RequireSession` wrapper and a route table, so an endpoint's handler is only the part specific
-to it. A missing `web/admin` is reported through `DeploymentDiagnostics` **and** answered with an
+to it. Mutating routes additionally go through `WriteGuard` (JSON content type + `Sec-Fetch-Site`), which is
+defence in depth behind `SameSite=Strict`, not the primary control — the port is. Operator guide:
+`docs/ADMIN.md`.
+
+**Portal tabs** (four; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
+`admin-core.js` is the pure/tested half exactly as `kb-core.js` is to `shell.js`, and `admin.js` exports
+`bootstrap()` so it can be driven under jsdom). Only the **visible tab polls** — four panels each polling
+would quadruple the request rate for three nobody is looking at, and the games tab can trigger a disk walk.
+- **Overview** — platform counters, `DeploymentDiagnostics` issues (repeated here because the warning page
+  only replaces the *shell's* home page), maintenance toggle, and per-game relay cost.
+- **Active Lobbies** — the directory, with single/bulk close, stale purge and per-member kick.
+- **Game Catalog** — availability, disk footprint, delete, rescan.
+- **System Logs** — the live stream plus raw file download.
+
+**Server counters are cumulative; rates are the client's job.** `RelayMetrics` and `Connection`'s
+frame/byte/drop counters only ever increase, and `system/status` reports `cpuSecondsTotal` rather than a
+percentage: a rate needs two samples, and producing one server-side would mean sleeping inside a request or
+keeping per-viewer state. `admin-core.js` `ratePerSecond` differences them, and returns **null** rather
+than a negative when a counter goes backwards — that means the server restarted, and drawing it as a spike
+would mislead at exactly the wrong moment.
+
+**Per-game relay cost is measured, because games are not server-side-free.** Every socket holds a bounded
+outbound `Channel` plus a writer task, and a `to:"all"` fan-out serializes once then sends per recipient.
+`Networking/RelayMetrics.cs` counts frames/bytes in and out per game (fan-out counted per recipient, from
+the actual send loop, so a member with no attached game socket costs nothing), and `Connection` counts
+frames the `DropOldest` policy discarded — which used to be visible only in a log line nobody watches.
+
+**Operator policy is the one persisted thing.** `Admin/AdminSettingsStore.cs` writes game availability
+(`Available`/`Disabled`/`Staged`) and maintenance mode to `AdminSettingsPath` (default: beside
+`AdminPasswordPath`, i.e. the persisted `/app/data` volume). Everything else here is deliberately ephemeral,
+but an admin who disables a game means it to stay disabled across the next image update. Reads are lock-free
+(a `volatile` immutable snapshot swapped atomically, the same discipline as `GameCatalog`) because the
+lobby-create path calls them; a change **takes effect in memory even when the write fails**, and the setter
+returns that as a warning rather than rejecting the change. The relay sees it through the narrow
+`Admin/IPlatformPolicy.cs` — `WebSocketHandler` has no business knowing about settings files, and
+`PlatformPolicy.OpenPlatform` keeps the flow tests free of one.
+
+**What policy does and doesn't touch:** it gates **creation and listing only**. Existing lobbies play on
+through both a disable and maintenance mode (spec §3.1), and join is deliberately ungated. `Staged` =
+hidden from the catalog but still startable, which is why `ListGamesMessage` grew an optional `Include`:
+the shell allowlists every launch against the catalog it was given, so a staged game reached via its
+`/?game=<id>` link has to come back in that list or the shell rejects its own `EnterGame` as unknown. A
+**disabled** game is never re-admitted by `Include` — that would only move the refusal to the create round
+trip, after the launch overlay was already up. Staged is **visibility, not access control**: there are no
+player accounts, so nothing can be authorized and the link is a weak secret at best.
+
+**Closing a live lobby has exactly one implementation.** `Lobby/LobbyCloser.cs` (detach the authority actor,
+remove the lobby, one `LobbyClosedMessage` fanned out, abort the game sockets) was extracted from
+`ServerAuthorityManager.HandleFatal`, which now calls it — two copies would drift, and whichever gained the
+next step would leave the other half-closing lobbies. Distinct from `CloseLobbyIfDark`, which broadcasts
+nothing because nobody is left to tell. The authority hook is a settable `OnClosing` rather than a ctor
+dependency (the manager needs the closer, so it can't also be an argument to it), but `HandleFatal` still
+stops its **own** actor first: a class must not depend on external wiring to reach its own invariant.
+
+**The live log view reads a ring buffer, not the log file.** `Admin/AdminLogBuffer.cs` is a hand-written
+bounded `ILogEventSink` (no `Serilog.Sinks.*` package — same AOT reasoning that rejected
+`ReadFrom.Configuration`), wired via `WriteTo.Sink` and constructed before `UseSerilog` since the host isn't
+built yet. Level and `SourceContext` stay structured, so filtering is exact instead of a guess at parsing
+rendered text; a monotonic sequence per event makes ordinary polling a stream (`?after=<seq>`), with no SSE
+and no second socket role. It renders with `MessageTemplateTextFormatter("{Message:lj}")` **on purpose** —
+Serilog's own `RenderMessage()` quotes string properties, so the portal and the log file would disagree
+about the same event.
+
+**Deleting a game is all-or-nothing, and usually impossible in production.** `Admin/AdminOperations.cs`
+probes every parent directory for writability *before* closing a single lobby, because the bad outcome isn't
+failure — it's removing the unpacked copy while leaving the `.kbg`, so the installer reinstalls the game and
+the operator watches a deletion undo itself after their lobbies were torn down for nothing. `games/` is
+mounted `:ro` in the shipped compose file and the server only ever reads it, so the API answers **409** (a
+deployment limit, not a fault) and the portal disables the button with the blocking path named. Disk usage
+counts the game folder **plus** its compressed cache **plus** its source `.kbg`; reporting only the first
+understates a large WASM game by roughly its own cache. A missing `web/admin` is reported through `DeploymentDiagnostics` **and** answered with an
 explanatory 503 at the origin, because the warning page only replaces the *shell* home page.
 Auth is one PBKDF2-hashed password (min 12 chars, file created mode `600`) in `AdminPasswordPath`
 (`Security/AdminAuthService.cs`) — **claim-on-first-use**: while no password is set, whoever reaches the
@@ -379,8 +449,10 @@ setup carefully to keep the `aot` CI job green.
 All knobs use the `KnockBox:` prefix (env: `KnockBox__Key`, `__` for nesting). Full reference
 in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`LogsRoot`,
 `GamesPort`/`GamesHost`/`GamesOrigin` and `AdminPort`/`AdminHost`/`AdminOrigin` (origin routing),
-`AdminPasswordPath`/`AdminSessionTtlHours` (admin portal; the path must be writable and, in a container,
-on a persisted volume outside the image), `GamesPollSeconds` (hot-reload
+`AdminPasswordPath`/`AdminSessionTtlHours`/`AdminSettingsPath` (admin portal; both paths must be writable
+and, in a container, on a persisted volume outside the image — the settings file is the only operator state
+that survives a restart), `AdminStaleLobbyMinutes`/`AdminLogBufferSize`/`AdminDiskUsageCacheSeconds`
+(dashboard behaviour; see `docs/ADMIN.md`), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
 (`.kbg` install; the root must be writable and outside `games/`),

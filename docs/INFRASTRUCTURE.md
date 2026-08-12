@@ -288,6 +288,27 @@ shell pipelines.
   once (pinned by `AdminAuthServiceTests`).
 - **Not on the games/shell path:** because the branch is selected before them, an admin request never
   touches the precompressed-asset negotiation, the `.kbg` gate, or COOP/COEP handling.
+- **Reads and controls.** Beyond the four auth routes, `/admin/api/*` serves `system/status`, `metrics`,
+  `lobbies`, `games`, `logs`, `logs/files` and `logs/files/{name}` (raw download), plus POSTs for closing a
+  lobby, bulk-closing (all or per game), purging stale lobbies, kicking a member, setting a game's
+  availability, deleting a game, rescanning the catalog, and toggling maintenance mode. Every one is behind
+  `RequireSession`; the mutating ones additionally pass `WriteGuard`, which requires a JSON content type and
+  rejects a cross-site `Sec-Fetch-Site`. That is defence in depth behind `SameSite=Strict` and the isolated
+  port, not a substitute for either — a header a client may simply omit cannot be a security boundary, so a
+  request without it (curl, the CI smoke test) is allowed through.
+- **Policy is the only persisted state.** Game availability and maintenance mode live in `AdminSettingsPath`
+  (default: beside `AdminPasswordPath`). They gate lobby **creation and listing only** — a lobby already
+  running survives both a disable and maintenance mode, and joining is never gated. The relay reads them
+  through the narrow `Admin/IPlatformPolicy.cs`, lock-free, because `HandleCreateLobby` asks on every
+  request. A change applies in memory even if it can't be written; the portal reports that as "active now,
+  lost on restart" rather than silently doing nothing.
+- **The live log view is a ring buffer, not a file tail.** `Admin/AdminLogBuffer.cs` is a bounded
+  `ILogEventSink` added via `WriteTo.Sink`, so level and `SourceContext` stay structured fields and
+  filtering is exact. Each event carries a monotonic sequence, which turns ordinary polling into a stream
+  (`?after=<seq>`). The rolling files under `LogsRoot` remain the history and the thing you download.
+
+Full operator guide, including what each tab shows and why Delete usually can't work in production:
+[ADMIN.md](./ADMIN.md).
 
 Note that `/ws` is mapped ahead of all three branches so the one socket endpoint is reachable on every
 origin — that is deliberate for the game origin (the data socket connects back to it) and simply
@@ -303,7 +324,7 @@ inherited by the admin origin, which never opens one.
 | `/games/{id}/<thumbnail>` (shell origin) | `games/{id}/<thumbnail>` | **Only** the manifest's declared thumbnail for the lobby browser; every other `/games/*` path 404s here (the full build is reachable only on the game origin). |
 | `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
 | `/games/*.kbg` (any origin) | — | Always **404**. The package's contents are public (they are the game), but serving a multi-megabyte uncacheable archive at a guessable URL is a needless bandwidth amplifier. |
-| `/`, `/admin.js`, `/admin.css` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. |
+| `/`, `/admin.js`, `/admin-core.js`, `/admin.css` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. `admin-core.js` is the pure, DOM-free half (formatting, filtering, rate arithmetic), the same split `kb-core.js` has from `shell.js`. |
 | `/admin*` (shell **or** game origin) | — | Always **404**, so the portal is unreachable from any origin a player can browse. |
 
 Game assets resolve through a `CompositeFileProvider` over `games/` then `GamesUnpackedRoot`, in the
@@ -398,6 +419,10 @@ into `games/` and it appears within a second or two — no restart.
 | `AdminOrigin` | — | Prod: explicit admin origin (overrides `AdminHost`/`AdminPort`). |
 | `AdminPasswordPath` | `admin.secret` next to the binary | Where the admin password hash is stored. Must be **writable** and, in a container, on a **persisted volume outside the image** — otherwise the password is lost on every image update and the portal reverts to unclaimed. The Docker image sets `/app/data/admin.secret`. Deleting this file is the password-reset path. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. Sessions are also invalidated by a restart (the signing key is per-process, like the player token secret). |
+| `AdminSettingsPath` | `admin-settings.json` next to `AdminPasswordPath` | Persisted operator policy: per-game availability (`available`/`disabled`/`staged`) and maintenance mode. The **only** state this server keeps across a restart, because re-applying policy by hand after every deploy is how a platform ships a game it meant to keep hidden. Same requirements as the password file — writable, and on a persisted volume in a container. Unreadable ⇒ platform defaults plus a `DeploymentDiagnostics` warning, never a crash. Delete it to reset all policy. |
+| `AdminStaleLobbyMinutes` | `30` | How long a lobby may go without a relayed frame, a join or a leave before the portal calls it **stale** and "Purge Stale" collects it. Independent of `DisconnectGraceSeconds`, which is about one player's socket dropping; this is about a whole session nobody is playing any more. `0` judges staleness only by "nobody in it is connected". |
+| `AdminLogBufferSize` | `2000` | Log events held in memory for the portal's live log view (`Admin/AdminLogBuffer.cs`). Bounded ring — older entries exist only in the rolling files under `LogsRoot`. |
+| `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. The measurement walks directories, and the dashboard polls, so a request must never wait on one. `0` measures on every read. |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-For/Proto/Host` from a fronting reverse proxy so the game origin resolves to `https`/`wss` and per-IP limits see real client IPs. Opt-in: only enable behind a trusted proxy, and name that proxy in `KnownProxies`. |
 | `KnownProxies` | `[]` (trust any forwarder) | Addresses allowed to set `X-Forwarded-*`: IPs (`10.0.0.7`, `::1`) and/or CIDR ranges (`10.0.0.0/8`). Only consulted when `ForwardedHeaders` is on. **Leaving it empty means any caller can choose the IP every per-IP limit keys on** — including the admin login throttle, whose per-IP bucket a rotating `X-Forwarded-For` then defeats entirely; startup logs a warning saying so. Unparseable entries are logged as errors and ignored (the proxy they name is *not* trusted). |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist (defense-in-depth; the token/ticket is the real auth). An empty `Origin` is always allowed — native engine clients send none. |

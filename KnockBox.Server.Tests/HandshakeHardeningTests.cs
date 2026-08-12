@@ -1,4 +1,5 @@
 using KnockBox.Contracts;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
@@ -32,6 +33,8 @@ public class HandshakeHardeningTests
             TestAuthorities.Manager(connections, lobbies),
             new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance),
             limits,
+            PlatformPolicy.OpenPlatform,
+            new RelayMetrics(),
             TimeProvider.System,
             NullLoggerFactory.Instance,
             NullLogger<WebSocketHandler>.Instance);

@@ -344,8 +344,504 @@ body {
   display: none !important;
 }
 
+/* Uptime is by far the longest value on the metrics grid ("12d 4h 31m 9s"), and at the shared size it
+   wrapped mid-value into two lines while every neighbouring card stayed one. Shrink this one rather than
+   every card, so the numbers that matter stay large. */
+#metric-uptime {
+  font-size: 1.35rem;
+  white-space: nowrap;
+}
+
+/* ── Dashboard tabs ─────────────────────────────────────────────────────────── */
+
+/* A per-tab count in the sidebar, so "3 lobbies running" is visible from any tab. */
+.nav-count {
+  margin-left: auto;
+  min-width: 1.4rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--primary-accent);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.4rem;
+}
+
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── Shared panel pieces ────────────────────────────────────────────────────── */
+
+.panel-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1.25rem 1.5rem;
+}
+
+.panel-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.panel-card-header h3 {
+  font-size: 1.05rem;
+  color: var(--text-main);
+}
+
+.panel-card-note {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.empty-state {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 1.5rem;
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.field-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.text-input {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+  min-width: 0;             /* lets an input shrink inside a flex row instead of overflowing it */
+  flex: 1 1 12rem;
+}
+
+.text-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.filter-narrow { flex: 0 1 12rem; }
+.filter-spacer { flex: 1 1 auto; }
+
+.filter-bar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.btn-small {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+}
+
+/* Destructive actions read as destructive. Distinct from .btn-secondary so "Close All" can never be
+   mistaken for a navigation control. */
+.btn-danger {
+  background: var(--error-bg);
+  border: 1px solid var(--error-color);
+  color: var(--error-color);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--error-color);
+  color: #fff;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Badges ─────────────────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.badge-ok { color: var(--success-color); border-color: var(--success-color); }
+.badge-warning { color: #fbbf24; border-color: #fbbf24; }
+.badge-muted { color: var(--text-muted); }
+
+/* ── Tables ─────────────────────────────────────────────────────────────────── */
+
+/* Wide content scrolls inside its own container: the page body must never scroll sideways. */
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 0.7rem 0.85rem;
+  background: var(--bg-glass);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+
+.data-table td {
+  padding: 0.6rem 0.85rem;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-main);
+  vertical-align: middle;
+  /* Short values ("1m 36s", "2/2") must not wrap mid-value when the members column squeezes the row —
+     the table scrolls inside .table-scroll, so widening is the right trade. The two cells that legitimately
+     wrap opt back in below. */
+  white-space: nowrap;
+}
+
+.data-table td:nth-child(2), .cell-members { white-space: normal; }
+
+.data-table tr:hover td { background: rgba(255, 255, 255, 0.03); }
+
+.row-warn td { background: rgba(251, 191, 36, 0.07); }
+
+.cell-code {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.col-actions { text-align: right; white-space: nowrap; }
+
+.cell-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.2rem 0.1rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  background: var(--bg-dark);
+}
+
+/* A member inside the reconnect grace window: still in the roster, but their tab is gone. */
+.member-dropped { opacity: 0.55; border-style: dashed; }
+
+.chip-action {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  border-radius: 999px;
+}
+
+.chip-action:hover { color: var(--error-color); background: var(--error-bg); }
+
+/* ── Game catalog cards ─────────────────────────────────────────────────────── */
+
+/* Cards rather than table rows: each game carries a state selector, a delete button, an explanation of
+   what the selected state means, and a four-way disk breakdown — none of which fit a row legibly. */
+.games-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.game-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1.1rem 1.25rem;
+}
+
+.game-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.9rem;
+}
+
+.game-card-header h3 {
+  font-size: 1.05rem;
+  color: var(--text-main);
+}
+
+.game-card-header code {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  background: var(--bg-dark);
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+}
+
+.game-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.game-fact { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+
+.game-fact-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.game-fact-value { font-size: 1rem; font-weight: 600; color: var(--text-main); }
+
+.game-fact-sub {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;   /* absolute paths must wrap, not widen the card */
+}
+
+.game-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.game-hint { font-size: 0.8rem; color: var(--text-muted); flex: 1 1 14rem; }
+
+.game-hint-block { margin-top: 0.6rem; color: #fbbf24; flex: none; }
+
+/* ── Diagnostics banner ─────────────────────────────────────────────────────── */
+
+.diagnostics-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.diagnostic {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.8rem 1rem;
+  border-radius: var(--radius-md);
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid #fbbf24;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+.diagnostic-blocking { background: var(--error-bg); border-color: var(--error-color); }
+
+.diagnostic span { color: var(--text-muted); }
+
+/* ── Log stream ─────────────────────────────────────────────────────────────── */
+
+.log-stream {
+  height: min(60vh, 32rem);
+  overflow: auto;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 0.5rem;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: 5.5rem 2.2rem 9rem minmax(0, 1fr);
+  gap: 0.5rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+}
+
+.log-line:hover { background: rgba(255, 255, 255, 0.04); }
+
+.log-time, .log-category { color: var(--text-muted); }
+
+.log-category { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.log-level { font-weight: 700; }
+
+.log-message { overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.log-exception {
+  grid-column: 1 / -1;
+  margin: 0.25rem 0 0.4rem;
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  overflow-x: auto;
+}
+
+.log-info .log-level { color: var(--text-muted); }
+.log-warning .log-level, .log-warning .log-message { color: #fbbf24; }
+.log-error .log-level, .log-error .log-message { color: var(--error-color); }
+.log-fatal { background: var(--error-bg); }
+.log-fatal .log-level, .log-fatal .log-message { color: var(--error-color); font-weight: 700; }
+.log-quiet { opacity: 0.65; }
+
+/* ── Modals ─────────────────────────────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 50;
+}
+
+.modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-main);
+  padding: 1.5rem;
+  max-width: 32rem;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.modal h3 { font-size: 1.1rem; margin-bottom: 0.6rem; color: var(--text-main); }
+
+.modal p { color: var(--text-muted); font-size: 0.9rem; line-height: 1.55; }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+}
+
+.files-list { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.9rem; }
+
+.file-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.file-row:hover { border-color: var(--border-focus); background: var(--bg-glass); }
+
+.file-meta { color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; }
+
+/* ── Toasts ─────────────────────────────────────────────────────────────────── */
+
+.toast-host {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 60;
+  max-width: min(28rem, calc(100vw - 2.5rem));
+}
+
+.toast {
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-main);
+  color: var(--text-main);
+  font-size: 0.85rem;
+  animation: toast-in 160ms ease;
+}
+
+.toast-success { border-color: var(--success-color); }
+.toast-warning { border-color: #fbbf24; }
+.toast-error { border-color: var(--error-color); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
+
 @media (max-width: 768px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
+
+  .log-line { grid-template-columns: 4.5rem 2rem minmax(0, 1fr); }
+  .log-category { display: none; }
+
+  /* The header is one non-wrapping flex row, so on a narrow screen the brand, the status pill and Log Out
+     together were wider than the viewport — which pushed the whole PAGE into horizontal scroll and clipped
+     the button. Let it wrap and let the pill give up its whitespace instead. */
+  .admin-header {
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    padding: 0.85rem 1rem;
+  }
+
+  .status-pill { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
+  .brand-title { font-size: 1.1rem; }
+  .admin-container { margin: 1.5rem auto; padding: 0 1rem; }
 }

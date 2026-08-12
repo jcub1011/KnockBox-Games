@@ -60,4 +60,20 @@ public sealed class ConnectionManager
 
     /// <summary>True if the player currently has an attached game (data-role) connection.</summary>
     public bool HasGameConnection(string playerId) => _gameByPlayer.ContainsKey(playerId);
+
+    // ── Observability (admin portal) ──────────────────────────────────────────
+    /// <summary>Live control (shell) sockets. Also the count of connected players, since a player
+    /// holds exactly one control socket. Cheap — no snapshot allocation.</summary>
+    public int ControlCount => _byPlayer.Count;
+
+    /// <summary>Live game (data-role) sockets — one per player currently inside a game.</summary>
+    public int GameCount => _gameByPlayer.Count;
+
+    /// <summary>Point-in-time snapshot of the live game sockets, for per-game relay accounting. The
+    /// dictionaries are the authority on which sockets exist, so aggregate over this rather than
+    /// keeping a parallel counter that could drift from it.</summary>
+    public IReadOnlyCollection<Connection> GameConnections() => [.. _gameByPlayer.Values];
+
+    /// <summary>Point-in-time snapshot of the live control sockets.</summary>
+    public IReadOnlyCollection<Connection> ControlConnections() => [.. _byPlayer.Values];
 }

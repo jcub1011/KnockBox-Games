@@ -489,6 +489,14 @@ body.in-game::after {
     transition: transform 220ms cubic-bezier(.34, 1.56, .64, 1), filter 200ms ease;
 }
 
+/* A staged (unlisted) game, in the grid only because this tab arrived on its direct "?game=<id>" link.
+   Marked so whoever is testing it can tell it apart from the public tiles — the outline sits outside the
+   tile's own 5px black border, so it reads as an annotation rather than part of the artwork. */
+.game-tile.is-staged {
+    outline: 3px dashed var(--tile-yellow);
+    outline-offset: 5px;
+}
+
 .game-tile:nth-child(5n+1) { transform: rotate(-1deg); }
 .game-tile:nth-child(5n+2) { transform: rotate(0.4deg); }
 .game-tile:nth-child(5n+3) { transform: rotate(1deg); }

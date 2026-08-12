@@ -145,16 +145,32 @@ jobs:
         run: |
           curl -fsS http://localhost:8082/ | grep -qi '<html'
           curl -fsS http://localhost:8082/admin.js >/dev/null
+          curl -fsS http://localhost:8082/admin-core.js >/dev/null
           curl -fsS http://localhost:8082/admin.css >/dev/null
           # Unclaimed on a fresh container: no password set yet, nobody authenticated.
           curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"configured":false'
           curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"authenticated":false'
           # Privileged data needs a session — an unauthenticated poll must be refused, not served.
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8082/admin/api/system/status)" = "401" ]
+          # Every dashboard read is session-gated, not just the one the old dashboard polled. A new
+          # endpoint that forgets RequireSession would serve lobby rosters and log lines to anyone who can
+          # reach the port, so assert the whole set rather than a representative.
+          for path in metrics lobbies games logs logs/files; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8082/admin/api/$path")
+            [ "$code" = "401" ] || { echo "/admin/api/$path answered $code unauthenticated, expected 401"; exit 1; }
+          done
+          # So is every mutating one — these close lobbies and delete games.
+          for path in maintenance games/rescan lobbies/close lobbies/purge-stale; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+              -d '{}' "http://localhost:8082/admin/api/$path")
+            [ "$code" = "401" ] || { echo "POST /admin/api/$path answered $code unauthenticated, expected 401"; exit 1; }
+          done
           # ...and the portal must be invisible from the two PUBLIC origins, which players can reach.
           ! curl -fsS http://localhost:8080/admin/ >/dev/null
           ! curl -fsS http://localhost:8080/admin/admin.js >/dev/null
+          ! curl -fsS http://localhost:8080/admin/admin-core.js >/dev/null
           ! curl -fsS http://localhost:8080/admin/api/auth/status >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/lobbies >/dev/null
           ! curl -fsS http://localhost:8081/admin/ >/dev/null
 
       - name: Admin password can be set, and only once
@@ -220,6 +236,65 @@ jobs:
           # ...and its assets serve from the game origin.
           curl -fsS http://localhost:8081/games/tictactoe/GAME.json >/dev/null
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
+
+      # The dashboard's read models and the policy round trip, against a real container with a real
+      # (read-only) games mount. Runs after the hot drop-in so there is a game to report on.
+      - name: Admin dashboard reads its data and applies policy
+        run: |
+          # Every read answers for an authenticated operator.
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/lobbies | grep -q '"lobbies"'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/metrics | grep -q '"games"'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/games > /tmp/kb-games.json
+          grep -q '"id":"tictactoe"' /tmp/kb-games.json
+          # Disk usage is measured, not stubbed: a game with files must not report zero bytes. And because
+          # /games is mounted read-only here, exactly as production recommends, deleting a game placed
+          # there is impossible — the portal has to know that up front rather than offer a doomed button.
+          jq -e '.games[] | select(.id == "tictactoe")
+                 | select(.diskBytes > 0)
+                 | select(.availability == "available")
+                 | select(.deletable == false)
+                 | select(.deleteBlockedReason != null)' /tmp/kb-games.json >/dev/null \
+            || { echo "Unexpected /admin/api/games payload:"; cat /tmp/kb-games.json; exit 1; }
+          # ...and the delete endpoint refuses it with 409 (a deployment limit), not 500 (a fault).
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            http://localhost:8082/admin/api/games/tictactoe/delete)" = "409" ]
+
+          # The live log stream is structured, so it can be filtered by level and by subsystem.
+          curl -fsS -b /tmp/kb-admin-cookies \
+            'http://localhost:8082/admin/api/logs?level=Information&q=tictactoe' | grep -q '"entries"'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/logs/files | grep -q '"files"'
+
+          # Policy round trip: disable the game, confirm the portal reports it, then restore it.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"state":"disabled"}' \
+            http://localhost:8082/admin/api/games/tictactoe/availability | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/games \
+            | grep -q '"availability":"disabled"'
+          # It must have been PERSISTED, not just held in memory — that file living on the /app/data
+          # volume is what makes operator policy survive an image update.
+          docker exec kb test -f /app/data/admin-settings.json
+          docker exec kb grep -q '"tictactoe": "disabled"' /app/data/admin-settings.json
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"state":"available"}' \
+            http://localhost:8082/admin/api/games/tictactoe/availability >/dev/null
+
+          # Maintenance mode is likewise persisted, and turned back off so later steps see a normal server.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"enabled":true,"message":"CI maintenance."}' \
+            http://localhost:8082/admin/api/maintenance | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/system/status \
+            | grep -q '"maintenanceMode":true'
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"enabled":false}' http://localhost:8082/admin/api/maintenance >/dev/null
+
+          # A cross-site write is refused even with a valid session cookie.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: cross-site' \
+            -d '{"enabled":true}' http://localhost:8082/admin/api/maintenance)" = "403" ]
+          # A log filename can't be used to walk out of the logs directory.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies \
+            'http://localhost:8082/admin/api/logs/files/..%2F..%2Fapp%2Fdata%2Fadmin.secret')" = "404" ]
 
       - name: Server-authority module is never served from the game origin
         run: |

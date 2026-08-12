@@ -76,15 +76,17 @@
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
             Overview
           </button>
-          <button class="nav-item disabled" data-tab="lobbies" title="Coming in future update">
+          <button class="nav-item" data-tab="lobbies">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
             Active Lobbies
+            <span class="nav-count" id="nav-count-lobbies" hidden></span>
           </button>
-          <button class="nav-item disabled" data-tab="games" title="Coming in future update">
+          <button class="nav-item" data-tab="games">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4m-2-2v4m10-2h.01m-3 0h.01"></path></svg>
             Game Catalog
+            <span class="nav-count" id="nav-count-games" hidden></span>
           </button>
-          <button class="nav-item disabled" data-tab="logs" title="Coming in future update">
+          <button class="nav-item" data-tab="logs">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
             System Logs
           </button>
@@ -93,41 +95,170 @@
         <!-- Main Dashboard Panel -->
         <div class="dashboard-panel">
           <div class="panel-header">
-            <h1>System Overview</h1>
+            <h1 id="panel-title">System Overview</h1>
             <span class="refresh-indicator" id="last-updated">Updating metrics...</span>
           </div>
 
-          <!-- Metric Cards Grid -->
-          <div class="metrics-grid">
-            <div class="metric-card">
-              <div class="metric-label">Server Uptime</div>
-              <div class="metric-value" id="metric-uptime">--</div>
-              <div class="metric-sub">Process runtime</div>
+          <!-- ── Tab: Overview ────────────────────────────────────────────── -->
+          <div class="tab-panel" id="tab-overview">
+            <!-- Deployment problems from DeploymentDiagnostics. These already replace the SHELL's home
+                 page when blocking, but an operator watching this dashboard shouldn't have to open the
+                 player site to discover the games mount is unreadable. -->
+            <div id="diagnostics-banner" class="diagnostics-banner hidden"></div>
+
+            <div class="metrics-grid">
+              <div class="metric-card">
+                <div class="metric-label">Server Uptime</div>
+                <div class="metric-value" id="metric-uptime">--</div>
+                <div class="metric-sub">Process runtime</div>
+              </div>
+
+              <div class="metric-card">
+                <div class="metric-label">Active Lobbies</div>
+                <div class="metric-value" id="metric-lobbies">0</div>
+                <div class="metric-sub" id="metric-lobbies-sub">Live game rooms</div>
+              </div>
+
+              <div class="metric-card">
+                <div class="metric-label">Connected Players</div>
+                <div class="metric-value" id="metric-players">0</div>
+                <div class="metric-sub" id="metric-sockets">Game sockets: 0</div>
+              </div>
+
+              <div class="metric-card">
+                <div class="metric-label">Registered Games</div>
+                <div class="metric-value" id="metric-games">0</div>
+                <div class="metric-sub">Installed catalog</div>
+              </div>
+
+              <div class="metric-card">
+                <div class="metric-label">Memory Working Set</div>
+                <div class="metric-value" id="metric-memory">-- MB</div>
+                <div class="metric-sub" id="metric-heap">Managed heap: -- MB</div>
+              </div>
+
+              <div class="metric-card">
+                <div class="metric-label">Process CPU</div>
+                <div class="metric-value" id="metric-cpu">--</div>
+                <div class="metric-sub" id="metric-cpu-sub">Across -- cores</div>
+              </div>
             </div>
 
-            <div class="metric-card">
-              <div class="metric-label">Active Lobbies</div>
-              <div class="metric-value" id="metric-lobbies">0</div>
-              <div class="metric-sub">Live game rooms</div>
+            <!-- Global maintenance mode -->
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Maintenance Mode</h3>
+                <span class="badge" id="maintenance-badge">Off</span>
+              </div>
+              <p class="panel-card-note">
+                Blocks new lobbies across every game. Sessions already running are left alone and finish
+                normally &mdash; use it to drain the platform before a restart, not to stop it dead.
+              </p>
+              <div class="field-row">
+                <input type="text" id="maintenance-message" class="text-input"
+                       placeholder="Message shown to players (optional)" maxlength="200" />
+                <button class="btn btn-primary" id="maintenance-toggle">Turn On</button>
+              </div>
             </div>
 
-            <div class="metric-card">
-              <div class="metric-label">Registered Games</div>
-              <div class="metric-value" id="metric-games">0</div>
-              <div class="metric-sub">Installed catalog</div>
+            <div class="panel-card">
+              <div class="panel-card-header"><h3>Per-Game Server Cost</h3></div>
+              <p class="panel-card-note">
+                Games run in the player's browser, but relaying for them is not free: every socket holds a
+                queued outbound channel and a writer task, and a broadcast serializes once then sends once
+                per recipient. Totals are cumulative since the server started; rates are measured between
+                polls. Server-authority games additionally run their logic here.
+              </p>
+              <div class="table-scroll">
+                <table class="data-table" id="metrics-table">
+                  <thead>
+                    <tr>
+                      <th>Game</th><th>Lobbies</th><th>Players</th><th>Frames in</th>
+                      <th>Frames out</th><th>Fan-out</th><th>Sent</th><th>Rate</th><th>Dropped</th>
+                    </tr>
+                  </thead>
+                  <tbody id="metrics-body"></tbody>
+                </table>
+              </div>
+              <p class="empty-state" id="metrics-empty">No game traffic since the server started.</p>
             </div>
 
-            <div class="metric-card">
-              <div class="metric-label">Memory Working Set</div>
-              <div class="metric-value" id="metric-memory">-- MB</div>
-              <div class="metric-sub" id="metric-heap">Managed heap: -- MB</div>
+            <div class="info-card">
+              <h3>Network Port Isolation Active</h3>
+              <p>This administrative portal is executing on a dedicated network port. Admin APIs and portal static pages are strictly inaccessible over public player or game origin ports.</p>
             </div>
           </div>
 
-          <!-- Portal Isolation Banner -->
-          <div class="info-card">
-            <h3>Network Port Isolation Active</h3>
-            <p>This administrative portal is executing on a dedicated network port. Admin APIs and portal static pages are strictly inaccessible over public player or game origin ports.</p>
+          <!-- ── Tab: Active Lobbies ──────────────────────────────────────── -->
+          <div class="tab-panel hidden" id="tab-lobbies">
+            <div class="filter-bar">
+              <input type="search" id="lobby-filter-game" class="text-input" placeholder="Filter by game" />
+              <input type="search" id="lobby-filter-code" class="text-input filter-narrow" placeholder="Room code" />
+              <select id="lobby-filter-status" class="text-input filter-narrow">
+                <option value="">Any status</option>
+                <option value="waiting">Waiting</option>
+                <option value="in-game">In game</option>
+                <option value="stale">Stale</option>
+                <option value="empty">Empty</option>
+              </select>
+              <span class="filter-spacer"></span>
+              <button class="btn btn-secondary" id="purge-stale-btn">Purge Stale</button>
+              <button class="btn btn-danger" id="close-all-btn">Close All</button>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table" id="lobbies-table">
+                <thead>
+                  <tr>
+                    <th>Code</th><th>Game</th><th>Players</th><th>Status</th>
+                    <th>Uptime</th><th>Idle</th><th>Members</th><th class="col-actions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="lobbies-body"></tbody>
+              </table>
+            </div>
+            <p class="empty-state" id="lobbies-empty">No active lobbies.</p>
+            <p class="panel-card-note" id="lobbies-note"></p>
+          </div>
+
+          <!-- ── Tab: Game Catalog ────────────────────────────────────────── -->
+          <div class="tab-panel hidden" id="tab-games">
+            <div class="filter-bar">
+              <input type="search" id="game-filter-q" class="text-input" placeholder="Filter by name or id" />
+              <select id="game-filter-availability" class="text-input filter-narrow">
+                <option value="">Any state</option>
+                <option value="available">Available</option>
+                <option value="disabled">Disabled</option>
+                <option value="staged">Staged</option>
+              </select>
+              <span class="filter-spacer"></span>
+              <button class="btn btn-secondary" id="rescan-btn">Rescan Now</button>
+            </div>
+            <div id="games-list" class="games-list"></div>
+            <p class="empty-state" id="games-empty">No games discovered.</p>
+            <p class="panel-card-note" id="games-note"></p>
+          </div>
+
+          <!-- ── Tab: System Logs ─────────────────────────────────────────── -->
+          <div class="tab-panel hidden" id="tab-logs">
+            <div class="filter-bar">
+              <select id="log-filter-level" class="text-input filter-narrow">
+                <option value="">All levels</option>
+                <option value="Information">Info and above</option>
+                <option value="Warning">Warnings and above</option>
+                <option value="Error">Errors and above</option>
+              </select>
+              <input type="search" id="log-filter-category" class="text-input filter-narrow"
+                     placeholder="Subsystem (e.g. GameLog)" />
+              <input type="search" id="log-filter-q" class="text-input" placeholder="Search messages" />
+              <span class="filter-spacer"></span>
+              <label class="checkbox-label">
+                <input type="checkbox" id="log-follow" checked /> Follow
+              </label>
+              <button class="btn btn-secondary" id="log-files-btn">Download&hellip;</button>
+            </div>
+            <div class="log-stream" id="log-stream"></div>
+            <p class="empty-state" id="logs-empty">No log entries match.</p>
+            <p class="panel-card-note" id="logs-note"></p>
           </div>
         </div>
       </section>
@@ -135,6 +266,33 @@
     </main>
   </div>
 
-  <script src="/admin.js" type="module"></script>
+  <!-- Confirmation dialog for destructive actions. One dialog reused by every caller, so the phrasing
+       and the focus/Escape handling can't drift between them. -->
+  <div class="modal-backdrop hidden" id="confirm-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <h3 id="confirm-title">Are you sure?</h3>
+      <p id="confirm-body"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="confirm-cancel">Cancel</button>
+        <button class="btn btn-danger" id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log-file download picker. -->
+  <div class="modal-backdrop hidden" id="files-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="files-title">
+      <h3 id="files-title">Download a log file</h3>
+      <p class="panel-card-note" id="files-note"></p>
+      <div id="files-list" class="files-list"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="files-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-host" id="toast-host" aria-live="polite"></div>
+
+  <script type="module">import { bootstrap } from '/admin.js'; bootstrap();</script>
 </body>
 </html>

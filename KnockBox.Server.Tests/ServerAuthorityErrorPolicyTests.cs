@@ -62,7 +62,8 @@ public class ServerAuthorityErrorPolicyTests : IDisposable
         var lobbies = new LobbyManager();
         var manager = new ServerAuthorityManager(id => Path.Combine(_root, id),
             AuthorityOptions.FromConfiguration(ConfigFactory.FromPairs(config)),
-            connections, lobbies, TimeProvider.System,
+            connections, new LobbyCloser(lobbies, connections, NullLogger<LobbyCloser>.Instance),
+            TimeProvider.System,
             new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),
             isDevelopment, NullLoggerFactory.Instance);
 
@@ -284,7 +285,7 @@ public class ServerAuthorityErrorPolicyTests : IDisposable
     {
         var rigless = TestAuthorities.Manager(new ConnectionManager(), new LobbyManager(),
             gamesRoot: _root, config: ConfigFactory.FromPairs(("KnockBox:AuthorityEnabled", "false")));
-        var lobby = new Lobby("AB12", "g", "p1", 4, isServerAuthority: true);
+        var lobby = new Lobby("AB12", "g", "p1", 4, DateTimeOffset.UnixEpoch, isServerAuthority: true);
         Assert.False(rigless.TryStart(lobby, new GameManifest("g", "G", "index.html", null, 4, ServerAuthority: "authority.js"), out var error));
         Assert.Contains("disabled", error, StringComparison.OrdinalIgnoreCase);
         await Task.CompletedTask;

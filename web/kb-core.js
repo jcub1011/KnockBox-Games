@@ -70,6 +70,19 @@ export function parseJoinParam(search) {
   return trimmed || null;
 }
 
+// A staged game's direct-launch link carries "?game=<id>". An operator marks a game "staged" to keep it
+// off the public grid, so the tile that would normally start it isn't rendered — this link is the way
+// in. It is VISIBILITY only, not access control: KnockBox has no player accounts, so there is nothing to
+// authorize against and anyone holding the link can use it.
+//
+// The id is shape-checked before it goes anywhere near a request or an iframe URL. Game ids are folder
+// names, so this is the same conservative alphabet the server accepts — a link can't smuggle a path
+// separator or a scheme through it.
+export function parseGameParam(search) {
+  const id = (new URLSearchParams(search || '').get('game') || '').trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) ? id : null;
+}
+
 // Default data-socket endpoint when the shell didn't supply one: this origin's /ws.
 export function defaultEndpoint(protocol, host) {
   return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}/ws`;

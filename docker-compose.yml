@@ -67,8 +67,10 @@ services:
       # set KNOCKBOX_UNPACKED_DIR=/path → a writable host bind mount. Persisting it avoids
       # re-extracting a large library every time the container is recreated.
       - ${KNOCKBOX_UNPACKED_DIR:-knockbox-unpacked}:/app/games-unpacked
-      # Admin password hash (admin.secret). UNLIKE the two caches above this is NOT regenerable — if it
-      # is lost the portal reverts to unclaimed and the next visitor sets the password. Keep this volume.
+      # Admin state: the password hash (admin.secret) plus operator policy (admin-settings.json — which
+      # games are disabled or staged, and whether maintenance mode is on). UNLIKE the two caches above this
+      # is NOT regenerable: lose it and the portal reverts to unclaimed AND every policy decision is
+      # forgotten, so a game you disabled starts serving players again. Keep this volume.
       - ${KNOCKBOX_ADMIN_DIR:-knockbox-admin}:/app/data
       # Uncomment to keep logs on the host too:
       # - ${KNOCKBOX_LOGS_DIR:-./logs}:/app/logs
@@ -129,8 +131,9 @@ services:
 # set (then the volume simply goes unused). Add knockbox-compressed-2, knockbox-unpacked-2 and
 # knockbox-admin-2 here if you enable the second instance above.
 #   • the first two are regenerable caches — losing one only costs rebuild time
-#   • knockbox-admin is NOT regenerable: it holds the admin password hash. Back it up or be ready to
-#     re-claim the portal.
+#   • knockbox-admin is NOT regenerable: it holds the admin password hash AND the operator policy
+#     (disabled/staged games, maintenance mode). Back it up, or be ready to re-claim the portal and
+#     re-apply your policy.
 volumes:
   knockbox-compressed:
   knockbox-unpacked:
