@@ -844,6 +844,82 @@ describe('launch overlay', () => {
       expect(el('game-view').style.display).not.toBe('block'); // never dragged into it
       expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
     });
+
+    it('drops the EnterGame the server sends behind the reply to an abandoned launch', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      const p = shell.createLobby('ttt');
+
+      el('launch-cancel').click();
+      const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+      ws._recv({ cid: frame.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+      await p;
+
+      // The server sends EnterGame on every entry, so one was already in flight when they backed
+      // out. It must not re-raise the launch and pull them into the session they cancelled.
+      shell.handle({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+      await tick();
+      expect(launchRetired()).toBe(true);
+      expect(el('game-view').style.display).not.toBe('block');
+      expect(ws.sent.some((f) => f.type === 'RequestTicket')).toBe(false);
+    });
+
+    it('swallows only that one push, so a later entry into the same code still starts', async () => {
+      await importShell();
+      const ws = await bootWithGames();
+      const p = shell.createLobby('ttt');
+
+      el('launch-cancel').click();
+      const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+      ws._recv({ cid: frame.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+      await p;
+
+      shell.handle({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+      await tick();
+      shell.handle({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+      await tick();
+
+      expect(el('launch-overlay').hidden).toBe(false);
+      expect(ws.sent.some((f) => f.type === 'RequestTicket')).toBe(true);
+    });
+
+    it('drops the previous game art before loading the next, so the tile never shows the wrong game', async () => {
+      await importShell();
+      await bootWithGames();
+      const art = el('launch-art');
+      shell.showLaunchOverlay('Chess', '/games/chess/tile.png');
+
+      const seen = [];
+      const obs = new MutationObserver((recs) => { for (const r of recs) seen.push(r.oldValue); });
+      obs.observe(art, { attributes: true, attributeOldValue: true, attributeFilter: ['src'] });
+      shell.showLaunchOverlay('Tic Tac Toe', '/games/ttt/tile.png');
+      await tick();
+      obs.disconnect();
+
+      // An <img> keeps painting its current image until the pending one decodes, so the old src has
+      // to go first — otherwise a slow (or 404) thumbnail leaves the last game's art on the tile.
+      // Two mutations, and the value the second one replaced is null: nothing of Chess survived.
+      expect(seen).toEqual(['/games/chess/tile.png', null]);
+      expect(art.getAttribute('src')).toBe('/games/ttt/tile.png');
+    });
+
+    it('leaves the art element alone when a re-label names the same game', async () => {
+      await importShell();
+      await bootWithGames();
+      const art = el('launch-art');
+      shell.showLaunchOverlay('Tic Tac Toe', '/games/ttt/tile.png');
+
+      const seen = [];
+      const obs = new MutationObserver((recs) => { for (const r of recs) seen.push(r.oldValue); });
+      obs.observe(art, { attributes: true, attributeOldValue: true, attributeFilter: ['src'] });
+      shell.setLaunchName('Tic Tac Toe', '/games/ttt/tile.png');   // createLobby → enterGame does this
+      await tick();
+      obs.disconnect();
+
+      expect(seen).toEqual([]);   // reloading an identical src would blink the tile mid-flight
+      expect(art.getAttribute('src')).toBe('/games/ttt/tile.png');
+      expect(el('launch-tile').hidden).toBe(false);
+    });
   });
 
   it('does not appear when no name has been entered', async () => {

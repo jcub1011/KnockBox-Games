@@ -115,6 +115,9 @@ export function handle(msg) {
       // src; fall back to this origin when missing or invalid.
       gameOrigin = sanitizeGameOrigin(msg.gameOrigin) || location.origin;
       reconnectAttempt = 0; // session confirmed; next drop starts backoff fresh
+      // Fresh socket: any abandoned-lobby marker whose EnterGame push never arrived (the drop ate it)
+      // would otherwise sit there and swallow one later, legitimate entry into that same lobby.
+      abandonedLobbies.clear();
       // Load the game catalog FIRST, then (re)join. An EnterGame — from an auto-join or a rejoin —
       // makes enterGame resolve the manifest from `games`, which must be populated by then. The
       // server replies in order, so an un-gated JoinLobby/Rejoin would land its EnterGame before
@@ -369,8 +372,12 @@ export async function createLobby(gameId, sourceEl) {
   const reply = await request('CreateLobby', { gameId });
   if (abortAt !== launchAbortSeq) {
     // Backed out while the server was replying. Don't drag them in — and don't strand the lobby
-    // the server went ahead and made either.
-    if (reply.type === 'LobbyCreated') send({ type: 'LeaveLobby', lobbyId: reply.lobbyId });
+    // the server went ahead and made either. The EnterGame push that follows the reply is already
+    // in flight, so mark the lobby abandoned to stand that down too.
+    if (reply.type === 'LobbyCreated') {
+      abandonedLobbies.add(reply.lobbyId);
+      send({ type: 'LeaveLobby', lobbyId: reply.lobbyId });
+    }
     return;
   }
   if (reply.type === 'LobbyCreated') {
@@ -399,7 +406,10 @@ export async function joinByCode() {
   const abortAt = launchAbortSeq;
   const reply = await request('JoinLobby', { lobbyId: code });
   if (abortAt !== launchAbortSeq) {
-    if (reply.type === 'LobbyJoined') send({ type: 'LeaveLobby', lobbyId: reply.lobbyId });
+    if (reply.type === 'LobbyJoined') {
+      abandonedLobbies.add(reply.lobbyId);   // stand down the EnterGame push already behind this reply
+      send({ type: 'LeaveLobby', lobbyId: reply.lobbyId });
+    }
     lobby = null;
     return;
   }
@@ -446,6 +456,10 @@ export function showRoom() {
 
 // ── In-game: embed the game on its own origin and hand it a scoped ticket ─────
 export async function enterGame(starting) {
+  // A push for a launch the player deliberately backed out of (the reply's abort branch already sent
+  // LeaveLobby). Drop it here, before anything below can raise the overlay or rewrite `lobby` —
+  // enterGame's own launchAbortSeq check comes too late to stop that.
+  if (abandonedLobbies.delete(starting.lobbyId)) return;
   // Only launch games discovered in our catalog (the allowlist refreshGames built). This rejects a
   // EnterGame for an unknown id instead of feeding a server-supplied id straight into the iframe URL.
   const manifest = games.get(starting.gameId);
@@ -621,6 +635,13 @@ let launchTimers = [];
 // Separate from launchSeq because that also moves on a routine dismissal — a launch whose overlay
 // timed out must still finish wiring up the game, whereas an abandoned one must not.
 let launchAbortSeq = 0;
+// The server answers a create/join we've already backed out of: the reply, and right behind it an
+// EnterGame push for the lobby the abort branch just sent LeaveLobby for. Record that lobby so the
+// push is dropped instead of pulling the player into the session they cancelled — enterGame raises
+// the overlay and rewrites `lobby` before it ever reaches its own launchAbortSeq check. Consumed on
+// the first matching push (the server sends exactly one per entry), so a later, genuine join of the
+// same code still enters.
+const abandonedLobbies = new Set();
 // The tile we borrowed from the grid, so its visibility is restored when the launch ends, and the
 // running expand-to-fullscreen animation (see startGameMorph).
 let launchSource = null;
@@ -753,14 +774,26 @@ function setLaunchArt(artUrl) {
   const art = el('launch-art');
   const tile = el('launch-tile');
   if (!art) return;
+  // Stamped with the launch it belongs to: an error arriving from a load we've already moved past
+  // must not hide the tile of the launch that is on screen now.
+  const seq = launchSeq;
+  const failed = () => { if (seq === launchSeq && tile) tile.hidden = true; };
+  art.onerror = null;
   // No art (or a broken thumbnail) means no tile — the dots and the title carry the launch alone.
   if (!artUrl) {
     if (tile) tile.hidden = true;
     art.removeAttribute('src');
     return;
   }
-  art.onerror = () => { if (tile) tile.hidden = true; };
+  // Already showing exactly this art (createLobby raises the overlay, then enterGame re-labels it
+  // with the same game): leave the element — and the tile's shown/hidden state — alone. Reloading an
+  // identical src would blink the tile mid-flight, which is the jolt this design exists to avoid.
+  if (art.getAttribute('src') === artUrl) { art.onerror = failed; return; }
+  // An <img> keeps painting its current image until the pending one decodes, so clear it first:
+  // otherwise a slow (or 404) thumbnail leaves the PREVIOUS game's art sitting on the tile.
+  art.removeAttribute('src');
   art.src = artUrl;
+  art.onerror = failed;
   if (tile) tile.hidden = false;
 }
 
