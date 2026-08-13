@@ -444,3 +444,4 @@ FodyWeavers.xsd
 # Games extracted from .kbg packages found in /games. Re-extracted whenever a package appears or
 # changes, so it is never committed either.
 /games-unpacked/
+/games-managed
