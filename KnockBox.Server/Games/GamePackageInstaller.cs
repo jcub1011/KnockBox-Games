@@ -5,13 +5,18 @@ using KnockBox.Server.Serialization;
 namespace KnockBox.Server.Games;
 
 /// <summary>
-/// Installs <c>.kbg</c> game packages that an administrator copies into the games directory. Copying
-/// the file in is the entire installation procedure — no CLI on the host, no restart.
+/// Installs <c>.kbg</c> game packages. Placing the file in a package root is the entire installation
+/// procedure — no CLI on the host, no restart.
 ///
 /// Because the games directory is mounted READ-ONLY in production (several servers may share one game
 /// library), packages cannot be expanded in place. They are extracted into a separate writable root —
 /// exactly how the pre-compressed asset cache works — which <see cref="GameCatalog"/> searches after
 /// the games directory itself, so a hand-placed folder always wins a contested id.
+///
+/// It scans MORE THAN ONE package root: <c>games/</c>, where an operator drops a package by hand, and
+/// the writable managed root, where the admin portal installs what it fetched or was handed. Roots are
+/// scanned in order and the first to claim an id keeps it, so a hand-placed package always beats a
+/// portal-installed one — the same precedence <see cref="GameCatalog"/> applies to folders.
 ///
 /// This class owns no watcher and no timer. It hangs off <see cref="GameCatalog.Discovered"/>, the
 /// signal the watcher and the polling fallback already drive, and asks for a rediscovery via
@@ -19,17 +24,19 @@ namespace KnockBox.Server.Games;
 /// the catalog's single debounced path, where two scans can't race and publish out of order.
 /// </summary>
 public sealed class GamePackageInstaller(
-    string gamesRoot,
+    IReadOnlyList<GamePackageInstaller.PackageRoot> roots,
     string unpackedRoot,
     GamePackageLimits limits,
     GameAssetPrecompressor? precompressor,
     ILogger<GamePackageInstaller> logger)
 {
-    // Per-game freshness record, written INSIDE the extracted folder. Keeping it there (rather than in
-    // one central index) means it is deleted along with the folder, so the index can never disagree
-    // with what is on disk. Dot-prefixed so PhysicalFileProvider's default exclusion filters never
-    // serve it.
-    private const string MarkerFileName = ".kb-package";
+    /// <summary>One directory scanned for <c>.kbg</c> files.</summary>
+    /// <param name="Token">
+    /// Which root this is, recorded in each extracted game's marker — one of the
+    /// <see cref="PackageMarker"/> root constants. Two roots can hold same-named packages, so the token
+    /// is what stops an extracted game from being matched to the wrong file.
+    /// </param>
+    public readonly record struct PackageRoot(string Path, string Token);
 
     // Staging and to-be-deleted directories live under this single dot-prefixed container. It holds no
     // GAME.json, so GameCatalog skips it silently instead of warning about a folder whose name doesn't
@@ -43,11 +50,23 @@ public sealed class GamePackageInstaller(
     // pass per call and defers the next one to the caller's debounced rescan.
     private readonly Dictionary<string, (long Mtime, long Length)> _lastSeen = new(StringComparer.OrdinalIgnoreCase);
 
-    // Source file name -> the id it installed. Lets an unchanged pass verify the extracted folder's
+    // Source file PATH -> the id it installed. Lets an unchanged pass verify the extracted folder's
     // marker without opening the archive at all: recovering the id was the ONLY reason the no-change
     // path used to seek to the end of a potentially huge ZIP and inflate its header. Empty after a
     // restart, which just means the first pass pays the old cost once.
+    //
+    // Keyed by full path rather than file name because two roots may hold packages with the SAME name:
+    // keyed by name, "demo.kbg" in games/ and "demo.kbg" in the managed root would share one row and
+    // fight over which id it recorded, and Forget would then drop the survivor's bookkeeping too.
     private readonly Dictionary<string, string> _installedIds = new(StringComparer.OrdinalIgnoreCase);
+
+    // Packages this server itself moved into place atomically, vouched for via Adopt so the next pass
+    // installs them without waiting for the two-pass settle check below. A queue rather than a direct
+    // write into _lastSeen because Adopt is called from request/job threads while _lastSeen is touched
+    // only on the (serialized) reconcile pass: an adoption arriving mid-pass simply lands on the next
+    // one, which costs a debounce interval and never correctness.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Path, long Mtime, long Length)>
+        _adoptions = new();
 
     // A package whose source file has been gone for this many consecutive passes is uninstalled.
     // Requiring more than one pass matters because an operator replacing a package by delete-then-copy
@@ -143,20 +162,35 @@ public sealed class GamePackageInstaller(
 
     private ReconcileResult ReconcileOnce()
     {
-        if (!Directory.Exists(gamesRoot)) return default;
+        DrainAdoptions();
 
         // Materialize eagerly so an access failure throws HERE. Pruning on a failed listing would read
         // "no packages exist" and uninstall the entire library over a transient permissions problem, so
-        // this must return before the prune step rather than continuing with an empty list.
-        List<string> packages;
-        try
+        // this must return before the prune step rather than continuing with an empty list. A root that
+        // is merely MISSING is the same hazard for the same reason — it is indistinguishable from every
+        // package in it having been deleted — so it bails too.
+        var packages = new List<(string Path, string Root)>();
+        foreach (var root in roots)
         {
-            packages = [.. Directory.EnumerateFiles(gamesRoot, GamePackage.SearchPattern)];
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            logger.LogError(ex, "Cannot list game packages in {Path}; leaving installed packages untouched.", gamesRoot);
-            return default;
+            if (!Directory.Exists(root.Path)) return default;
+
+            List<string> found;
+            try
+            {
+                found = [.. Directory.EnumerateFiles(root.Path, GamePackage.SearchPattern)];
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogError(ex, "Cannot list game packages in {Path}; leaving installed packages untouched.",
+                    root.Path);
+                return default;
+            }
+
+            // Sorted WITHIN each root and appended in root order, rather than one sort across all of
+            // them: which package wins a contested id then follows root precedence (games/ first) and is
+            // stable across passes and hosts, instead of depending on enumeration order or path spelling.
+            found.Sort(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in found) packages.Add((path, root.Token));
         }
 
         PackagesObserved = packages.Count;
@@ -183,9 +217,6 @@ public sealed class GamePackageInstaller(
         var changed = false;
         var pending = false;
         var failures = new List<string>();
-        // Deterministic order, so which package wins a contested id is stable across passes and hosts
-        // rather than depending on directory-enumeration order.
-        packages.Sort(StringComparer.OrdinalIgnoreCase);
 
         // Game id -> the package file that claimed it, so a second package claiming the same id is
         // reported and ignored rather than fighting over one extracted folder.
@@ -195,13 +226,18 @@ public sealed class GamePackageInstaller(
         // that hasn't settled yet, or one that is quarantined, never gets that far, so "still being
         // copied" and "malformed replacement" both read as "the package is gone" and deleted the
         // extracted game that was serving players perfectly well.
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        //
+        // Two views of the same set, because they answer different questions: seenPaths keys the
+        // _installedIds sweep (which is keyed by path), while live keys the uninstall check against what
+        // a marker records — a (root, file name) pair, since the same name can exist in both roots.
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var path in packages)
+        foreach (var (path, root) in packages)
         {
             try
             {
-                var outcome = Install(path, claimedIds, seen);
+                var outcome = Install(path, root, claimedIds, seenPaths, live);
                 changed |= outcome.Changed;
                 pending |= outcome.Pending;
             }
@@ -220,11 +256,11 @@ public sealed class GamePackageInstaller(
             }
         }
 
-        var uninstall = Uninstall(seen);
+        var uninstall = Uninstall(live);
         changed |= uninstall.Changed;
         pending |= uninstall.Pending;
 
-        Forget(packages, seen);
+        Forget(packages, seenPaths);
 
         InstallFailure = failures.Count == 0
             ? null
@@ -239,28 +275,67 @@ public sealed class GamePackageInstaller(
     /// keeps a settle row for the process lifetime. (<c>_absentPasses</c> is already cleaned as part of
     /// install/uninstall.)
     /// </summary>
-    private void Forget(List<string> packages, HashSet<string> seen)
+    private void Forget(List<(string Path, string Root)> packages, HashSet<string> seenPaths)
     {
-        var live = new HashSet<string>(packages, StringComparer.OrdinalIgnoreCase);
+        var present = new HashSet<string>(packages.Select(p => p.Path), StringComparer.OrdinalIgnoreCase);
 
-        foreach (var stale in _lastSeen.Keys.Where(p => !live.Contains(p)).ToList())
+        foreach (var stale in _lastSeen.Keys.Where(p => !present.Contains(p)).ToList())
             _lastSeen.Remove(stale);
-        foreach (var stale in _quarantined.Keys.Where(p => !live.Contains(p)).ToList())
+        foreach (var stale in _quarantined.Keys.Where(p => !present.Contains(p)).ToList())
             _quarantined.Remove(stale);
-        // Keyed by file NAME, not full path, so it is swept against the pass's seen-set instead.
-        foreach (var stale in _installedIds.Keys.Where(f => !seen.Contains(f)).ToList())
+        // Swept against the pass's seen-set rather than the listing, because a package deleted between
+        // the listing and its Install() call is present here but was never seen.
+        foreach (var stale in _installedIds.Keys.Where(p => !seenPaths.Contains(p)).ToList())
             _installedIds.Remove(stale);
     }
 
+    /// <summary>
+    /// Vouches that a package file is complete, so the next pass installs it without waiting for the
+    /// two-pass settle check. Only ever valid for a file this server renamed into place itself.
+    /// </summary>
+    /// <remarks>
+    /// The settle check exists because copying a large archive in is not atomic, and a half-copied file
+    /// must never be read. A same-volume <see cref="File.Move(string, string, bool)"/> has no such
+    /// window: the file is complete the instant it appears under that name. Making an operator who
+    /// clicked Install wait two debounced passes buys nothing and makes the portal look stuck.
+    ///
+    /// The caller still has to ask for a rescan (<see cref="GameCatalog.ScheduleRescan"/>) — this only
+    /// removes the extra round trip, it does not schedule anything.
+    /// </remarks>
+    public void Adopt(string packagePath)
+    {
+        try
+        {
+            var info = new FileInfo(packagePath);
+            if (info.Exists)
+                _adoptions.Enqueue((Path.GetFullPath(packagePath), info.LastWriteTimeUtc.Ticks, info.Length));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Not adopting is never wrong, only slower: the package settles the ordinary way instead.
+            logger.LogDebug(ex, "Could not adopt {Path}; it will settle over two passes instead.", packagePath);
+        }
+    }
+
+    /// <summary>Seeds the settle record from vouched-for packages. Runs first, on the reconcile thread.</summary>
+    private void DrainAdoptions()
+    {
+        while (_adoptions.TryDequeue(out var adoption))
+            _lastSeen[adoption.Path] = (adoption.Mtime, adoption.Length);
+    }
+
     /// <summary>Installs one package if it is settled, not quarantined, and not already current.</summary>
-    private ReconcileResult Install(string path, Dictionary<string, string> claimedIds, HashSet<string> seen)
+    private ReconcileResult Install(
+        string path, string root, Dictionary<string, string> claimedIds,
+        HashSet<string> seenPaths, HashSet<string> live)
     {
         var info = new FileInfo(path);
         if (!info.Exists) return default; // deleted between listing and now
         var fileName = Path.GetFileName(path);
         // Record the file as PRESENT before any early return below. Every one of them leaves an
         // already-extracted game in place, so the prune step must not read them as "package gone".
-        seen.Add(fileName);
+        seenPaths.Add(path);
+        live.Add(LiveKey(root, fileName));
         var stamp = (info.LastWriteTimeUtc.Ticks, info.Length);
 
         // Settle check: only proceed when this pass sees exactly what the previous pass saw. Pending, not
@@ -286,8 +361,8 @@ public sealed class GamePackageInstaller(
         // opening it for. Recovering the id is the only thing the open bought us, and a ZIP's central
         // directory lives at the END of the file — so this is what makes Reconcile's documented cost
         // (a listing plus a stat per package) true rather than aspirational.
-        if (_installedIds.TryGetValue(fileName, out var knownId)
-            && IsCurrent(Path.Combine(unpackedRoot, knownId), path, stamp))
+        if (_installedIds.TryGetValue(path, out var knownId)
+            && IsCurrent(Path.Combine(unpackedRoot, knownId), path, root, stamp))
         {
             if (!TryClaim(knownId, path, claimedIds)) return default;
             logger.LogDebug("Game package {File} is already installed and current.", fileName);
@@ -310,9 +385,9 @@ public sealed class GamePackageInstaller(
         // looked like it was doing something.
         var target = Path.Combine(unpackedRoot, id);
 
-        if (IsCurrent(target, path, stamp))
+        if (IsCurrent(target, path, root, stamp))
         {
-            _installedIds[fileName] = id; // seed the fast path (e.g. first pass after a restart)
+            _installedIds[path] = id; // seed the fast path (e.g. first pass after a restart)
             logger.LogDebug("Game package {File} is already installed and current.", fileName);
             return default;
         }
@@ -323,13 +398,13 @@ public sealed class GamePackageInstaller(
         try
         {
             var written = GamePackageReader.Extract(plan, staging, limits);
-            WriteMarker(staging, path, stamp);
+            PackageMarker.Write(staging, path, root, stamp);
             SwapIntoPlace(staging, target);
 
             logger.LogInformation("Installed game package '{Id}' ({Name}{Version}) from {File}: {Count} file(s).",
                 id, header.Name ?? id, header.Version is null ? "" : " " + header.Version, fileName, written.Count);
 
-            _installedIds[fileName] = id;
+            _installedIds[path] = id;
             Seed(plan, id, target);
             return new ReconcileResult(Changed: true, Pending: false);
         }
@@ -469,9 +544,11 @@ public sealed class GamePackageInstaller(
     /// Uninstalls extracted games whose source package has been gone for long enough.
     /// </summary>
     /// <param name="live">
-    /// The package file names that were PRESENT this pass — not the ones that installed successfully.
+    /// The (root, file name) keys that were PRESENT this pass — not the ones that installed successfully.
     /// A package still being copied, or one quarantined as malformed, is very much still there, and its
-    /// previously-extracted game must survive until the file itself is actually removed.
+    /// previously-extracted game must survive until the file itself is actually removed. Keyed by root as
+    /// well as name so a "demo.kbg" appearing in one root does not vouch for an extracted game that came
+    /// from a same-named package in the other.
     /// </param>
     private ReconcileResult Uninstall(HashSet<string> live)
     {
@@ -496,15 +573,16 @@ public sealed class GamePackageInstaller(
             var name = new DirectoryInfo(dir).Name;
             if (name == StagingDirName) continue;
 
-            var source = ReadMarkerSource(dir);
+            var marker = PackageMarker.TryRead(dir);
             // No marker means this folder was not put here by a completed install (a crash mid-swap, or
             // something an operator dropped into a server-owned cache). Either way it is not ours to
             // keep, but it still goes through the same patience as a vanished package.
-            if (source is not null && live.Contains(source))
+            if (marker is { } found && live.Contains(LiveKey(found.Root, found.Source)))
             {
                 _absentPasses.Remove(name);
                 continue;
             }
+            var source = marker?.Source;
 
             var misses = _absentPasses.GetValueOrDefault(name) + 1;
             _absentPasses[name] = misses;
@@ -533,44 +611,20 @@ public sealed class GamePackageInstaller(
     }
 
     /// <summary>True when the extracted folder was produced by exactly this package file and version.</summary>
-    private bool IsCurrent(string target, string packagePath, (long Mtime, long Length) stamp)
+    private static bool IsCurrent(string target, string packagePath, string root, (long Mtime, long Length) stamp)
     {
         if (!Directory.Exists(target)) return false;
-        var marker = ReadMarker(target);
+        var marker = PackageMarker.TryRead(target);
         return marker is not null
             && marker.Value.Mtime == stamp.Mtime
             && marker.Value.Length == stamp.Length
+            && string.Equals(marker.Value.Root, root, StringComparison.OrdinalIgnoreCase)
             && string.Equals(marker.Value.Source, Path.GetFileName(packagePath), StringComparison.OrdinalIgnoreCase);
     }
 
-    // Format: "<mtimeTicks>\t<length>\t<source file name>". The name is last so a tab in a filename
-    // can't corrupt the numeric fields — same convention as the pre-compress index.
-    private void WriteMarker(string dir, string packagePath, (long Mtime, long Length) stamp) =>
-        File.WriteAllText(Path.Combine(dir, MarkerFileName),
-            $"{stamp.Mtime}\t{stamp.Length}\t{Path.GetFileName(packagePath)}\n");
-
-    private (long Mtime, long Length, string Source)? ReadMarker(string dir)
-    {
-        var path = Path.Combine(dir, MarkerFileName);
-        if (!File.Exists(path)) return null;
-        try
-        {
-            var line = File.ReadLines(path).FirstOrDefault();
-            if (line is null) return null;
-            var parts = line.Split('\t', 3);
-            if (parts.Length < 3) return null;
-            if (!long.TryParse(parts[0], out var mtime)) return null;
-            if (!long.TryParse(parts[1], out var length)) return null;
-            return (mtime, length, parts[2]);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Unreadable marker just means "looks stale", which reinstalls. Safe.
-            return null;
-        }
-    }
-
-    private string? ReadMarkerSource(string dir) => ReadMarker(dir)?.Source;
+    // Identifies a package across roots. The separator is a character no file name may contain, so
+    // "managed" + "a\0b.kbg" can never collide with "managed\0a" + "b.kbg".
+    private static string LiveKey(string root, string fileName) => root + '\0' + fileName;
 
     private void Quarantine(string path)
     {

@@ -27,9 +27,10 @@ var contentPaths = ContentPaths.Resolve(
     builder.Configuration["KnockBox:LogsRoot"],
     builder.Configuration["KnockBox:GamesCompressedRoot"],
     builder.Configuration["KnockBox:GamesUnpackedRoot"],
+    builder.Configuration["KnockBox:GamesManagedRoot"],
     builder.Environment.ContentRootPath,
     AppContext.BaseDirectory);
-var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot) = contentPaths;
+var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot, gamesManagedRoot) = contentPaths;
 
 // Pre-compress game assets once into gamesCompressedRoot and serve those variants via Accept-Encoding
 // negotiation, instead of re-compressing every full-body response on the fly (see the ResponseCompression
@@ -49,6 +50,19 @@ var precompressReconcileSeconds = builder.Configuration.GetValue("KnockBox:Preco
 var packagesEnabled = builder.Configuration.GetValue("KnockBox:Packages", true);
 var packageLimits = GamePackageLimits.FromConfiguration(builder.Configuration);
 
+// The writable package root the ADMIN PORTAL installs into. gamesRoot is mounted read-only in
+// production, so a package the portal fetched or was handed cannot be written there — it goes here and
+// the installer scans both roots. Off ⇒ the root is never created and portal installs are refused;
+// hand-dropped packages in gamesRoot keep working either way.
+// Folded together because a managed root is worthless without the installer that reads it: with
+// KnockBox:Packages=false nothing would ever extract what the portal installed, so the engine reports
+// itself unavailable rather than accepting packages into a folder nothing scans.
+var packageManagerOptions = PackageManagerOptions.FromConfiguration(builder.Configuration) with
+{
+    Enabled = packagesEnabled && builder.Configuration.GetValue("KnockBox:ManagedPackages", true),
+};
+var managedPackagesEnabled = packageManagerOptions.Enabled;
+
 // Official marketplace: where admins browse and download game packages from. See docs/MARKETPLACE.md.
 var marketplaceOptions = MarketplaceOptions.FromConfiguration(builder.Configuration);
 
@@ -62,6 +76,7 @@ var diagnostics = new DeploymentDiagnostics();
 List<string> bootstrapDirs = [webRoot, gamesRoot, logsRoot];
 if (precompressEnabled) bootstrapDirs.Add(gamesCompressedRoot);
 if (packagesEnabled) bootstrapDirs.Add(gamesUnpackedRoot);
+if (managedPackagesEnabled) bootstrapDirs.Add(gamesManagedRoot);
 foreach (var dir in bootstrapDirs)
 {
     try { Directory.CreateDirectory(dir); }
@@ -82,6 +97,7 @@ foreach (var dir in bootstrapDirs)
 List<(string Dir, string Label)> writableDirs = [(logsRoot, "Logs folder")];
 if (precompressEnabled) writableDirs.Add((gamesCompressedRoot, "Pre-compressed cache"));
 if (packagesEnabled) writableDirs.Add((gamesUnpackedRoot, "Game package cache"));
+if (managedPackagesEnabled) writableDirs.Add((gamesManagedRoot, "Managed package folder"));
 foreach (var (dir, label) in writableDirs)
 {
     if (!Directory.Exists(dir)) continue; // a create failure above already reported it
@@ -210,22 +226,41 @@ if (precompressEnabled)
         gamesCompressedRoot, precompressGzip, precompressMinBytes,
         sp.GetRequiredService<ILogger<GameAssetPrecompressor>>()));
 // Registered as a singleton (rather than constructed inline) so the container disposes it on shutdown.
+// The root ORDER is the precedence rule: games/ is scanned first, so a package an operator dropped in
+// by hand beats a portal-installed one for a contested id — matching GameCatalog's folder precedence.
+List<GamePackageInstaller.PackageRoot> packageRoots =
+    [new(gamesRoot, PackageMarker.GamesRoot)];
+if (managedPackagesEnabled) packageRoots.Add(new(gamesManagedRoot, PackageMarker.ManagedRoot));
 if (packagesEnabled)
     builder.Services.AddSingleton(sp => new GamePackageInstaller(
-        gamesRoot, gamesUnpackedRoot, packageLimits,
+        packageRoots, gamesUnpackedRoot, packageLimits,
         precompressEnabled ? sp.GetRequiredService<GameAssetPrecompressor>() : null,
         sp.GetRequiredService<ILogger<GamePackageInstaller>>()));
-// The official game marketplace: fetch the catalog and download packages from it. Nothing calls
-// this yet (there is no admin UI for it), and it starts no timer and makes no request on its own —
-// registering it now just means the eventual UI is a route table addition. Off ⇒ the server holds no
-// HttpClient at all, which is the posture an air-gapped deployment wants.
+// The game marketplaces: the official catalog plus any the operator registered. Off ⇒ the server holds
+// no HttpClient at all and makes no outbound request, which is the posture an air-gapped deployment
+// wants — while uploading, rolling back and uninstalling a package all keep working.
+//
+// The OPTIONS are registered unconditionally (they carry Enabled themselves, so anything that needs to
+// explain the switch can resolve them); only the registry, which owns the HttpClient, is conditional.
+builder.Services.AddSingleton(marketplaceOptions);
 if (marketplaceOptions.Enabled)
 {
-    builder.Services.AddSingleton(marketplaceOptions);
-    builder.Services.AddSingleton(sp => new MarketplaceClient(
-        MarketplaceClient.CreateHttpClient(marketplaceOptions), marketplaceOptions, packageLimits,
-        sp.GetRequiredService<ILogger<MarketplaceClient>>()));
+    // One HttpClient shared by every source: CreateHttpClient reads nothing source-specific, so a
+    // client per marketplace would only cost connection pools.
+    var marketplaceHttp = MarketplaceClient.CreateHttpClient();
+    builder.Services.AddSingleton(sp => new MarketplaceSourceRegistry(
+        marketplaceHttp, marketplaceOptions, packageLimits,
+        sp.GetRequiredService<AdminSettingsStore>(),
+        builder.Configuration.GetValue("KnockBox:MarketplaceMaxSources",
+            MarketplaceSourceRegistry.DefaultMaxSources),
+        sp.GetRequiredService<ILoggerFactory>()));
+    // The policy layer over the install engine — which games this server may update on its own.
+    builder.Services.AddSingleton<GameUpdateCoordinator>();
 }
+// How often the scheduled check runs. 0 = never; the portal's own Refresh is unaffected either way.
+var marketplacePollMinutes = marketplaceOptions.Enabled
+    ? builder.Configuration.GetValue("KnockBox:MarketplacePollMinutes", 360)
+    : 0;
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 // Explicit factory (not AddSingleton<LobbyManager>) so the clock that stamps Lobby.CreatedAt — which
@@ -246,12 +281,34 @@ builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
 builder.Services.AddSingleton<AdminSettingsStore>();
-// The relay asks the policy questions through the narrow IPlatformPolicy; the settings store is the
-// implementation. Forwarded to the same instance so a toggle in the portal is seen by the next
-// lobby-create immediately, with no second copy of the state to keep in step.
-builder.Services.AddSingleton<IPlatformPolicy>(sp => sp.GetRequiredService<AdminSettingsStore>());
+// The relay asks the policy questions through the narrow IPlatformPolicy. Two layers answer them: the
+// settings store (persisted operator policy) and the lifecycle gate laid over it (transient "this game
+// is mid-update"). The gate composes the store rather than replacing it, and is what IPlatformPolicy
+// resolves to — so a toggle in the portal AND an in-flight update are both seen by the next
+// lobby-create immediately, with no second copy of either state to keep in step.
+builder.Services.AddSingleton<GameLifecycleGate>();
+builder.Services.AddSingleton<IPlatformPolicy>(sp => sp.GetRequiredService<GameLifecycleGate>());
 builder.Services.AddSingleton<DiskUsageReporter>();
 builder.Services.AddSingleton<AdminOperations>();
+
+// The install engine: the job feed the portal polls, and the manager that writes to the managed root.
+// Both are registered even when ManagedPackages is off — the manager then refuses every install with a
+// reason the portal can show, which is far more useful than an endpoint that isn't there.
+builder.Services.AddSingleton(packageManagerOptions);
+builder.Services.AddSingleton(sp => new PackageJobRegistry(
+    sp.GetRequiredService<TimeProvider>(), packageManagerOptions.JobRetention));
+builder.Services.AddSingleton(sp => new PackageManager(
+    contentPaths,
+    sp.GetRequiredService<GameCatalog>(),
+    packagesEnabled ? sp.GetRequiredService<GamePackageInstaller>() : null,
+    sp.GetRequiredService<PackageJobRegistry>(),
+    sp.GetRequiredService<GameLifecycleGate>(),
+    sp.GetRequiredService<LobbyManager>(),
+    sp.GetRequiredService<LobbyCloser>(),
+    packageLimits,
+    packageManagerOptions,
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILogger<PackageManager>>()));
 
 // Compress responses (game bundles are large). Brotli + Gzip, including the engine asset
 // types that are off the default list. Level = Fastest to bound the CPU cost of compressing
@@ -325,6 +382,17 @@ if (packagesEnabled && (IsUnder(gamesUnpackedRoot, gamesRoot) || IsUnder(gamesRo
     diagnostics.Report("Game package cache overlaps the games folder",
         $"KnockBox:GamesUnpackedRoot ('{gamesUnpackedRoot}') and KnockBox:GamesRoot ('{gamesRoot}') must not contain " +
         "one another — the cache is written by the server and must stay outside the games folder it reads.",
+        blocking: true);
+// The managed package root gets the same treatment, and additionally must not sit inside the unpacked
+// root: the installer would find its own packages while enumerating extracted games, and Uninstall
+// deletes any folder there that carries no marker.
+if (managedPackagesEnabled &&
+    (IsUnder(gamesManagedRoot, gamesRoot) || IsUnder(gamesRoot, gamesManagedRoot)
+     || IsUnder(gamesManagedRoot, gamesUnpackedRoot) || IsUnder(gamesUnpackedRoot, gamesManagedRoot)))
+    diagnostics.Report("Managed package folder overlaps another root",
+        $"KnockBox:GamesManagedRoot ('{gamesManagedRoot}') must not contain, or sit inside, " +
+        $"KnockBox:GamesRoot ('{gamesRoot}') or KnockBox:GamesUnpackedRoot ('{gamesUnpackedRoot}'). " +
+        "It holds packages the server writes and must stay outside both.",
         blocking: true);
 // A web root without the shell means a blank site — make the misconfiguration loud and diagnosable
 // instead of silently serving nothing. (Blocking: surfaced on the home-page warning below.)
@@ -500,6 +568,10 @@ if (installer is not null)
     diagnostics.AddProbe("A game package could not be installed", () => installer.InstallFailure);
 }
 
+// A download or upload the process died in the middle of leaves a .part file behind. Swept once at
+// startup, which is the only moment nothing can be using one.
+if (managedPackagesEnabled) app.Services.GetRequiredService<PackageManager>().SweepStaging();
+
 catalog.Discover();
 catalog.StartWatching();
 // Polling safety net for bind mounts where file events don't propagate (Docker Desktop). 0 = off.
@@ -520,6 +592,37 @@ if (precompressor is not null && precompressReconcileSeconds > 0)
         catch (Exception ex) { app.Logger.LogError(ex, "Scheduled pre-compression reconcile failed."); }
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => precompressTimer.Dispose());
+}
+
+// Scheduled marketplace check: fetch the registered catalogs and start an update for each game the
+// operator ENROLLED (nothing is enrolled by default, and a pass with an empty enrolment makes no
+// request at all). 6 hours by default — the catalog is a CDN-fronted file with ETag support, so a poll
+// is one 304 and no re-parse, and games publish rarely; a tighter interval multiplied across every
+// deployment is unkind to the origin for no gain. 0 = off. Disposed on shutdown.
+Timer? marketplacePollTimer = null;
+if (marketplacePollMinutes > 0 && app.Services.GetService<GameUpdateCoordinator>() is { } updateCoordinator)
+{
+    var interval = TimeSpan.FromMinutes(marketplacePollMinutes);
+    // Jittered first tick, so a fleet restarted together doesn't thunder at the catalog host.
+    var first = interval + TimeSpan.FromSeconds(Random.Shared.Next(0, 300));
+    marketplacePollTimer = new Timer(_ =>
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var pass = await updateCoordinator.RunOnceAsync(app.Lifetime.ApplicationStopping);
+                if (pass.Started > 0)
+                    app.Logger.LogInformation("Scheduled marketplace check started {Started} update(s).",
+                        pass.Started);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                app.Logger.LogError(ex, "Scheduled marketplace check failed.");
+            }
+        });
+    }, null, first, interval);
+    app.Lifetime.ApplicationStopping.Register(() => marketplacePollTimer.Dispose());
 }
 
 // Reconnect-grace reaper: a member whose shell socket drops is kept in their lobby for
@@ -715,7 +818,13 @@ app.MapWhen(
             app.Services.GetRequiredService<LobbyCloser>(),
             catalog,
             adminSettings,
+            app.Services.GetRequiredService<GameLifecycleGate>(),
             app.Services.GetRequiredService<AdminOperations>(),
+            app.Services.GetRequiredService<PackageManager>(),
+            packageManagerOptions,
+            packageLimits,
+            app.Services.GetService<MarketplaceSourceRegistry>(),
+            app.Services.GetService<GameUpdateCoordinator>(),
             adminLogBuffer,
             app.Services.GetRequiredService<DiskUsageReporter>(),
             relayMetrics,

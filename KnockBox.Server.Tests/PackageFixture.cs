@@ -45,6 +45,34 @@ internal static class PackageFixture
     }
 
     /// <summary>
+    /// A well-formed package whose GAME.json ALSO declares the version, so an installed game reports it.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Valid"/> puts the version only in the <c>KBG.json</c> header, which is what the
+    /// installer reads. <c>GameCatalog</c> reads <c>GAME.json</c>, so anything asserting on the version
+    /// of an INSTALLED game — updates, rollbacks, the marketplace's installed-side check — needs it in
+    /// both places, exactly as a real packed game has it.
+    /// </remarks>
+    internal static byte[] Versioned(string id, string name, string? version, params File[] extra)
+    {
+        var manifest = version is null
+            ? $$"""{"id":"{{id}}","name":"{{name}}","entry":"index.html","maxPlayers":2}"""
+            : $$"""{"id":"{{id}}","name":"{{name}}","entry":"index.html","maxPlayers":2,"version":"{{version}}"}""";
+        return Build(id, name, [
+            new File("GAME.json", Bytes(manifest)),
+            new File("index.html", Bytes("<!doctype html><title>demo</title>")),
+            .. extra,
+        ], version: version);
+    }
+
+    /// <summary>A ZIP with no KBG.json — the shape of a plain folder archive an operator uploads by mistake.</summary>
+    internal static byte[] ZipWithoutHeader(string id = "demo") =>
+        Build(id, id, [
+            new File("GAME.json", Bytes(DefaultManifest)),
+            new File("index.html", Bytes("<!doctype html><title>demo</title>")),
+        ], omitHeader: true);
+
+    /// <summary>
     /// Builds a package with full control over the header and the archive, so a test can break exactly
     /// one rule. Pass <paramref name="headerJson"/> to replace the generated header wholesale.
     /// </summary>

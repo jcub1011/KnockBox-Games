@@ -1,9 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using KnockBox.Contracts;
+using Microsoft.AspNetCore.Http.Features;
 using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
+using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using KnockBox.Server.Serialization;
@@ -46,7 +48,15 @@ internal static class AdminApi
         LobbyCloser Closer,
         GameCatalog Catalog,
         AdminSettingsStore Settings,
+        GameLifecycleGate Lifecycle,
         AdminOperations Operations,
+        PackageManager Packages,
+        PackageManagerOptions PackageOptions,
+        GamePackageLimits PackageLimits,
+        // Null when KnockBox:MarketplaceEnabled is false — the same nullable-when-disabled precedent as
+        // Authorities. Every package route except install keeps working without it.
+        MarketplaceSourceRegistry? Marketplace,
+        GameUpdateCoordinator? Updates,
         AdminLogBuffer Logs,
         DiskUsageReporter Disk,
         RelayMetrics Relay,
@@ -91,6 +101,9 @@ internal static class AdminApi
             routes.MapGet("/admin/api/logs/files", RequireSession(options, ctx => LogFiles(ctx, options)));
             routes.MapGet("/admin/api/logs/files/{name}",
                 RequireSession(options, ctx => DownloadLogFile(ctx, options)));
+            routes.MapGet("/admin/api/packages/jobs", RequireSession(options, ctx => Jobs(ctx, options)));
+            routes.MapGet("/admin/api/packages/jobs/{jobId}", RequireSession(options, ctx => Job(ctx, options)));
+            routes.MapGet("/admin/api/marketplace/catalog", RequireSession(options, ctx => Catalog(ctx, options)));
 
             // ── Mutations ──
             // Every one of these is gated by RequireSession AND by the mutation guard inside WriteGuard,
@@ -111,6 +124,30 @@ internal static class AdminApi
                 RequireSession(options, WriteGuard(ctx => DeleteGame(ctx, options))));
             routes.MapPost("/admin/api/maintenance",
                 RequireSession(options, WriteGuard(ctx => SetMaintenance(ctx, options))));
+
+            // ── Packages ──
+            // Separate from /games/* on purpose: these are the INSTALLED-side lifecycle, and every one of
+            // them keeps working on an air-gapped host where the marketplace is switched off entirely.
+            routes.MapPost("/admin/api/packages/upload",
+                RequireSession(options, WriteGuard(ctx => UploadPackage(ctx, options), MediaKind.Package)));
+            routes.MapPost("/admin/api/packages/{id}/rollback",
+                RequireSession(options, WriteGuard(ctx => Rollback(ctx, options))));
+            routes.MapPost("/admin/api/packages/{id}/uninstall",
+                RequireSession(options, WriteGuard(ctx => Uninstall(ctx, options))));
+            routes.MapPost("/admin/api/packages/jobs/{jobId}/cancel",
+                RequireSession(options, WriteGuard(ctx => CancelJob(ctx, options))));
+
+            // ── Marketplace ──
+            routes.MapPost("/admin/api/marketplace/install/{id}",
+                RequireSession(options, WriteGuard(ctx => InstallFromMarketplace(ctx, options))));
+            routes.MapPost("/admin/api/marketplace/sources",
+                RequireSession(options, WriteGuard(ctx => AddSource(ctx, options))));
+            routes.MapPost("/admin/api/marketplace/sources/{id}/delete",
+                RequireSession(options, WriteGuard(ctx => RemoveSource(ctx, options))));
+            routes.MapPost("/admin/api/marketplace/check",
+                RequireSession(options, WriteGuard(ctx => CheckForUpdates(ctx, options))));
+            routes.MapPost("/admin/api/packages/{id}/update-policy",
+                RequireSession(options, WriteGuard(ctx => SetUpdatePolicy(ctx, options))));
         });
     }
 
@@ -401,11 +438,13 @@ internal static class AdminApi
             byId.TryGetValue(id, out var usage);
             lobbyCounts.TryGetValue(id, out var counts);
 
-            var packageBacked = File.Exists(Path.Combine(options.Paths.GamesRoot, manifest.Id + GamePackage.Extension));
+            // Resolved from the marker, not derived as GamesRoot/<id>.kbg: the installer accepts any
+            // *.kbg file name, and a portal-installed package lives in the managed root entirely.
+            var package = GamePackageLocations.Find(options.Paths, manifest.Id);
             var underPackages = location.Directory.StartsWith(options.Paths.GamesUnpackedRoot, StringComparison.OrdinalIgnoreCase);
             // Whether Delete could work is answered here so the portal can disable the button and say why,
             // rather than offering an action that always fails on a read-only games mount.
-            var blocked = DeleteBlockedReason(options, location.Directory, packageBacked);
+            var blocked = DeleteBlockedReason(options, location.Directory, package);
 
             games.Add(new AdminGameSummary(
                 manifest.Id,
@@ -416,15 +455,20 @@ internal static class AdminApi
                 manifest.ServerAuthority is not null,
                 location.Directory,
                 underPackages ? "packages" : "games",
-                packageBacked,
+                package is not null,
+                package?.Root,
                 usage?.TotalBytes ?? 0,
                 usage?.DirectoryBytes ?? 0,
                 usage?.CompressedBytes ?? 0,
                 usage?.PackageBytes ?? 0,
+                usage?.BackupBytes ?? 0,
                 counts.Lobbies,
                 counts.Players,
                 blocked is null,
-                blocked));
+                blocked,
+                Camel(options.Lifecycle.StateOf(manifest.Id).ToString()),
+                Camel(options.Settings.GetUpdatePolicy(manifest.Id).ToString()),
+                options.Packages.Jobs.ActiveFor(manifest.Id)?.JobId));
         }
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
@@ -436,19 +480,25 @@ internal static class AdminApi
             options.Catalog.ScanError,
             disk.TakenAt.UtcDateTime.ToString("O"),
             disk.CompressedCacheBytes,
-            disk.LogsBytes));
+            disk.LogsBytes,
+            options.Paths.GamesManagedRoot,
+            disk.ManagedRootBytes));
     }
 
     // A cheap, read-only guess at whether the files could be removed: it checks the directories that
     // would have to be written to. AdminOperations.DeleteGame probes them for real before touching
     // anything, so this only decides whether the portal offers the button.
-    private static string? DeleteBlockedReason(Options options, string directory, bool packageBacked)
+    private static string? DeleteBlockedReason(
+        Options options, string directory, GamePackageLocations.PackageLocation? package)
     {
         var parent = Path.GetDirectoryName(Path.GetFullPath(directory));
         if (parent is not null && !DirectoryWritable(parent))
             return $"'{parent}' is not writable by the server (in production the games folder is mounted read-only).";
-        if (packageBacked && !DirectoryWritable(options.Paths.GamesRoot))
-            return $"the source package in '{options.Paths.GamesRoot}' can't be removed, so the game would reinstall itself.";
+        // The package's OWN root, not always games/: a portal-installed package sits in the managed root,
+        // which is writable by design — which is what makes deleting those games work in production.
+        if (package is { } source && Path.GetDirectoryName(source.Path) is { } packageDir
+            && !DirectoryWritable(packageDir))
+            return $"the source package in '{packageDir}' can't be removed, so the game would reinstall itself.";
         return null;
     }
 
@@ -599,6 +649,453 @@ internal static class AdminApi
             closed, body.GameId ?? "all");
         await WriteAction(ctx, new AdminActionResponse(true, Affected: closed));
     }
+
+    // ── Packages ──────────────────────────────────────────────────────────────
+
+    private static Task Jobs(HttpContext ctx, Options options)
+    {
+        _ = long.TryParse(ctx.Request.Query["after"], out var after);
+        _ = int.TryParse(ctx.Request.Query["limit"], out var limit);
+        var registry = options.Packages.Jobs;
+
+        // A cursor of 0 means "I have nothing" — hand over the whole retained set so a portal that just
+        // opened the tab, or came back to it, sees outcomes it missed rather than an empty strip.
+        var jobs = after > 0
+            ? registry.Read(after, limit is > 0 and <= 500 ? limit : 200)
+            : registry.Snapshot();
+
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobsResponse, new AdminJobsResponse(
+            [.. jobs.Select(ToSummary)],
+            registry.LastSequence,
+            registry.ActiveCount,
+            registry.Count));
+    }
+
+    private static Task Job(HttpContext ctx, Options options)
+    {
+        var jobId = ctx.GetRouteValue("jobId") as string ?? "";
+        return options.Packages.Jobs.Get(jobId) is { } job
+            ? WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobSummary, ToSummary(job))
+            : Refuse(ctx, StatusCodes.Status404NotFound, $"No job with id '{jobId}'.");
+    }
+
+    private static AdminJobSummary ToSummary(PackageJob job) => new(
+        job.JobId,
+        job.Sequence,
+        Camel(job.Kind.ToString()),
+        Camel(job.Source.ToString()),
+        job.GameId,
+        job.GameName,
+        job.FromVersion,
+        job.ToVersion,
+        Camel(job.Status.ToString()),
+        job.Phase,
+        job.BytesDone,
+        job.BytesTotal,
+        Camel(job.Mode.ToString()),
+        job.StartedAt.UtcDateTime.ToString("O"),
+        job.EndedAt?.UtcDateTime.ToString("O"),
+        job.Error,
+        job.Warning,
+        job.LobbiesWaiting,
+        job.Cancellable,
+        job.IsTerminal);
+
+    // Enum names go over the wire camelCased, matching how GameAvailability is reported: the portal
+    // compares them as strings, and "waitingForLobbies" is what a JS switch reads naturally.
+    private static string Camel(string name) => char.ToLowerInvariant(name[0]) + name[1..];
+
+    private static async Task UploadPackage(HttpContext ctx, Options options)
+    {
+        var manager = options.Packages;
+        if (manager.InstallBlockedReason() is { } blocked)
+        {
+            // 409, not 500: a deployment limit rather than a fault — the same meaning DeleteGame gives it.
+            await Refuse(ctx, StatusCodes.Status409Conflict, blocked);
+            return;
+        }
+
+        // Kestrel's default 30 MB body cap would reject a large game long before MaxPackageBytes had
+        // anything to say about it. Raised for THIS endpoint only — no other route has any business
+        // accepting a body this size.
+        if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodySize)
+            bodySize.MaxRequestBodySize = options.PackageLimits.MaxBytes + 4096;
+
+        // Rejected in one round trip when the client is honest about the size. The real enforcement is
+        // still the byte count while streaming, because Content-Length is the client's claim.
+        if (ctx.Request.ContentLength > options.PackageLimits.MaxBytes)
+        {
+            await Refuse(ctx, StatusCodes.Status413PayloadTooLarge,
+                $"The package exceeds the {options.PackageLimits.MaxBytes:N0}-byte limit " +
+                "(KnockBox:MaxPackageBytes).");
+            return;
+        }
+
+        PackageManager.StagedPackage staged;
+        try
+        {
+            staged = await manager.ReceiveAsync(ctx.Request.Body, ctx.RequestAborted);
+        }
+        catch (PackageManager.PackageTooLargeException ex)
+        {
+            await Refuse(ctx, StatusCodes.Status413PayloadTooLarge, ex.Message);
+            return;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            await Refuse(ctx, StatusCodes.Status500InternalServerError,
+                $"The upload could not be stored ({ex.Message}).");
+            return;
+        }
+
+        var mode = ParseMode(ctx.Request.Query["mode"]);
+        var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, mode);
+        if (!start.Started)
+        {
+            await Refuse(ctx, StatusFor(start.Refusal), start.Error ?? "The package could not be installed.");
+            return;
+        }
+
+        options.Logger.LogInformation("Admin uploaded a package for '{GameId}' ({Bytes} bytes).",
+            start.Job!.GameId, staged.Bytes);
+        // 202: the bytes are accepted and validated, but nothing has been swapped yet. Claiming 200 here
+        // would say the game is installed when it may still be waiting for a lobby to end.
+        await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobResponse,
+            new AdminJobResponse(true, JobId: start.Job.JobId, Detail: start.Job.Phase),
+            StatusCodes.Status202Accepted);
+    }
+
+    private static async Task Rollback(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminRollbackRequest)
+                   ?? new AdminRollbackRequest();
+
+        var start = options.Packages.StartRollback(id, NullIfBlank(body.Version), ParseMode(body.Mode));
+        if (!start.Started)
+        {
+            await Refuse(ctx, StatusFor(start.Refusal), start.Error ?? "The rollback could not be started.");
+            return;
+        }
+
+        options.Logger.LogWarning("Admin started a rollback of '{GameId}' to {Version}.",
+            start.Job!.GameId, start.Job.ToVersion ?? "the retained version");
+        await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobResponse,
+            new AdminJobResponse(true, JobId: start.Job.JobId, Detail: start.Job.Phase),
+            StatusCodes.Status202Accepted);
+    }
+
+    private static async Task Uninstall(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (!options.Catalog.GameLocations.TryGetValue(id, out var location))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No installed game with id '{id}'.");
+            return;
+        }
+
+        var gameId = location.Manifest.Id;
+        var registry = options.Packages.Jobs;
+        if (registry.ActiveFor(gameId) is { } running)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                $"'{gameId}' already has a {Camel(running.Kind.ToString())} in progress ({running.Phase}).");
+            return;
+        }
+
+        // Deletion itself is AdminOperations' job — it already closes lobbies first, probes every parent
+        // for writability before removing anything, and cleans the compressed cache and backups. This
+        // only wraps it so the operation shows up in the same feed as everything else the portal starts.
+        var job = registry.Create(PackageJobKind.Uninstall, PackageJobSource.None, gameId,
+            location.Manifest.Name, location.Manifest.Version, null, PackageApplyMode.Force);
+        var operations = options.Operations;
+        var logger = options.Logger;
+
+        _ = Task.Run(() =>
+        {
+            registry.SetStatus(job.JobId, PackageJobStatus.Applying, "Removing files.");
+            var result = operations.DeleteGame(gameId);
+            if (result.Success)
+            {
+                logger.LogWarning("Admin uninstalled '{GameId}', closing {Lobbies} lobby/lobbies.",
+                    gameId, result.LobbiesClosed);
+                registry.Finish(job.JobId, PackageJobStatus.Succeeded,
+                    result.LobbiesClosed > 0
+                        ? $"Uninstalled, and closed {result.LobbiesClosed} running lobby/lobbies."
+                        : "Uninstalled.");
+            }
+            else
+            {
+                registry.Finish(job.JobId, PackageJobStatus.Failed, "Failed.", result.Error);
+            }
+        });
+
+        await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobResponse,
+            new AdminJobResponse(true, JobId: job.JobId, Detail: "Uninstalling."),
+            StatusCodes.Status202Accepted);
+    }
+
+    private static Task CancelJob(HttpContext ctx, Options options)
+    {
+        var jobId = ctx.GetRouteValue("jobId") as string ?? "";
+        return options.Packages.Jobs.Cancel(jobId) switch
+        {
+            PackageCancelOutcome.Cancelled => WriteAction(ctx,
+                new AdminActionResponse(true, Detail: "Cancelling; the job stops at its next checkpoint.")),
+            PackageCancelOutcome.NotFound => Refuse(ctx, StatusCodes.Status404NotFound,
+                $"No job with id '{jobId}'."),
+            // 409 rather than 400: nothing about the request is wrong, the job has simply passed the
+            // point where stopping would leave a half-swapped game directory behind.
+            _ => Refuse(ctx, StatusCodes.Status409Conflict,
+                "This job is already installing files and can no longer be cancelled."),
+        };
+    }
+
+    // ── Marketplace ───────────────────────────────────────────────────────────
+
+    private static async Task Catalog(HttpContext ctx, Options options)
+    {
+        var manager = options.Packages;
+        var registry = options.Marketplace;
+        var jobs = manager.Jobs;
+        var blocked = manager.InstallBlockedReason();
+
+        // The cached snapshot by default. ?refresh=1 is the ONLY thing that reaches the network: a fetch
+        // carries a 30-second timeout, so making it the tab's poll target would be indefensible.
+        var refresh = ctx.Request.Query["refresh"] == "1";
+        IReadOnlyList<SourceCatalog> fetched = registry is null
+            ? []
+            : await registry.FetchAllAsync(refresh, ctx.RequestAborted);
+
+        var installed = options.Catalog.GameLocations;
+        var managed = new HashSet<string>(
+            installed.Keys.Where(id => GamePackageLocations.Find(options.Paths, id) is { Managed: true }),
+            StringComparer.OrdinalIgnoreCase);
+
+        var lobbyCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var lobby in options.Lobbies.Snapshot())
+            lobbyCounts[lobby.GameId] = lobbyCounts.GetValueOrDefault(lobby.GameId) + 1;
+
+        var entries = MarketplaceProjection.Project(fetched, installed, managed, KnockBoxVersion.Current)
+            .Select(e => new AdminMarketplaceEntry(
+                e.Id, e.Name, e.Description, e.Author, e.Tags,
+                e.AvailableVersion, e.InstalledVersion, e.Status, e.Reason,
+                e.SizeBytes, e.PublishedAt, e.MinAppVersion, e.MaxAppVersion,
+                e.SourceId, e.SourceName, e.ShadowedBy, e.Managed, e.Installed,
+                lobbyCounts.GetValueOrDefault(e.Id),
+                jobs.ActiveFor(e.Id)?.JobId,
+                [.. manager.Backups(e.Id).Select(b => new AdminRetainedVersion(
+                    b.Version, b.Bytes, b.RetainedAt.UtcDateTime.ToString("O")))]))
+            .ToList();
+
+        var sources = (registry?.Sources ?? []).Select(s =>
+        {
+            var result = fetched.FirstOrDefault(f => f.Source.Id == s.Id);
+            return new AdminMarketplaceSource(
+                s.Id, s.Name, s.CatalogUrl, s.DownloadBaseUrl, s.Enabled,
+                BuiltIn: s.Id == MarketplaceSourceRegistry.OfficialId,
+                Entries: result?.Catalog?.Plugins?.Count ?? 0,
+                Error: result?.Error);
+        }).ToList();
+
+        await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminMarketplaceResponse,
+            new AdminMarketplaceResponse(
+                entries,
+                sources,
+                [.. jobs.Snapshot().Select(ToSummary)],
+                jobs.LastSequence,
+                registry is not null,
+                KnockBoxVersion.Current.ToString(),
+                fetched.Count > 0 ? options.Time.GetUtcNow().UtcDateTime.ToString("O") : null,
+                registry?.MaxSources ?? 0,
+                options.PackageOptions.BackupCount,
+                options.PackageLimits.MaxBytes,
+                blocked is null,
+                blocked,
+                options.Paths.GamesManagedRoot));
+    }
+
+    private static async Task InstallFromMarketplace(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (options.Marketplace is not { } registry)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "The marketplace is disabled (KnockBox:MarketplaceEnabled=false). Upload a .kbg instead.");
+            return;
+        }
+
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminInstallRequest)
+                   ?? new AdminInstallRequest();
+
+        // Resolved from the cached catalog, so clicking Install does not wait on a network round trip
+        // the operator already paid for when the page loaded.
+        var fetched = await registry.FetchAllAsync(false, ctx.RequestAborted);
+        MarketplacePlugin? plugin = null;
+        MarketplaceClient? client = null;
+        foreach (var source in fetched)
+        {
+            if (body.SourceId is { Length: > 0 } wanted
+                && !string.Equals(source.Source.Id, wanted, StringComparison.OrdinalIgnoreCase)) continue;
+            if (source.Catalog?.Plugins?.FirstOrDefault(
+                    p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase)) is not { } match) continue;
+            plugin = match;
+            client = registry.For(source.Source.Id);
+            break;
+        }
+
+        if (plugin is null || client is null)
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound,
+                $"No marketplace entry with id '{id}'" +
+                (body.SourceId is { Length: > 0 } s ? $" in source '{s}'." : "."));
+            return;
+        }
+
+        var start = options.Packages.StartMarketplaceInstall(client, plugin, ParseMode(body.Mode));
+        if (!start.Started)
+        {
+            await Refuse(ctx, StatusFor(start.Refusal), start.Error ?? "The install could not be started.");
+            return;
+        }
+
+        options.Logger.LogInformation("Admin started a marketplace install of '{GameId}' {Version}.",
+            start.Job!.GameId, plugin.Version ?? "(no version)");
+        await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobResponse,
+            new AdminJobResponse(true, JobId: start.Job.JobId, Detail: start.Job.Phase),
+            StatusCodes.Status202Accepted);
+    }
+
+    private static async Task AddSource(HttpContext ctx, Options options)
+    {
+        if (options.Marketplace is not { } registry)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "The marketplace is disabled (KnockBox:MarketplaceEnabled=false).");
+            return;
+        }
+
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminSourceRequest);
+        if (body is null)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, "Send a marketplace to register.");
+            return;
+        }
+
+        // An existing row supplies anything the body left out, so toggling Enabled doesn't need the
+        // caller to resend both URLs.
+        var existing = registry.Sources.FirstOrDefault(
+            s => string.Equals(s.Id, body.Id, StringComparison.OrdinalIgnoreCase));
+        var source = new RegisteredMarketplace(
+            (body.Id ?? existing?.Id ?? "").Trim(),
+            (body.Name ?? existing?.Name ?? "").Trim(),
+            (body.CatalogUrl ?? existing?.CatalogUrl ?? "").Trim(),
+            (body.DownloadBaseUrl ?? existing?.DownloadBaseUrl ?? MarketplaceOptions.Default.DownloadBaseUrl)
+                .Trim().TrimEnd('/'),
+            body.Enabled ?? existing?.Enabled ?? true);
+
+        if (registry.Validate(source) is { } why)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, why);
+            return;
+        }
+
+        var warning = options.Settings.UpsertSource(source);
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
+            Detail: $"Registered '{source.Name}'. Refresh the catalog to see what it offers."));
+    }
+
+    private static async Task RemoveSource(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (string.Equals(id, MarketplaceSourceRegistry.OfficialId, StringComparison.OrdinalIgnoreCase))
+        {
+            // 409, not 403: the request is well-formed, the target simply isn't removable. Disabling it
+            // achieves what the operator wanted and is reversible.
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "The official marketplace is built in and can't be removed. Disable it instead.");
+            return;
+        }
+
+        if (!options.Settings.RemoveSource(id, out var warning))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No registered marketplace with id '{id}'.");
+            return;
+        }
+
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: "Removed."));
+    }
+
+    private static async Task SetUpdatePolicy(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminUpdatePolicyRequest);
+
+        if (!Enum.TryParse<UpdatePolicy>(body?.Policy, ignoreCase: true, out var policy))
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                "Policy must be one of: manual, auto, drain, force.");
+            return;
+        }
+
+        // Deliberately NOT gated on the game being installed: enrolling a game whose files are briefly
+        // absent — a mount that hasn't come up, a package mid-replace — must not silently fail, and the
+        // settings store already keeps overrides for games it can't currently see.
+        var canonical = options.Catalog.GameLocations.TryGetValue(id, out var location)
+            ? location.Manifest.Id
+            : id;
+        var warning = options.Settings.SetUpdatePolicy(canonical, policy);
+
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: policy switch
+        {
+            UpdatePolicy.Manual => "This game will only be updated when you ask.",
+            UpdatePolicy.Auto => "This game will update itself whenever it has no lobbies running.",
+            UpdatePolicy.Drain =>
+                "This game will stop accepting new lobbies when an update is found, and update once the " +
+                "running ones finish.",
+            _ => "This game will close its running lobbies and update as soon as one is found.",
+        }));
+    }
+
+    private static async Task CheckForUpdates(HttpContext ctx, Options options)
+    {
+        if (options.Updates is not { } coordinator)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "The marketplace is disabled (KnockBox:MarketplaceEnabled=false).");
+            return;
+        }
+
+        var pass = await coordinator.RunOnceAsync(ctx.RequestAborted);
+        if (pass.Error is not null)
+        {
+            await Refuse(ctx, StatusCodes.Status502BadGateway, pass.Error);
+            return;
+        }
+
+        await WriteAction(ctx, new AdminActionResponse(true, Affected: pass.Started,
+            Detail: pass.Started > 0
+                ? $"Started {pass.Started} update(s); follow them in the operations list."
+                : "Nothing to do — every game enrolled in automatic updates is already current."));
+    }
+
+    private static PackageApplyMode ParseMode(string? mode) => mode?.Trim().ToLowerInvariant() switch
+    {
+        "auto" => PackageApplyMode.Auto,
+        "force" => PackageApplyMode.Force,
+        // Drain is the default: it never interrupts a game in progress, and unlike auto it does not
+        // silently give up when one happens to be running.
+        _ => PackageApplyMode.Drain,
+    };
+
+    private static int StatusFor(PackageRefusal refusal) => refusal switch
+    {
+        PackageRefusal.NotFound => StatusCodes.Status404NotFound,
+        PackageRefusal.Invalid => StatusCodes.Status400BadRequest,
+        // Busy, NotManaged and Unavailable are all "the request is fine, the state or the deployment
+        // says no" — which is what 409 means throughout this API.
+        _ => StatusCodes.Status409Conflict,
+    };
 
     private static async Task PurgeStale(HttpContext ctx, Options options)
     {
@@ -764,20 +1261,42 @@ internal static class AdminApi
     /// test) are allowed through, because a header a client may simply omit cannot be a security boundary
     /// and pretending otherwise would only break operator tooling.
     /// </remarks>
-    private static RequestDelegate WriteGuard(RequestDelegate handler) => ctx =>
+    /// <summary>What body a mutation route accepts. All but one take JSON.</summary>
+    private enum MediaKind
+    {
+        /// <summary>No body, or <c>application/json</c>.</summary>
+        Json,
+
+        /// <summary>Raw <c>.kbg</c> bytes — the package upload route, and only that one.</summary>
+        Package,
+    }
+
+    private static RequestDelegate WriteGuard(RequestDelegate handler, MediaKind media = MediaKind.Json) => ctx =>
     {
         var site = ctx.Request.Headers["Sec-Fetch-Site"].ToString();
         if (site.Length > 0 && !site.Equals("same-origin", StringComparison.OrdinalIgnoreCase))
             return Refuse(ctx, StatusCodes.Status403Forbidden, "Cross-site admin requests are refused.");
 
         var contentType = ctx.Request.ContentType;
-        // An empty body is fine — several of these actions take no arguments — but a body that IS present
-        // must be JSON.
-        if (ctx.Request.ContentLength is > 0
-            && (contentType is null || !contentType.Contains("application/json", StringComparison.OrdinalIgnoreCase)))
-            return Refuse(ctx, StatusCodes.Status415UnsupportedMediaType, "Send application/json.");
+        return media switch
+        {
+            // An empty body is fine — several of these actions take no arguments — but a body that IS
+            // present must be JSON.
+            MediaKind.Json when ctx.Request.ContentLength is > 0 && !Has(contentType, "application/json")
+                => Refuse(ctx, StatusCodes.Status415UnsupportedMediaType, "Send application/json."),
 
-        return handler(ctx);
+            // An upload ALWAYS has a body, so the type is required outright rather than only when
+            // ContentLength says so — a chunked request has no ContentLength at all, and the JSON rule
+            // above would wave it straight through on that technicality.
+            MediaKind.Package when !Has(contentType, "application/octet-stream")
+                => Refuse(ctx, StatusCodes.Status415UnsupportedMediaType,
+                    "Send the .kbg bytes as application/octet-stream."),
+
+            _ => handler(ctx),
+        };
+
+        static bool Has(string? contentType, string expected) =>
+            contentType is not null && contentType.Contains(expected, StringComparison.OrdinalIgnoreCase);
     };
 
     /// <summary>

@@ -52,8 +52,12 @@ public class GamePolicyGateTests : IDisposable
         public HashSet<string> Unlisted { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> Unstartable { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>Per-game refusal text, e.g. what a game mid-update says. Empty ⇒ the generic message.</summary>
+        public Dictionary<string, string> Reasons { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         public bool CanCreateLobby(string gameId) => !MaintenanceMode && !Unstartable.Contains(gameId);
         public bool IsListed(string gameId) => !Unlisted.Contains(gameId);
+        public string? UnavailableReason(string gameId) => Reasons.GetValueOrDefault(gameId);
     }
 
     // Returns the frames the server sent. Deliberately NOT the lobby list: when the scripted socket runs

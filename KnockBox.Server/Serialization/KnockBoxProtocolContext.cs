@@ -33,12 +33,22 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminMetricsResponse))]
 [JsonSerializable(typeof(AdminLogsResponse))]
 [JsonSerializable(typeof(AdminLogFilesResponse))]
+// Package jobs. AdminJobSummary is listed on its own as well as via the response, because
+// /admin/api/packages/jobs/{id} serializes one as the root.
+[JsonSerializable(typeof(AdminJobsResponse))]
+[JsonSerializable(typeof(AdminJobSummary))]
+[JsonSerializable(typeof(AdminJobResponse))]
+[JsonSerializable(typeof(AdminMarketplaceResponse))]
 // Request bodies.
 [JsonSerializable(typeof(AdminCloseLobbiesRequest))]
 [JsonSerializable(typeof(AdminPurgeStaleRequest))]
 [JsonSerializable(typeof(AdminKickRequest))]
 [JsonSerializable(typeof(AdminAvailabilityRequest))]
 [JsonSerializable(typeof(AdminMaintenanceRequest))]
+[JsonSerializable(typeof(AdminRollbackRequest))]
+[JsonSerializable(typeof(AdminInstallRequest))]
+[JsonSerializable(typeof(AdminUpdatePolicyRequest))]
+[JsonSerializable(typeof(AdminSourceRequest))]
 // The roster projection handed to an authority module's init(players) (ServerAuthorityManager).
 [JsonSerializable(typeof(IReadOnlyList<Player>))]
 // Not a wire type, but it goes through the same source-generated serializer for the same reason:

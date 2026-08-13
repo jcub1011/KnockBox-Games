@@ -17,7 +17,15 @@
 # password. To expose the portal beyond the host, put it behind your proxy with its own auth and set
 # KnockBox__AdminHost/AdminOrigin — do not simply widen the port mapping. See docs/HOSTING.md.
 #
-# TWO PERSISTENT DERIVED CACHES (plus the admin secret above): the server writes two regenerable
+# INSTALLING GAMES FROM THE PORTAL: the Marketplace tab can install a game from a catalog or from a
+# .kbg you upload. Those packages land in /app/games-managed (the `knockbox-managed` volume), NOT in
+# your games dir — that mount is read-only, which is the whole reason a separate root exists. Budget
+# roughly 3x a game's size while one installs (download + extraction + the retained previous version).
+# Behind a reverse proxy, raise its request-body limit or large uploads fail before reaching the server
+# (nginx `client_max_body_size`; Cloudflare's free plan caps at 100 MB).
+#
+# TWO PERSISTENT DERIVED CACHES (plus the admin secret and the managed packages above): the server
+# writes two regenerable
 # directories, both of which must
 # stay OUTSIDE the read-only games mount. By default each lives in a named volume below, so both
 # SURVIVE image updates instead of being rebuilt every time:
@@ -67,6 +75,11 @@ services:
       # set KNOCKBOX_UNPACKED_DIR=/path → a writable host bind mount. Persisting it avoids
       # re-extracting a large library every time the container is recreated.
       - ${KNOCKBOX_UNPACKED_DIR:-knockbox-unpacked}:/app/games-unpacked
+      # Packages the ADMIN PORTAL installed — from a marketplace, or uploaded — plus the previous
+      # versions it retains for rollback. UNLIKE the two caches above this is NOT freely regenerable: a
+      # marketplace game can be fetched again, but an UPLOADED one exists nowhere else. Back it up like
+      # /app/data. Never share it between instances: each server reconciles and prunes its own copy.
+      - ${KNOCKBOX_MANAGED_DIR:-knockbox-managed}:/app/games-managed
       # Admin state: the password hash (admin.secret) plus operator policy (admin-settings.json — which
       # games are disabled or staged, and whether maintenance mode is on). UNLIKE the two caches above this
       # is NOT regenerable: lose it and the portal reverts to unclaimed AND every policy decision is
@@ -98,6 +111,15 @@ services:
       # KnockBox__AdminOrigin: "https://admin.example.com"
       # How long an admin session cookie lasts (default 8 hours; sessions also drop on restart):
       # KnockBox__AdminSessionTtlHours: "8"
+      # ── Marketplace ───────────────────────────────────────────────────────────
+      # Air-gapped or locked-down: no catalog is fetched and the server holds no HttpClient at all.
+      # Uploading a .kbg through the portal, rolling one back and uninstalling all still work.
+      # KnockBox__MarketplaceEnabled: "false"
+      # How often to check registered catalogs for updates to games you ENROLLED in automatic updates
+      # (nothing is enrolled by default, and with none enrolled no request is made). 0 = never:
+      # KnockBox__MarketplacePollMinutes: "360"
+      # Previous versions of each portal-installed package kept for one-click rollback. 0 = none:
+      # KnockBox__PackageBackupCount: "1"
     restart: unless-stopped
 
   # ── Second instance sharing the SAME games folder ─────────────────────────────
@@ -132,9 +154,14 @@ services:
 # knockbox-admin-2 here if you enable the second instance above.
 #   • the first two are regenerable caches — losing one only costs rebuild time
 #   • knockbox-admin is NOT regenerable: it holds the admin password hash AND the operator policy
-#     (disabled/staged games, maintenance mode). Back it up, or be ready to re-claim the portal and
-#     re-apply your policy.
+#     (disabled/staged games, maintenance mode, registered marketplaces, update enrolments). Back it
+#     up, or be ready to re-claim the portal and re-apply your policy.
+#   • knockbox-managed is NOT regenerable either: it holds the .kbg packages the portal installed. A
+#     marketplace game can be re-downloaded; one an admin UPLOADED exists nowhere else. Back it up.
+#     NOTE: portal-installed games therefore do NOT live in your KNOCKBOX_GAMES_DIR — backing up that
+#     directory alone no longer captures your whole library.
 volumes:
   knockbox-compressed:
   knockbox-unpacked:
+  knockbox-managed:
   knockbox-admin:

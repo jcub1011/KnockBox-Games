@@ -128,6 +128,18 @@ public sealed record AdminLobbiesResponse(
 /// <param name="Availability">"available", "disabled" or "staged" — the operator override, not a discovery state.</param>
 /// <param name="Root">Which root won this id: "games" or "packages".</param>
 /// <param name="DeleteBlockedReason">Why Delete is unavailable, e.g. a read-only games mount.</param>
+/// <param name="PackageRoot">
+/// Which package root holds the source <c>.kbg</c>: "games" for one an operator dropped in by hand,
+/// "managed" for one the portal installed, null for a plain game folder. A managed package is the one
+/// the server may replace or remove, so this is what tells the portal an update or rollback applies.
+/// </param>
+/// <param name="BackupBytes">Retained previous versions of a managed package, kept for rollback.</param>
+/// <param name="Lifecycle">
+/// "ready", "draining" or "updating" — engine state, NOT operator policy. It is deliberately absent
+/// from the availability control: that select is a command, and offering a value the server would have
+/// to refuse is worse than not offering it.
+/// </param>
+/// <param name="UpdatePolicy">"manual", "auto", "drain" or "force" — what the scheduled check may do.</param>
 public sealed record AdminGameSummary(
     string Id,
     string Name,
@@ -138,14 +150,19 @@ public sealed record AdminGameSummary(
     string Directory,
     string Root,
     bool PackageBacked,
+    string? PackageRoot,
     long DiskBytes,
     long DirectoryBytes,
     long CompressedBytes,
     long PackageBytes,
+    long BackupBytes,
     int ActiveLobbies,
     int ActivePlayers,
     bool Deletable,
-    string? DeleteBlockedReason
+    string? DeleteBlockedReason,
+    string Lifecycle,
+    string UpdatePolicy,
+    string? PendingJobId
 );
 
 public sealed record AdminGamesResponse(
@@ -155,7 +172,9 @@ public sealed record AdminGamesResponse(
     string? ScanError,
     string DiskMeasuredAt,
     long CompressedCacheBytes,
-    long LogsBytes
+    long LogsBytes,
+    string ManagedRoot,
+    long ManagedRootBytes
 );
 
 // ── Logs ─────────────────────────────────────────────────────────────────────
@@ -186,6 +205,124 @@ public sealed record AdminLogFilesResponse(
     string? Error
 );
 
+// ── Package jobs ─────────────────────────────────────────────────────────────
+
+/// <summary>One install/update/rollback/uninstall operation, as the portal renders it.</summary>
+/// <param name="Sequence">Bumped on every change — the cursor to pass back as <c>after</c>.</param>
+/// <param name="Kind">"install", "update", "rollback" or "uninstall".</param>
+/// <param name="Source">Where the bytes came from: "marketplace", "upload", "backup" or "none".</param>
+/// <param name="Status">
+/// "queued", "downloading", "verifying", "waitingForLobbies", "applying", "succeeded", "failed" or
+/// "cancelled". The last three are terminal.
+/// </param>
+/// <param name="Phase">A sentence for the operator. Changes far more often than <paramref name="Status"/>.</param>
+/// <param name="BytesTotal">0 when unknown — render indeterminate progress, never a confident 0%.</param>
+/// <param name="Mode">"auto", "drain" or "force" — what this job is allowed to do to running lobbies.</param>
+/// <param name="Cancellable">False from "applying" onwards: a half-swapped game is not worth creating.</param>
+public sealed record AdminJobSummary(
+    string JobId,
+    long Sequence,
+    string Kind,
+    string Source,
+    string GameId,
+    string? GameName,
+    string? FromVersion,
+    string? ToVersion,
+    string Status,
+    string Phase,
+    long BytesDone,
+    long BytesTotal,
+    string Mode,
+    string StartedAt,
+    string? EndedAt,
+    string? Error,
+    string? Warning,
+    int LobbiesWaiting,
+    bool Cancellable,
+    bool Terminal
+);
+
+public sealed record AdminJobsResponse(
+    IReadOnlyList<AdminJobSummary> Jobs,
+    long LastSequence,
+    int Active,
+    int Retained
+);
+
+/// <summary>The reply to any route that starts a job: 202 plus the id to follow it by.</summary>
+public sealed record AdminJobResponse(
+    bool Success,
+    string? Error = null,
+    string? JobId = null,
+    string? Detail = null,
+    string? Warning = null
+);
+
+// ── Marketplace ──────────────────────────────────────────────────────────────
+
+/// <param name="Status">
+/// A PluginUpdateStatus, camelCase — plus "installedOnly", which is not one of them: it marks a managed
+/// game no enabled source offers (an upload, or a withdrawn entry).
+/// </param>
+/// <param name="ShadowedBy">Another source offered this id first and won. Reported, never silently dropped.</param>
+/// <param name="Managed">Its package is in the managed root, so update/rollback/uninstall apply to it.</param>
+public sealed record AdminMarketplaceEntry(
+    string Id,
+    string Name,
+    string? Description,
+    string? Author,
+    IReadOnlyList<string>? Tags,
+    string? AvailableVersion,
+    string? InstalledVersion,
+    string Status,
+    string? Reason,
+    long? SizeBytes,
+    string? PublishedAt,
+    string? MinAppVersion,
+    string? MaxAppVersion,
+    string SourceId,
+    string? SourceName,
+    string? ShadowedBy,
+    bool Managed,
+    bool Installed,
+    int ActiveLobbies,
+    string? PendingJobId,
+    IReadOnlyList<AdminRetainedVersion> Backups
+);
+
+/// <summary>A retained earlier version of a managed package, available as a rollback target.</summary>
+public sealed record AdminRetainedVersion(string? Version, long Bytes, string RetainedAt);
+
+public sealed record AdminMarketplaceSource(
+    string Id,
+    string Name,
+    string CatalogUrl,
+    string DownloadBaseUrl,
+    bool Enabled,
+    bool BuiltIn,
+    int Entries,
+    string? Error
+);
+
+/// <param name="Enabled">KnockBox:MarketplaceEnabled. False ⇒ no source is fetched and install is refused.</param>
+/// <param name="AppVersion">This server's version — what every "incompatible" row is judged against.</param>
+/// <param name="MaxUploadBytes">KnockBox:MaxPackageBytes, so the upload guard can't drift from the server's.</param>
+public sealed record AdminMarketplaceResponse(
+    IReadOnlyList<AdminMarketplaceEntry> Entries,
+    IReadOnlyList<AdminMarketplaceSource> Sources,
+    IReadOnlyList<AdminJobSummary> Jobs,
+    long JobsLastSequence,
+    bool Enabled,
+    string AppVersion,
+    string? FetchedAt,
+    int MaxSources,
+    int BackupRetention,
+    long MaxUploadBytes,
+    bool CanInstall,
+    string? InstallBlockedReason,
+    string ManagedRoot
+);
+
 // ── Requests ─────────────────────────────────────────────────────────────────
 
 public sealed record AdminCloseLobbiesRequest(string? GameId = null, string? Reason = null);
@@ -193,3 +330,24 @@ public sealed record AdminPurgeStaleRequest(int? IdleMinutes = null);
 public sealed record AdminKickRequest(string? PlayerId = null);
 public sealed record AdminAvailabilityRequest(string? State = null);
 public sealed record AdminMaintenanceRequest(bool Enabled = false, string? Message = null);
+
+/// <param name="Version">Which retained version to return to; null takes the most recent.</param>
+/// <param name="Mode">"auto", "drain" or "force". Defaults to "drain" — the least disruptive that still happens.</param>
+public sealed record AdminRollbackRequest(string? Version = null, string? Mode = null);
+
+/// <param name="SourceId">Which marketplace to take it from; null uses whichever offered it first.</param>
+public sealed record AdminInstallRequest(string? SourceId = null, string? Mode = null);
+
+/// <param name="Policy">"manual", "auto", "drain" or "force" — what the scheduled check may do unattended.</param>
+public sealed record AdminUpdatePolicyRequest(string? Policy = null);
+
+/// <summary>
+/// Registers or updates an extra marketplace. Every member is nullable so a partial body leaves the
+/// rest alone, rather than a defaulted <c>false</c> silently disabling a source.
+/// </summary>
+public sealed record AdminSourceRequest(
+    string? Id = null,
+    string? Name = null,
+    string? CatalogUrl = null,
+    string? DownloadBaseUrl = null,
+    bool? Enabled = null);

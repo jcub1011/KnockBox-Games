@@ -23,6 +23,19 @@ public interface IPlatformPolicy
 
     /// <summary>Whether this game appears in the catalog players browse.</summary>
     bool IsListed(string gameId);
+
+    /// <summary>
+    /// Why this game can't be started right now, when there is something specific to say — e.g. that it
+    /// is mid-update. Null means "no reason beyond the generic one", which is the answer whenever
+    /// <see cref="CanCreateLobby"/> is true.
+    /// </summary>
+    /// <remarks>
+    /// This exists so a game being updated stays LISTED and refuses with an explanation, rather than
+    /// vanishing from the grid and reappearing a minute later — which reads as a broken platform. It is
+    /// deliberately shaped like <see cref="MaintenanceMessage"/>: a string the relay passes through
+    /// without interpreting, so <c>WebSocketHandler</c> still knows nothing about updates or packages.
+    /// </remarks>
+    string? UnavailableReason(string gameId);
 }
 
 /// <summary>Policy implementations that aren't backed by operator settings.</summary>
@@ -40,5 +53,6 @@ public static class PlatformPolicy
         public string? MaintenanceMessage => null;
         public bool CanCreateLobby(string gameId) => true;
         public bool IsListed(string gameId) => true;
+        public string? UnavailableReason(string gameId) => null;
     }
 }

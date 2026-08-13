@@ -124,7 +124,12 @@ jobs:
             -p 8080:8080 -p 8081:8081 -p 8082:8082 \
             -v /tmp/kb-games:/games:ro \
             -e KnockBox__GamesPollSeconds=2 \
+            -e KnockBox__MarketplaceCatalogUrl=http://127.0.0.1:9000/CATALOG.json \
+            -e KnockBox__MarketplaceDownloadBaseUrl=http://127.0.0.1:9000 \
             knockbox:ci
+          # The catalog host is stood up later (it needs a package to serve). Pointing at it now is free
+          # — the URL is only dereferenced on demand — and it buys an assertion that an unreachable
+          # catalog is REPORTED rather than fatal.
 
       - name: Shell serves from the baked-in web root
         run: |
@@ -155,12 +160,15 @@ jobs:
           # Every dashboard read is session-gated, not just the one the old dashboard polled. A new
           # endpoint that forgets RequireSession would serve lobby rosters and log lines to anyone who can
           # reach the port, so assert the whole set rather than a representative.
-          for path in metrics lobbies games logs logs/files; do
+          for path in metrics lobbies games logs logs/files packages/jobs marketplace/catalog; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8082/admin/api/$path")
             [ "$code" = "401" ] || { echo "/admin/api/$path answered $code unauthenticated, expected 401"; exit 1; }
           done
-          # So is every mutating one — these close lobbies and delete games.
-          for path in maintenance games/rescan lobbies/close lobbies/purge-stale; do
+          # So is every mutating one — these close lobbies, delete games and install code.
+          for path in maintenance games/rescan lobbies/close lobbies/purge-stale \
+                      marketplace/install/x marketplace/sources marketplace/check \
+                      packages/x/rollback packages/x/uninstall packages/x/update-policy \
+                      packages/jobs/x/cancel; do
             code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
               -d '{}' "http://localhost:8082/admin/api/$path")
             [ "$code" = "401" ] || { echo "POST /admin/api/$path answered $code unauthenticated, expected 401"; exit 1; }
@@ -171,6 +179,8 @@ jobs:
           ! curl -fsS http://localhost:8080/admin/admin-core.js >/dev/null
           ! curl -fsS http://localhost:8080/admin/api/auth/status >/dev/null
           ! curl -fsS http://localhost:8080/admin/api/lobbies >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/marketplace/catalog >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/packages/jobs >/dev/null
           ! curl -fsS http://localhost:8081/admin/ >/dev/null
 
       - name: Admin password can be set, and only once
@@ -401,6 +411,218 @@ jobs:
           # The plain folder dropped in earlier must be untouched by all of this.
           curl -fsS http://localhost:8081/games/tictactoe/index.html >/dev/null
 
+      # ── Marketplace & portal installs ─────────────────────────────────────────────────────────────
+      # file:// is refused by MarketplaceClient.IsAllowedScheme, but http on LOOPBACK is allowed — which
+      # exists for exactly this. `--network container:kb` puts nginx on kb's own loopback, so
+      # 127.0.0.1:9000 resolves from the server's perspective, nothing is published to the host, and no
+      # GitHub rate limit applies. The asset is laid out at the DERIVED release path, so the real trust
+      # path runs: derive URL → download → verify sha256 → GamePackageReader.Read → id/version match.
+      - name: Stand up a loopback catalog serving the package CI already built
+        run: |
+          mkdir -p /tmp/kb-catalog/ci/fixture/releases/download/v1.2.3
+          cp /tmp/packaged.kbg /tmp/kb-catalog/ci/fixture/releases/download/v1.2.3/packaged-demo.kbg
+          SHA=$(sha256sum /tmp/packaged.kbg | cut -d' ' -f1)
+          SIZE=$(stat -c%s /tmp/packaged.kbg)
+          # A second entry with a deliberately WRONG hash, so the refusal path is exercised for real
+          # rather than assumed.
+          cp /tmp/packaged.kbg /tmp/kb-catalog/ci/fixture/releases/download/v1.2.3/tampered-demo.kbg
+          cat > /tmp/kb-catalog/CATALOG.json <<JSON
+          {
+            "schemaVersion": "1.0",
+            "name": "CI fixture catalog",
+            "revision": 1,
+            "plugins": [
+              {
+                "id": "packaged-demo",
+                "name": "Packaged Demo",
+                "description": "The package CI builds, served back as a marketplace entry.",
+                "version": "1.2.3",
+                "author": "CI",
+                "source": {
+                  "type": "github-release",
+                  "repo": "ci/fixture",
+                  "tag": "v1.2.3",
+                  "asset": "packaged-demo.kbg",
+                  "sha256": "$SHA",
+                  "size": $SIZE
+                }
+              },
+              {
+                "id": "tampered-demo",
+                "name": "Tampered Demo",
+                "version": "1.2.3",
+                "author": "CI",
+                "source": {
+                  "type": "github-release",
+                  "repo": "ci/fixture",
+                  "tag": "v1.2.3",
+                  "asset": "tampered-demo.kbg",
+                  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "size": $SIZE
+                }
+              }
+            ]
+          }
+          JSON
+          docker run -d --name kb-catalog --network container:kb \
+            -v /tmp/kb-catalog:/usr/share/nginx/html:ro \
+            -e NGINX_PORT=9000 nginx:alpine
+          for i in $(seq 1 30); do
+            docker exec kb-catalog curl -fsS http://127.0.0.1:9000/CATALOG.json >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+      - name: The managed package root exists and is outside the read-only games mount
+        run: |
+          docker exec kb test -d /app/games-managed
+          # Writable: the whole reason portal installs can work where Delete on a games/ package cannot.
+          docker exec kb touch /app/games-managed/.ci-probe
+          docker exec kb rm /app/games-managed/.ci-probe
+
+      - name: Catalog reads, and the guards hold on the new routes
+        run: |
+          curl -fsS -b /tmp/kb-admin-cookies \
+            'http://localhost:8082/admin/api/marketplace/catalog?refresh=1' > /tmp/kb-catalog.json
+          jq -e '.enabled == true' /tmp/kb-catalog.json >/dev/null
+          jq -e '.entries[] | select(.id == "packaged-demo")
+                 | select(.status == "notInstalled")
+                 | select(.availableVersion == "1.2.3")' /tmp/kb-catalog.json >/dev/null \
+            || { echo "Unexpected catalog payload:"; cat /tmp/kb-catalog.json; exit 1; }
+          # The managed root is reported so the operator knows where installs land.
+          jq -e '.managedRoot == "/app/games-managed"' /tmp/kb-catalog.json >/dev/null
+          jq -e '.canInstall == true' /tmp/kb-catalog.json >/dev/null
+
+          # A cross-site write is refused on the new routes too.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: cross-site' -d '{}' \
+            http://localhost:8082/admin/api/marketplace/install/packaged-demo)" = "403" ]
+          # The relaxed media type is scoped to ONE route: a JSON route still refuses octet-stream...
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/octet-stream' --data-binary 'x' \
+            http://localhost:8082/admin/api/marketplace/sources)" = "415" ]
+          # ...and the upload route refuses JSON.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            http://localhost:8082/admin/api/packages/upload)" = "415" ]
+          # An http source that isn't loopback is refused, with the downloader's own rule.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"id":"bad","name":"Bad","catalogUrl":"http://example.com/c.json"}' \
+            http://localhost:8082/admin/api/marketplace/sources)" = "400" ]
+          # The built-in source can be disabled but never removed.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            http://localhost:8082/admin/api/marketplace/sources/official/delete)" = "409" ]
+
+      # The single most valuable assertion here: it proves a read-only /games mount no longer blocks
+      # installing a game, which is the entire deployment story this feature exists for.
+      - name: Install from the catalog into a read-only deployment, and serve the result
+        run: |
+          JOB=$(curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"mode":"force"}' \
+            http://localhost:8082/admin/api/marketplace/install/packaged-demo | jq -r '.jobId')
+          [ -n "$JOB" ] && [ "$JOB" != "null" ] || { echo "No job id returned"; exit 1; }
+          for i in $(seq 1 45); do
+            [ "$(docker inspect -f '{{.State.Running}}' kb 2>/dev/null)" = "true" ] \
+              || { echo "Container is not running:"; docker logs kb 2>&1; exit 1; }
+            STATE=$(curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB" | jq -r '.status')
+            [ "$STATE" = "succeeded" ] && break
+            [ "$STATE" = "failed" ] && { curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB"; docker logs kb 2>&1; exit 1; }
+            sleep 1
+          done
+          [ "$STATE" = "succeeded" ] || { echo "Install job stalled in $STATE"; docker logs kb 2>&1; exit 1; }
+          docker exec kb test -f /app/games-managed/packaged-demo.kbg
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8081/games/packaged-demo/index.html >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8081/games/packaged-demo/index.html >/dev/null
+          # ...and it is now deletable, unlike a game sitting in the read-only mount.
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/games \
+            | jq -e '.games[] | select(.id == "packaged-demo")
+                     | select(.packageRoot == "managed") | select(.deletable == true)' >/dev/null
+
+      - name: A tampered release is refused, and installs nothing
+        run: |
+          JOB=$(curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"mode":"force"}' \
+            http://localhost:8082/admin/api/marketplace/install/tampered-demo | jq -r '.jobId')
+          for i in $(seq 1 45); do
+            STATE=$(curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB" | jq -r '.status')
+            [ "$STATE" = "failed" ] || [ "$STATE" = "succeeded" ] && break
+            sleep 1
+          done
+          [ "$STATE" = "failed" ] || { echo "A hash mismatch was not refused (state: $STATE)"; exit 1; }
+          # The trust model, end to end: nothing was written and nothing is served.
+          ! docker exec kb test -f /app/games-managed/tampered-demo.kbg
+          ! curl -fsS http://localhost:8081/games/tampered-demo/index.html >/dev/null
+
+      - name: Upload a package over the raw body, and enrol it in automatic updates
+        run: |
+          # Its own id, so this asserts the UPLOAD path rather than accidentally re-testing the install
+          # above — and so uninstalling one later doesn't take the other with it.
+          mkdir -p /tmp/upsrc && cp -r games/tictactoe/. /tmp/upsrc/
+          sed -i 's/"id": *"tictactoe"/"id": "uploaded-demo"/' /tmp/upsrc/GAME.json
+          grep -q '"uploaded-demo"' /tmp/upsrc/GAME.json
+          node tools/pack-game/pack-game.mjs \
+            --in /tmp/upsrc --manifest /tmp/upsrc/GAME.json \
+            --out /tmp/uploaded.kbg --version 3.0.0 --quality 4
+          JOB=$(curl -fsS -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/octet-stream' \
+            --data-binary @/tmp/uploaded.kbg \
+            'http://localhost:8082/admin/api/packages/upload?mode=force&filename=uploaded.kbg' \
+            | jq -r '.jobId')
+          for i in $(seq 1 45); do
+            STATE=$(curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB" | jq -r '.status')
+            [ "$STATE" = "succeeded" ] && break
+            [ "$STATE" = "failed" ] && { curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB"; exit 1; }
+            sleep 1
+          done
+          [ "$STATE" = "succeeded" ] || { echo "Upload job stalled in $STATE"; exit 1; }
+          # Canonically named for the id inside, not for the file the operator uploaded.
+          docker exec kb test -f /app/games-managed/uploaded-demo.kbg
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8081/games/uploaded-demo/index.html >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8081/games/uploaded-demo/index.html >/dev/null
+
+          # An update enrolment is operator policy and must persist beside the availability overrides.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"policy":"drain"}' \
+            http://localhost:8082/admin/api/packages/packaged-demo/update-policy | grep -q '"success":true'
+          docker exec kb grep -q '"packaged-demo": "drain"' /app/data/admin-settings.json
+          # Back to manual, recorded by REMOVING the row rather than storing the default.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"policy":"manual"}' \
+            http://localhost:8082/admin/api/packages/packaged-demo/update-policy >/dev/null
+          ! docker exec kb grep -q '"packaged-demo"' /app/data/admin-settings.json
+
+      - name: Uninstalling a portal-installed game removes it everywhere
+        run: |
+          JOB=$(curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/packages/packaged-demo/uninstall | jq -r '.jobId')
+          for i in $(seq 1 45); do
+            STATE=$(curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB" | jq -r '.status')
+            [ "$STATE" = "succeeded" ] && break
+            [ "$STATE" = "failed" ] && { curl -fsS -b /tmp/kb-admin-cookies \
+              "http://localhost:8082/admin/api/packages/jobs/$JOB"; exit 1; }
+            sleep 1
+          done
+          [ "$STATE" = "succeeded" ] || { echo "Uninstall job stalled in $STATE"; exit 1; }
+          ! docker exec kb test -f /app/games-managed/packaged-demo.kbg
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8081/games/packaged-demo/index.html >/dev/null 2>&1 || break
+            sleep 1
+          done
+          ! curl -fsS http://localhost:8081/games/packaged-demo/index.html >/dev/null
+
       # The two features meet here: a server-authority game shipped as a package. Its module has to
       # survive the round trip into the unpacked-package cache (the server resolves the module through
       # the catalog's directory, NOT gamesRoot/<id>, or every packaged authority game fails to start)
@@ -458,7 +680,7 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: docker rm -f kb || true
+        run: docker rm -f kb kb-catalog || true
 
   publish:
     name: Publish image to GHCR

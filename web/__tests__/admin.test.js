@@ -78,6 +78,7 @@ const GAMES = {
       serverAuthority: false, directory: '/srv/games/tictactoe', root: 'games', packageBacked: false,
       diskBytes: 12_685, directoryBytes: 7_756, compressedBytes: 4_929, packageBytes: 0,
       activeLobbies: 1, activePlayers: 2, deletable: true, deleteBlockedReason: null,
+      backupBytes: 0, packageRoot: null, lifecycle: 'ready', updatePolicy: 'manual', pendingJobId: null,
     },
     {
       id: 'word-rush', name: 'Word Rush', version: '1.2.0', availability: 'disabled', maxPlayers: 8,
@@ -85,9 +86,53 @@ const GAMES = {
       diskBytes: 1_048_576, directoryBytes: 800_000, compressedBytes: 148_576, packageBytes: 100_000,
       activeLobbies: 0, activePlayers: 0, deletable: false,
       deleteBlockedReason: "'/srv/games' is not writable by the server (read-only mount).",
+      backupBytes: 0, packageRoot: 'managed', lifecycle: 'ready', updatePolicy: 'manual', pendingJobId: null,
+    },
+  ],
+  managedRoot: '/app/games-managed',
+  managedRootBytes: 100_000,
+};
+
+const CATALOG = {
+  enabled: true,
+  appVersion: '1.4.0',
+  fetchedAt: '2026-08-12T20:00:00.000Z',
+  maxSources: 8,
+  backupRetention: 1,
+  maxUploadBytes: 536_870_912,
+  canInstall: true,
+  installBlockedReason: null,
+  managedRoot: '/app/games-managed',
+  jobsLastSequence: 0,
+  jobs: [],
+  sources: [
+    {
+      id: 'official', name: 'Official KnockBox marketplace', catalogUrl: 'https://example/CATALOG.json',
+      downloadBaseUrl: 'https://github.com', enabled: true, builtIn: true, entries: 2, error: null,
+    },
+  ],
+  entries: [
+    {
+      id: 'word-rush', name: 'Word Rush', description: 'Fast word game', author: 'Someone',
+      tags: ['party'], availableVersion: '1.3.0', installedVersion: '1.2.0', status: 'updateAvailable',
+      reason: null, sizeBytes: 2_000_000, publishedAt: '2026-08-01T00:00:00.000Z',
+      minAppVersion: null, maxAppVersion: null, sourceId: 'official',
+      sourceName: 'Official KnockBox marketplace', shadowedBy: null, managed: true, installed: true,
+      activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
+      backups: [{ version: '1.1.0', bytes: 900_000, retainedAt: '2026-07-01T00:00:00.000Z' }],
+    },
+    {
+      id: 'alpha-chain', name: 'Alpha Chain', description: 'A chain game', author: null, tags: [],
+      availableVersion: '2.0.0', installedVersion: null, status: 'notInstalled', reason: null,
+      sizeBytes: 1_000_000, publishedAt: null, minAppVersion: null, maxAppVersion: null,
+      sourceId: 'official', sourceName: 'Official KnockBox marketplace', shadowedBy: null,
+      managed: false, installed: false, activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
+      backups: [],
     },
   ],
 };
+
+const JOBS = { jobs: [], lastSequence: 0, active: 0, retained: 0 };
 
 const LOGS = {
   entries: [
@@ -130,6 +175,8 @@ function authedRoutes(overrides = {}) {
     'GET /admin/api/games': { body: GAMES },
     'GET /admin/api/logs': { body: LOGS },
     'GET /admin/api/logs/files': { body: { files: [{ name: 'knockbox-20260812.log', bytes: 254_000, modified: '2026-08-12T20:00:00.000Z' }], logsRoot: '/logs', error: null } },
+    'GET /admin/api/marketplace/catalog': { body: CATALOG },
+    'GET /admin/api/packages/jobs': { body: JOBS },
     ...overrides,
   };
 }
@@ -350,15 +397,31 @@ describe('tab router', () => {
 
     const pathsBefore = new Set(fake.calls.map((c) => c.path));
     expect(pathsBefore.has('/admin/api/system/status')).toBe(true);
-    // Four tabs each polling would quadruple the request rate for three panels nobody is looking at —
-    // and the games one can trigger a disk walk.
+    // Five tabs each polling would multiply the request rate for four panels nobody is looking at —
+    // and the games one can trigger a disk walk while the catalog one can reach the network.
     expect(pathsBefore.has('/admin/api/lobbies')).toBe(false);
     expect(pathsBefore.has('/admin/api/games')).toBe(false);
+    expect(pathsBefore.has('/admin/api/marketplace/catalog')).toBe(false);
+    expect(pathsBefore.has('/admin/api/packages/jobs')).toBe(false);
 
     const before = fake.calls.length;
     await vi.advanceTimersByTimeAsync(5000);
     expect(fake.calls.length).toBeGreaterThan(before);
     expect(fake.calls.some((c) => c.path === '/admin/api/lobbies')).toBe(false);
+    expect(fake.calls.some((c) => c.path === '/admin/api/packages/jobs')).toBe(false);
+  });
+
+  it('has a nav item and a panel for every tab, and nothing extra', async () => {
+    // The structural guard loadAdminDom() exists for: adding a tab means touching TABS, TAB_TITLES, the
+    // sidebar and the panel markup, and forgetting one of the four fails only at runtime otherwise.
+    const { TABS } = await import('../admin/admin-core.js');
+
+    const navTabs = [...document.querySelectorAll('.nav-item')].map((b) => b.dataset.tab);
+    expect(navTabs).toEqual(TABS);
+    for (const tab of TABS) expect(el(`tab-${tab}`)).not.toBeNull();
+
+    const panels = [...document.querySelectorAll('.tab-panel')].map((p) => p.id.replace(/^tab-/, ''));
+    expect(panels.sort()).toEqual([...TABS].sort());
   });
 });
 

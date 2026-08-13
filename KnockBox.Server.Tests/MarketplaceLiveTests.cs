@@ -56,7 +56,7 @@ public class MarketplaceLiveTests : IDisposable
     {
         var options = MarketplaceOptions.Default;
         return new MarketplaceClient(
-            MarketplaceClient.CreateHttpClient(options), options, GamePackageLimits.Default,
+            MarketplaceClient.CreateHttpClient(), options, GamePackageLimits.Default,
             NullLogger<MarketplaceClient>.Instance);
     }
 

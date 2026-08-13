@@ -820,8 +820,123 @@ body {
   to { opacity: 1; transform: none; }
 }
 
+/* ── Marketplace & packages ─────────────────────────────────────────────────── */
+
+.badge-danger { color: var(--error-color); border-color: var(--error-color); }
+
+.mkt-desc {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  margin: 0.35rem 0 0.7rem;
+}
+
+/* One row per operation. Kept legible while a bar animates by giving the label and the phase fixed
+   space, so a job whose phase text grows doesn't reflow the whole strip. */
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  margin-top: 0.4rem;
+  font-size: 0.86rem;
+}
+
+.job-ok { border-color: var(--success-color); }
+.job-failed { border-color: var(--error-color); }
+.job-title { color: var(--text-main); font-weight: 600; }
+.job-phase { color: var(--text-muted); flex: 1 1 12rem; }
+.job-meta { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.job-bar {
+  flex: 0 0 8rem;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-color);
+  overflow: hidden;
+}
+
+.job-bar-fill {
+  height: 100%;
+  background: var(--success-color);
+  transition: width 0.3s ease;
+}
+
+/* No width is set for an unknown total, so this slides instead of claiming a percentage we can't
+   compute. A confident 0% on a transfer that is moving reads as a stall. */
+.job-bar-indeterminate {
+  width: 35%;
+  animation: job-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes job-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border-color);
+  overflow: hidden;
+  margin: 0.8rem 0 0.2rem;
+}
+
+.progress-fill { height: 100%; width: 0; background: var(--success-color); transition: width 0.2s ease; }
+
+.upload-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 5.5rem;
+  margin-top: 0.9rem;
+  padding: 1rem;
+  border: 2px dashed var(--border-color);
+  border-radius: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  cursor: pointer;
+}
+
+.upload-drop:hover, .upload-drop:focus-visible, .drop-active {
+  border-color: var(--success-color);
+  color: var(--text-main);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.modal-wide { max-width: 44rem; }
+.modal-subhead { margin: 1.1rem 0 0.5rem; font-size: 0.95rem; color: var(--text-main); }
+
+.source-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 0.86rem;
+}
+
+.source-name { color: var(--text-main); font-weight: 600; }
+.source-url { color: var(--text-muted); flex: 1 1 10rem; overflow-wrap: anywhere; }
+
+.source-form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.source-form .text-input { flex: 1 1 10rem; }
+
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
+  .job-bar-indeterminate { animation: none; width: 100%; opacity: 0.5; }
 }
 
 @media (max-width: 768px) {

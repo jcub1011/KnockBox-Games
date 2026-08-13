@@ -15,21 +15,31 @@ public class GamePackageInstallerTests : IDisposable
     private readonly string _gamesRoot;
     private readonly string _unpackedRoot;
     private readonly string _compressedRoot;
+    private readonly string _managedRoot;
 
     public GamePackageInstallerTests()
     {
         _gamesRoot = Path.Combine(_root, "games");
         _unpackedRoot = Path.Combine(_root, "games-unpacked");
         _compressedRoot = Path.Combine(_root, "games-compressed");
+        _managedRoot = Path.Combine(_root, "games-managed");
         Directory.CreateDirectory(_gamesRoot);
+        Directory.CreateDirectory(_managedRoot);
     }
 
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { /* best effort */ } }
 
     private static readonly GamePackageLimits Generous = new(100L * 1024 * 1024, 1000, 10_000);
 
+    /// <summary>An installer over both package roots, games/ first — the production ordering.</summary>
     private GamePackageInstaller New(GameAssetPrecompressor? precompressor = null, GamePackageLimits? limits = null) =>
-        new(_gamesRoot, _unpackedRoot, limits ?? Generous, precompressor,
+        new([new(_gamesRoot, PackageMarker.GamesRoot), new(_managedRoot, PackageMarker.ManagedRoot)],
+            _unpackedRoot, limits ?? Generous, precompressor,
+            NullLogger<GamePackageInstaller>.Instance);
+
+    /// <summary>An installer over games/ only — the shape a deployment with ManagedPackages=false runs.</summary>
+    private GamePackageInstaller GamesRootOnly() =>
+        new([new(_gamesRoot, PackageMarker.GamesRoot)], _unpackedRoot, Generous, null,
             NullLogger<GamePackageInstaller>.Instance);
 
     /// <summary>
@@ -54,9 +64,14 @@ public class GamePackageInstallerTests : IDisposable
     private DateTime _dropClock = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     /// <summary>Drops a package into the games folder and returns its path.</summary>
-    private string Drop(string fileName, byte[] package)
+    private string Drop(string fileName, byte[] package) => DropInto(_gamesRoot, fileName, package);
+
+    /// <summary>Drops a package into the managed root — where the admin portal installs.</summary>
+    private string DropManaged(string fileName, byte[] package) => DropInto(_managedRoot, fileName, package);
+
+    private string DropInto(string root, string fileName, byte[] package)
     {
-        var path = Path.Combine(_gamesRoot, fileName);
+        var path = Path.Combine(root, fileName);
         System.IO.File.WriteAllBytes(path, package);
         _dropClock = _dropClock.AddSeconds(1);
         System.IO.File.SetLastWriteTimeUtc(path, _dropClock);
@@ -737,5 +752,190 @@ public class GamePackageInstallerTests : IDisposable
 
         var result = New().Reconcile(); // must not throw
         Assert.False(result.Changed);
+    }
+
+    // ── Two package roots ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Installs_from_the_managed_root_as_well_as_the_games_folder()
+    {
+        Drop("hand.kbg", PackageFixture.Valid("hand", "Hand Placed"));
+        DropManaged("portal.kbg", PackageFixture.Valid("portal", "Portal Installed"));
+
+        Assert.True(RunToCompletion(New()));
+
+        Assert.True(System.IO.File.Exists(Installed("hand", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("portal", "GAME.json")));
+    }
+
+    [Fact]
+    public void The_marker_records_which_root_a_package_came_from()
+    {
+        DropManaged("portal.kbg", PackageFixture.Valid("portal"));
+
+        RunToCompletion(New());
+
+        var marker = PackageMarker.TryRead(Path.Combine(_unpackedRoot, "portal"));
+        Assert.NotNull(marker);
+        Assert.Equal(PackageMarker.ManagedRoot, marker.Value.Root);
+        Assert.Equal("portal.kbg", marker.Value.Source);
+    }
+
+    [Fact]
+    public void A_contested_id_goes_to_the_games_folder_copy()
+    {
+        // Both roots offer "demo". games/ is scanned first, so the hand-placed package wins and the
+        // managed one is ignored — the same precedence GameCatalog gives a hand-placed FOLDER.
+        Drop("demo.kbg", PackageFixture.Valid("demo", "Hand Placed"));
+        DropManaged("demo.kbg", PackageFixture.Valid("demo", "Portal Installed"));
+
+        RunToCompletion(New());
+
+        var manifest = System.IO.File.ReadAllText(Installed("demo", "GAME.json"));
+        Assert.Contains("Hand Placed", manifest, StringComparison.Ordinal);
+        var marker = PackageMarker.TryRead(Path.Combine(_unpackedRoot, "demo"));
+        Assert.Equal(PackageMarker.GamesRoot, marker!.Value.Root);
+    }
+
+    [Fact]
+    public void Same_named_packages_in_both_roots_do_not_share_bookkeeping()
+    {
+        // The collision the old file-name keying created: "shared.kbg" exists in BOTH roots but carries
+        // a different game in each. Keyed by name, one row would record both ids and Forget would drop
+        // the survivor's row along with the loser's.
+        Drop("shared.kbg", PackageFixture.Valid("alpha"));
+        DropManaged("shared.kbg", PackageFixture.Valid("beta"));
+
+        RunToCompletion(New());
+
+        Assert.True(System.IO.File.Exists(Installed("alpha", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("beta", "GAME.json")));
+    }
+
+    [Fact]
+    public void Removing_one_of_two_same_named_packages_only_uninstalls_that_one()
+    {
+        Drop("shared.kbg", PackageFixture.Valid("alpha"));
+        var managed = DropManaged("shared.kbg", PackageFixture.Valid("beta"));
+        var installer = New();
+        RunToCompletion(installer);
+
+        System.IO.File.Delete(managed);
+        RunToCompletion(installer);
+
+        // "shared.kbg" is still present — in the other root. Matching on the name alone would read that
+        // as "beta's package is still there" and keep a game whose package is gone.
+        Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "beta")));
+        Assert.True(System.IO.File.Exists(Installed("alpha", "GAME.json")));
+    }
+
+    [Fact]
+    public void A_legacy_three_field_marker_is_not_treated_as_stale()
+    {
+        // Upgrading a server that installed games before the managed root existed must not re-extract
+        // the entire library: those markers have no root token and mean games/.
+        var path = Drop("demo.kbg", PackageFixture.Valid("demo"));
+        RunToCompletion(New());
+
+        var dir = Path.Combine(_unpackedRoot, "demo");
+        var info = new FileInfo(path);
+        System.IO.File.WriteAllText(
+            Path.Combine(dir, PackageMarker.FileName),
+            $"{info.LastWriteTimeUtc.Ticks}\t{info.Length}\tdemo.kbg\n");
+        var entryWritten = System.IO.File.GetLastWriteTimeUtc(Installed("demo", "index.html"));
+
+        var installer = New();
+        RunToCompletion(installer);
+
+        // Untouched: had the marker read as stale, the folder would have been swapped for a fresh
+        // extraction and the file's timestamp would have moved.
+        Assert.Equal(entryWritten, System.IO.File.GetLastWriteTimeUtc(Installed("demo", "index.html")));
+    }
+
+    [Fact]
+    public void Only_the_games_folder_is_scanned_when_the_managed_root_is_disabled()
+    {
+        Drop("hand.kbg", PackageFixture.Valid("hand"));
+        DropManaged("portal.kbg", PackageFixture.Valid("portal"));
+
+        RunToCompletion(GamesRootOnly());
+
+        Assert.True(System.IO.File.Exists(Installed("hand", "GAME.json")));
+        Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+    }
+
+    [Fact]
+    public void A_missing_managed_root_leaves_installed_packages_untouched()
+    {
+        // The same reasoning as a missing games folder: an unlistable root is indistinguishable from
+        // every package in it having been deleted, so pruning on that reading would uninstall the world.
+        Drop("demo.kbg", PackageFixture.Valid("demo"));
+        var installer = New();
+        RunToCompletion(installer);
+
+        Directory.Delete(_managedRoot, recursive: true);
+        var result = installer.Reconcile();
+
+        Assert.False(result.Changed);
+        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")));
+    }
+
+    // ── Adoption ──────────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void An_adopted_package_installs_on_the_very_next_pass()
+    {
+        // The settle check guards against half-copied files. A package this server renamed into place
+        // atomically has no such window, and making the operator who clicked Install wait two debounced
+        // passes buys nothing.
+        var path = DropManaged("portal.kbg", PackageFixture.Valid("portal"));
+        var installer = New();
+
+        installer.Adopt(path);
+        var result = installer.Reconcile(); // ONE pass
+
+        Assert.True(result.Changed);
+        Assert.True(System.IO.File.Exists(Installed("portal", "GAME.json")));
+    }
+
+    [Fact]
+    public void Without_adoption_the_same_package_needs_two_passes()
+    {
+        // The other half of the assertion above: proves the single pass came from Adopt and not from
+        // the settle check having quietly stopped working.
+        DropManaged("portal.kbg", PackageFixture.Valid("portal"));
+        var installer = New();
+
+        var first = installer.Reconcile();
+
+        Assert.False(first.Changed);
+        Assert.True(first.Pending);
+        Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+    }
+
+    [Fact]
+    public void Adopting_a_file_that_is_not_there_is_harmless()
+    {
+        var installer = New();
+
+        installer.Adopt(Path.Combine(_managedRoot, "ghost.kbg")); // must not throw
+
+        Assert.False(installer.Reconcile().Changed);
+    }
+
+    [Fact]
+    public void An_adopted_replacement_reinstalls_on_the_next_pass()
+    {
+        var installer = New();
+        DropManaged("portal.kbg", PackageFixture.Valid("portal", "First"));
+        RunToCompletion(installer);
+
+        var replaced = DropManaged("portal.kbg", PackageFixture.Valid("portal", "Second"));
+        installer.Adopt(replaced);
+        var result = installer.Reconcile();
+
+        Assert.True(result.Changed);
+        Assert.Contains("Second", System.IO.File.ReadAllText(Installed("portal", "GAME.json")),
+            StringComparison.Ordinal);
     }
 }

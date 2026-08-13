@@ -19,6 +19,7 @@ public class AdminOperationsTests : IDisposable
     private readonly string _gamesRoot;
     private readonly string _unpackedRoot;
     private readonly string _compressedRoot;
+    private readonly string _managedRoot;
     private readonly MutableTimeProvider _clock = new(DateTimeOffset.UnixEpoch);
     private readonly LobbyManager _lobbies;
     private readonly ConnectionManager _connections = new();
@@ -32,7 +33,9 @@ public class AdminOperationsTests : IDisposable
         _gamesRoot = Path.Combine(_root, "games");
         _unpackedRoot = Path.Combine(_root, "games-unpacked");
         _compressedRoot = Path.Combine(_root, "games-compressed");
-        foreach (var dir in new[] { _gamesRoot, _unpackedRoot, _compressedRoot }) Directory.CreateDirectory(dir);
+        _managedRoot = Path.Combine(_root, "games-managed");
+        foreach (var dir in new[] { _gamesRoot, _unpackedRoot, _compressedRoot, _managedRoot })
+            Directory.CreateDirectory(dir);
     }
 
     public void Dispose()
@@ -50,7 +53,7 @@ public class AdminOperationsTests : IDisposable
             _connections,
             new ContentPaths.Resolved(
                 Path.Combine(_root, "web"), _gamesRoot, Path.Combine(_root, "logs"),
-                _compressedRoot, _unpackedRoot),
+                _compressedRoot, _unpackedRoot, _managedRoot),
             _clock,
             NullLogger<AdminOperations>.Instance);
 
@@ -244,6 +247,51 @@ public class AdminOperationsTests : IDisposable
         Assert.False(Directory.Exists(unpacked));
         Assert.False(File.Exists(package));
         Assert.Equal(2, result.Removed!.Count);
+    }
+
+    [Fact]
+    public void Deleting_a_package_whose_file_name_is_not_the_game_id_still_removes_the_kbg()
+    {
+        // The installer takes the id from the header INSIDE the archive and accepts any file name, so
+        // deriving the package path as "<id>.kbg" missed this one entirely: the unpacked copy went, the
+        // archive stayed, and the next reconcile pass put the game straight back. The marker inside the
+        // extracted folder is what names the real file.
+        var unpacked = WriteGame(_unpackedRoot, "packaged");
+        var package = Path.Combine(_gamesRoot, "packaged-v2-final.kbg");
+        File.WriteAllBytes(package, [1, 2, 3, 4]);
+        PackageMarker.Write(unpacked, package, PackageMarker.GamesRoot, (1L, 4L));
+
+        var catalog = Catalog();
+        catalog.Discover();
+        var result = Operations(catalog).DeleteGame("packaged");
+
+        Assert.True(result.Success, result.Error);
+        Assert.False(Directory.Exists(unpacked));
+        Assert.False(File.Exists(package));
+    }
+
+    [Fact]
+    public void Deleting_a_managed_game_removes_its_package_and_its_rollback_backups()
+    {
+        var unpacked = WriteGame(_unpackedRoot, "managed-game");
+        var package = ManagedPackageLayout.PackagePath(_managedRoot, "managed-game");
+        File.WriteAllBytes(package, [1, 2, 3, 4]);
+        PackageMarker.Write(unpacked, package, PackageMarker.ManagedRoot, (1L, 4L));
+
+        var backups = ManagedPackageLayout.BackupDir(_managedRoot, "managed-game");
+        Directory.CreateDirectory(backups);
+        File.WriteAllBytes(Path.Combine(backups, "1-1.0.0-abc123def456.kbg"), [9, 9]);
+
+        var catalog = Catalog();
+        catalog.Discover();
+        var result = Operations(catalog).DeleteGame("managed-game");
+
+        Assert.True(result.Success, result.Error);
+        Assert.False(Directory.Exists(unpacked));
+        Assert.False(File.Exists(package));
+        // Retained versions of a game that no longer exists are pure waste — and a rollback target for a
+        // game with nothing to roll back to.
+        Assert.False(Directory.Exists(backups));
     }
 
     [Fact]

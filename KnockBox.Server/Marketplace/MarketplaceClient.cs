@@ -102,7 +102,12 @@ public sealed partial class MarketplaceClient
     /// that talks to one or two hosts. That keeps <c>Microsoft.Extensions.Http</c> out of the
     /// dependency list, which matters here — every package has to clear the Native AOT gate.
     /// </remarks>
-    public static HttpClient CreateHttpClient(MarketplaceOptions options)
+    /// <remarks>
+    /// Takes no options on purpose: nothing here is source-specific. That is what makes ONE client
+    /// shareable across every registered marketplace, with each <see cref="MarketplaceClient"/> holding
+    /// only its own URL pair and cached catalog.
+    /// </remarks>
+    public static HttpClient CreateHttpClient()
     {
         var handler = new SocketsHttpHandler
         {
@@ -492,6 +497,14 @@ public sealed partial class MarketplaceClient
     /// </summary>
     private static bool IsAllowedScheme(Uri uri) =>
         uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
+
+    /// <summary>
+    /// Whether a URL an operator typed may be used as a catalog or download origin — the same rule,
+    /// exposed so <see cref="MarketplaceSourceRegistry"/> validates a registration with it rather than
+    /// keeping a second copy that could drift.
+    /// </summary>
+    internal static bool IsAllowedUrl(string? url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) && IsAllowedScheme(uri);
 
     private async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, string what, CancellationToken cancellationToken)

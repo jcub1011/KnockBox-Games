@@ -83,6 +83,16 @@ The directory is mounted **read-only** (`:ro`) — the server never writes to it
 instances can safely share one game library. `docker-compose.yml` contains a commented-out second
 instance showing exactly that pattern.
 
+> **Games installed from the admin portal are NOT in this directory.** Because the mount is read-only,
+> anything the portal installs — from a marketplace or uploaded by hand — lands in
+> `KnockBox__GamesManagedRoot` (`/app/games-managed`, the `knockbox-managed` volume) instead. So backing
+> up `KNOCKBOX_GAMES_DIR` alone no longer captures your whole library. A marketplace game can always be
+> downloaded again; **an uploaded one exists nowhere else**, so treat that volume like `/app/data` and
+> back it up. Never share it between instances — each server reconciles and prunes its own copy.
+>
+> Budget roughly **3× a game's size** in that volume while an install runs: the download, the extracted
+> copy, and the previous version retained for rollback (`KnockBox__PackageBackupCount`, default 1).
+
 > **Pre-compressed asset cache.** With `KnockBox__Precompress` on (the default), the server writes a
 > `games-compressed/` cache of `.br`/`.gz` variants (built at max effort — the slow part of a cold
 > boot) — it lives at `KnockBox__GamesCompressedRoot` (`/app/games-compressed` in the image), which
@@ -253,6 +263,10 @@ Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-
 5. Leave the **admin** port (8082) out of the proxy unless you are deliberately exposing the portal —
    see [The admin portal](#the-admin-portal). Publishing it also makes the session cookie `Secure`
    automatically, since the server sees the forwarded `https` scheme.
+6. If you *do* proxy the admin origin, **raise the request-body limit** or uploading a game package
+   fails before the server ever sees it. nginx defaults to 1 MB (`client_max_body_size 512m;`); Caddy
+   and Traefik have no default cap. Cloudflare's free plan caps uploads at **100 MB** and cannot be
+   raised — upload larger packages over a tunnel-free path, or install from a marketplace instead.
 
 ### Behind Cloudflare Tunnel (cloudflared)
 

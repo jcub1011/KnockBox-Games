@@ -47,9 +47,15 @@ public sealed class DiskUsageReporter(
     private int _refreshing;
 
     /// <summary>One game's disk footprint, broken out so the portal can explain the total.</summary>
-    public sealed record GameDisk(string Id, long DirectoryBytes, long CompressedBytes, long PackageBytes)
+    /// <param name="BackupBytes">
+    /// Retained previous versions of a managed package, kept for rollback. Counted per game because it is
+    /// the operator's own retention setting that produced it — an unexplained multiple of a large game's
+    /// package size is exactly the figure someone opens this page to understand.
+    /// </param>
+    public sealed record GameDisk(
+        string Id, long DirectoryBytes, long CompressedBytes, long PackageBytes, long BackupBytes)
     {
-        public long TotalBytes => DirectoryBytes + CompressedBytes + PackageBytes;
+        public long TotalBytes => DirectoryBytes + CompressedBytes + PackageBytes + BackupBytes;
     }
 
     /// <summary>A complete measurement.</summary>
@@ -57,9 +63,10 @@ public sealed class DiskUsageReporter(
         DateTimeOffset TakenAt,
         IReadOnlyList<GameDisk> Games,
         long CompressedCacheBytes,
-        long LogsBytes)
+        long LogsBytes,
+        long ManagedRootBytes)
     {
-        /// <summary>Total across every game (folders, compressed variants and source packages).</summary>
+        /// <summary>Total across every game (folders, compressed variants, source packages and backups).</summary>
         public long TotalGameBytes => Games.Sum(g => g.TotalBytes);
     }
 
@@ -98,7 +105,8 @@ public sealed class DiskUsageReporter(
                 id,
                 DirectoryBytes(location.Directory),
                 DirectoryBytes(Path.Combine(paths.GamesCompressedRoot, id)),
-                PackageBytes(id)));
+                PackageBytes(id),
+                DirectoryBytes(ManagedPackageLayout.BackupDir(paths.GamesManagedRoot, id))));
         }
         games.Sort((a, b) => b.TotalBytes.CompareTo(a.TotalBytes)); // biggest first: the reason to look
 
@@ -106,7 +114,8 @@ public sealed class DiskUsageReporter(
             clock.GetUtcNow(),
             games,
             DirectoryBytes(paths.GamesCompressedRoot),
-            DirectoryBytes(paths.LogsRoot));
+            DirectoryBytes(paths.LogsRoot),
+            DirectoryBytes(paths.GamesManagedRoot));
     }
 
     /// <summary>Total size of every file under a directory, or 0 if it doesn't exist or can't be read.</summary>
@@ -129,11 +138,13 @@ public sealed class DiskUsageReporter(
         }
     }
 
-    // The source archive for a package-installed game, still in games/ where the installer watches it.
+    // The source archive for a package-installed game, in whichever package root actually holds it —
+    // resolved rather than derived, because the installer accepts any *.kbg file name and a
+    // portal-installed package lives in the managed root, not games/.
     private long PackageBytes(string id)
     {
-        var package = Path.Combine(paths.GamesRoot, id + GamePackage.Extension);
-        try { return File.Exists(package) ? new FileInfo(package).Length : 0; }
+        if (GamePackageLocations.Find(paths, id) is not { } package) return 0;
+        try { return new FileInfo(package.Path).Length; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return 0; }
     }
 }

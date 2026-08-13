@@ -1,4 +1,5 @@
 using System.Text.Json;
+using KnockBox.Server.Marketplace;
 using KnockBox.Server.Security;
 
 namespace KnockBox.Server.Admin;
@@ -72,6 +73,12 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     /// <summary>Whether this game appears in the catalog players browse.</summary>
     public bool IsListed(string gameId) => GetAvailability(gameId) == GameAvailability.Available;
 
+    /// <summary>
+    /// Always null: persisted policy has nothing specific to add beyond the generic refusal. The
+    /// transient half of policy (<see cref="GameLifecycleGate"/>) is what answers this.
+    /// </summary>
+    public string? UnavailableReason(string gameId) => null;
+
     /// <summary>Every recorded override. Entries for games that aren't currently installed are kept
     /// deliberately — see <see cref="Save"/>.</summary>
     public IReadOnlyDictionary<string, GameAvailability> Overrides => _state.Games;
@@ -94,6 +101,74 @@ public sealed class AdminSettingsStore : IPlatformPolicy
             _state = _state with { Games = games };
             _logger.LogInformation("Admin set game {GameId} availability to {State}.", gameId, state);
             return Save();
+        }
+    }
+
+    /// <summary>Extra marketplaces the operator registered. The official one is not in here — it is built in.</summary>
+    public IReadOnlyList<RegisteredMarketplace> Sources => _state.Sources;
+
+    /// <summary>What the server may do on its own when a newer version of this game appears.</summary>
+    public UpdatePolicy GetUpdatePolicy(string gameId) =>
+        _state.Updates.TryGetValue(gameId, out var policy) ? policy : UpdatePolicy.Manual;
+
+    /// <summary>Every game enrolled in automatic updates. Games on Manual are absent, not listed.</summary>
+    public IReadOnlyDictionary<string, UpdatePolicy> UpdatePolicies => _state.Updates;
+
+    /// <summary>
+    /// Sets a game's update policy. Returns null on success, or a message explaining why it could not be
+    /// persisted (it is in effect regardless, until the next restart).
+    /// </summary>
+    public string? SetUpdatePolicy(string gameId, UpdatePolicy policy)
+    {
+        lock (_writeGate)
+        {
+            var updates = new Dictionary<string, UpdatePolicy>(_state.Updates, GameIdComparer);
+            if (policy == UpdatePolicy.Manual) updates.Remove(gameId);
+            else updates[gameId] = policy;
+
+            _state = _state with { Updates = updates };
+            _logger.LogInformation("Admin set game {GameId} update policy to {Policy}.", gameId, policy);
+            return Save();
+        }
+    }
+
+    /// <summary>
+    /// Adds a marketplace, or replaces the one with the same id. Returns null on success, or a message
+    /// explaining why it could not be persisted (it is in effect regardless, until the next restart).
+    /// </summary>
+    public string? UpsertSource(RegisteredMarketplace source)
+    {
+        lock (_writeGate)
+        {
+            var sources = _state.Sources
+                .Where(s => !string.Equals(s.Id, source.Id, StringComparison.OrdinalIgnoreCase))
+                .Append(source)
+                .ToList();
+            _state = _state with { Sources = sources };
+            _logger.LogInformation("Admin registered marketplace {SourceId} ({Url}).",
+                source.Id, source.CatalogUrl);
+            return Save();
+        }
+    }
+
+    /// <summary>Removes a registered marketplace. False when there was no such id.</summary>
+    public bool RemoveSource(string id, out string? warning)
+    {
+        lock (_writeGate)
+        {
+            var sources = _state.Sources
+                .Where(s => !string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (sources.Count == _state.Sources.Count)
+            {
+                warning = null;
+                return false;
+            }
+
+            _state = _state with { Sources = sources };
+            _logger.LogInformation("Admin removed marketplace {SourceId}.", id);
+            warning = Save();
+            return true;
         }
     }
 
@@ -164,7 +239,8 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     /// </remarks>
     private string? Save()
     {
-        var settings = new AdminSettings(_state.MaintenanceMode, _state.MaintenanceMessage, _state.Games);
+        var settings = new AdminSettings(
+            _state.MaintenanceMode, _state.MaintenanceMessage, _state.Games, _state.Sources, _state.Updates);
         var temp = FilePath + ".tmp";
         try
         {
@@ -191,13 +267,25 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     private sealed record State(
         bool MaintenanceMode,
         string? MaintenanceMessage,
-        IReadOnlyDictionary<string, GameAvailability> Games)
+        IReadOnlyDictionary<string, GameAvailability> Games,
+        IReadOnlyList<RegisteredMarketplace> Sources,
+        IReadOnlyDictionary<string, UpdatePolicy> Updates)
     {
         public static readonly State Default =
-            new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer));
+            new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer), [],
+                new Dictionary<string, UpdatePolicy>(GameIdComparer));
 
         public static State From(AdminSettings settings)
         {
+            var updates = new Dictionary<string, UpdatePolicy>(GameIdComparer);
+            foreach (var (id, policy) in settings.Updates ?? Default.Updates)
+            {
+                // Manual is the default, recorded by ABSENCE — the same trick the availability map uses
+                // for Available, so the file doesn't accumulate a row per game ever looked at.
+                if (string.IsNullOrWhiteSpace(id) || policy == UpdatePolicy.Manual) continue;
+                updates[id] = policy;
+            }
+
             var games = new Dictionary<string, GameAvailability>(GameIdComparer);
             foreach (var (id, state) in settings.Games ?? Default.Games)
             {
@@ -206,7 +294,21 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 if (string.IsNullOrWhiteSpace(id) || state == GameAvailability.Available) continue;
                 games[id] = state;
             }
-            return new State(settings.MaintenanceMode, settings.MaintenanceMessage, games);
+
+            // Same discipline for the source list: a hand-edited row missing its URL is dropped, not
+            // fatal, and a duplicate id keeps the first.
+            var sources = new List<RegisteredMarketplace>();
+            foreach (var source in settings.Sources ?? [])
+            {
+                if (!MarketplaceSourceRegistry.IsValidId(source.Id)
+                    || !MarketplaceClient.IsAllowedUrl(source.CatalogUrl)
+                    || !MarketplaceClient.IsAllowedUrl(source.DownloadBaseUrl)
+                    || sources.Any(s => string.Equals(s.Id, source.Id, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                sources.Add(source);
+            }
+
+            return new State(settings.MaintenanceMode, settings.MaintenanceMessage, games, sources, updates);
         }
     }
 }

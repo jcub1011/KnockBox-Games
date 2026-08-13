@@ -86,6 +86,11 @@
             Game Catalog
             <span class="nav-count" id="nav-count-games" hidden></span>
           </button>
+          <button class="nav-item" data-tab="marketplace">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"></path><path d="M3 8h18l-1.5 11a2 2 0 0 1-2 1.75H6.5a2 2 0 0 1-2-1.75z"></path><path d="M9 12v4m6-4v4"></path></svg>
+            Marketplace
+            <span class="nav-count" id="nav-count-marketplace" hidden></span>
+          </button>
           <button class="nav-item" data-tab="logs">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
             System Logs
@@ -238,6 +243,50 @@
             <p class="panel-card-note" id="games-note"></p>
           </div>
 
+          <!-- ── Tab: Marketplace & Packages ──────────────────────────────── -->
+          <!-- Its own tab rather than folded into Game Catalog because only the VISIBLE tab polls, and
+               these two need different rates: the catalog tab is 20s because it triggers a disk walk,
+               while the operations list below needs ~3s to render progress. One panel would mean one
+               timer, and neither rate suits both. -->
+          <div class="tab-panel hidden" id="tab-marketplace">
+            <div class="panel-card hidden" id="mkt-disabled">
+              <div class="panel-card-header"><h3>Marketplace disabled</h3></div>
+              <p class="panel-card-note">
+                <code>KnockBox:MarketplaceEnabled</code> is false, so this server makes no outbound
+                requests and no catalog is fetched. Uploading a <code>.kbg</code>, rolling one back and
+                uninstalling all still work.
+              </p>
+            </div>
+
+            <!-- In-flight and recently finished operations. Server-side state, so switching tabs or
+                 closing the browser doesn't affect anything running. -->
+            <div class="panel-card hidden" id="mkt-jobs-card">
+              <div class="panel-card-header"><h3>Operations</h3></div>
+              <div id="mkt-jobs"></div>
+            </div>
+
+            <div class="filter-bar">
+              <input type="search" id="mkt-filter-q" class="text-input" placeholder="Filter by name, id or tag" />
+              <select id="mkt-filter-status" class="text-input filter-narrow">
+                <option value="">Any status</option>
+                <option value="updateAvailable">Update available</option>
+                <option value="notInstalled">Not installed</option>
+                <option value="installed">Installed</option>
+                <option value="problem">Problems</option>
+              </select>
+              <select id="mkt-filter-source" class="text-input filter-narrow">
+                <option value="">Any source</option>
+              </select>
+              <span class="filter-spacer"></span>
+              <button class="btn btn-secondary" id="mkt-upload-btn">Upload .kbg…</button>
+              <button class="btn btn-secondary" id="mkt-settings-btn">Sources…</button>
+              <button class="btn btn-secondary" id="mkt-refresh-btn">Refresh Catalog</button>
+            </div>
+            <div id="mkt-list" class="games-list"></div>
+            <p class="empty-state" id="mkt-empty">No games offered and none installed from a package.</p>
+            <p class="panel-card-note" id="mkt-note"></p>
+          </div>
+
           <!-- ── Tab: System Logs ─────────────────────────────────────────── -->
           <div class="tab-panel hidden" id="tab-logs">
             <div class="filter-bar">
@@ -287,6 +336,55 @@
       <div id="files-list" class="files-list"></div>
       <div class="modal-actions">
         <button class="btn btn-secondary" id="files-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Package upload. Sends the raw .kbg bytes as application/octet-stream — see admin.js for why this
+       one path uses XMLHttpRequest rather than fetch. -->
+  <div class="modal-backdrop hidden" id="upload-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+      <h3 id="upload-title">Upload a game package</h3>
+      <p class="panel-card-note">
+        A <code>.kbg</code> package, as produced by <code>knockbox-pack</code>. It is validated exactly
+        like one downloaded from a marketplace — but nothing published its hash, so the bytes you supply
+        are the only thing vouching for it.
+      </p>
+      <div class="upload-drop" id="upload-drop" tabindex="0" role="button">
+        <span id="upload-name">Drop a .kbg here, or click to choose one</span>
+        <input type="file" id="upload-file" accept=".kbg" hidden />
+      </div>
+      <label class="checkbox-row">
+        <span>When a game is already running this package:</span>
+        <select id="upload-mode" class="text-input filter-narrow"></select>
+      </label>
+      <div class="progress-bar hidden" id="upload-progress"><div class="progress-fill" id="upload-progress-fill"></div></div>
+      <p class="form-error hidden" id="upload-error"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="upload-abort">Cancel upload</button>
+        <button class="btn btn-secondary" id="upload-close">Close</button>
+        <button class="btn btn-primary" id="upload-submit">Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Registered marketplaces. -->
+  <div class="modal-backdrop hidden" id="mkt-settings-backdrop">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="mkt-settings-title">
+      <h3 id="mkt-settings-title">Marketplace sources</h3>
+      <p class="panel-card-note" id="mkt-settings-note"></p>
+      <div id="mkt-sources" class="files-list"></div>
+      <h4 class="modal-subhead">Register another</h4>
+      <div class="source-form">
+        <input type="text" id="mkt-source-id" class="text-input filter-narrow" placeholder="id (e.g. staging)" />
+        <input type="text" id="mkt-source-name" class="text-input" placeholder="Display name" />
+        <input type="url" id="mkt-source-url" class="text-input" placeholder="https://…/CATALOG.json" />
+        <input type="url" id="mkt-source-download" class="text-input" placeholder="Download origin (https://github.com)" />
+        <button class="btn btn-secondary" id="mkt-source-add">Add</button>
+      </div>
+      <p class="form-error hidden" id="mkt-settings-error"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="mkt-settings-close">Close</button>
       </div>
     </div>
   </div>

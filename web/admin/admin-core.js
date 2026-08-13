@@ -6,7 +6,7 @@
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 /** The dashboard tabs, in sidebar order. The nav's data-tab attributes must match these. */
-export const TABS = ['overview', 'lobbies', 'games', 'logs'];
+export const TABS = ['overview', 'lobbies', 'games', 'marketplace', 'logs'];
 
 /**
  * The tab a URL fragment selects, or the first tab when the fragment names nothing valid. Driving the
@@ -203,4 +203,258 @@ export const AVAILABILITY = [
 
 export function availabilityLabel(value) {
   return AVAILABILITY.find((a) => a.value === String(value).toLowerCase())?.label ?? String(value ?? '--');
+}
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+/**
+ * What the install engine is doing to a game right now.
+ *
+ * Deliberately NOT part of AVAILABILITY. That select is a command control — choosing an option POSTs it —
+ * so offering a value the server would have to refuse is worse than not offering it at all. These are
+ * engine state, never operator policy, and they render as a badge instead.
+ */
+export const LIFECYCLE = [
+  // Empty label: the overwhelmingly common state renders nothing rather than a badge saying "fine".
+  { value: 'ready', label: '', hint: '' },
+  { value: 'draining', label: 'Draining', hint: 'Waiting for running lobbies to finish before updating. New lobbies are refused.' },
+  { value: 'updating', label: 'Updating', hint: 'Files are being swapped. New lobbies are refused.' },
+];
+
+export function lifecycleLabel(value) {
+  const entry = LIFECYCLE.find((l) => l.value === String(value ?? '').toLowerCase());
+  return entry ? entry.label : String(value ?? '');
+}
+
+export function lifecycleClass(value) {
+  switch (String(value ?? '').toLowerCase()) {
+    case 'updating': return 'badge-warning';
+    case 'draining': return 'badge-muted';
+    default: return '';
+  }
+}
+
+/** True when the engine is mid-swap, so availability and delete must be held. */
+export function isBusyLifecycle(value) {
+  const name = String(value ?? 'ready').toLowerCase();
+  return name !== 'ready' && name !== '';
+}
+
+// ── Marketplace ───────────────────────────────────────────────────────────────
+
+/**
+ * Every status a catalog row can carry: the seven PluginUpdateStatus values, plus `installedOnly`,
+ * which is not one of them — it marks a managed game no enabled source offers (an upload, or an entry
+ * that was withdrawn).
+ *
+ * Pinned as a list so a server-side enum addition fails loudly in a test here rather than rendering as
+ * a bare camelCase string in the UI.
+ */
+export const PLUGIN_STATUS = [
+  { value: 'notInstalled', label: 'Not installed', badge: 'badge-muted', hint: 'Offered by a marketplace but not installed here.' },
+  { value: 'upToDate', label: 'Up to date', badge: 'badge-ok', hint: 'The installed version matches what the marketplace offers.' },
+  { value: 'updateAvailable', label: 'Update available', badge: 'badge-warning', hint: 'A newer version is published.' },
+  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered — usually a hand-built package.' },
+  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version, so there is nothing to compare. Common for hand-made games.' },
+  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version does not run on this server version. Never offered as an update.' },
+  { value: 'unusable', label: 'Unusable', badge: 'badge-danger', hint: 'The catalog entry is malformed and cannot be acted on.' },
+  { value: 'installedOnly', label: 'Installed', badge: 'badge-ok', hint: 'Installed here, but no registered marketplace offers it.' },
+];
+
+export function pluginStatusLabel(value) {
+  // Unknown values pass through rather than becoming "--", the same contract availabilityLabel has: a
+  // server that grew a status should read oddly, not disappear.
+  return PLUGIN_STATUS.find((s) => s.value === value)?.label ?? String(value ?? '--');
+}
+
+export function pluginStatusClass(value) {
+  return PLUGIN_STATUS.find((s) => s.value === value)?.badge ?? 'badge-muted';
+}
+
+export function pluginStatusHint(value) {
+  return PLUGIN_STATUS.find((s) => s.value === value)?.hint ?? '';
+}
+
+const INSTALLED_STATUSES = new Set([
+  'upToDate', 'updateAvailable', 'installedAhead', 'installedVersionUnknown', 'installedOnly',
+]);
+const PROBLEM_STATUSES = new Set(['incompatible', 'unusable']);
+
+/** Catalog rows matching the marketplace view's filters. Client-side, like the other two filters. */
+export function filterCatalog(entries, { q = '', status = '', source = '' } = {}) {
+  const needle = q.trim().toLowerCase();
+  const wantedStatus = status.trim();
+  const wantedSource = source.trim().toLowerCase();
+  return (entries || []).filter((e) => {
+    if (wantedSource && String(e.sourceId ?? '').toLowerCase() !== wantedSource) return false;
+    if (wantedStatus === 'installed' && !INSTALLED_STATUSES.has(e.status)) return false;
+    else if (wantedStatus === 'problem' && !PROBLEM_STATUSES.has(e.status)) return false;
+    else if (wantedStatus && wantedStatus !== 'installed' && wantedStatus !== 'problem'
+             && e.status !== wantedStatus) return false;
+    if (needle
+        && !matches(e.name, needle)
+        && !matches(e.id, needle)
+        && !(e.tags || []).some((t) => matches(t, needle))) return false;
+    return true;
+  });
+}
+
+// ── Jobs ──────────────────────────────────────────────────────────────────────
+
+/** Statuses a job stays in. Reaching one is what triggers a toast and a catalog re-read. */
+export const TERMINAL_JOB_STATUSES = ['succeeded', 'failed', 'cancelled'];
+
+export function isTerminalJob(status) {
+  return TERMINAL_JOB_STATUSES.includes(String(status ?? '').toLowerCase());
+}
+
+/**
+ * Merges a poll's jobs into the visible list.
+ *
+ * The one behavioural difference from appendLogEntries: this replaces BY jobId rather than appending.
+ * A job is a single thing that changes, not a stream of events, so a running job's row has to update in
+ * place instead of stacking a new row per poll.
+ *
+ * A lower sequence for a job we already hold is ignored — two polls can overlap, and letting a stale
+ * reply overwrite a newer one would make a finished job flicker back to "downloading".
+ */
+export function mergeJobs(existing, incoming, limit = 50) {
+  const byId = new Map();
+  for (const job of existing || []) {
+    if (job && job.jobId) byId.set(job.jobId, job);
+  }
+  for (const job of incoming || []) {
+    if (!job || !job.jobId) continue;
+    const current = byId.get(job.jobId);
+    if (current && Number(current.sequence) > Number(job.sequence)) continue;
+    byId.set(job.jobId, job);
+  }
+  const merged = [...byId.values()].sort((a, b) => Number(b.sequence) - Number(a.sequence));
+  return merged.length > limit ? merged.slice(0, limit) : merged;
+}
+
+/**
+ * A job's progress as a percentage and a label.
+ *
+ * `percent` is null — never 0 — when the total is unknown, so the bar renders indeterminate. A confident
+ * "0%" on a transfer that is actually moving is a claim we cannot make, and it reads as a stall.
+ */
+export function jobProgress(job) {
+  const done = Number(job?.bytesDone);
+  const total = Number(job?.bytesTotal);
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(done) || done < 0) {
+    return { percent: null, label: done > 0 ? formatBytes(done) : '' };
+  }
+  const percent = Math.max(0, Math.min(100, (done / total) * 100));
+  return { percent, label: `${formatBytes(done)} / ${formatBytes(total)}` };
+}
+
+// ── Version targeting ─────────────────────────────────────────────────────────
+
+/**
+ * The versions a catalog row can be taken to, newest-intent first: what the marketplace offers, what is
+ * running now, then each retained backup.
+ *
+ * One control serves both version targeting and rollback, because rolling back IS targeting an older
+ * version you already hold. Two separate controls would be two ways to say the same thing.
+ */
+export function versionOptions(entry) {
+  const options = [];
+  const seen = new Set();
+  const add = (version, kind) => {
+    const key = `${version ?? ''}|${kind}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    options.push({ version: version ?? null, kind });
+  };
+
+  if (entry?.availableVersion) add(entry.availableVersion, 'available');
+  if (entry?.installed) add(entry.installedVersion ?? null, 'installed');
+  for (const backup of entry?.backups || []) add(backup.version ?? null, 'backup');
+  return options;
+}
+
+/**
+ * What the action button does for the currently selected version.
+ *
+ * `blockedReason` is set when the row cannot be acted on at all; the caller disables the button and uses
+ * the reason as its tooltip, the same pattern the games tab already uses for a non-deletable game.
+ */
+export function versionAction(entry, selected) {
+  if (!entry) return { kind: 'none', label: 'Install', danger: false, blockedReason: 'Nothing selected.' };
+
+  if (entry.status === 'incompatible' || entry.status === 'unusable') {
+    return {
+      kind: 'none',
+      label: entry.status === 'incompatible' ? 'Incompatible' : 'Unusable',
+      danger: false,
+      blockedReason: entry.reason || pluginStatusHint(entry.status),
+    };
+  }
+  if (entry.installBlockedReason) {
+    return { kind: 'none', label: 'Install', danger: false, blockedReason: entry.installBlockedReason };
+  }
+
+  const options = versionOptions(entry);
+  const target = options.find((o) => (o.version ?? '') === String(selected ?? ''))
+    ?? options[0]
+    ?? { version: entry.availableVersion ?? null, kind: 'available' };
+
+  if (!entry.installed) {
+    return { kind: 'install', label: 'Install', danger: false, blockedReason: null };
+  }
+  if (target.kind === 'backup') {
+    // Danger styling because it replaces what is running with older bytes — the one action here an
+    // operator can regret.
+    return { kind: 'rollback', label: 'Roll back', danger: true, blockedReason: null };
+  }
+  if (target.kind === 'installed' || (target.version ?? '') === (entry.installedVersion ?? '')) {
+    return { kind: 'reinstall', label: 'Reinstall', danger: false, blockedReason: null };
+  }
+  return { kind: 'update', label: 'Update', danger: false, blockedReason: null };
+}
+
+/** How an update is allowed to treat lobbies that are running right now. */
+export const UPDATE_MODES = [
+  { value: 'drain', label: 'When games finish', hint: 'Stops new lobbies starting, then updates once the running ones end on their own.' },
+  { value: 'auto', label: 'Only if idle', hint: 'Updates only if nobody is playing right now; otherwise does nothing.' },
+  { value: 'force', label: 'Now (closes games)', hint: 'Closes every lobby running this game, then updates immediately.' },
+];
+
+/** What the scheduled check may do to a game unattended. `manual` means "never, ask me". */
+export const UPDATE_POLICIES = [
+  { value: 'manual', label: 'Manual', hint: 'Never updated on its own. The portal reports what is available.' },
+  { value: 'auto', label: 'Automatic when idle', hint: 'Updates itself whenever the game has no lobbies running.' },
+  { value: 'drain', label: 'Automatic, draining', hint: 'Stops new lobbies when an update is found, then updates once the running ones end.' },
+  { value: 'force', label: 'Automatic, immediate', hint: 'Closes running lobbies and updates as soon as an update is found.' },
+];
+
+/** A version as `v1.2.3`, or a dash when there is none to show. */
+export function formatVersion(version) {
+  const text = String(version ?? '').trim();
+  return text ? `v${text.replace(/^v/i, '')}` : '--';
+}
+
+// ── Upload ────────────────────────────────────────────────────────────────────
+
+/**
+ * Whether a picked file is worth uploading. ADVISORY ONLY — the server enforces the real cap while
+ * streaming, and re-validates the archive. This exists so a ten-minute upload doesn't end in a 413.
+ *
+ * `maxBytes` comes from the server (KnockBox:MaxPackageBytes); hard-coding it here would drift from the
+ * only place that actually decides.
+ */
+export function uploadGuard(file, { maxBytes = 0 } = {}) {
+  if (!file) return { ok: false, error: 'Choose a .kbg package to upload.' };
+  if (!/\.kbg$/i.test(file.name || '')) {
+    return {
+      ok: false,
+      error: 'Only .kbg packages can be uploaded. Run knockbox-pack on the game folder to produce one.',
+    };
+  }
+  if (!Number(file.size)) return { ok: false, error: 'That file is empty.' };
+  if (maxBytes > 0 && Number(file.size) > maxBytes) {
+    return { ok: false, error: `That package is ${formatBytes(file.size)}, over the ${formatBytes(maxBytes)} limit.` };
+  }
+  return { ok: true, error: null };
 }

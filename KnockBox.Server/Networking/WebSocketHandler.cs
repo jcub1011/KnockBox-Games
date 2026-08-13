@@ -280,8 +280,12 @@ public sealed class WebSocketHandler(
         }
         if (!policy.CanCreateLobby(game.Id))
         {
+            // The policy gets to say WHY when it has something specific — a game mid-update is refused
+            // for a reason players can act on ("try again shortly"), not the generic shrug an operator
+            // disabling a game earns. The relay still knows nothing about updates: it just passes the
+            // string through, exactly as it does for MaintenanceMessage.
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
-                $"'{game.Name}' is currently unavailable.")));
+                policy.UnavailableReason(game.Id) ?? $"'{game.Name}' is currently unavailable.")));
             return;
         }
 

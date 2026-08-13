@@ -6,9 +6,10 @@ marketplace at [`jcub1011/KnockBox-Games-Marketplace`](https://github.com/jcub10
 Related: [`KBG_FORMAT.md`](KBG_FORMAT.md) (the package format), [`HOSTING.md`](HOSTING.md)
 (deployment), [`GAME_DEVELOPER_GUIDE.md`](GAME_DEVELOPER_GUIDE.md) (authoring a game).
 
-**Status.** The server-side client and the update check are implemented and tested. There is
-deliberately **no UI and no automation yet**: nothing polls the catalog, and nothing installs what it
-downloads. The admin portal's "Game Catalog" tab is still disabled.
+**Status.** Complete end to end. The admin portal's **Marketplace** tab browses registered catalogs,
+installs, updates, rolls back and uninstalls; an operator can also upload a `.kbg` directly. A scheduled
+check keeps games the operator **enrolled** up to date — nothing is enrolled by default. See
+[`ADMIN.md`](ADMIN.md) §4 for the operator's view.
 
 ---
 
@@ -106,9 +107,42 @@ Consequently:
 Any failure deletes the partial file. The result is a `DownloadedPackage`, which is `IDisposable`
 so a caller cannot leak a half-gigabyte artifact on an error path.
 
-**It does not install.** Dropping a `.kbg` into the games directory remains the only way a package
-becomes a playable game (see `GamePackageInstaller`). Downloading and installing are kept separate so
-the read-only-`games/` deployment story is unaffected.
+**It does not install.** `DownloadAsync` hands back a verified file and stops there; `PackageManager`
+is what places it. Keeping the two apart is what lets the same placement path serve a download, an
+upload and a rollback without any of them re-deciding what "valid" means.
+
+### An uploaded package has no hash to check
+
+The guarantee above rests entirely on the catalog having committed to a `sha256`. **An upload has no
+catalog entry**, so there is nothing to compare against: it is validated for structure and safety by
+`GamePackageReader.Read` exactly like a download, and steps 2 and 5 above simply do not exist for it.
+
+On that path the operator supplying the bytes *is* the trust root. That is the one place in this
+document where the hash guarantee does not apply, and it is worth stating plainly rather than leaving a
+reader to infer it from the absence of a step.
+
+## 3a. Installing from a catalog
+
+The portal's install path, end to end:
+
+1. `MarketplaceSourceRegistry` resolves the entry from the **cached** catalog — clicking Install does
+   not pay for a network round trip the page already made.
+2. `PackageManager` starts a job and returns; nothing blocks the request. A large download plus an
+   extraction outlives any HTTP request, and a drain is open-ended.
+3. `DownloadAsync` runs every check in §3 into the managed root's staging folder.
+4. The apply mode decides what happens to lobbies running that game (see [`ADMIN.md`](ADMIN.md) §4).
+5. The previous package is copied aside for rollback, then the new one is moved into place with a
+   single atomic overwrite — so the id is never without a package, not even across a crash.
+6. `GamePackageInstaller` extracts it on the next pass and the catalog republishes.
+
+**Why a separate root.** `games/` is mounted read-only in the shipped compose file, and several servers
+may share one library, so the portal cannot write there at all. Packages it installs live in
+`GamesManagedRoot` instead, which the installer also scans. `games/` still wins a contested id, so a
+package placed by hand always beats one installed by the portal — the same precedence `GameCatalog`
+gives a hand-placed folder.
+
+Consequence worth knowing: **portal-installed games are not in your games directory.** Backing that
+directory up no longer captures the whole library.
 
 ## 4. Is my copy up to date?
 
@@ -203,5 +237,9 @@ dotnet test KnockBox.Server.Tests --filter "FullyQualifiedName~MarketplaceLive"
 
 ## 8. Not built yet
 
-Admin API routes and UI, scheduled catalog polling, one-click install/update, and signature
-verification beyond the published hash. None of them change the contracts above.
+- **Signature verification beyond the published hash.** The catalog's commit history is the trust root;
+  nothing is signed.
+- **The `local-path` source type.** Named in the schema, refused by `ValidateEntry`.
+- **Scheduled update windows.** The check runs on a fixed interval, with no "only overnight".
+
+None of them change the contracts above.

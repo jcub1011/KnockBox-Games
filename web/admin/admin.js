@@ -8,18 +8,26 @@
 // display names are untrusted input.
 
 import {
-  AVAILABILITY, TABS, appendLogEntries, availabilityLabel, cpuPercentBetween, filterGames, filterLobbies,
-  formatBytes, formatClock, formatCount, formatDuration, logLevelClass, logLevelTag, ratePerSecond,
-  tabFromHash,
+  AVAILABILITY, TABS, UPDATE_MODES, UPDATE_POLICIES, appendLogEntries, availabilityLabel,
+  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, formatBytes, formatClock, formatCount,
+  formatDuration, formatVersion, isBusyLifecycle, isTerminalJob, jobProgress, lifecycleClass,
+  lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, pluginStatusClass, pluginStatusHint,
+  pluginStatusLabel, ratePerSecond, tabFromHash, uploadGuard, versionAction, versionOptions,
 } from './admin-core.js';
 
 const el = (id) => document.getElementById(id);
 
-// How often each tab refreshes while it is the visible one. Only the visible tab polls: four tabs each
-// polling every five seconds would quadruple the request rate for three panels nobody is looking at, and
+// How often each tab refreshes while it is the visible one. Only the visible tab polls: five tabs each
+// polling every five seconds would multiply the request rate for four panels nobody is looking at, and
 // the games tab in particular can trigger a disk walk.
-const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, logs: 2000 };
+//
+// The marketplace entry is the fastest of the five, but it hits ONLY the in-memory job feed. The catalog
+// — which can reach the network, with a 30-second timeout — is re-read on tab entry, on Refresh, and
+// whenever a job finishes, which is what flips a card from "Update to 1.3.0" to "Up to date" the moment
+// it is true rather than up to 20 seconds later.
+const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000 };
 const LOG_VIEW_LIMIT = 500;
+const JOB_VIEW_LIMIT = 50;
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
@@ -31,6 +39,14 @@ let lobbyData = null;
 let gameData = null;
 let logEntries = [];
 let logCursor = 0;
+let catalogData = null;
+let jobs = [];
+let jobCursor = 0;
+// jobIds whose terminal outcome has already been toasted, so each finished job raises exactly one —
+// whenever the operator first sees it, however many polls later that is.
+const reportedJobs = new Set();
+let uploadXhr = null;
+let uploadFile = null;
 
 // Previous counter samples, for the rates admin-core derives. `{ value, at }` pairs — see ratePerSecond.
 let cpuSample = null;
@@ -44,10 +60,17 @@ const gameFrameSamples = new Map();
 async function request(path, init) {
   const res = await fetch(path, init);
   if (res.status === 401) {
-    await checkAuthStatus();
+    await handleUnauthorized();
     return null;
   }
   return res;
+}
+
+// Extracted so the upload path — which uses XMLHttpRequest and therefore cannot go through request() —
+// funnels 401 the same way. Forgetting it would leave an operator whose session expired mid-upload
+// staring at a modal that never finishes.
+function handleUnauthorized() {
+  return checkAuthStatus();
 }
 
 async function getJson(path) {
@@ -199,6 +222,7 @@ const TAB_TITLES = {
   overview: 'System Overview',
   lobbies: 'Active Lobbies',
   games: 'Game Catalog',
+  marketplace: 'Marketplace & Packages',
   logs: 'System Logs',
 };
 
@@ -219,6 +243,9 @@ export function selectTab(tab, { replaceHash = true } = {}) {
   // Re-reading the log stream from cursor 0 on entry means switching away and back shows the buffer
   // rather than an empty panel waiting for the next event.
   if (activeTab === 'logs') { logCursor = 0; logEntries = []; }
+  // Same reasoning for the job feed: a cursor of 0 asks for the whole retained set, so an operator who
+  // spent ten minutes on another tab comes back to the outcomes they missed rather than an empty strip.
+  if (activeTab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
 
   refreshActiveTab();
   startPolling();
@@ -229,7 +256,15 @@ function startPolling() {
   pollTimer = setInterval(refreshActiveTab, POLL_MS[activeTab] ?? 5000);
 }
 
-function stopPolling() {
+/**
+ * Stops the visible tab's refresh timer.
+ *
+ * Exported for the test suite, which imports a FRESH copy of this module per case: without it the
+ * previous case's interval keeps firing against the next one's fetch stub, and a test that advances
+ * timers records requests it never made. Nothing in the page needs to call it — selectTab and the
+ * logout path both go through startPolling, which stops the old timer first.
+ */
+export function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
 }
@@ -239,6 +274,7 @@ async function refreshActiveTab() {
     case 'overview': await refreshOverview(); break;
     case 'lobbies': await refreshLobbies(); break;
     case 'games': await refreshGames(); break;
+    case 'marketplace': await refreshJobs(); break;
     case 'logs': await refreshLogs(); break;
   }
   el('last-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -535,6 +571,29 @@ function gameCard(game) {
   state.className = `badge badge-${game.availability === 'available' ? 'ok' : 'warning'}`;
   state.textContent = availabilityLabel(game.availability);
   header.appendChild(state);
+
+  // Engine state, separate from the availability badge and deliberately absent from the select below —
+  // that control is a command, and offering a value the server would refuse is worse than not offering
+  // it. 'ready' has an empty label and renders nothing.
+  const busy = isBusyLifecycle(game.lifecycle);
+  if (busy) {
+    const lifecycle = document.createElement('span');
+    lifecycle.className = `badge ${lifecycleClass(game.lifecycle)}`;
+    lifecycle.textContent = lifecycleLabel(game.lifecycle);
+    header.appendChild(lifecycle);
+  }
+  // Read from the catalog snapshot the portal already holds, never fetched here: the games tab polls
+  // every 20 seconds because it triggers a disk walk, and a catalog fetch carries a 30-second timeout.
+  // Absent until the operator has visited the Marketplace tab, which is the right trade — this is a
+  // pointer to that tab, not the place the work happens.
+  const offered = (catalogData?.entries || []).find(
+    (e) => e.id === game.id && e.status === 'updateAvailable');
+  if (offered) {
+    const update = document.createElement('span');
+    update.className = 'badge badge-warning';
+    update.textContent = `update ${formatVersion(offered.availableVersion)}`;
+    header.appendChild(update);
+  }
   card.appendChild(header);
 
   const facts = document.createElement('div');
@@ -561,6 +620,11 @@ function gameCard(game) {
     select.appendChild(opt);
   }
   select.onchange = () => setAvailability(game, select.value);
+  if (busy) {
+    // An availability write racing a directory swap is arbitration the engine shouldn't have to do.
+    select.disabled = true;
+    select.title = `${lifecycleLabel(game.lifecycle)} — availability can't change mid-update.`;
+  }
   actions.appendChild(select);
 
   const hint = document.createElement('span');
@@ -587,7 +651,10 @@ function gameCard(game) {
   remove.className = 'btn btn-danger btn-small';
   remove.type = 'button';
   remove.textContent = 'Delete';
-  if (game.deletable) {
+  if (busy) {
+    remove.disabled = true;
+    remove.title = `${lifecycleLabel(game.lifecycle)} — wait for the update to finish.`;
+  } else if (game.deletable) {
     remove.onclick = () => deleteGame(game);
   } else {
     // Say why rather than offering a button that always fails: in production the games folder is a
@@ -598,7 +665,19 @@ function gameCard(game) {
   actions.appendChild(remove);
   card.appendChild(actions);
 
-  if (!game.deletable && game.deleteBlockedReason) {
+  if (busy) {
+    const why = document.createElement('p');
+    why.className = 'game-hint game-hint-block';
+    why.textContent = `${lifecycleLabel(game.lifecycle)} — follow it in the Marketplace tab.`;
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'btn btn-secondary btn-small';
+    jump.textContent = 'View operation';
+    // Jumps rather than duplicating the controls: one place owns package operations.
+    jump.onclick = () => { el('mkt-filter-q').value = game.id; location.hash = '#marketplace'; };
+    why.appendChild(jump);
+    card.appendChild(why);
+  } else if (!game.deletable && game.deleteBlockedReason) {
     const why = document.createElement('p');
     why.className = 'game-hint game-hint-block';
     why.textContent = `Delete unavailable: ${game.deleteBlockedReason} Disable the game instead.`;
@@ -775,6 +854,521 @@ async function openLogFiles() {
 
 // ── Wiring ────────────────────────────────────────────────────────────────────
 
+// ── Marketplace & packages ────────────────────────────────────────────────────
+
+// The catalog can reach the network, so it is NEVER on the poll path — see POLL_MS.
+async function refreshCatalog({ refresh = false } = {}) {
+  const data = await getJson(`/admin/api/marketplace/catalog${refresh ? '?refresh=1' : ''}`);
+  if (!data) return;
+  catalogData = data;
+  // The catalog reply carries the current job set too, so entering the tab costs one request rather
+  // than two.
+  jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
+  jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
+  renderSourceFilter();
+  renderMarketplace();
+  renderJobs();
+}
+
+async function refreshJobs() {
+  const data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
+  if (!data) return;
+
+  const before = new Set(jobs.filter((j) => j.terminal).map((j) => j.jobId));
+  jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
+  jobCursor = Number(data.lastSequence) || jobCursor;
+
+  // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
+  // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
+  let finished = false;
+  for (const job of jobs) {
+    if (!job.terminal || before.has(job.jobId)) continue;
+    finished = true;
+    if (!reportedJobs.has(job.jobId)) {
+      reportedJobs.add(job.jobId);
+      announceJob(job);
+    }
+  }
+
+  renderJobs();
+  setNavCount('marketplace', updatesAvailable());
+  if (finished) refreshCatalog();
+}
+
+function announceJob(job) {
+  const what = `${job.gameName || job.gameId}`;
+  if (job.status === 'succeeded') toast(`${what}: ${job.phase}`, 'success');
+  else if (job.status === 'failed') toast(`${what} failed: ${job.error || job.phase}`, 'error');
+  else toast(`${what}: ${job.phase}`, 'warning');
+}
+
+function updatesAvailable() {
+  return (catalogData?.entries || []).filter((e) => e.status === 'updateAvailable').length;
+}
+
+function renderSourceFilter() {
+  const select = el('mkt-filter-source');
+  const current = select.value;
+  select.textContent = '';
+  const any = document.createElement('option');
+  any.value = '';
+  any.textContent = 'Any source';
+  select.appendChild(any);
+  for (const source of catalogData?.sources || []) {
+    const opt = document.createElement('option');
+    opt.value = source.id;
+    opt.textContent = source.name || source.id;
+    select.appendChild(opt);
+  }
+  select.value = current;
+}
+
+function renderMarketplace() {
+  const list = el('mkt-list');
+  list.textContent = '';
+  el('mkt-disabled').classList.toggle('hidden', catalogData?.enabled !== false);
+
+  const entries = filterCatalog(catalogData?.entries, {
+    q: el('mkt-filter-q').value,
+    status: el('mkt-filter-status').value,
+    source: el('mkt-filter-source').value,
+  });
+  el('mkt-empty').classList.toggle('hidden', entries.length > 0);
+  for (const entry of entries) list.appendChild(marketplaceCard(entry));
+
+  const failed = (catalogData?.sources || []).filter((s) => s.error);
+  const parts = [];
+  if (catalogData?.fetchedAt) parts.push(`Catalog read ${formatClock(catalogData.fetchedAt)}`);
+  if (catalogData?.appVersion) parts.push(`server v${catalogData.appVersion}`);
+  if (catalogData?.managedRoot) parts.push(`installs into ${catalogData.managedRoot}`);
+  if (catalogData?.backupRetention !== undefined) {
+    parts.push(catalogData.backupRetention > 0
+      ? `keeping ${catalogData.backupRetention} previous version(s) for rollback`
+      : 'not keeping previous versions (KnockBox:PackageBackupCount=0)');
+  }
+  for (const source of failed) parts.push(`${source.name || source.id}: ${source.error}`);
+  el('mkt-note').textContent = parts.join(' · ');
+  setNavCount('marketplace', updatesAvailable());
+}
+
+function marketplaceCard(entry) {
+  const card = document.createElement('div');
+  card.className = 'game-card mkt-card';
+  card.dataset.id = entry.id;
+
+  const header = document.createElement('div');
+  header.className = 'game-card-header';
+  const title = document.createElement('h3');
+  title.textContent = entry.name;
+  const id = document.createElement('code');
+  id.textContent = entry.id;
+  header.append(title, id);
+
+  const status = document.createElement('span');
+  status.className = `badge ${pluginStatusClass(entry.status)}`;
+  status.textContent = pluginStatusLabel(entry.status);
+  status.title = pluginStatusHint(entry.status);
+  header.appendChild(status);
+
+  for (const tag of (entry.tags || []).slice(0, 3)) {
+    const chip = document.createElement('span');
+    chip.className = 'badge badge-muted';
+    chip.textContent = tag;
+    header.appendChild(chip);
+  }
+  card.appendChild(header);
+
+  if (entry.description) {
+    const description = document.createElement('p');
+    description.className = 'mkt-desc';
+    description.textContent = entry.description;
+    card.appendChild(description);
+  }
+
+  const facts = document.createElement('div');
+  facts.className = 'game-facts';
+  addFact(facts, 'Installed', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed', '');
+  addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
+    entry.sourceName || entry.sourceId || '');
+  if (entry.sizeBytes) addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
+  if (entry.author) addFact(facts, 'Author', entry.author, '');
+  if (entry.activeLobbies > 0) addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, '');
+  card.appendChild(facts);
+
+  const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+  const actions = document.createElement('div');
+  actions.className = 'game-actions';
+
+  const version = document.createElement('select');
+  version.className = 'text-input filter-narrow mkt-version';
+  for (const option of versionOptions(entry)) {
+    const opt = document.createElement('option');
+    opt.value = option.version ?? '';
+    opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
+    version.appendChild(opt);
+  }
+  if (version.options.length === 0) version.disabled = true;
+  actions.appendChild(version);
+
+  // Always rendered, disabled with a reason when there is nothing running: a control that appears and
+  // disappears between polls is worse than one that is visibly inert.
+  const mode = document.createElement('select');
+  mode.className = 'text-input filter-narrow mkt-mode';
+  for (const option of UPDATE_MODES) {
+    const opt = document.createElement('option');
+    opt.value = option.value;
+    opt.textContent = option.label;
+    opt.title = option.hint;
+    mode.appendChild(opt);
+  }
+  if (entry.activeLobbies === 0) {
+    mode.disabled = true;
+    mode.title = 'Nobody is playing this game right now, so it applies immediately either way.';
+  }
+  actions.appendChild(mode);
+
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'btn btn-small mkt-action';
+  const refresh = () => {
+    const decided = versionAction(entry, version.value);
+    action.textContent = decided.label;
+    action.className = `btn btn-small mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
+    action.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
+    action.title = decided.blockedReason || '';
+    action.onclick = () => runPackageAction(entry, decided, version.value, mode.value);
+  };
+  version.onchange = refresh;
+  refresh();
+  actions.appendChild(action);
+
+  if (entry.installed && entry.managed) {
+    const policy = document.createElement('select');
+    policy.className = 'text-input filter-narrow mkt-policy';
+    for (const option of UPDATE_POLICIES) {
+      const opt = document.createElement('option');
+      opt.value = option.value;
+      opt.textContent = option.label;
+      opt.title = option.hint;
+      if (option.value === entry.updatePolicy) opt.selected = true;
+      policy.appendChild(opt);
+    }
+    policy.value = entry.updatePolicy || 'manual';
+    policy.disabled = Boolean(pending);
+    policy.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
+      { policy: policy.value });
+    actions.appendChild(policy);
+  }
+
+  const spacer = document.createElement('span');
+  spacer.className = 'filter-spacer';
+  actions.appendChild(spacer);
+
+  if (entry.installed && entry.managed) {
+    const uninstall = document.createElement('button');
+    uninstall.type = 'button';
+    uninstall.className = 'btn btn-danger btn-small mkt-uninstall';
+    uninstall.textContent = 'Uninstall';
+    uninstall.disabled = Boolean(pending);
+    uninstall.onclick = () => uninstallGame(entry);
+    actions.appendChild(uninstall);
+  }
+  card.appendChild(actions);
+
+  if (entry.shadowedBy) {
+    const shadow = document.createElement('p');
+    shadow.className = 'game-hint game-hint-block';
+    shadow.textContent =
+      `Also offered by '${entry.shadowedBy}', which takes precedence — installing here uses that copy.`;
+    card.appendChild(shadow);
+  }
+  if (entry.reason && entry.status !== 'installedOnly') {
+    const why = document.createElement('p');
+    why.className = 'game-hint game-hint-block';
+    why.textContent = entry.reason;
+    card.appendChild(why);
+  }
+  if (pending) card.appendChild(jobRow(pending, { compact: true }));
+
+  return card;
+}
+
+async function runPackageAction(entry, decided, version, mode) {
+  const name = entry.name || entry.id;
+  if (decided.kind === 'rollback') {
+    if (!await confirmAction(
+      `Roll ${name} back from ${formatVersion(entry.installedVersion)} to ${formatVersion(version)}? `
+      + describeMode(mode, entry.activeLobbies), 'Roll Back')) return;
+    if (await postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/rollback`, { version, mode })) {
+      refreshJobs();
+    }
+    return;
+  }
+
+  if (entry.activeLobbies > 0 && !await confirmAction(
+    `${decided.label} ${name}? ${describeMode(mode, entry.activeLobbies)}`, decided.label)) return;
+
+  if (await postJson(`/admin/api/marketplace/install/${encodeURIComponent(entry.id)}`,
+    { sourceId: entry.sourceId || null, mode })) refreshJobs();
+}
+
+function describeMode(mode, running) {
+  if (!running) return 'Nobody is playing it right now, so it applies immediately.';
+  switch (mode) {
+    case 'force': return `Its ${running} running lobby/lobbies will be CLOSED first.`;
+    case 'auto': return `It has ${running} running lobby/lobbies, so nothing will happen until they end.`;
+    default: return `New lobbies will be refused, and it applies once the ${running} running one(s) finish.`;
+  }
+}
+
+async function uninstallGame(entry) {
+  const running = entry.activeLobbies;
+  if (!await confirmAction(
+    `Uninstall ${entry.name || entry.id}? Its files, its cached assets and any retained versions are `
+    + `deleted from disk${running > 0 ? `, and its ${running} running lobby/lobbies are closed` : ''}.`,
+    'Uninstall')) return;
+  if (await postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/uninstall`, {})) refreshJobs();
+}
+
+function renderJobs() {
+  const host = el('mkt-jobs');
+  host.textContent = '';
+  el('mkt-jobs-card').classList.toggle('hidden', jobs.length === 0);
+  for (const job of jobs) host.appendChild(jobRow(job));
+}
+
+function jobRow(job, { compact = false } = {}) {
+  const row = document.createElement('div');
+  row.className = 'job-row';
+  row.dataset.job = job.jobId;
+  if (job.status === 'succeeded') row.classList.add('job-ok');
+  if (job.status === 'failed') row.classList.add('job-failed');
+
+  if (!compact) {
+    const title = document.createElement('span');
+    title.className = 'job-title';
+    const versions = job.fromVersion || job.toVersion
+      ? ` ${formatVersion(job.fromVersion)} → ${formatVersion(job.toVersion)}`
+      : '';
+    title.textContent = `${job.kind} · ${job.gameName || job.gameId}${versions}`;
+    row.appendChild(title);
+  }
+
+  const phase = document.createElement('span');
+  phase.className = 'job-phase';
+  phase.textContent = job.error ? `${job.phase} ${job.error}` : job.phase;
+  row.appendChild(phase);
+
+  const { percent, label } = jobProgress(job);
+  if (!job.terminal) {
+    const bar = document.createElement('div');
+    bar.className = 'job-bar';
+    const fill = document.createElement('div');
+    // Null percent means the total is unknown — render indeterminate rather than a confident 0%.
+    fill.className = percent === null ? 'job-bar-fill job-bar-indeterminate' : 'job-bar-fill';
+    if (percent !== null) fill.style.width = `${percent.toFixed(0)}%`;
+    bar.appendChild(fill);
+    row.appendChild(bar);
+  }
+  if (label) {
+    const meta = document.createElement('span');
+    meta.className = 'job-meta';
+    meta.textContent = label;
+    row.appendChild(meta);
+  }
+
+  if (job.cancellable) {
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-secondary btn-small job-cancel';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = async () => {
+      if (await postJson(`/admin/api/packages/jobs/${encodeURIComponent(job.jobId)}/cancel`, {})) {
+        refreshJobs();
+      }
+    };
+    row.appendChild(cancel);
+  }
+  return row;
+}
+
+// ── Upload ────────────────────────────────────────────────────────────────────
+
+function openUpload() {
+  el('upload-error').classList.add('hidden');
+  el('upload-progress').classList.add('hidden');
+  el('upload-file').value = '';
+  uploadFile = null;
+  el('upload-name').textContent = 'Drop a .kbg here, or click to choose one';
+  el('upload-abort').classList.add('hidden');
+  el('upload-submit').disabled = false;
+
+  const mode = el('upload-mode');
+  mode.textContent = '';
+  for (const option of UPDATE_MODES) {
+    const opt = document.createElement('option');
+    opt.value = option.value;
+    opt.textContent = option.label;
+    opt.title = option.hint;
+    mode.appendChild(opt);
+  }
+  el('upload-backdrop').classList.remove('hidden');
+}
+
+function closeUpload() {
+  if (uploadXhr) uploadXhr.abort();
+  el('upload-backdrop').classList.add('hidden');
+}
+
+function showUploadError(message) {
+  const error = el('upload-error');
+  error.textContent = message;
+  error.classList.remove('hidden');
+}
+
+function startUpload() {
+  const file = uploadFile;
+  const guard = uploadGuard(file, { maxBytes: catalogData?.maxUploadBytes ?? 0 });
+  if (!guard.ok) {
+    // Inline, not a toast: the operator is looking at this modal and has to change the input.
+    showUploadError(guard.error);
+    return;
+  }
+
+  el('upload-error').classList.add('hidden');
+  el('upload-submit').disabled = true;
+  el('upload-abort').classList.remove('hidden');
+  el('upload-progress').classList.remove('hidden');
+  el('upload-progress-fill').style.width = '0%';
+
+  // XMLHttpRequest, deliberately, in a file that otherwise uses fetch everywhere: fetch has no
+  // upload-progress event (a streaming request body needs HTTP/2 plus duplex:'half' and still reports
+  // nothing). A .kbg runs to hundreds of megabytes, and an upload with no progress reads as hung — so
+  // the operator clicks again and starts a SECOND one. Do not "fix" this back to fetch.
+  const xhr = new XMLHttpRequest();
+  uploadXhr = xhr;
+  const mode = el('upload-mode').value;
+  xhr.open('POST', `/admin/api/packages/upload?mode=${encodeURIComponent(mode)}`
+    + `&filename=${encodeURIComponent(file.name)}`);
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    el('upload-progress-fill').style.width = `${((e.loaded / e.total) * 100).toFixed(0)}%`;
+  };
+  xhr.onload = () => {
+    uploadXhr = null;
+    el('upload-submit').disabled = false;
+    el('upload-abort').classList.add('hidden');
+    if (xhr.status === 401) { handleUnauthorized(); return; }
+
+    let body = null;
+    try { body = JSON.parse(xhr.responseText); } catch { /* a non-JSON error page */ }
+    if (xhr.status >= 200 && xhr.status < 300 && body?.success) {
+      el('upload-backdrop').classList.add('hidden');
+      toast(body.detail || 'Package accepted.', 'success');
+      // Everything after this point happens inside the JOB — a bad archive, an id collision, a full
+      // disk. The request is over; the operations list owns the outcome.
+      refreshJobs();
+      return;
+    }
+    showUploadError(body?.error || `The upload was refused (${xhr.status}).`);
+  };
+  xhr.onerror = () => {
+    uploadXhr = null;
+    el('upload-submit').disabled = false;
+    el('upload-abort').classList.add('hidden');
+    showUploadError('The upload could not be sent. Check the connection and try again.');
+  };
+  xhr.onabort = () => {
+    uploadXhr = null;
+    el('upload-submit').disabled = false;
+    el('upload-abort').classList.add('hidden');
+    el('upload-progress').classList.add('hidden');
+  };
+  xhr.send(file);
+}
+
+// The picked file is held here rather than pushed back into the input's `files`, which is read-only
+// except via a DataTransfer — a hoop worth avoiding when the drop and the picker can just agree on one
+// variable.
+function pickUploadFile(file) {
+  if (!file) return;
+  uploadFile = file;
+  el('upload-name').textContent = `${file.name} (${formatBytes(file.size)})`;
+  el('upload-error').classList.add('hidden');
+}
+
+// ── Sources ───────────────────────────────────────────────────────────────────
+
+function openSources() {
+  el('mkt-settings-error').classList.add('hidden');
+  renderSources();
+  el('mkt-settings-backdrop').classList.remove('hidden');
+}
+
+function renderSources() {
+  const host = el('mkt-sources');
+  host.textContent = '';
+  el('mkt-settings-note').textContent = catalogData?.maxSources
+    ? `The official marketplace is built in. Up to ${catalogData.maxSources} more can be registered.`
+    : 'The official marketplace is built in.';
+
+  for (const source of catalogData?.sources || []) {
+    const row = document.createElement('div');
+    row.className = 'source-row';
+    row.dataset.id = source.id;
+
+    const name = document.createElement('span');
+    name.className = 'source-name';
+    name.textContent = source.name || source.id;
+    const url = document.createElement('span');
+    url.className = 'source-url';
+    url.textContent = source.catalogUrl;
+    row.append(name, url);
+
+    const count = document.createElement('span');
+    count.className = 'badge badge-muted';
+    count.textContent = source.error ? 'unreachable' : `${source.entries} game(s)`;
+    if (source.error) count.title = source.error;
+    row.appendChild(count);
+
+    if (!source.builtIn) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn btn-danger btn-small source-remove';
+      remove.textContent = 'Remove';
+      remove.onclick = async () => {
+        if (await postJson(`/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/delete`, {})) {
+          refreshCatalog({ refresh: true });
+        }
+      };
+      row.appendChild(remove);
+    }
+    host.appendChild(row);
+  }
+}
+
+async function addSource() {
+  const body = {
+    id: el('mkt-source-id').value.trim(),
+    name: el('mkt-source-name').value.trim(),
+    catalogUrl: el('mkt-source-url').value.trim(),
+    downloadBaseUrl: el('mkt-source-download').value.trim() || 'https://github.com',
+  };
+  // The URL rule is NOT re-implemented here: it lives in MarketplaceClient, and a second copy in JS is
+  // exactly the drift this codebase avoids. The server's message is what the operator sees.
+  if (await postJson('/admin/api/marketplace/sources', body)) {
+    for (const id of ['mkt-source-id', 'mkt-source-name', 'mkt-source-url', 'mkt-source-download']) {
+      el(id).value = '';
+    }
+    await refreshCatalog({ refresh: true });
+    renderSources();
+  } else {
+    el('mkt-settings-error').classList.add('hidden');
+  }
+}
+
 function wire() {
   el('setup-form').addEventListener('submit', onSetupSubmit);
   el('login-form').addEventListener('submit', onLoginSubmit);
@@ -808,6 +1402,35 @@ function wire() {
     if (await postJson('/admin/api/games/rescan', {})) setTimeout(refreshGames, 800);
   });
 
+  el('mkt-filter-q').addEventListener('input', renderMarketplace);
+  el('mkt-filter-status').addEventListener('change', renderMarketplace);
+  el('mkt-filter-source').addEventListener('change', renderMarketplace);
+  el('mkt-refresh-btn').addEventListener('click', () => refreshCatalog({ refresh: true }));
+  el('mkt-upload-btn').addEventListener('click', openUpload);
+  el('mkt-settings-btn').addEventListener('click', openSources);
+  el('mkt-settings-close').addEventListener('click', () => el('mkt-settings-backdrop').classList.add('hidden'));
+  el('mkt-source-add').addEventListener('click', addSource);
+
+  el('upload-close').addEventListener('click', closeUpload);
+  el('upload-abort').addEventListener('click', () => uploadXhr?.abort());
+  el('upload-submit').addEventListener('click', startUpload);
+  el('upload-drop').addEventListener('click', () => el('upload-file').click());
+  el('upload-file').addEventListener('change', () => pickUploadFile(el('upload-file').files?.[0]));
+  el('upload-drop').addEventListener('dragover', (e) => {
+    e.preventDefault();
+    el('upload-drop').classList.add('drop-active');
+  });
+  el('upload-drop').addEventListener('dragleave', () => el('upload-drop').classList.remove('drop-active'));
+  el('upload-drop').addEventListener('drop', (e) => {
+    e.preventDefault();
+    el('upload-drop').classList.remove('drop-active');
+    pickUploadFile(e.dataTransfer?.files?.[0]);
+  });
+  // A drop that MISSES the zone would otherwise navigate the portal away to a binary download, losing
+  // whatever was in flight. One line, and the classic version of this bug.
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => e.preventDefault());
+
   el('log-filter-level').addEventListener('change', resetLogStream);
   el('log-filter-category').addEventListener('input', resetLogStream);
   el('log-filter-q').addEventListener('input', resetLogStream);
@@ -820,10 +1443,19 @@ function wire() {
   el('confirm-backdrop').addEventListener('click', (e) => {
     if (e.target === el('confirm-backdrop')) settleConfirm(false);
   });
+  for (const id of ['upload-backdrop', 'mkt-settings-backdrop']) {
+    el(id).addEventListener('click', (e) => {
+      if (e.target === el(id)) el(id).classList.add('hidden');
+    });
+  }
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!el('confirm-backdrop').classList.contains('hidden')) settleConfirm(false);
     el('files-backdrop').classList.add('hidden');
+    el('mkt-settings-backdrop').classList.add('hidden');
+    // Not closeUpload(): Escape must not silently abort a transfer that is halfway through. The Cancel
+    // button is the deliberate way out.
+    if (!uploadXhr) el('upload-backdrop').classList.add('hidden');
   });
 }
 

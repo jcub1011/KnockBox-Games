@@ -19,6 +19,7 @@ public class ContentPathsTests : IDisposable
             logsRootConfig: null,
             gamesCompressedRootConfig: "my-compressed",
             gamesUnpackedRootConfig: "my-unpacked",
+            gamesManagedRootConfig: "my-managed",
             contentRoot: _root,
             baseDirectory: Path.Combine(_root, "app"));
 
@@ -26,6 +27,7 @@ public class ContentPathsTests : IDisposable
         Assert.Equal(Path.GetFullPath(Path.Combine(_root, "my-games")), paths.GamesRoot);
         Assert.Equal(Path.GetFullPath(Path.Combine(_root, "my-compressed")), paths.GamesCompressedRoot);
         Assert.Equal(Path.GetFullPath(Path.Combine(_root, "my-unpacked")), paths.GamesUnpackedRoot);
+        Assert.Equal(Path.GetFullPath(Path.Combine(_root, "my-managed")), paths.GamesManagedRoot);
         // Unconfigured root falls through to the base-directory fallback (no repo marker here).
         Assert.Equal(Path.Combine(_root, "app", "logs"), paths.LogsRoot);
     }
@@ -37,13 +39,14 @@ public class ContentPathsTests : IDisposable
         var nested = Path.Combine(_root, "KnockBox.Server", "bin", "Debug");
         Directory.CreateDirectory(nested);
 
-        var paths = ContentPaths.Resolve(null, null, null, null, null, contentRoot: nested, baseDirectory: nested);
+        var paths = ContentPaths.Resolve(null, null, null, null, null, null, contentRoot: nested, baseDirectory: nested);
 
         Assert.Equal(Path.Combine(_root, "web"), paths.WebRoot);
         Assert.Equal(Path.Combine(_root, "games"), paths.GamesRoot);
         Assert.Equal(Path.Combine(_root, "logs"), paths.LogsRoot);
         Assert.Equal(Path.Combine(_root, "games-compressed"), paths.GamesCompressedRoot);
         Assert.Equal(Path.Combine(_root, "games-unpacked"), paths.GamesUnpackedRoot);
+        Assert.Equal(Path.Combine(_root, "games-managed"), paths.GamesManagedRoot);
     }
 
     [Fact]
@@ -53,13 +56,14 @@ public class ContentPathsTests : IDisposable
         var appDir = Path.Combine(_root, "publish");
         Directory.CreateDirectory(appDir);
 
-        var paths = ContentPaths.Resolve(null, null, null, null, null, contentRoot: _root, baseDirectory: appDir);
+        var paths = ContentPaths.Resolve(null, null, null, null, null, null, contentRoot: _root, baseDirectory: appDir);
 
         Assert.Equal(Path.Combine(appDir, "web"), paths.WebRoot);
         Assert.Equal(Path.Combine(appDir, "games"), paths.GamesRoot);
         Assert.Equal(Path.Combine(appDir, "logs"), paths.LogsRoot);
         Assert.Equal(Path.Combine(appDir, "games-compressed"), paths.GamesCompressedRoot);
         Assert.Equal(Path.Combine(appDir, "games-unpacked"), paths.GamesUnpackedRoot);
+        Assert.Equal(Path.Combine(appDir, "games-managed"), paths.GamesManagedRoot);
     }
 
     [Fact]

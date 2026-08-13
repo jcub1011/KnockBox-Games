@@ -16,4 +16,9 @@ namespace KnockBox.Server.Admin;
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AdminSettings))]
+// Nested in AdminSettings, but a list of records needs its own entry the same way
+// GameManifest.AuthorityWords does — source generation covers a registered type's members, not
+// arbitrary collection element types reached through them.
+[JsonSerializable(typeof(RegisteredMarketplace))]
+[JsonSerializable(typeof(IReadOnlyList<RegisteredMarketplace>))]
 public partial class AdminSettingsJsonContext : JsonSerializerContext { }

@@ -99,15 +99,36 @@ to it. Mutating routes additionally go through `WriteGuard` (JSON content type +
 defence in depth behind `SameSite=Strict`, not the primary control — the port is. Operator guide:
 `docs/ADMIN.md`.
 
-**Portal tabs** (four; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
+**Portal tabs** (five; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
 `admin-core.js` is the pure/tested half exactly as `kb-core.js` is to `shell.js`, and `admin.js` exports
-`bootstrap()` so it can be driven under jsdom). Only the **visible tab polls** — four panels each polling
-would quadruple the request rate for three nobody is looking at, and the games tab can trigger a disk walk.
+`bootstrap()` so it can be driven under jsdom). Only the **visible tab polls** — five panels each polling
+would multiply the request rate for four nobody is looking at, and the games tab can trigger a disk walk.
 - **Overview** — platform counters, `DeploymentDiagnostics` issues (repeated here because the warning page
   only replaces the *shell's* home page), maintenance toggle, and per-game relay cost.
 - **Active Lobbies** — the directory, with single/bulk close, stale purge and per-member kick.
-- **Game Catalog** — availability, disk footprint, delete, rescan.
+- **Game Catalog** — availability, disk footprint, delete, rescan, lifecycle badges.
+- **Marketplace & Packages** — catalogs, install/update/rollback/uninstall, upload, the operations list.
 - **System Logs** — the live stream plus raw file download.
+
+**The marketplace tab's poll rate is split, and that split is the design.** `POLL_MS.marketplace = 3000`
+hits **only** the in-memory job feed; the catalog — which reaches the network with a 30-second timeout — is
+read on tab entry, on Refresh, and when a job reaches a terminal status (which is what flips a card from
+"Update to 1.3.0" to "Up to date" the moment it's true). That is also why it is a fifth tab rather than
+part of Game Catalog: one panel means one timer, and 20 s (a disk walk) and 3 s (a progress bar) have no
+common answer. `web/__tests__/admin-marketplace.test.js` asserts exactly this.
+
+**Two jsdom traps that file documents**, both from vitest reusing one `window` per file: every
+previously-imported copy of `admin.js` still holds its `hashchange` listener, so assigning
+`location.hash` in `beforeEach` makes stale modules re-render and re-fetch into the fresh DOM (use
+`history.replaceState`); and their poll intervals keep firing against the next test's fetch stub unless
+`stopPolling()` — exported for exactly this — is called in `afterEach`.
+
+**Upload is `XMLHttpRequest`, not `fetch`**, and it is the only such path in the codebase. `fetch` has no
+upload-progress event, and a half-gigabyte upload with no progress reads as hung — so the operator clicks
+again and starts a second one. Two consequences: the 401 funnel `request()` owns had to be extracted into
+`handleUnauthorized()` so the XHR path shares it, and `WriteGuard` grew a media-kind parameter scoped to
+that single route (its content-type check is skipped when `ContentLength` is null, so the upload route
+requires `application/octet-stream` *positively* rather than on that technicality).
 
 **Server counters are cumulative; rates are the client's job.** `RelayMetrics` and `Connection`'s
 frame/byte/drop counters only ever increase, and `system/status` reports `cpuSecondsTotal` rather than a
@@ -258,8 +279,68 @@ Where admins get games from: a catalog index (`.plugins/CATALOG.json` in the sep
 `.kbg` on a GitHub release. `MarketplaceClient` is the **only outbound HTTP in the server** — a plain
 singleton `HttpClient` over a `SocketsHttpHandler` with `PooledConnectionLifetime`, deliberately not
 `IHttpClientFactory`, so no new package has to clear the AOT gate. Spec + trust model:
-`docs/MARKETPLACE.md`. **No UI and no automation yet** — nothing polls, and `DownloadAsync` installs
-nothing; the drop-a-`.kbg`-in flow stays the only path to a playable game.
+`docs/MARKETPLACE.md`.
+
+**The install engine (`Games/PackageManager.cs`, `Games/PackageJobRegistry.cs`).** `DownloadAsync` still
+installs nothing — `PackageManager` places what it hands back, and the same `PlaceAsync` serves a
+download, an upload and a rollback, so none of them re-decides what "valid" means. Every path re-runs
+`GamePackageReader.Read`, **including rollback**: a file that has sat on disk for months is not more
+trustworthy than one off the network.
+
+Packages the portal installs land in **`GamesManagedRoot`** (default sibling `games-managed`), a writable
+*package* root the installer also scans — `games/` is `:ro` in production, so the portal cannot write
+there at all. Extraction still goes to `GamesUnpackedRoot`, so the catalog's root list and asset serving
+are unchanged, and `games/` still wins a contested id. Layout in `Games/ManagedPackageLayout.cs`. Unlike
+the two derived caches this root is **not regenerable**: a marketplace package can be re-fetched, an
+uploaded one exists nowhere else.
+
+`PlaceAsync`'s order is load-bearing: **copy** the current package to `.backups/` (a *move* would leave
+the id with no package, and a reconcile pass landing in that window starts the two-pass uninstall
+countdown on a healthy game), then one `File.Move(..., overwrite: true)`, then stamp the mtime **strictly
+past** the previous value — the installer keys freshness on `(mtime, length)`, so two same-length versions
+inside one filesystem tick would otherwise look identical and the second would never extract (a rollback
+is the likeliest way to hit that). `GamePackageInstaller.Adopt` then vouches for the file so it installs
+on the next pass rather than waiting out the two-pass settle check, which exists for copy-in and has no
+bearing on an atomic rename.
+
+**Jobs, not blocking requests** — a download plus extraction outlives any request and a drain is
+open-ended, so every operation answers `202` + `jobId` and the portal polls a cursor change feed. This is
+the **third** use of that house pattern (after `AdminLogBuffer`): still no SSE and no second socket role.
+A job is cancellable until `Applying` and refused after — a half-swapped game directory is the one outcome
+worth refusing to create, the same reasoning `DeleteGame` applies to a half-delete. Retention never evicts
+an active job, so the cap is deliberately soft.
+
+**Sources** (`Marketplace/MarketplaceSourceRegistry.cs`): one `MarketplaceClient` per source, since each
+holds exactly one catalog+ETag pair and so cannot be parameterised by URL; all share one `HttpClient`
+(`CreateHttpClient()` reads nothing source-specific — it used to take an options argument it never looked
+at). Per-source options are `global with { CatalogUrl, DownloadBaseUrl }`; the caps and timeouts stay
+shared because those are policy about *this server*. Registrations are validated with
+`MarketplaceClient.IsAllowedUrl` — the downloader's own rule, exposed rather than copied. One unreachable
+source is an error string, never a failed aggregate (`GameCatalog.ScanError` discipline).
+
+`Marketplace/MarketplaceProjection.cs` merges catalogs against installed state and is
+`PluginUpdateEvaluator`'s **first production caller**. It synthesizes `installedOnly` there rather than in
+the enum, because every `PluginUpdateStatus` is a statement about a catalog *entry* and that one is a
+statement about the absence of one.
+
+**Update policy** is per game and persisted (`manual`/`auto`/`drain`/`force`, recorded by *absence* when
+manual, like `Available`); `Admin/GameUpdateCoordinator.cs` is the schedule. With nothing enrolled a pass
+**makes no outbound request at all**, so a default deployment doesn't quietly start phoning home.
+
+`Admin/GameLifecycleGate.cs` holds the transient `Draining`/`Updating` states and implements
+`IPlatformPolicy` by composing `AdminSettingsStore` and ANDing its own answer. They are **never
+persisted**: lobbies are in-memory, so after a restart every game has zero lobbies and a persisted drain
+would be stale by construction — a server killed mid-update would come back with a game permanently
+unlaunchable. `IPlatformPolicy` gained `UnavailableReason` so a draining game stays *listed* and refuses
+with something a player can act on; `WebSocketHandler` passes that string through exactly as it already
+does `MaintenanceMessage`, and still knows nothing about packages.
+
+**`GamePackageLocations.Find` replaced three copies of `Path.Combine(GamesRoot, id + ".kbg")`.** The
+installer accepts any `*.kbg` name and takes the id from the header inside, so that derivation was already
+wrong for a hand-named package: it reported `packageBacked: false`, left the bytes uncounted, and — worst —
+`DeleteGame` removed the unpacked folder while leaving the archive, so the installer put the game straight
+back. The marker inside the extracted folder (`Games/PackageMarker.cs`, 4-field; a 3-field legacy marker
+reads as `games`, which is exactly what it meant) is the authority.
 
 **The catalog's commit history is the trust root, not the release** — a release asset can be
 re-uploaded in place, so what the catalog commits to is a **`sha256`, which is required** (schema and
@@ -456,6 +537,9 @@ that survives a restart), `AdminStaleLobbyMinutes`/`AdminLogBufferSize`/`AdminDi
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
 (`.kbg` install; the root must be writable and outside `games/`),
+`GamesManagedRoot`/`ManagedPackages`/`PackageBackupCount`/`MaxConcurrentInstalls`/`PackageJobRetention`
+(portal installs; the managed root must be writable, outside `games/`, and — unlike the caches — backed up),
+`MarketplacePollMinutes`/`MarketplaceMaxSources` (the scheduled check and extra catalogs),
 `Marketplace{Enabled,CatalogUrl,DownloadBaseUrl,MaxCatalogBytes,MaxDownloadBytes,CatalogTimeoutSeconds,DownloadTimeoutSeconds}`
 (official marketplace; `Enabled=false` ⇒ no outbound HttpClient at all), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`KnownProxies`/`AllowedOrigins` (behind a reverse proxy),

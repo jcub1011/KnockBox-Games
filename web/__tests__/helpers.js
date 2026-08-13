@@ -116,6 +116,58 @@ export function installFakeFetch(routes = {}) {
   return { calls, fetchMock, routes };
 }
 
+/**
+ * Installs a fake XMLHttpRequest, and records what each instance was asked to send.
+ *
+ * The package upload is the one path in the portal that uses XHR rather than fetch, because fetch has no
+ * upload-progress event. Hand-rolled in the same style as FakeWebSocket rather than adding a dependency.
+ *
+ * Each instance exposes `_progress(loaded, total)`, `_respond(status, body)` and `_fail()` so a test can
+ * drive the transfer without a real network.
+ */
+export function installFakeXhr() {
+  const instances = [];
+
+  class FakeXhr {
+    constructor() {
+      this.headers = {};
+      this.upload = {};
+      this.status = 0;
+      this.responseText = '';
+      this.aborted = false;
+      instances.push(this);
+    }
+
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(name, value) { this.headers[name] = value; }
+    send(body) { this.body = body; }
+    abort() { this.aborted = true; this.onabort?.(); }
+
+    _progress(loaded, total) {
+      this.upload.onprogress?.({ lengthComputable: true, loaded, total });
+    }
+
+    _respond(status, body) {
+      this.status = status;
+      this.responseText = typeof body === 'string' ? body : JSON.stringify(body);
+      this.onload?.();
+    }
+
+    _fail() { this.onerror?.(); }
+  }
+
+  vi.stubGlobal('XMLHttpRequest', FakeXhr);
+  return { instances };
+}
+
+/** A File the upload path can carry, with a size a test can claim without allocating it. */
+export function makeKbgFile(name = 'demo.kbg', size = 2048) {
+  const file = new File([new Uint8Array(1)], name, { type: 'application/octet-stream' });
+  // jsdom computes size from the blob parts, so a "500 MB" file would otherwise mean allocating one.
+  Object.defineProperty(file, 'size', { value: size });
+  return file;
+}
+
 // navigator.clipboard.writeText spy that resolves (success) or rejects (failure) on demand.
 export function stubClipboard({ fail = false } = {}) {
   const writeText = fail

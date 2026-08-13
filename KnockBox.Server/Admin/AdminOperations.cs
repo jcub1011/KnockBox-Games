@@ -120,13 +120,19 @@ public sealed class AdminOperations(
                 $"'{id}' lives at '{directory}', which is outside both the games root and the package cache; " +
                 "refusing to delete it. Remove it by hand, or disable the game instead.");
 
-        var package = Path.Combine(paths.GamesRoot, id + GamePackage.Extension);
+        // Resolved, never derived as GamesRoot/<id>.kbg: the installer accepts any *.kbg file name and
+        // takes the id from the header inside, and a portal-installed package lives in the managed root
+        // entirely. Guessing the path is what let a delete remove the unpacked copy and leave the package
+        // behind, so the installer put the game straight back.
+        var package = GamePackageLocations.Find(paths, id);
         var compressed = Path.Combine(paths.GamesCompressedRoot, id);
+        var backups = Path.Combine(paths.GamesManagedRoot, ManagedPackageLayout.BackupsDirName, id);
 
         var targets = new List<string>();
         if (Directory.Exists(directory)) targets.Add(directory);
-        if (File.Exists(package)) targets.Add(package);
+        if (package is { } found && File.Exists(found.Path)) targets.Add(found.Path);
         if (Directory.Exists(compressed)) targets.Add(compressed);
+        if (Directory.Exists(backups)) targets.Add(backups);
         if (targets.Count == 0)
             return new DeleteResult(false, $"Nothing to delete for '{id}' — its files are already gone.");
 
