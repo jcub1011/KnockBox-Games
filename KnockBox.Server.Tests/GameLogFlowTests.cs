@@ -32,7 +32,7 @@ public class GameLogFlowTests
         var tokens = new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance);
         var limits = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
         var handler = new WebSocketHandler(connections, lobbies, catalog,
-            TestAuthorities.Manager(connections, lobbies), tokens, limits,
+            TestAuthorities.Manager(connections, lobbies), tokens, new LimitsProvider(limits),
             PlatformPolicy.OpenPlatform, new RelayMetrics(), new MutableTimeProvider(Now), NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
         return (handler, connections, lobbies, tokens);
     }

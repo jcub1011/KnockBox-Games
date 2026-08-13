@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading.Channels;
 using KnockBox.Contracts;
@@ -43,6 +44,9 @@ public sealed class ServerAuthority
     private readonly ILogger _authorityLogger; // the module's own kb.log output ("KnockBox.Authority")
     private readonly bool _relayContainedErrors;
     private readonly Action<ServerAuthority, string> _onFatal;
+    // Optional so the many tests that build an actor directly need no extra argument, and so an operator
+    // who never opens the dashboard pays nothing for it.
+    private readonly AuthorityMetrics? _metrics;
 
     private readonly Channel<AuthorityWork> _channel;
     private ITimer? _tickTimer;
@@ -64,8 +68,10 @@ public sealed class ServerAuthority
         ILogger logger,
         ILogger authorityLogger,
         bool relayContainedErrors,
-        Action<ServerAuthority, string> onFatal)
+        Action<ServerAuthority, string> onFatal,
+        AuthorityMetrics? metrics = null)
     {
+        _metrics = metrics;
         _lobby = lobby;
         _runtime = runtime;
         _connections = connections;
@@ -146,17 +152,26 @@ public sealed class ServerAuthority
             await foreach (var work in _channel.Reader.ReadAllAsync())
             {
                 if (work is TickWork) Interlocked.Exchange(ref _tickPending, 0);
+                // One measurement point for every kind of work, rather than five around the individual
+                // runtime calls: this is exactly the window in which the game's module owns the thread, so
+                // it is the honest boundary for "what this game costs the server".
+                var started = Stopwatch.GetTimestamp();
                 try
                 {
                     Process(work);
+                    _metrics?.RecordCall(_lobby.GameId, Stopwatch.GetTimestamp() - started);
                     _consecutiveFailures = 0;
                 }
                 catch (AuthorityScriptException ex)
                 {
+                    // A failed call still consumed CPU — often MORE than a successful one, since it ran to
+                    // the point of throwing. Excluding it would understate a module that mostly fails.
+                    _metrics?.RecordCall(_lobby.GameId, Stopwatch.GetTimestamp() - started, failed: true);
                     if (!HandleContainedFailure(work, ex)) break; // escalated to fatal
                 }
                 catch (Exception ex) // AuthorityConstraintException or anything unexpected
                 {
+                    _metrics?.RecordCall(_lobby.GameId, Stopwatch.GetTimestamp() - started, failed: true);
                     _logger.LogError(ex, "Authority for lobby {LobbyId} (game {GameId}) failed fatally", _lobby.Id, _lobby.GameId);
                     _onFatal(this, "authority-failed");
                     break;

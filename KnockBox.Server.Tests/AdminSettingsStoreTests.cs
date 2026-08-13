@@ -1,4 +1,6 @@
 using KnockBox.Server.Admin;
+using KnockBox.Server.Lobbies;
+using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -218,6 +220,201 @@ public class AdminSettingsStoreTests : IDisposable
         // That directory is already required to be writable and, in a container, on a persisted volume
         // outside the image — exactly what this file needs, so it defaults there rather than to the CWD.
         Assert.Equal(Path.GetDirectoryName(_secretPath), Path.GetDirectoryName(store.FilePath));
+    }
+
+    // ── Runtime limit overrides (§2.2) ─────────────────────────────────────────
+
+    [Fact]
+    public void A_fresh_server_has_no_limit_overrides()
+    {
+        Assert.True(NewStore().Limits.IsEmpty);
+    }
+
+    [Fact]
+    public void Limit_overrides_survive_a_restart()
+    {
+        Assert.Null(NewStore().SetLimits(new OperatorLimits(
+            ControlMessagesPerSecond: 2, MaxLobbies: 40, MaxLobbiesPerGame: 8)));
+
+        var reloaded = NewStore().Limits;
+        Assert.Equal(2, reloaded.ControlMessagesPerSecond);
+        Assert.Equal(40, reloaded.MaxLobbies);
+        Assert.Equal(8, reloaded.MaxLobbiesPerGame);
+        // Everything not set stays null — the file records what was changed, not a snapshot of all ten.
+        Assert.Null(reloaded.GameMessagesPerSecond);
+        Assert.Null(reloaded.MaxConnectionsPerIp);
+    }
+
+    [Fact]
+    public void Reverting_every_limit_removes_the_object_rather_than_recording_nulls()
+    {
+        var store = NewStore();
+        store.SetLimits(new OperatorLimits(MaxLobbies: 40));
+        Assert.False(store.Limits.IsEmpty);
+
+        store.SetLimits(OperatorLimits.None);
+        Assert.True(store.Limits.IsEmpty);
+        Assert.True(NewStore().Limits.IsEmpty);
+        // Same reasoning as availability: no override and "explicitly the configured value" must not
+        // become two spellings of one state. The key itself stays (nulls are written, as they are for
+        // maintenanceMessage) — what must not survive is an object full of nulls that reads like policy.
+        var json = File.ReadAllText(_settingsPath);
+        Assert.Contains("\"limits\": null", json);
+        Assert.DoesNotContain("maxLobbies", json);
+    }
+
+    [Fact]
+    public void The_saved_limits_object_contains_only_settable_fields()
+    {
+        NewStore().SetLimits(new OperatorLimits(MaxLobbies: 40));
+
+        // The record IS the persisted shape, and the file is meant to be hand-edited. A computed property
+        // serialized alongside the real ones reads like a field an operator could set.
+        var json = File.ReadAllText(_settingsPath);
+        Assert.DoesNotContain("isEmpty", json);
+        Assert.Contains("\"maxLobbies\": 40", json);
+    }
+
+    [Fact]
+    public void Overrides_are_laid_over_configuration_leaving_the_rest_alone()
+    {
+        var configured = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
+        var merged = new OperatorLimits(ControlMessagesPerSecond: 1, MaxLobbies: 3).ApplyTo(configured);
+
+        Assert.Equal(1, merged.ControlMessagesPerSecond);
+        Assert.Equal(3, merged.MaxLobbies);
+        Assert.Equal(configured.GameMessagesPerSecond, merged.GameMessagesPerSecond);
+        Assert.Equal(configured.HandshakeTimeout, merged.HandshakeTimeout);
+    }
+
+    [Theory]
+    [InlineData(-1, null, "maxLobbies")]
+    [InlineData(null, -5, "maxConnectionsPerIp")]
+    public void Out_of_range_overrides_are_refused_naming_the_field(int? maxLobbies, int? maxPerIp, string expected)
+    {
+        var configured = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
+        var error = new OperatorLimits(MaxLobbies: maxLobbies, MaxConnectionsPerIp: maxPerIp)
+            .Validate(configured);
+        Assert.NotNull(error);
+        Assert.Contains(expected, error);
+    }
+
+    [Fact]
+    public void A_burst_below_one_against_a_live_rate_is_refused_as_a_self_inflicted_outage()
+    {
+        var configured = ServerLimits.FromConfiguration(new ConfigurationBuilder().Build());
+
+        // Only the burst is set, so the rate comes from configuration (5/s) — which is exactly why this is
+        // judged on the MERGED limits. A zero burst there refuses every lobby operation, forever, for
+        // everyone, and the only way back is hand-editing this file.
+        var error = new OperatorLimits(ControlMessagesBurst: 0).Validate(configured);
+        Assert.NotNull(error);
+        Assert.Contains("controlMessagesBurst", error);
+
+        // Turning the whole limit off is a legitimate choice, and stays one.
+        Assert.Null(new OperatorLimits(ControlMessagesPerSecond: 0, ControlMessagesBurst: 0).Validate(configured));
+    }
+
+    // ── Banned room codes (§2.4) ───────────────────────────────────────────────
+
+    [Fact]
+    public void A_fresh_server_blocks_no_room_codes()
+    {
+        Assert.True(NewStore().RoomCodes.IsEmpty);
+    }
+
+    [Fact]
+    public void The_room_code_blocklist_survives_a_restart_compiled()
+    {
+        Assert.Null(NewStore().SetRoomCodes(RoomCodeFilter.Compile(["XQ"], ["Q7*"])));
+
+        var reloaded = NewStore().RoomCodes;
+        Assert.Equal(["XQ"], reloaded.Words);
+        Assert.Equal(["Q7*"], reloaded.Patterns);
+        // Compiled, not just stored: the lobby-create path reads this per generated code.
+        Assert.True(reloaded.IsBlocked("KXQ2"));
+        Assert.True(reloaded.IsBlocked("Q7ZZ"));
+        Assert.False(reloaded.IsBlocked("ABCD"));
+    }
+
+    [Fact]
+    public void An_empty_blocklist_removes_the_object_rather_than_recording_empty_lists()
+    {
+        var store = NewStore();
+        store.SetRoomCodes(RoomCodeFilter.Compile(["XQ"], null));
+        store.SetRoomCodes(RoomCodeFilter.Empty);
+
+        Assert.True(NewStore().RoomCodes.IsEmpty);
+        Assert.Contains("\"roomCodes\": null", File.ReadAllText(_settingsPath));
+    }
+
+    [Fact]
+    public void A_hand_edited_blocklist_keeps_its_usable_entries()
+    {
+        File.WriteAllText(_settingsPath, """
+        {
+          "roomCodes": { "words": ["XQ", "TOOLONG", ""], "patterns": ["A?", "!!"] }
+        }
+        """);
+
+        var store = NewStore();
+        Assert.Null(store.LoadError);
+        Assert.Equal(["XQ"], store.RoomCodes.Words);
+        Assert.Equal(["A?"], store.RoomCodes.Patterns);
+    }
+
+    // ── Player announcement (§4.1) ─────────────────────────────────────────────
+
+    [Fact]
+    public void An_announcement_survives_a_restart()
+    {
+        var posted = new PlatformAnnouncement("a1", "Maintenance at 09:00.",
+            new DateTimeOffset(2026, 8, 13, 10, 0, 0, TimeSpan.Zero), "warning", "word-rush");
+        Assert.Null(NewStore().SetAnnouncement(posted));
+
+        // Persisted for the same reason maintenance mode is: a notice about a window that vanished on the
+        // next deploy would be worse than not posting one.
+        var reloaded = NewStore().Announcement;
+        Assert.NotNull(reloaded);
+        Assert.Equal(("a1", "Maintenance at 09:00.", "warning", "word-rush"),
+            (reloaded.Id, reloaded.Text, reloaded.Severity, reloaded.GameId));
+    }
+
+    [Fact]
+    public void Clearing_an_announcement_removes_it()
+    {
+        var store = NewStore();
+        store.SetAnnouncement(new PlatformAnnouncement("a1", "Hi", DateTimeOffset.UnixEpoch));
+        store.SetAnnouncement(null);
+
+        Assert.Null(store.Announcement);
+        Assert.Null(NewStore().Announcement);
+    }
+
+    [Fact]
+    public void A_hand_edited_announcement_is_completed_rather_than_dropped()
+    {
+        // No id, no timestamp, an unknown severity. Every one of those is fixable, and an operator who
+        // edited the file by hand meant to say something.
+        File.WriteAllText(_settingsPath, """
+        { "announcement": { "text": "  Server moving on Friday.  ", "severity": "URGENT" } }
+        """);
+
+        var announcement = NewStore().Announcement;
+        Assert.NotNull(announcement);
+        Assert.Equal("Server moving on Friday.", announcement.Text);
+        Assert.NotEqual("", announcement.Id);            // a dismissal needs something to key on
+        Assert.NotEqual(default, announcement.PostedAt);
+        // An unrecognised severity becomes a class name in the shell; it reads as info rather than being
+        // trusted through.
+        Assert.Equal("info", announcement.Severity);
+    }
+
+    [Fact]
+    public void An_announcement_with_no_text_is_not_an_announcement()
+    {
+        File.WriteAllText(_settingsPath, """{ "announcement": { "id": "a1", "text": "   " } }""");
+        Assert.Null(NewStore().Announcement);
     }
 
     [Fact]

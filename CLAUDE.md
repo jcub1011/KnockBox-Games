@@ -99,16 +99,22 @@ to it. Mutating routes additionally go through `WriteGuard` (JSON content type +
 defence in depth behind `SameSite=Strict`, not the primary control — the port is. Operator guide:
 `docs/ADMIN.md`.
 
-**Portal tabs** (five; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
+**Portal tabs** (six; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
 `admin-core.js` is the pure/tested half exactly as `kb-core.js` is to `shell.js`, and `admin.js` exports
-`bootstrap()` so it can be driven under jsdom). Only the **visible tab polls** — five panels each polling
-would multiply the request rate for four nobody is looking at, and the games tab can trigger a disk walk.
-- **Overview** — platform counters, `DeploymentDiagnostics` issues (repeated here because the warning page
-  only replaces the *shell's* home page), maintenance toggle, and per-game relay cost.
+`bootstrap()` so it can be driven under jsdom). Only the **visible tab polls** — six panels each polling
+would multiply the request rate for five nobody is looking at, and the games tab can trigger a disk walk.
+- **Overview** — platform counters, the history graphs, `DeploymentDiagnostics` issues (repeated here because
+  the warning page only replaces the *shell's* home page), maintenance toggle, per-game relay + authority cost.
 - **Active Lobbies** — the directory, with single/bulk close, stale purge and per-member kick.
 - **Game Catalog** — availability, disk footprint, delete, rescan, lifecycle badges.
 - **Marketplace & Packages** — catalogs, install/update/rollback/uninstall, upload, the operations list.
 - **System Logs** — the live stream plus raw file download.
+- **Platform** — runtime limits & lobby caps, the player announcement, banned room codes, webhook endpoints.
+
+**`POLL_MS.platform = 0`: the Platform tab is the only one that does not poll**, and `startPolling` treats a
+falsy interval as "no timer" rather than falling back to 5 s. It is a set of forms, not a view — a poll would
+re-render a field mid-edit and throw away what the operator was typing. It reads on entry, after each save,
+and on Refresh. A jsdom test asserts it arms no timer, beside the one asserting the others do.
 
 **The marketplace tab's poll rate is split, and that split is the design.** `POLL_MS.marketplace = 3000`
 hits **only** the in-memory job feed; the catalog — which reaches the network with a 30-second timeout — is
@@ -130,6 +136,71 @@ again and starts a second one. Two consequences: the 401 funnel `request()` owns
 that single route (its content-type check is skipped when `ContentLength` is null, so the upload route
 requires `application/octet-stream` *positively* rather than on that technicality).
 
+**Runtime-editable limits are a live read, not a re-read.** `Networking/LimitsProvider.cs` holds the configured
+baseline plus the operator's overrides (`OperatorLimits`, persisted, every member nullable so the file records
+only what changed) and publishes the merged `ServerLimits` as one volatile reference. The seam that makes it
+matter is that `TokenBucket` and `IpConnectionGate` take a **delegate** rather than captured numbers, so an
+edit reaches sockets that are **already open** — the connections a flood arrives on are by definition already
+connected, which is what made a capture-at-construction design nearly useless as a control. Three knobs stay
+startup-only and say so in the portal: `HandshakeTimeout` and `DisconnectGrace` (the reaper's interval, and
+whether its timer exists at all, are derived from grace at startup) and both `AdminLoginAttemptsPerMinute`
+caps (they bound PBKDF2 CPU for an unauthenticated caller — a lock that opens from inside the room it protects
+is not a lock). The **lobby caps** (`MaxLobbies`, `MaxLobbiesPerGame`) are enforced in `HandleCreateLobby`,
+between the policy gate and `LeaveLobbiesExcept` — *not* behind `IPlatformPolicy`, because neither policy
+implementation knows anything about live lobbies while that method already holds the manager that does, and
+that ordering is what stops a refused player also losing the lobby they were in.
+
+**Banned room codes are globs, deliberately not regexes.** `Lobby/RoomCodeFilter.cs` compiles two operator
+lists — substring `words` and whole-code `patterns` (`?`/`*`) — and `LobbyManager` reads it per draw, so an
+edit applies to the next lobby. A blocked draw is **re-drawn without consuming one of the five placement
+attempts**: those exist for code collisions, and spending them on a blocklist would quietly raise the failure
+rate of starting a game. An operator-typed regex on the lobby-create path would be a DoS lever pointed at the
+thing every player needs, and buys nothing over a glob on four characters. The API refuses a list removing
+more than half the code space, counted **exactly** by walking all 32^4 codes on save — a starved generator
+surfaces to players as "could not create a lobby" with nothing to connect it to the cause. Spec §2.4's
+*reserved* codes were **dropped by decision**, not deferred (docs/ADMIN.md §9 records why).
+
+**Announcements are the second thing shaped like `MaintenanceMessage`.** `AnnouncementPostedMessage` /
+`AnnouncementClearedMessage` are additive server→client pushes (no protocol bump: the version gate only
+rejects clients *newer* than the server, and an old shell drops an unknown `type`). `IPlatformPolicy` gained
+`Announcement` so the relay passes a payload through without interpreting it and still knows nothing about
+settings files; `ConnectionManager.BroadcastToAllControl` is the only platform-wide fan-out in the server and
+iterates the registry directly rather than snapshotting every player. The banner is **also pushed right after
+`WelcomeMessage`**, which is what makes a late arrival see the same notice without the server keeping
+per-viewer state — and reuses the message type instead of adding a `WelcomeMessage` field the Phaser and Godot
+SDKs would have to mirror. Dismissal lives in `localStorage` keyed by the announcement **id**, so an edited
+notice (new id) returns for everyone who dismissed the old one.
+
+**The webhook loop guard is the load-bearing part of §4.2.** `Webhooks/WebhookLogSink.cs` turns error-level
+log events into deliveries; a failed delivery logs. Without excluding `WebhookDispatcher`'s own
+`SourceContext`, those two facts are a loop that grows one event per failure until the endpoint recovers —
+which it cannot, because the server is now busy posting to it. (The dispatcher also logs failures at Warning,
+so the exclusion is the second line, not the only one.) A `TokenBucket` caps alerts per minute and the count
+suppressed rides the next delivery. `WebhookQueue` is created **pre-`Build()`** like `AdminLogBuffer`, because
+the sink is constructed inside `UseSerilog` where DI does not exist yet while the dispatcher needs the settings
+store; it is bounded drop-oldest with a counter, the same policy a game socket's outbound queue uses. Delivery
+is **one attempt, no retry**, with the last result kept per endpoint — and the payload carries the same summary
+as both `content` (Discord) and `text` (Slack) plus structured fields, so one POST serves all three kinds of
+endpoint with no per-service formatting in the server. `PackageJobRegistry` grew a settable `OnFinished` hook
+(the `LobbyCloser.OnClosing` shape) so update outcomes reach it without the install engine knowing webhooks
+exist. The URL rule is `MarketplaceClient.IsAllowedUrl` — exposed, not copied.
+
+**Per-game CPU exists only for server-authority games, and is measured.** `Games/AuthorityMetrics.cs` counts
+calls, total time and the slowest call per game, instrumented at the **one** place in `ServerAuthority`'s drain
+loop where the module owns the thread — one measurement point rather than five around the individual
+`_runtime.Invoke` sites. A failed call still counts its time (it ran to the point of throwing). Every other
+game reports `--`, not `0.00s`: it executes nothing in this process, which is a different statement. Per-game
+*memory* is deliberately not reported, since it could only be inferred from engine count × cap.
+
+**`Admin/MetricHistory.cs` is the fourth cursor-polled feed** (after `AdminLogBuffer` and
+`PackageJobRegistry`): a bounded ring sampled by a timer in `Program.cs`, read with `?after=<seq>`. Sampled
+**server-side** on purpose — the portal already differences consecutive polls but holds one prior sample, so a
+tab switch, a reload or a second machine starts the picture from nothing, and an operator opens this page
+precisely when something has already gone wrong. `admin-core.js` derives the series (`seriesRate` omits a pair
+whose counter went backwards rather than drawing a false trough) and builds an inline-SVG sparkline path;
+there is no charting library, because the portal has no build step. Resource-threshold webhooks are
+edge-triggered from the same sampler, so a sustained breach alerts once rather than every 15 seconds.
+
 **Server counters are cumulative; rates are the client's job.** `RelayMetrics` and `Connection`'s
 frame/byte/drop counters only ever increase, and `system/status` reports `cpuSecondsTotal` rather than a
 percentage: a rate needs two samples, and producing one server-side would mean sleeping inside a request or
@@ -144,7 +215,8 @@ the actual send loop, so a member with no attached game socket costs nothing), a
 frames the `DropOldest` policy discarded — which used to be visible only in a log line nobody watches.
 
 **Operator policy is the one persisted thing.** `Admin/AdminSettingsStore.cs` writes game availability
-(`Available`/`Disabled`/`Staged`) and maintenance mode to `AdminSettingsPath` (default: beside
+(`Available`/`Disabled`/`Staged`), maintenance mode, runtime limit overrides, the room-code blocklist, the
+live announcement and the webhook endpoints to `AdminSettingsPath` (default: beside
 `AdminPasswordPath`, i.e. the persisted `/app/data` volume). Everything else here is deliberately ephemeral,
 but an admin who disables a game means it to stay disabled across the next image update. Reads are lock-free
 (a `volatile` immutable snapshot swapped atomically, the same discipline as `GameCatalog`) because the
@@ -537,6 +609,10 @@ that survives a restart), `AdminStaleLobbyMinutes`/`AdminLogBufferSize`/`AdminDi
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
 (pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
 (`.kbg` install; the root must be writable and outside `games/`),
+`MaxLobbies`/`MaxLobbiesPerGame` (capacity caps; also editable at runtime from the portal and persisted),
+`MetricSampleSeconds`/`MetricHistoryPoints` (the dashboard's time series; `0` = off),
+`WebhooksEnabled`/`MaxWebhooks`/`WebhookTimeoutSeconds`/`WebhookErrorsPerMinute`/`WebhookMemoryThresholdMb`/`WebhookCpuPercentThreshold`
+(outbound webhooks; `Enabled=false` ⇒ no dispatcher and no HttpClient at all),
 `GamesManagedRoot`/`ManagedPackages`/`PackageBackupCount`/`MaxConcurrentInstalls`/`PackageJobRetention`
 (portal installs; the managed root must be writable, outside `games/`, and — unlike the caches — backed up),
 `MarketplacePollMinutes`/`MarketplaceMaxSources` (the scheduled check and extra catalogs),

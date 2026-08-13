@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using KnockBox.Server.Networking;
+using KnockBox.Server.Webhooks;
 
 namespace KnockBox.Server.Admin;
 
@@ -43,7 +45,59 @@ public sealed record AdminSettings(
     string? MaintenanceMessage = null,
     IReadOnlyDictionary<string, GameAvailability>? Games = null,
     IReadOnlyList<RegisteredMarketplace>? Sources = null,
-    IReadOnlyDictionary<string, UpdatePolicy>? Updates = null);
+    IReadOnlyDictionary<string, UpdatePolicy>? Updates = null,
+    OperatorLimits? Limits = null,
+    BannedRoomCodes? RoomCodes = null,
+    PlatformAnnouncement? Announcement = null,
+    IReadOnlyList<WebhookEndpoint>? Webhooks = null);
+
+/// <summary>
+/// An outbound endpoint the operator registered, and which events it wants (spec §4.2).
+/// </summary>
+/// <remarks>
+/// Shaped like <see cref="RegisteredMarketplace"/> on purpose — an id that is also a route value, a name
+/// for the portal, a URL validated by the downloader's own rule, and an enabled flag so an endpoint can be
+/// silenced without losing its configuration. The URL is checked with
+/// <c>MarketplaceClient.IsAllowedUrl</c>: HTTPS, or HTTP on loopback (which is what lets a local
+/// monitoring agent work, and what CI points at).
+/// </remarks>
+/// <param name="Events">Which events to post. Empty means every event — an endpoint registered with no
+/// subscription is far more likely to mean "tell me things" than "tell me nothing".</param>
+public sealed record WebhookEndpoint(
+    string Id = "",
+    string Name = "",
+    string Url = "",
+    IReadOnlyList<WebhookEvent>? Events = null,
+    bool Enabled = true);
+
+/// <summary>
+/// The operator's player-facing banner (spec §4.1), persisted like the rest of policy: an announcement
+/// about a maintenance window that vanished on the next deploy would be worse than none.
+/// </summary>
+/// <remarks>
+/// Only one is live at a time. A queue of them was considered and rejected: the shell has one banner slot,
+/// and "which of the three do you mean?" is a question an operator posting a notice should never have to
+/// answer. Editing is re-posting, which is why <paramref name="Id"/> changes each time — a dismissal is
+/// remembered against it, so an edited notice comes back for someone who dismissed the old one.
+/// </remarks>
+/// <param name="Severity">"info" or "warning". Anything else reads as info rather than being trusted.</param>
+/// <param name="GameId">Scopes the notice to one game, or null for the whole platform.</param>
+public sealed record PlatformAnnouncement(
+    string Id = "",
+    string Text = "",
+    DateTimeOffset PostedAt = default,
+    string Severity = "info",
+    string? GameId = null);
+
+/// <summary>
+/// The operator's room-code blocklist, as stored. Both lists are optional and an empty one is recorded by
+/// absence; <see cref="Lobbies.RoomCodeFilter"/> is what compiles and applies them.
+/// </summary>
+/// <param name="Words">Blocked as a substring anywhere in a code.</param>
+/// <param name="Patterns">Blocked as a whole-code glob (<c>?</c> = one character, <c>*</c> = any run).</param>
+public sealed record BannedRoomCodes(
+    IReadOnlyList<string>? Words = null,
+    IReadOnlyList<string>? Patterns = null);
 
 /// <summary>
 /// What the server is allowed to do on its own when a marketplace offers a newer version of a game.

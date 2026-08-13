@@ -95,6 +95,10 @@
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
             System Logs
           </button>
+          <button class="nav-item" data-tab="platform">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            Platform
+          </button>
         </aside>
 
         <!-- Main Dashboard Panel -->
@@ -166,6 +170,17 @@
               </div>
             </div>
 
+            <!-- Server-side time series (§5.2). Sampled by the server, so the graphs are populated the
+                 moment the portal opens rather than starting from the first poll of this tab. -->
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Recent History</h3>
+                <span class="badge badge-muted" id="history-badge">--</span>
+              </div>
+              <p class="panel-card-note" id="history-note"></p>
+              <div class="graph-grid" id="history-graphs"></div>
+            </div>
+
             <div class="panel-card">
               <div class="panel-card-header"><h3>Per-Game Server Cost</h3></div>
               <p class="panel-card-note">
@@ -180,6 +195,7 @@
                     <tr>
                       <th>Game</th><th>Lobbies</th><th>Players</th><th>Frames in</th>
                       <th>Frames out</th><th>Fan-out</th><th>Sent</th><th>Rate</th><th>Dropped</th>
+                      <th title="Server-authority games only: a browser-side game runs no code here.">Authority CPU</th>
                     </tr>
                   </thead>
                   <tbody id="metrics-body"></tbody>
@@ -308,6 +324,140 @@
             <div class="log-stream" id="log-stream"></div>
             <p class="empty-state" id="logs-empty">No log entries match.</p>
             <p class="panel-card-note" id="logs-note"></p>
+          </div>
+
+          <!-- ── Tab: Platform ────────────────────────────────────────────────
+               Settings, not a live view: this is the one tab that does NOT poll. A timer here would
+               re-render a form mid-edit and throw away what the operator was typing. -->
+          <div class="tab-panel hidden" id="tab-platform">
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Limits &amp; Caps</h3>
+                <span class="badge" id="limits-badge" hidden>Overridden</span>
+              </div>
+              <p class="panel-card-note">
+                Abuse protection and capacity. A change applies immediately &mdash; including to sockets
+                that are already open &mdash; and is saved, so it survives a restart. Leave a field empty to
+                use its default; <strong>0</strong> is different, and disables that limit entirely. A lowered
+                cap never disconnects anyone: it refuses the next connection or lobby.
+              </p>
+              <div id="limits-fields"></div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="limits-save">Save Limits</button>
+                <button class="btn btn-secondary" id="limits-reset">Revert All to Defaults</button>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary btn-small" id="limits-refresh">Refresh</button>
+              </div>
+              <p class="panel-card-note" id="limits-note"></p>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Player Announcement</h3>
+                <span class="badge" id="announce-badge">None</span>
+              </div>
+              <p class="panel-card-note">
+                One banner, shown on the player home page until they dismiss it or you clear it. Everyone
+                connected sees it immediately, and anyone arriving later gets it too. Purely informational
+                &mdash; it stops nothing; maintenance mode is the control that blocks new lobbies.
+              </p>
+              <div class="field-row">
+                <input type="text" id="announce-text" class="text-input" maxlength="200"
+                       placeholder="e.g. Scheduled maintenance in 20 minutes" />
+              </div>
+              <div class="field-row">
+                <select id="announce-severity" class="text-input filter-narrow">
+                  <option value="info">Information</option>
+                  <option value="warning">Warning</option>
+                </select>
+                <select id="announce-game" class="text-input filter-narrow">
+                  <option value="">All games</option>
+                </select>
+                <button class="btn btn-primary" id="announce-post">Post</button>
+                <button class="btn btn-secondary" id="announce-clear">Clear</button>
+              </div>
+              <p class="panel-card-note" id="announce-note"></p>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Banned Room Codes</h3>
+                <span class="badge" id="codes-badge" hidden></span>
+              </div>
+              <p class="panel-card-note">
+                Codes the generator will never hand out. A <strong>word</strong> is blocked anywhere inside a
+                code (<code>XQ</code> blocks <code>XQ4B</code> and <code>7XQ2</code>); a
+                <strong>pattern</strong> matches a whole code, where <code>?</code> is one character and
+                <code>*</code> any run (<code>Q7*</code> blocks every code starting <code>Q7</code>). Codes
+                already in use are never revoked.
+              </p>
+              <div class="field-row">
+                <label class="limit-label" for="code-word">Blocked words</label>
+                <input type="text" id="code-word" class="text-input filter-narrow" maxlength="4"
+                       placeholder="Letters or digits" />
+                <button class="btn btn-secondary btn-small" id="code-word-add">Add</button>
+              </div>
+              <div class="chip-list" id="code-words"></div>
+              <div class="field-row">
+                <label class="limit-label" for="code-pattern">Blocked patterns</label>
+                <input type="text" id="code-pattern" class="text-input filter-narrow" maxlength="6"
+                       placeholder="e.g. Q7* or ?K??" />
+                <button class="btn btn-secondary btn-small" id="code-pattern-add">Add</button>
+              </div>
+              <div class="chip-list" id="code-patterns"></div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="codes-save">Save Blocklist</button>
+                <button class="btn btn-secondary" id="codes-clear">Clear All</button>
+              </div>
+              <p class="panel-card-note" id="codes-note"></p>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Webhooks</h3>
+                <span class="badge badge-muted" id="hook-badge">0</span>
+              </div>
+              <p class="panel-card-note" id="hook-note"></p>
+              <div class="table-scroll">
+                <table class="data-table" id="hook-table">
+                  <thead>
+                    <tr><th>Endpoint</th><th>Events</th><th>Last delivery</th><th class="col-actions">Actions</th></tr>
+                  </thead>
+                  <tbody id="hook-body"></tbody>
+                </table>
+              </div>
+              <p class="empty-state" id="hook-empty">No endpoints registered, so nothing is sent anywhere.</p>
+              <div class="field-row">
+                <input type="text" id="hook-id" class="text-input filter-narrow" maxlength="32" placeholder="Id (e.g. ops)" />
+                <input type="text" id="hook-name" class="text-input filter-narrow" maxlength="60" placeholder="Name" />
+                <input type="url" id="hook-url" class="text-input" placeholder="https://hooks.example.com/…" />
+              </div>
+              <div class="field-row" id="hook-events"></div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="hook-add">Save Endpoint</button>
+                <span class="limit-hint">
+                  Select no events to receive all of them. The URL must be https, or http on loopback.
+                  A Discord or Slack webhook URL works as-is.
+                </span>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-header"><h3>Set in Configuration</h3></div>
+              <p class="panel-card-note">
+                These are deliberately not editable here. The reconnect and handshake windows are read when
+                the server starts (the reaper's own interval comes from the grace window), and the admin
+                login caps bound the CPU an unauthenticated caller can spend on password hashing &mdash; a
+                lock that opens from inside the room it protects is not a lock. Change them with
+                <code>KnockBox:*</code> configuration and restart.
+              </p>
+              <div class="table-scroll">
+                <table class="data-table" id="limits-startup-table">
+                  <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+                  <tbody id="limits-startup-body"></tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </section>

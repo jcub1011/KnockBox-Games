@@ -769,6 +769,53 @@ body.in-game::after {
     white-space: nowrap;
 }
 
+/* ── Operator announcement ───────────────────────────────────────────────────
+   Deliberately NOT a toast: an announcement has to still be on screen when the player looks up, so it
+   sits in the page flow above the hero, stays until dismissed, and takes pointer events (it has an x).
+   Card styling, not fixed-position, so it pushes the page down rather than covering the title. */
+.home-announcement {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 auto 14px;
+    /* The home container is a flex column, where a flex item shrinks to its content unless told otherwise —
+       so without this the banner is as narrow as its text and reads as a chip, not a notice. */
+    width: 100%;
+    max-width: 900px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 2px solid var(--canvas-card-border);
+    background: var(--canvas-card);
+    color: var(--ink);
+    font-family: var(--font-primary);
+    font-weight: 600;
+    font-size: 0.95rem;
+    box-shadow: var(--shadow-card-rest);
+}
+
+/* The one severity that should catch an eye already looking elsewhere. */
+.home-announcement.severity-warning {
+    border-color: var(--banner-yellow);
+    background: rgba(254, 222, 102, 0.12);
+}
+
+.home-announcement-icon { font-size: 1.1rem; line-height: 1; }
+.home-announcement-text { flex: 1 1 auto; }
+
+.home-announcement-close {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.home-announcement-close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.08); }
+
 /* ── Error toast ─────────────────────────────────────────────────────────── */
 .home-error-toast {
     position: fixed;

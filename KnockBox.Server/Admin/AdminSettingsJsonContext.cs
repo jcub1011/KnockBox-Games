@@ -21,4 +21,10 @@ namespace KnockBox.Server.Admin;
 // arbitrary collection element types reached through them.
 [JsonSerializable(typeof(RegisteredMarketplace))]
 [JsonSerializable(typeof(IReadOnlyList<RegisteredMarketplace>))]
+[JsonSerializable(typeof(Networking.OperatorLimits))]
+[JsonSerializable(typeof(BannedRoomCodes))]
+[JsonSerializable(typeof(PlatformAnnouncement))]
+[JsonSerializable(typeof(WebhookEndpoint))]
+[JsonSerializable(typeof(IReadOnlyList<WebhookEndpoint>))]
+[JsonSerializable(typeof(IReadOnlyList<string>))]
 public partial class AdminSettingsJsonContext : JsonSerializerContext { }

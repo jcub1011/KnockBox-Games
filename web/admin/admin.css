@@ -438,6 +438,28 @@ body {
 .filter-narrow { flex: 0 1 12rem; }
 .filter-spacer { flex: 1 1 auto; }
 
+/* The Platform tab's limit rows: a fixed-width label, the input, then the reason it exists. The label is
+   sized rather than auto so eight rows line up as a column instead of eight ragged flex rows. */
+.limit-label {
+  flex: 0 0 14rem;
+  color: var(--text-main);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.limit-hint {
+  flex: 1 1 16rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 768px) {
+  /* Stacked: a 14rem label beside a 12rem input doesn't fit a phone, and the hint least of all. */
+  .limit-label { flex: 1 1 100%; }
+  .limit-hint { flex: 1 1 100%; }
+}
+
 .filter-bar {
   display: flex;
   gap: 0.75rem;
@@ -582,6 +604,71 @@ body {
 }
 
 .chip-action:hover { color: var(--error-color); background: var(--error-bg); }
+
+/* ── History graphs ─────────────────────────────────────────────────────────── */
+
+/* Inline SVG, no charting library: the portal has no build step and a strict origin, so a CDN script is not
+   an option and a bundled one would be the only bundled thing here. Four small sparklines need neither. */
+.graph-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.graph-card {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+}
+
+.graph-label {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.graph-value {
+  color: var(--text-main);
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin: 0.15rem 0 0.35rem;
+}
+
+.graph-scale { color: var(--text-muted); font-size: 0.75rem; }
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 44px;
+}
+
+/* Stroked here rather than per-element so the path elements the JS builds carry no styling of their own. */
+.sparkline path {
+  stroke: var(--primary-accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;   /* the viewBox is stretched, the line should not be */
+}
+
+/* A chip row outside a table — the room-code blocklist. Same chips as a lobby's members, so removing an
+   entry reads the same as kicking a player: the x is where you expect it. */
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0 0;
+}
+
+.chip-list .member-chip {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  letter-spacing: 0.08em;
+}
+
+/* An entry the generator can never produce (it uses O/0/I/1, which the code alphabet omits). Legal, and
+   pointless — flagged rather than refused. */
+.chip-unreachable { border-style: dashed; color: #fbbf24; }
 
 /* ── Game catalog cards ─────────────────────────────────────────────────────── */
 

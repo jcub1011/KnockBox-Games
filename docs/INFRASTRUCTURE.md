@@ -294,23 +294,42 @@ shell pipelines.
 - **Not on the games/shell path:** because the branch is selected before them, an admin request never
   touches the precompressed-asset negotiation, the `.kbg` gate, or COOP/COEP handling.
 - **Reads and controls.** Beyond the four auth routes, `/admin/api/*` serves `system/status`, `metrics`,
-  `lobbies`, `games`, `logs`, `logs/files` and `logs/files/{name}` (raw download), plus POSTs for closing a
-  lobby, bulk-closing (all or per game), purging stale lobbies, kicking a member, setting a game's
-  availability, deleting a game, rescanning the catalog, and toggling maintenance mode. Every one is behind
+  `metrics/history`, `lobbies`, `games`, `logs`, `logs/files` and `logs/files/{name}` (raw download),
+  `limits`, `room-codes`, `announcement` and `webhooks`, plus POSTs for closing a lobby, bulk-closing (all or
+  per game), purging stale lobbies, kicking a member, setting a game's availability, deleting a game,
+  rescanning the catalog, toggling maintenance mode, editing the runtime limits and lobby caps, replacing the
+  room-code blocklist, posting or clearing the player announcement, and registering, removing or testing a
+  webhook endpoint. Every one is behind
   `RequireSession`; the mutating ones additionally pass `WriteGuard`, which requires a JSON content type and
   rejects a cross-site `Sec-Fetch-Site`. That is defence in depth behind `SameSite=Strict` and the isolated
   port, not a substitute for either — a header a client may simply omit cannot be a security boundary, so a
   request without it (curl, the CI smoke test) is allowed through.
-- **Policy is the only persisted state.** Game availability and maintenance mode live in `AdminSettingsPath`
+- **Policy is the only persisted state.** Game availability, maintenance mode, runtime limit overrides, the
+  room-code blocklist, the live announcement and the webhook endpoints live in `AdminSettingsPath`
   (default: beside `AdminPasswordPath`). They gate lobby **creation and listing only** — a lobby already
   running survives both a disable and maintenance mode, and joining is never gated. The relay reads them
   through the narrow `Admin/IPlatformPolicy.cs`, lock-free, because `HandleCreateLobby` asks on every
   request. A change applies in memory even if it can't be written; the portal reports that as "active now,
   lost on restart" rather than silently doing nothing.
+- **Limits are read live, so an edit reaches open sockets.** `Networking/LimitsProvider.cs` publishes the
+  configured baseline merged with the operator's overrides as one volatile `ServerLimits`, and `TokenBucket` /
+  `IpConnectionGate` read it through a delegate rather than capturing numbers at construction. That is the
+  whole point of the control: the connections a flood arrives on are already connected. The handshake timeout,
+  the reconnect grace window and both admin-login caps stay startup-only and the portal says so — the first
+  two because the reaper's timer is derived from grace at startup, the last two because they bound PBKDF2 CPU
+  for an unauthenticated caller.
+- **One outbound egress besides the marketplace.** `Webhooks/WebhookDispatcher.cs` posts platform events to
+  operator-registered endpoints, reusing `MarketplaceClient.CreateHttpClient()` and its `IsAllowedUrl` rule
+  (https, or http on loopback) rather than configuring a second handler or copying the rule. A bounded
+  drop-oldest queue sits in front of it so no request path ever waits on an outbound POST, and the error sink
+  that feeds it excludes the dispatcher's own log category — otherwise a failed delivery logs an error that
+  becomes another delivery, forever.
 - **The live log view is a ring buffer, not a file tail.** `Admin/AdminLogBuffer.cs` is a bounded
   `ILogEventSink` added via `WriteTo.Sink`, so level and `SourceContext` stay structured fields and
   filtering is exact. Each event carries a monotonic sequence, which turns ordinary polling into a stream
   (`?after=<seq>`). The rolling files under `LogsRoot` remain the history and the thing you download.
+  `Games/PackageJobRegistry.cs` and `Admin/MetricHistory.cs` use the same cursor shape, which is why the
+  portal needs neither SSE nor a second socket role for any of its three live feeds.
 
 Full operator guide, including what each tab shows and why Delete usually can't work in production:
 [ADMIN.md](./ADMIN.md).
@@ -431,7 +450,7 @@ into `games/` and it appears within a second or two — no restart.
 | `AdminOrigin` | — | Prod: explicit admin origin (overrides `AdminHost`/`AdminPort`). |
 | `AdminPasswordPath` | `admin.secret` next to the binary | Where the admin password hash is stored. Must be **writable** and, in a container, on a **persisted volume outside the image** — otherwise the password is lost on every image update and the portal reverts to unclaimed. The Docker image sets `/app/data/admin.secret`. Deleting this file is the password-reset path. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. Sessions are also invalidated by a restart (the signing key is per-process, like the player token secret). |
-| `AdminSettingsPath` | `admin-settings.json` next to `AdminPasswordPath` | Persisted operator policy: per-game availability (`available`/`disabled`/`staged`) and maintenance mode. The **only** state this server keeps across a restart, because re-applying policy by hand after every deploy is how a platform ships a game it meant to keep hidden. Same requirements as the password file — writable, and on a persisted volume in a container. Unreadable ⇒ platform defaults plus a `DeploymentDiagnostics` warning, never a crash. Delete it to reset all policy. |
+| `AdminSettingsPath` | `admin-settings.json` next to `AdminPasswordPath` | Persisted operator policy: per-game availability (`available`/`disabled`/`staged`), maintenance mode, runtime limit overrides, the room-code blocklist, the live player announcement and the webhook endpoints. The **only** state this server keeps across a restart, because re-applying policy by hand after every deploy is how a platform ships a game it meant to keep hidden. Same requirements as the password file — writable, and on a persisted volume in a container. Unreadable ⇒ platform defaults plus a `DeploymentDiagnostics` warning, never a crash. Delete it to reset all policy. |
 | `AdminStaleLobbyMinutes` | `30` | How long a lobby may go without a relayed frame, a join or a leave before the portal calls it **stale** and "Purge Stale" collects it. Independent of `DisconnectGraceSeconds`, which is about one player's socket dropping; this is about a whole session nobody is playing any more. `0` judges staleness only by "nobody in it is connected". |
 | `AdminLogBufferSize` | `2000` | Log events held in memory for the portal's live log view (`Admin/AdminLogBuffer.cs`). Bounded ring — older entries exist only in the rolling files under `LogsRoot`. |
 | `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. The measurement walks directories, and the dashboard polls, so a request must never wait on one. `0` measures on every read. |
@@ -457,6 +476,16 @@ into `games/` and it appears within a second or two — no restart.
 | `AuthorityMaxWordFileBytes` | `33554432` (32 MB) | Max size of a single `authorityWords` dictionary file; checked at discovery (oversize ⇒ the game is skipped). Dictionaries load once into a shared CLR structure (not a per-lobby budget), so this cap is generous. |
 | `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
 | `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
+| `MaxLobbies` | `0` (unlimited) | Cap on simultaneous lobbies across every game. Also editable at runtime from the admin portal, which persists an override — this is the value a deployment starts from. Enforced in `HandleCreateLobby` before the player is moved out of any lobby they were already in, so a refusal never costs them their current game. |
+| `MaxLobbiesPerGame` | `0` (unlimited) | Same, per game, so one popular title can't consume every remaining slot. |
+| `MetricSampleSeconds` | `15` | How often the server samples counters into `Admin/MetricHistory.cs` for the dashboard's graphs. Sampled server-side so the history belongs to the SERVER, not to one open browser tab. `0` = no history and no graphs. |
+| `MetricHistoryPoints` | `240` | Samples retained (240 x 15 s = one hour). Bounded ring; memory is a fixed handful of numbers per sample plus one small row per game seen in it. |
+| `WebhooksEnabled` | `true` | Outbound webhooks (`Webhooks/`). `false` ⇒ no dispatcher, no drain task and **no HttpClient at all**, and the webhook admin routes answer `409` naming this key — the same air-gapped posture as `MarketplaceEnabled`. With it on but no endpoints registered, nothing ever leaves the process either. |
+| `MaxWebhooks` | `8` | Endpoints an operator may register. |
+| `WebhookTimeoutSeconds` | `10` | Per-delivery deadline (a linked `CancellationTokenSource`, like the marketplace's). Short on purpose: a slow endpoint must not hold the drain task while the bounded queue behind it fills and starts dropping alerts. One attempt, no retry. |
+| `WebhookErrorsPerMinute` | `6` | Token-bucket cap on error-log events turned into deliveries; the count suppressed rides the next delivery. An error storm is when this feature fires most and is worth least per message. |
+| `WebhookMemoryThresholdMb` | `0` (off) | Working set that counts as a resource breach. Edge-triggered: crossing alerts once, and coming back under alerts once. |
+| `WebhookCpuPercentThreshold` | `0` (off) | Process CPU (percent of one core-equivalent, measured between metric samples) that counts as a breach. |
 | `MemoryLogSeconds` | `0` (off) | Interval for a periodic memory-diagnostics log line (working set, managed heap, GC-committed bytes, gen0/1/2 collection counts, live lobby & authority-actor counts). Use it to correlate footprint with concurrent server-authority lobbies and confirm memory falls back after lobbies close. |
 
 > **Setting ports explicitly replaces the defaults — it does not add to them.** With no port

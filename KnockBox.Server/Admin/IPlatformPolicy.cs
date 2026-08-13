@@ -36,6 +36,18 @@ public interface IPlatformPolicy
     /// without interpreting, so <c>WebSocketHandler</c> still knows nothing about updates or packages.
     /// </remarks>
     string? UnavailableReason(string gameId);
+
+    /// <summary>
+    /// The operator's current player-facing banner, or null when there isn't one.
+    /// </summary>
+    /// <remarks>
+    /// Shaped exactly like <see cref="MaintenanceMessage"/> for the same reason: the relay hands it to a
+    /// connecting shell without interpreting it, so <c>WebSocketHandler</c> still knows nothing about
+    /// settings files. It is on the policy interface rather than reached for directly because the relay
+    /// already has this one narrow window onto operator intent, and a second one would be a second thing
+    /// to keep honest.
+    /// </remarks>
+    PlatformAnnouncement? Announcement { get; }
 }
 
 /// <summary>Policy implementations that aren't backed by operator settings.</summary>
@@ -54,5 +66,6 @@ public static class PlatformPolicy
         public bool CanCreateLobby(string gameId) => true;
         public bool IsListed(string gameId) => true;
         public string? UnavailableReason(string gameId) => null;
+        public PlatformAnnouncement? Announcement => null;
     }
 }

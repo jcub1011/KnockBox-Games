@@ -7,6 +7,7 @@ using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using KnockBox.Server.Webhooks;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -121,21 +122,37 @@ var logRetentionDays = builder.Configuration.GetValue("KnockBox:LogRetentionDays
 // admin API can read it.
 var adminLogBuffer = new AdminLogBuffer(
     builder.Configuration.GetValue("KnockBox:AdminLogBufferSize", AdminLogBuffer.DefaultCapacity));
+// Outbound webhooks (§4.2). The QUEUE is created here, before the host is built, for the same reason as
+// the log ring above: the error sink that feeds it is constructed inside UseSerilog, where DI does not yet
+// exist. The dispatcher that drains it is DI-built further down (it needs the settings store), and with
+// KnockBox:WebhooksEnabled=false neither it nor any HttpClient is ever created — nothing reaches out.
+var webhookOptions = WebhookOptions.FromConfiguration(builder.Configuration);
+var webhookQueue = webhookOptions.Enabled ? new WebhookQueue() : null;
+var webhookSink = webhookQueue is null
+    ? null
+    : new WebhookLogSink(webhookQueue, webhookOptions, TimeProvider.System);
+
 // Levels are configured in code, NOT via ReadFrom.Configuration: that pulls in
 // Serilog.Settings.Configuration, whose assembly scanning (DependencyContext / Assembly.Location) is
 // not Native-AOT-safe and emits IL2104/IL3002/IL3053 at publish. ReadFrom.Services is DI-only and fine.
-builder.Host.UseSerilog((context, services, config) => config
-    .MinimumLevel.Information()
-    .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
-    .ReadFrom.Services(services)
-    .Enrich.FromLogContext()
-    .WriteTo.Console()
-    .WriteTo.Sink(adminLogBuffer)
-    .WriteTo.File(
-        Path.Combine(logsRoot, "knockbox-.log"),
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: logRetentionDays,
-        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
+builder.Host.UseSerilog((context, services, config) =>
+{
+    config
+        .MinimumLevel.Information()
+        .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .WriteTo.Console()
+        .WriteTo.Sink(adminLogBuffer)
+        .WriteTo.File(
+            Path.Combine(logsRoot, "knockbox-.log"),
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: logRetentionDays,
+            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}");
+    // Only when webhooks are switched on — an extra sink that would never publish anything is still a
+    // string render per error event.
+    if (webhookSink is not null) config.WriteTo.Sink(webhookSink);
+});
 
 // Games are served from a SEPARATE ORIGIN (a second port in dev, a subdomain in prod) so that
 // untrusted game code is isolated from the shell — it cannot read the shell's identity token or
@@ -206,13 +223,27 @@ var authorityOptions = AuthorityOptions.FromConfiguration(builder.Configuration)
 // lobby/actor counts (and see whether memory falls back after lobbies close). 0 = off (default).
 var memoryLogSeconds = builder.Configuration.GetValue("KnockBox:MemoryLogSeconds", 0);
 
+// The dashboard's metric time series (§5.2). Sampled server-side so the graph is a property of the SERVER,
+// not of one open browser tab — an operator opening the portal mid-incident gets the last hour, not an empty
+// chart that starts filling from now. 0 = off.
+var metricSampleSeconds = builder.Configuration.GetValue("KnockBox:MetricSampleSeconds", 15);
+var metricHistoryPoints = builder.Configuration.GetValue(
+    "KnockBox:MetricHistoryPoints", MetricHistory.DefaultCapacity);
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(limits);
+// The limits actually in force: the configured baseline above, plus whatever the operator has overridden
+// from the portal. Registered as well as (not instead of) ServerLimits, because the values read once at
+// startup — the IP gate's cap being the exception, see below — genuinely are startup values.
+builder.Services.AddSingleton(sp => new LimitsProvider(sp.GetRequiredService<ServerLimits>()));
 // The resolved content roots as one object: the admin API needs LogsRoot for the log downloads and all
 // three game roots for disk-usage reporting, which is less error-prone than threading four strings
 // through AdminApi.Options.
 builder.Services.AddSingleton(contentPaths);
 builder.Services.AddSingleton(adminLogBuffer);
+builder.Services.AddSingleton(new MetricHistory(metricHistoryPoints));
+// Per-game authority cost. A singleton like RelayMetrics, and pruned off the same catalog event.
+builder.Services.AddSingleton<AuthorityMetrics>();
 builder.Services.AddSingleton(authorityOptions);
 // Search order matters: the administrator's games folder first, then games extracted from .kbg
 // packages, so a hand-placed folder always wins a contested id. With packages off there is only one root.
@@ -257,6 +288,19 @@ if (marketplaceOptions.Enabled)
     // The policy layer over the install engine — which games this server may update on its own.
     builder.Services.AddSingleton<GameUpdateCoordinator>();
 }
+// Outbound webhooks. Registered only when enabled, exactly like the marketplace registry, so a disabled
+// deployment holds no HttpClient — and consumers resolve it as nullable and report the switch rather than
+// failing to build. The client factory and the URL allow-rule are the marketplace's own, not copies.
+builder.Services.AddSingleton(webhookOptions);
+if (webhookQueue is not null)
+{
+    builder.Services.AddSingleton(webhookQueue);
+    builder.Services.AddSingleton(webhookSink!);
+    var webhookHttp = MarketplaceClient.CreateHttpClient();
+    builder.Services.AddSingleton(sp => new WebhookDispatcher(
+        webhookQueue, sp.GetRequiredService<AdminSettingsStore>(), webhookHttp, webhookOptions,
+        sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<WebhookDispatcher>>()));
+}
 // How often the scheduled check runs. 0 = never; the portal's own Refresh is unaffected either way.
 var marketplacePollMinutes = marketplaceOptions.Enabled
     ? builder.Configuration.GetValue("KnockBox:MarketplacePollMinutes", 360)
@@ -265,7 +309,13 @@ builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 // Explicit factory (not AddSingleton<LobbyManager>) so the clock that stamps Lobby.CreatedAt — which
 // the admin portal reports session duration from — is the registered TimeProvider, not the fallback.
-builder.Services.AddSingleton(sp => new LobbyManager(sp.GetRequiredService<TimeProvider>()));
+// The code blocklist is passed as a delegate, not a value: it is read per generated code, so an operator's
+// edit applies to the next lobby rather than the next restart.
+builder.Services.AddSingleton(sp =>
+{
+    var settings = sp.GetRequiredService<AdminSettingsStore>();
+    return new LobbyManager(sp.GetRequiredService<TimeProvider>(), () => settings.RoomCodes);
+});
 builder.Services.AddSingleton<LobbyCloser>();
 builder.Services.AddSingleton(sp => new ServerAuthorityManager(
     // Where a game's files live is the catalog's answer, not gamesRoot/<id>: a game installed from a
@@ -276,7 +326,8 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
     sp.GetRequiredService<TimeProvider>(),
     sp.GetRequiredService<IAuthorityWordService>(),
     builder.Environment.IsDevelopment(),
-    sp.GetRequiredService<ILoggerFactory>()));
+    sp.GetRequiredService<ILoggerFactory>(),
+    sp.GetRequiredService<AuthorityMetrics>()));
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
@@ -484,6 +535,18 @@ diagnostics.AddProbe("Games folder is not accessible", () => catalog.ScanError, 
 var adminSettings = app.Services.GetRequiredService<AdminSettingsStore>();
 diagnostics.AddProbe("Admin settings could not be read", () => adminSettings.LoadError);
 
+// Put the operator's saved limit overrides into force. An object that can't be honoured is dropped on its
+// own with a warning rather than taken or made fatal — the same treatment a marketplace row missing its
+// URL gets, and for the same reason: one bad value must not cost the operator the rest of their policy,
+// and silently running with limits nobody chose is worse than running with the configured ones.
+var limitsProvider = app.Services.GetRequiredService<LimitsProvider>();
+if (adminSettings.Limits.Validate(limitsProvider.Configured) is { } limitsError)
+    app.Logger.LogError(
+        "Ignoring the saved runtime limit overrides in '{Path}' and using the configured limits: {Reason}",
+        adminSettings.FilePath, limitsError);
+else
+    limitsProvider.Apply(adminSettings.Limits);
+
 // Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
 // Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
 // background task because SmallestSize over a large .wasm is slow and must never block discovery
@@ -530,6 +593,15 @@ catalog.Discovered += games =>
 {
     try { relayMetrics.Prune(games.Keys); }
     catch (Exception ex) { app.Logger.LogError(ex, "Relay-metrics prune failed."); }
+};
+
+// Same for per-game authority cost, and for the same reason: an uninstalled game must not keep a row in the
+// dashboard forever.
+var authorityMetricsSingleton = app.Services.GetRequiredService<AuthorityMetrics>();
+catalog.Discovered += games =>
+{
+    try { authorityMetricsSingleton.Prune(games.Keys); }
+    catch (Exception ex) { app.Logger.LogError(ex, "Authority-metrics prune failed."); }
 };
 
 // Install .kbg packages off the same signal, for the same reason: it rides the catalog's watcher and
@@ -625,6 +697,37 @@ if (marketplacePollMinutes > 0 && app.Services.GetService<GameUpdateCoordinator>
     app.Lifetime.ApplicationStopping.Register(() => marketplacePollTimer.Dispose());
 }
 
+// The webhook drain: one long-lived task posting whatever lands in the queue. Not a timer — the queue is
+// the schedule. Started here rather than as a hosted service to match the rest of this file's background
+// work, and completed on shutdown so the backlog is flushed rather than abandoned mid-alert.
+var webhookDispatcher = app.Services.GetService<WebhookDispatcher>();
+if (webhookDispatcher is not null && webhookQueue is not null)
+{
+    // Install/update outcomes. The registry's terminal transition is the one chokepoint every path funnels
+    // through (marketplace install, upload, rollback, uninstall, scheduled update), and it is idempotent —
+    // so this fires exactly once per job, without any of those paths knowing webhooks exist.
+    app.Services.GetRequiredService<PackageJobRegistry>().OnFinished = job =>
+    {
+        var name = job.GameName ?? job.GameId;
+        var version = job.ToVersion is null ? "" : $" to {job.ToVersion}";
+        webhookDispatcher.Publish(job.Status == PackageJobStatus.Succeeded
+            ? WebhookDispatcher.Payload(WebhookEvent.UpdateApplied,
+                $"{job.Kind} of '{name}'{version} succeeded.", job.EndedAt ?? DateTimeOffset.UtcNow,
+                title: $"{job.Kind} succeeded", gameId: job.GameId, detail: job.Warning)
+            : WebhookDispatcher.Payload(WebhookEvent.UpdateFailed,
+                $"{job.Kind} of '{name}'{version} ended {job.Status}: {job.Error ?? job.Phase}",
+                job.EndedAt ?? DateTimeOffset.UtcNow,
+                title: $"{job.Kind} {job.Status}", gameId: job.GameId, detail: job.Error));
+    };
+
+    var draining = Task.Run(() => webhookDispatcher.RunAsync(app.Lifetime.ApplicationStopping));
+    app.Lifetime.ApplicationStopping.Register(() => webhookQueue.Complete());
+    // Referenced so the task isn't collected, and so a fault surfaces in the log rather than as silence.
+    _ = draining.ContinueWith(t =>
+        app.Logger.LogError(t.Exception, "The webhook drain task faulted."),
+        TaskContinuationOptions.OnlyOnFaulted);
+}
+
 // Reconnect-grace reaper: a member whose shell socket drops is kept in their lobby for
 // limits.DisconnectGrace so a tab refresh/blip doesn't kick them out; this timer evicts the ones
 // who never came back. Sweep frequently enough that eviction latency stays small without a
@@ -669,6 +772,90 @@ if (memoryLogSeconds > 0)
         catch (Exception ex) { app.Logger.LogError(ex, "Memory diagnostics sweep failed."); }
     }, null, interval, interval);
     app.Lifetime.ApplicationStopping.Register(() => memoryLogTimer.Dispose());
+}
+
+// Metric history sampler: the time series behind the dashboard's graphs. The counters it reads are all
+// cumulative and lock-free, so a tick is a handful of reads and one array write — the same shape as the
+// memory diagnostics above, which is the closest existing analogue. 0 = off (no history, no graphs).
+Timer? metricSampleTimer = null;
+if (metricSampleSeconds > 0)
+{
+    var history = app.Services.GetRequiredService<MetricHistory>();
+    var lobbies = app.Services.GetRequiredService<LobbyManager>();
+    var connections = app.Services.GetRequiredService<ConnectionManager>();
+    var authorityMetrics = app.Services.GetRequiredService<AuthorityMetrics>();
+    var interval = TimeSpan.FromSeconds(metricSampleSeconds);
+    // Threshold alerts are EDGE-triggered: crossing fires once, and coming back under fires once. Sampling
+    // every 15s and alerting per sample would post four times a minute for as long as the breach lasted,
+    // which is how an alert channel becomes something people mute.
+    var breaching = false;
+
+    metricSampleTimer = new Timer(_ =>
+    {
+        try
+        {
+            var now = app.Services.GetRequiredService<TimeProvider>().GetUtcNow();
+            var relay = relayMetrics.Snapshot();
+            var authority = authorityMetrics.Snapshot()
+                .ToDictionary(a => a.GameId, StringComparer.OrdinalIgnoreCase);
+            var lobbySnapshot = lobbies.Snapshot();
+
+            var games = new List<MetricHistory.GameSample>(relay.Count);
+            foreach (var game in relay)
+            {
+                authority.TryGetValue(game.GameId, out var cost);
+                games.Add(new MetricHistory.GameSample(
+                    game.GameId,
+                    lobbySnapshot.Count(l => string.Equals(l.GameId, game.GameId, StringComparison.OrdinalIgnoreCase)),
+                    game.FramesOut, game.BytesOut, game.FramesDropped, cost.CpuSeconds));
+            }
+
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            var workingSetMb = Environment.WorkingSet / (1024 * 1024);
+            history.Add(new MetricHistory.Sample(
+                Sequence: 0, // stamped by Add
+                At: now,
+                CpuSeconds: Math.Round(self.TotalProcessorTime.TotalSeconds, 3),
+                WorkingSetMb: workingSetMb,
+                ManagedHeapMb: GC.GetTotalMemory(false) / (1024 * 1024),
+                Lobbies: lobbies.Count,
+                Players: connections.ControlCount,
+                GameSockets: connections.GameCount,
+                AuthorityLobbies: authorityManager.ActorCount,
+                Games: games));
+
+            // CPU here is the RATE between the last two samples, which is only knowable once there are two —
+            // the same reason the portal shows "--" for CPU on its first poll.
+            var samples = history.Read(Math.Max(0, history.LastSequence - 2));
+            var cpuPercent = samples.Count >= 2 ? CpuPercentBetween(samples[^2], samples[^1]) : 0;
+            var overMemory = webhookOptions.MemoryThresholdMb > 0 && workingSetMb > webhookOptions.MemoryThresholdMb;
+            var overCpu = webhookOptions.CpuPercentThreshold > 0 && cpuPercent > webhookOptions.CpuPercentThreshold;
+            var over = overMemory || overCpu;
+            if (over != breaching)
+            {
+                breaching = over;
+                webhookDispatcher?.Publish(WebhookDispatcher.Payload(
+                    WebhookEvent.ResourceThreshold,
+                    over
+                        ? $"Resource threshold crossed: {workingSetMb} MB working set, {cpuPercent:F0}% CPU."
+                        : $"Resource use back under threshold: {workingSetMb} MB working set, {cpuPercent:F0}% CPU.",
+                    now,
+                    title: over ? "Threshold breached" : "Threshold cleared"));
+            }
+        }
+        catch (Exception ex) { app.Logger.LogError(ex, "Metric history sample failed."); }
+    }, null, interval, interval);
+    app.Lifetime.ApplicationStopping.Register(() => metricSampleTimer.Dispose());
+}
+
+// Percent of one core-equivalent between two samples. Mirrors admin-core.js cpuPercentBetween — including
+// answering 0 rather than a negative when the counter goes backwards, which can only mean a restart.
+static double CpuPercentBetween(MetricHistory.Sample previous, MetricHistory.Sample current)
+{
+    var seconds = (current.At - previous.At).TotalSeconds;
+    var cpu = current.CpuSeconds - previous.CpuSeconds;
+    if (seconds <= 0 || cpu < 0) return 0;
+    return cpu / seconds / Environment.ProcessorCount * 100;
 }
 
 // Server-authority actors hold live Jint engines and tick timers — stop them all on shutdown
@@ -761,7 +948,10 @@ StaticFileOptions WebStaticOptions() => new()
 // first frame: Hello = control (shell), Attach = data (game). See WebSocketHandler.
 // One machine gets a bounded number of concurrent sockets — a player legitimately holds two
 // (control + game) per tab, so the cap is per-IP, generous, and released with the connection.
-var ipGate = new IpConnectionGate(limits.MaxConnectionsPerIp);
+// The cap is read live off the limits provider, not captured: this gate is created once for the process,
+// so a captured value would make the portal's control apply only after a restart — by which time the
+// flood it was meant to stop has ended on its own.
+var ipGate = new IpConnectionGate(() => limitsProvider.Current.MaxConnectionsPerIp);
 app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
 {
     var origin = ctx.Request.Headers.Origin.ToString();
@@ -828,6 +1018,13 @@ app.MapWhen(
             adminLogBuffer,
             app.Services.GetRequiredService<DiskUsageReporter>(),
             relayMetrics,
+            app.Services.GetRequiredService<AuthorityMetrics>(),
+            app.Services.GetRequiredService<MetricHistory>(),
+            metricSampleSeconds,
+            limitsProvider,
+            app.Services.GetService<WebhookDispatcher>(),
+            app.Services.GetService<WebhookLogSink>(),
+            webhookOptions,
             app.Services.GetRequiredService<ConnectionManager>(),
             // Optional: with AuthorityEnabled=false the manager still exists, but keeping this nullable is
             // what lets the portal report "0 authority lobbies" instead of the origin failing to build if

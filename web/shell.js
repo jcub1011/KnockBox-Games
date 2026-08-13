@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -55,6 +55,9 @@ let ws = null;
 let reconnectAttempt = 0;       // 0-based; drives exponential backoff, reset once a session is confirmed
 let games = new Map();          // gameId -> manifest
 let lobby = null;               // { lobbyId, gameId, hostId, players: [] } once in a game
+// The operator's live announcement, or null. Server-owned: pushed on connect and whenever it changes,
+// never persisted here — only the id of the one this browser dismissed is.
+let announcement = null;
 const pending = new Map();      // cid -> resolver
 let cidSeq = 0;
 
@@ -133,6 +136,9 @@ export function handle(msg) {
       // server replies in order, so an un-gated JoinLobby/Rejoin would land its EnterGame before
       // the ListGames reply and enterGame would reject it as "Unknown game".
       refreshGames().then(() => {
+        // A game-scoped announcement arrives immediately after Welcome, i.e. BEFORE this catalog reply,
+        // so its first render has no title to label it with. Re-render now that `games` is populated.
+        renderAnnouncement();
         // First connect of an auto-join tab joins the URL code; null it after so a later reconnect
         // rejoins the now-saved lobby via tryRejoin() instead of re-running the auto-join.
         if (pendingJoinCode) { const code = pendingJoinCode; pendingJoinCode = null; autoJoin(code); }
@@ -195,7 +201,45 @@ export function handle(msg) {
       // and routed it back to us. Persist it (browser-local) and refresh the home-page panel.
       recordPlayLog(msg);
       break;
+    case 'AnnouncementPosted':
+      // The operator's banner: broadcast when posted, and pushed again to each shell as it connects,
+      // so a reload or a late arrival sees the same notice.
+      announcement = { id: msg.id, text: msg.text, severity: msg.severity, gameId: msg.gameId };
+      renderAnnouncement();
+      break;
+    case 'AnnouncementCleared':
+      // Only if it's the one we're showing: a newer announcement may have arrived between the operator
+      // clearing the old one and this frame reaching us.
+      if (announcement && announcement.id === msg.id) {
+        announcement = null;
+        renderAnnouncement();
+      }
+      break;
   }
+}
+
+// ── Operator announcement (home page) ─────────────────────────────────────────
+// The one banner the platform shows players. Not a toast: it stays until the player dismisses it or the
+// operator takes it down, because "maintenance in 20 minutes" has to be readable when they look up.
+// Text is untrusted operator input and goes in via textContent; the severity is validated to a known
+// value before it becomes a class name.
+const ANNOUNCEMENT_DISMISSED_KEY = 'kb.announcementDismissed';
+
+function renderAnnouncement() {
+  const banner = el('announcement-banner');
+  const dismissed = localStorage.getItem(ANNOUNCEMENT_DISMISSED_KEY);
+  if (!shouldShowAnnouncement(announcement, dismissed)) {
+    banner.hidden = true;
+    return;
+  }
+
+  // A game-scoped notice is labelled with the game's title — on the home page it is otherwise
+  // indistinguishable from a platform-wide one. An id we don't know (a game since uninstalled) simply
+  // shows the text: a raw id means nothing to a player.
+  const gameName = announcement.gameId ? games.get(announcement.gameId)?.name : null;
+  el('announcement-text').textContent = announcementText(announcement, gameName);
+  banner.className = `home-announcement severity-${announcementSeverity(announcement.severity)}`;
+  banner.hidden = false;
 }
 
 // ── Play Log (home page) ───────────────────────────────────────────────────────
@@ -1224,7 +1268,16 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// Dismissing the banner is remembered in localStorage (not sessionStorage) against the announcement's
+// id: it survives closing the browser, and an operator editing the notice mints a new id, so the new
+// wording comes back for everyone who dismissed the old one.
+el('announcement-dismiss').addEventListener('click', () => {
+  if (announcement) localStorage.setItem('kb.announcementDismissed', announcement.id);
+  renderAnnouncement();
+});
+
 applyGate();
+renderAnnouncement();
 renderPlayLog(); // home view is shown by default on load — populate the Play Log from storage
 
 // Start the control socket. On a real page load index.html imports this module and calls bootstrap();

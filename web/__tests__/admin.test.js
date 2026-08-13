@@ -155,6 +155,7 @@ const METRICS = {
     gameId: 'tictactoe', framesIn: 100, framesOut: 200, bytesIn: 5000, bytesOut: 10_000,
     framesDropped: 0, fanOut: 2, lobbies: 1, players: 2,
     socketFramesSent: 200, socketBytesSent: 10_000, socketFramesDropped: 0,
+    authorityCalls: 0, authorityCpuSeconds: 0, authorityAverageMs: 0, authorityMaxMs: 0, authorityErrors: 0,
   }],
   controlSockets: 5,
   gameSockets: 3,
@@ -163,6 +164,20 @@ const METRICS = {
   outboundFramesDropped: 0,
   trackedRateLimitIps: 0,
   hostTime: '2026-08-12T20:00:00.000Z',
+};
+
+function historySample(seq, seconds, fields = {}) {
+  return {
+    sequence: seq, at: new Date(Date.UTC(2026, 7, 12, 20, 0, seconds)).toISOString(),
+    cpuSeconds: seconds * 0.2, workingSetMb: 60 + seq, managedHeapMb: 3,
+    lobbies: 2, players: 5, gameSockets: 3, authorityLobbies: 0, games: [], ...fields,
+  };
+}
+
+const HISTORY = {
+  enabled: true,
+  samples: [historySample(1, 0), historySample(2, 15), historySample(3, 30)],
+  lastSequence: 3, retained: 3, capacity: 240, sampleSeconds: 15, processorCount: 8,
 };
 
 // The happy path: configured, authenticated, every read endpoint answering.
@@ -177,6 +192,7 @@ function authedRoutes(overrides = {}) {
     'GET /admin/api/logs/files': { body: { files: [{ name: 'knockbox-20260812.log', bytes: 254_000, modified: '2026-08-12T20:00:00.000Z' }], logsRoot: '/logs', error: null } },
     'GET /admin/api/marketplace/catalog': { body: CATALOG },
     'GET /admin/api/packages/jobs': { body: JOBS },
+    'GET /admin/api/metrics/history': { body: HISTORY },
     ...overrides,
   };
 }
@@ -760,5 +776,83 @@ describe('setup and login forms', () => {
     await tick();
 
     expect(el('login-error').textContent).toBe('Invalid admin password.');
+  });
+});
+
+describe('history graphs', () => {
+  async function openOverview(overrides) {
+    fake = installFakeFetch(authedRoutes(overrides));
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+  }
+
+  it('draws one sparkline per series from the server-side samples', async () => {
+    await openOverview();
+
+    const cards = [...document.querySelectorAll('#history-graphs .graph-card')];
+    expect(cards.map((c) => c.dataset.graph)).toEqual(['cpu', 'memory', 'players', 'lobbies']);
+    // A real path, not an empty box: the history came from the server, so the graph is populated on the
+    // first poll rather than starting to fill from now.
+    expect(cards[0].querySelector('.sparkline path')).not.toBeNull();
+    expect(el('history-badge').textContent).toContain('samples');
+  });
+
+  it('polls with a cursor so an open dashboard fetches only what is new', async () => {
+    // Fake timers BEFORE bootstrap: the poll interval is armed during it, so installing them afterwards
+    // leaves a real interval that advanceTimersByTime can never fire.
+    vi.useFakeTimers();
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await vi.advanceTimersByTimeAsync(1);
+
+    const first = fake.calls.filter((c) => c.path === '/admin/api/metrics/history');
+    expect(first[0].url).toContain('after=0');
+
+    await vi.advanceTimersByTimeAsync(5000);
+    const later = fake.calls.filter((c) => c.path === '/admin/api/metrics/history');
+    expect(later.length).toBeGreaterThan(first.length);
+    expect(later[later.length - 1].url).toContain('after=3');
+  });
+
+  it('says history is off rather than drawing an empty chart', async () => {
+    await openOverview({
+      'GET /admin/api/metrics/history': {
+        body: { enabled: false, samples: [], lastSequence: 0, retained: 0, capacity: 240, sampleSeconds: 0, processorCount: 8 },
+      },
+    });
+
+    expect(el('history-badge').textContent).toBe('Off');
+    expect(el('history-note').textContent).toContain('MetricSampleSeconds=0');
+    expect(document.querySelectorAll('#history-graphs .graph-card').length).toBe(0);
+  });
+
+  it('shows a dash for a game with no authority module, and the cost for one that has', async () => {
+    await openOverview({
+      'GET /admin/api/metrics': {
+        body: {
+          ...METRICS,
+          games: [
+            METRICS.games[0],
+            {
+              gameId: 'word-rush', framesIn: 10, framesOut: 10, bytesIn: 100, bytesOut: 100,
+              framesDropped: 0, fanOut: 1, lobbies: 1, players: 2,
+              socketFramesSent: 10, socketBytesSent: 100, socketFramesDropped: 0,
+              authorityCalls: 400, authorityCpuSeconds: 1.25, authorityAverageMs: 3.1,
+              authorityMaxMs: 40, authorityErrors: 0,
+            },
+          ],
+        },
+      },
+    });
+
+    const rows = [...document.querySelectorAll('#metrics-body tr')];
+    // A browser-side game costs this process no CPU at all — which is a different statement from "0.00s".
+    expect(rows[0].textContent).toContain('--');
+    expect(rows[1].textContent).toContain('1.25s');
+    expect(rows[1].textContent).toContain('3.1 ms/call');
   });
 });

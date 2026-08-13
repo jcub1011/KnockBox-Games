@@ -55,6 +55,9 @@ public class GamePolicyGateTests : IDisposable
         /// <summary>Per-game refusal text, e.g. what a game mid-update says. Empty ⇒ the generic message.</summary>
         public Dictionary<string, string> Reasons { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>The live banner, if a test is exercising the announcement push.</summary>
+        public PlatformAnnouncement? Announcement { get; set; }
+
         public bool CanCreateLobby(string gameId) => !MaintenanceMode && !Unstartable.Contains(gameId);
         public bool IsListed(string gameId) => !Unlisted.Contains(gameId);
         public string? UnavailableReason(string gameId) => Reasons.GetValueOrDefault(gameId);
@@ -74,7 +77,7 @@ public class GamePolicyGateTests : IDisposable
             connections, lobbies, catalog,
             TestAuthorities.Manager(connections, lobbies),
             new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance),
-            ServerLimits.FromConfiguration(new ConfigurationBuilder().Build()),
+            new LimitsProvider(ServerLimits.FromConfiguration(new ConfigurationBuilder().Build())),
             policy, new RelayMetrics(), TimeProvider.System,
             NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
 
@@ -237,6 +240,37 @@ public class GamePolicyGateTests : IDisposable
         // Leaving a lobby broadcasts PlayerLeft to its members — including the leaver, who is the only
         // member here. Its absence is the proof that the refusal came before LeaveLobbiesExcept ran.
         Assert.Empty(replies.OfType<PlayerLeftMessage>());
+    }
+
+    // ── Announcements (§4.1) ──────────────────────────────────────────────────
+
+    [Fact]
+    public void A_connecting_player_is_told_the_live_announcement_right_after_Welcome()
+    {
+        var policy = new StubPolicy
+        {
+            Announcement = new PlatformAnnouncement(
+                "a1", "Maintenance in 20 minutes.", DateTimeOffset.UnixEpoch, "warning"),
+        };
+
+        var replies = Run(policy, new HelloMessage(null, "Ann"));
+
+        // The whole reason this is pushed on connect rather than only broadcast when posted: a player who
+        // arrives after the operator posted it must see the same banner, without the server keeping any
+        // per-viewer state.
+        var announced = Assert.Single(replies.OfType<AnnouncementPostedMessage>());
+        Assert.Equal(("a1", "Maintenance in 20 minutes.", "warning"),
+            (announced.Id, announced.Text, announced.Severity));
+        // After Welcome, so the shell has its identity before anything else arrives.
+        Assert.True(replies.FindIndex(m => m is WelcomeMessage)
+                    < replies.FindIndex(m => m is AnnouncementPostedMessage));
+    }
+
+    [Fact]
+    public void With_no_announcement_posted_nothing_extra_is_sent()
+    {
+        var replies = Run(new StubPolicy(), new HelloMessage(null, "Ann"));
+        Assert.Empty(replies.OfType<AnnouncementPostedMessage>());
     }
 
     /// <summary>Replays scripted inbound frames and captures the outbound ones, then ends the socket.</summary>

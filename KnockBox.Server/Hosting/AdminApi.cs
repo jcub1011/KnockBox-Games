@@ -9,6 +9,7 @@ using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using KnockBox.Server.Serialization;
+using KnockBox.Server.Webhooks;
 
 namespace KnockBox.Server.Hosting;
 
@@ -60,6 +61,15 @@ internal static class AdminApi
         AdminLogBuffer Logs,
         DiskUsageReporter Disk,
         RelayMetrics Relay,
+        AuthorityMetrics Authority,
+        MetricHistory History,
+        int MetricSampleSeconds,
+        LimitsProvider Limits,
+        // Null when KnockBox:WebhooksEnabled is false — the same nullable-when-disabled precedent as
+        // Marketplace. Registered endpoints are still listed; the mutating routes refuse with 409.
+        WebhookDispatcher? Webhooks,
+        WebhookLogSink? WebhookLog,
+        WebhookOptions WebhookOptions,
         ConnectionManager Connections,
         ServerAuthorityManager? Authorities,
         ContentPaths.Resolved Paths,
@@ -95,6 +105,8 @@ internal static class AdminApi
             routes.MapGet("/admin/api/system/status",
                 RequireSession(options, ctx => SystemStatus(ctx, options, processStartedUtc)));
             routes.MapGet("/admin/api/metrics", RequireSession(options, ctx => Metrics(ctx, options)));
+            routes.MapGet("/admin/api/metrics/history",
+                RequireSession(options, ctx => MetricHistoryFeed(ctx, options)));
             routes.MapGet("/admin/api/lobbies", RequireSession(options, ctx => Lobbies(ctx, options)));
             routes.MapGet("/admin/api/games", RequireSession(options, ctx => Games(ctx, options)));
             routes.MapGet("/admin/api/logs", RequireSession(options, ctx => Logs(ctx, options)));
@@ -104,6 +116,10 @@ internal static class AdminApi
             routes.MapGet("/admin/api/packages/jobs", RequireSession(options, ctx => Jobs(ctx, options)));
             routes.MapGet("/admin/api/packages/jobs/{jobId}", RequireSession(options, ctx => Job(ctx, options)));
             routes.MapGet("/admin/api/marketplace/catalog", RequireSession(options, ctx => Catalog(ctx, options)));
+            routes.MapGet("/admin/api/limits", RequireSession(options, ctx => Limits(ctx, options)));
+            routes.MapGet("/admin/api/room-codes", RequireSession(options, ctx => RoomCodes(ctx, options)));
+            routes.MapGet("/admin/api/announcement", RequireSession(options, ctx => Announcement(ctx, options)));
+            routes.MapGet("/admin/api/webhooks", RequireSession(options, ctx => Webhooks(ctx, options)));
 
             // ── Mutations ──
             // Every one of these is gated by RequireSession AND by the mutation guard inside WriteGuard,
@@ -124,6 +140,20 @@ internal static class AdminApi
                 RequireSession(options, WriteGuard(ctx => DeleteGame(ctx, options))));
             routes.MapPost("/admin/api/maintenance",
                 RequireSession(options, WriteGuard(ctx => SetMaintenance(ctx, options))));
+            routes.MapPost("/admin/api/limits",
+                RequireSession(options, WriteGuard(ctx => SetLimits(ctx, options))));
+            routes.MapPost("/admin/api/room-codes",
+                RequireSession(options, WriteGuard(ctx => SetRoomCodes(ctx, options))));
+            routes.MapPost("/admin/api/announcement",
+                RequireSession(options, WriteGuard(ctx => PostAnnouncement(ctx, options))));
+            routes.MapPost("/admin/api/announcement/delete",
+                RequireSession(options, WriteGuard(ctx => ClearAnnouncement(ctx, options))));
+            routes.MapPost("/admin/api/webhooks",
+                RequireSession(options, WriteGuard(ctx => AddWebhook(ctx, options))));
+            routes.MapPost("/admin/api/webhooks/{id}/delete",
+                RequireSession(options, WriteGuard(ctx => RemoveWebhook(ctx, options))));
+            routes.MapPost("/admin/api/webhooks/{id}/test",
+                RequireSession(options, WriteGuard(ctx => TestWebhook(ctx, options))));
 
             // ── Packages ──
             // Separate from /games/* on purpose: these are the INSTALLED-side lifecycle, and every one of
@@ -331,11 +361,19 @@ internal static class AdminApi
         {
             socketFrames.TryGetValue(relay.GameId, out var sockets);
             lobbyCounts.TryGetValue(relay.GameId, out var counts);
+            // Zero for every game that isn't server-authority, and that zero is a measurement, not a gap:
+            // a browser-side game executes no code in this process.
+            var authority = options.Authority.For(relay.GameId);
             games.Add(new AdminGameRelayMetrics(
                 relay.GameId, relay.FramesIn, relay.FramesOut, relay.BytesIn, relay.BytesOut,
                 relay.FramesDropped, Math.Round(relay.FanOut, 2),
                 counts.Lobbies, counts.Players,
-                sockets.Frames, sockets.Bytes, sockets.Dropped));
+                sockets.Frames, sockets.Bytes, sockets.Dropped,
+                authority?.Calls ?? 0,
+                Math.Round(authority?.CpuSeconds ?? 0, 3),
+                Math.Round(authority?.AverageCallMs ?? 0, 3),
+                Math.Round(authority?.MaxCallMs ?? 0, 3),
+                authority?.Errors ?? 0));
         }
 
         // Server-wide outbound totals across BOTH planes: the control sockets carry lobby events too, and
@@ -1234,10 +1272,460 @@ internal static class AdminApi
         var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminMaintenanceRequest)
                    ?? new AdminMaintenanceRequest();
         var warning = options.Settings.SetMaintenance(body.Enabled, body.Message);
+        // Notified from here rather than from the store: the store is IPlatformPolicy's lock-free backing
+        // and is read on the lobby-create path, so it must not own an outbound side-effect.
+        options.Webhooks?.Publish(WebhookDispatcher.Payload(
+            WebhookEvent.MaintenanceChanged,
+            body.Enabled
+                ? $"Maintenance mode ON. {body.Message ?? "No message set."}"
+                : "Maintenance mode off; new lobbies are allowed again.",
+            options.Time.GetUtcNow(),
+            title: body.Enabled ? "Maintenance on" : "Maintenance off"));
+
         await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
             Detail: body.Enabled
                 ? "New lobbies are blocked platform-wide. Running sessions continue until they finish."
                 : "New lobbies are allowed again."));
+    }
+
+    // ── Metric history ────────────────────────────────────────────────────────
+
+    private static Task MetricHistoryFeed(HttpContext ctx, Options options)
+    {
+        // Cursor-polled, like the log ring and the job feed: `after` is the last sequence the client holds,
+        // so an open dashboard transfers one sample per tick instead of the whole hour every five seconds.
+        var after = long.TryParse(ctx.Request.Query["after"], out var parsed) && parsed > 0 ? parsed : 0;
+        var samples = options.History.Read(after).Select(s => new AdminMetricSample(
+            s.Sequence,
+            s.At.UtcDateTime.ToString("O"),
+            s.CpuSeconds,
+            s.WorkingSetMb,
+            s.ManagedHeapMb,
+            s.Lobbies,
+            s.Players,
+            s.GameSockets,
+            s.AuthorityLobbies,
+            [.. s.Games.Select(g => new AdminMetricGame(
+                g.GameId, g.Lobbies, g.FramesOut, g.BytesOut, g.FramesDropped,
+                Math.Round(g.AuthorityCpuSeconds, 3)))]));
+
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminMetricHistoryResponse,
+            new AdminMetricHistoryResponse(
+                Enabled: options.MetricSampleSeconds > 0,
+                Samples: [.. samples],
+                LastSequence: options.History.LastSequence,
+                Retained: options.History.Count,
+                Capacity: options.History.Capacity,
+                SampleSeconds: options.MetricSampleSeconds,
+                ProcessorCount: Environment.ProcessorCount));
+    }
+
+    // ── Platform limits ───────────────────────────────────────────────────────
+
+    private static Task Limits(HttpContext ctx, Options options)
+    {
+        var provider = options.Limits;
+        var overrides = provider.Overrides;
+        var startup = provider.Configured;
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminLimitsResponse, new AdminLimitsResponse(
+            Defaults: Values(startup),
+            Effective: Values(provider.Current),
+            Overridden: OverriddenKeys(overrides),
+            // Reported read-only. The portal shows them greyed with the reason rather than omitting them:
+            // an operator looking for "handshake timeout" and not finding it assumes the portal is
+            // incomplete, where a disabled field with "set in configuration" answers the question.
+            HandshakeTimeoutSeconds: startup.HandshakeTimeout.TotalSeconds,
+            DisconnectGraceSeconds: startup.DisconnectGrace.TotalSeconds,
+            AdminLoginAttemptsPerMinute: startup.AdminLoginAttemptsPerMinute,
+            AdminLoginAttemptsPerMinuteGlobal: startup.AdminLoginAttemptsPerMinuteGlobal,
+            ActiveLobbies: options.Lobbies.Count,
+            ConnectedPlayers: options.Connections.ControlCount));
+
+        static AdminLimitValues Values(ServerLimits limits) => new(
+            limits.GameMessagesPerSecond, limits.GameMessagesBurst,
+            limits.ControlMessagesPerSecond, limits.ControlMessagesBurst,
+            limits.LobbyCreatesPerMinute, limits.MaxConnectionsPerIp,
+            limits.MaxLobbies, limits.MaxLobbiesPerGame);
+
+        static IReadOnlyList<string> OverriddenKeys(OperatorLimits o)
+        {
+            var keys = new List<string>(8);
+            if (o.GameMessagesPerSecond is not null) keys.Add("gameMessagesPerSecond");
+            if (o.GameMessagesBurst is not null) keys.Add("gameMessagesBurst");
+            if (o.ControlMessagesPerSecond is not null) keys.Add("controlMessagesPerSecond");
+            if (o.ControlMessagesBurst is not null) keys.Add("controlMessagesBurst");
+            if (o.LobbyCreatesPerMinute is not null) keys.Add("lobbyCreatesPerMinute");
+            if (o.MaxConnectionsPerIp is not null) keys.Add("maxConnectionsPerIp");
+            if (o.MaxLobbies is not null) keys.Add("maxLobbies");
+            if (o.MaxLobbiesPerGame is not null) keys.Add("maxLobbiesPerGame");
+            return keys;
+        }
+    }
+
+    private static async Task SetLimits(HttpContext ctx, Options options)
+    {
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminLimitsRequest)
+                   ?? new AdminLimitsRequest();
+        var overrides = new OperatorLimits(
+            body.GameMessagesPerSecond, body.GameMessagesBurst,
+            body.ControlMessagesPerSecond, body.ControlMessagesBurst,
+            body.LobbyCreatesPerMinute, body.MaxConnectionsPerIp,
+            body.MaxLobbies, body.MaxLobbiesPerGame);
+
+        // 400, not 409: an out-of-range number or a burst that would refuse every message is a bad
+        // request, not a state conflict. The message names the field and the range, matching how the
+        // availability and update-policy routes enumerate their legal values.
+        if (overrides.Validate(options.Limits.Configured) is { } error)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, error);
+            return;
+        }
+
+        // Persist first, then publish — both happen regardless of whether the write succeeded, which is
+        // the store's contract: a change is in effect even when it can't be saved.
+        var warning = options.Settings.SetLimits(overrides);
+        options.Limits.Apply(overrides);
+
+        var effective = options.Limits.Current;
+        var detail = overrides.IsEmpty
+            ? "Every limit is back to its default."
+            : Applied(effective, options.Lobbies);
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: detail));
+
+        // What the operator most needs told: the change reached sockets that were already open (that is
+        // the whole point), but a lowered cap never tears anything down — it refuses the next one.
+        static string Applied(ServerLimits effective, LobbyManager lobbies)
+        {
+            var note = "In force now, including for connections that are already open.";
+            if (effective.MaxLobbies > 0 && lobbies.Count > effective.MaxLobbies)
+                note += $" {lobbies.Count} lobbies are already running, above the new cap of " +
+                        $"{effective.MaxLobbies} — they continue until they finish; no new ones start " +
+                        "until the count falls below it.";
+            return note;
+        }
+    }
+
+    // ── Room codes ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The largest share of the code space a blocklist may remove. Well past any real word list, and short
+    /// of the point where the generator starts failing to find a free code — which would surface to players
+    /// as "could not create a lobby", with nothing to connect it to the blocklist that caused it.
+    /// </summary>
+    private const int MaxBlockedPercent = 50;
+
+    private static Task RoomCodes(HttpContext ctx, Options options) =>
+        WriteRoomCodes(ctx, options.Settings.RoomCodes);
+
+    private static async Task SetRoomCodes(HttpContext ctx, Options options)
+    {
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminRoomCodesRequest)
+                   ?? new AdminRoomCodesRequest();
+
+        // Report a bad entry rather than dropping it: on the way IN, silence would leave an operator sure
+        // they had blocked something. (Compile still drops junk when LOADING a hand-edited file, where
+        // there is nobody to tell and the alternative is losing the rest of the list.)
+        foreach (var word in body.Words ?? [])
+            if (RoomCodeFilter.ValidateEntry(word, pattern: false) is { } wordError)
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest, $"'{word}': {wordError}");
+                return;
+            }
+        foreach (var pattern in body.Patterns ?? [])
+            if (RoomCodeFilter.ValidateEntry(pattern, pattern: true) is { } patternError)
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest, $"'{pattern}': {patternError}");
+                return;
+            }
+
+        var filter = RoomCodeFilter.Compile(body.Words, body.Patterns);
+        if (filter.Count > RoomCodeFilter.MaxEntries)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                $"At most {RoomCodeFilter.MaxEntries} entries. One pattern usually replaces many words.");
+            return;
+        }
+
+        var blocked = filter.CountBlocked();
+        var space = RoomCodeFilter.CodeSpaceSize();
+        if (blocked * 100L > space * (long)MaxBlockedPercent)
+        {
+            // 409: the request is well-formed, the consequence is what's refused — the same reading of 409
+            // this API uses everywhere else.
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                $"That blocklist removes {blocked:N0} of {space:N0} possible codes " +
+                $"({blocked * 100.0 / space:F0}%), over the {MaxBlockedPercent}% limit. Lobby creation " +
+                "would start failing for reasons no player could act on.");
+            return;
+        }
+
+        var warning = options.Settings.SetRoomCodes(filter);
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
+            Detail: filter.IsEmpty
+                ? "No codes are blocked."
+                : $"Blocking {blocked:N0} of {space:N0} possible codes ({blocked * 100.0 / space:F1}%). " +
+                  "Codes already in use are unaffected."));
+    }
+
+    private static Task WriteRoomCodes(HttpContext ctx, RoomCodeFilter filter)
+    {
+        var unreachable = new List<string>();
+        foreach (var entry in filter.Words.Concat(filter.Patterns))
+            if (RoomCodeFilter.IsUnreachable(entry)) unreachable.Add(entry);
+
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminRoomCodesResponse, new AdminRoomCodesResponse(
+            Words: filter.Words,
+            Patterns: filter.Patterns,
+            Unreachable: unreachable,
+            Blocked: filter.CountBlocked(),
+            CodeSpace: RoomCodeFilter.CodeSpaceSize(),
+            MaxEntries: RoomCodeFilter.MaxEntries,
+            MaxBlockedPercent: MaxBlockedPercent,
+            Alphabet: LobbyManager.CodeAlphabet,
+            CodeLength: LobbyManager.CodeLength));
+    }
+
+    // ── Announcements ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Cap on announcement text, matching the maintenance message's and the <see cref="Reason"/> helper's.
+    /// A banner is one line above the game grid; anything longer is a page, and belongs somewhere a player
+    /// can choose to read it.
+    /// </summary>
+    private const int MaxAnnouncementLength = 200;
+
+    private static Task Announcement(HttpContext ctx, Options options)
+    {
+        var live = options.Settings.Announcement;
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminAnnouncementResponse,
+            new AdminAnnouncementResponse(
+                Id: live?.Id,
+                Text: live?.Text,
+                Severity: live?.Severity,
+                GameId: live?.GameId,
+                PostedAt: live?.PostedAt.UtcDateTime.ToString("O"),
+                // How many players would see it — the number that tells an operator whether posting now is
+                // worth anything, and the same number the POST reports having reached.
+                ConnectedPlayers: options.Connections.ControlCount,
+                MaxLength: MaxAnnouncementLength,
+                Games: [.. options.Catalog.Games.Select(g => new AdminGameName(g.Id, g.Name))]));
+    }
+
+    private static async Task PostAnnouncement(HttpContext ctx, Options options)
+    {
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminAnnouncementRequest)
+                   ?? new AdminAnnouncementRequest();
+        var text = body.Text?.Trim();
+        if (string.IsNullOrEmpty(text))
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                "Text is required. To take the banner down, use Clear.");
+            return;
+        }
+
+        var gameId = string.IsNullOrWhiteSpace(body.GameId) ? null : body.GameId.Trim();
+        if (gameId is not null)
+        {
+            // Resolved through the catalog so the stored id has the manifest's casing — an override keyed
+            // differently than the manifest is the bug the availability store's comparer exists to avoid.
+            if (!options.Catalog.TryGet(gameId, out var scoped))
+            {
+                await Refuse(ctx, StatusCodes.Status404NotFound, $"No installed game with id '{gameId}'.");
+                return;
+            }
+            gameId = scoped.Id;
+        }
+
+        var announcement = new PlatformAnnouncement(
+            // A NEW id every time, including an edit: dismissal is remembered against it, so reusing one
+            // would leave an edited notice invisible to everyone who dismissed the previous version.
+            Id: Guid.NewGuid().ToString("N"),
+            Text: text.Length > MaxAnnouncementLength ? text[..MaxAnnouncementLength] : text,
+            PostedAt: options.Time.GetUtcNow(),
+            Severity: AdminSettingsStore.AnnouncementSeverity(body.Severity),
+            GameId: gameId);
+
+        var warning = options.Settings.SetAnnouncement(announcement);
+        var reached = options.Connections.BroadcastToAllControl(new AnnouncementPostedMessage(
+            announcement.Id, announcement.Text, announcement.PostedAt,
+            announcement.Severity, announcement.GameId));
+
+        await WriteAction(ctx, new AdminActionResponse(true, Affected: reached, Warning: warning,
+            Detail: reached == 0
+                // Not a failure worth an error: nobody is on the site right now, and the whole point of
+                // pushing it on connect is that the next arrival still sees it.
+                ? "Posted. Nobody is connected right now; anyone who arrives will see it."
+                : $"Posted to {reached} connected player(s). Anyone arriving later sees it too."));
+    }
+
+    private static async Task ClearAnnouncement(HttpContext ctx, Options options)
+    {
+        if (options.Settings.Announcement is not { } live)
+        {
+            await WriteAction(ctx, new AdminActionResponse(true, Detail: "There was no announcement posted."));
+            return;
+        }
+
+        var warning = options.Settings.SetAnnouncement(null);
+        // The id goes with it so a shell already showing a NEWER announcement doesn't clear the wrong one.
+        var reached = options.Connections.BroadcastToAllControl(new AnnouncementClearedMessage(live.Id));
+        await WriteAction(ctx, new AdminActionResponse(true, Affected: reached, Warning: warning,
+            Detail: $"Cleared for {reached} connected player(s)."));
+    }
+
+    // ── Webhooks ──────────────────────────────────────────────────────────────
+
+    private static Task Webhooks(HttpContext ctx, Options options)
+    {
+        var dispatcher = options.Webhooks;
+        var endpoints = options.Settings.Webhooks.Select(e =>
+        {
+            var last = dispatcher?.LastResult(e.Id);
+            return new AdminWebhookSummary(
+                e.Id, e.Name, e.Url,
+                Events: [.. (e.Events ?? []).Select(v => Camel(v.ToString()))],
+                Enabled: e.Enabled,
+                LastAt: last?.At.UtcDateTime.ToString("O"),
+                LastOk: last?.Ok,
+                LastStatus: last?.Status,
+                LastError: last?.Error,
+                LastEvent: last is null ? null : Camel(last.Event.ToString()));
+        });
+
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminWebhooksResponse, new AdminWebhooksResponse(
+            Enabled: options.WebhookOptions.Enabled,
+            Endpoints: [.. endpoints],
+            KnownEvents: [.. Enum.GetValues<WebhookEvent>().Select(v => Camel(v.ToString()))],
+            MaxEndpoints: options.WebhookOptions.MaxEndpoints,
+            Delivered: dispatcher?.Delivered ?? 0,
+            Failed: dispatcher?.Failed ?? 0,
+            Dropped: dispatcher?.Dropped ?? 0,
+            Suppressed: options.WebhookLog?.Suppressed ?? 0,
+            TimeoutSeconds: (int)options.WebhookOptions.Timeout.TotalSeconds,
+            ErrorsPerMinute: options.WebhookOptions.ErrorsPerMinute));
+    }
+
+    private static async Task AddWebhook(HttpContext ctx, Options options)
+    {
+        if (!options.WebhookOptions.Enabled)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "Webhooks are switched off (KnockBox:WebhooksEnabled=false).");
+            return;
+        }
+
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminWebhookRequest);
+        if (body is null)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, "Send an id, a name and a URL.");
+            return;
+        }
+
+        var existing = options.Settings.Webhooks
+            .FirstOrDefault(w => string.Equals(w.Id, body.Id, StringComparison.OrdinalIgnoreCase));
+
+        if (!MarketplaceSourceRegistry.IsValidId(body.Id))
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                "Id must be 1-32 characters of letters, digits, dash or underscore.");
+            return;
+        }
+
+        var url = body.Url ?? existing?.Url;
+        if (!WebhookDispatcher.IsAllowedUrl(url))
+        {
+            // The downloader's own rule, exposed rather than copied — so a URL that registers can never be
+            // one the sender would then refuse.
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                "The URL must be https, or http on loopback (for a local monitoring agent).");
+            return;
+        }
+
+        var events = new List<WebhookEvent>();
+        foreach (var name in body.Events ?? [])
+        {
+            if (!Enum.TryParse<WebhookEvent>(name, ignoreCase: true, out var parsed))
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest,
+                    $"'{name}' is not an event. Valid: " +
+                    string.Join(", ", Enum.GetValues<WebhookEvent>().Select(v => Camel(v.ToString()))) + ".");
+                return;
+            }
+            if (!events.Contains(parsed)) events.Add(parsed);
+        }
+
+        if (existing is null && options.Settings.Webhooks.Count >= options.WebhookOptions.MaxEndpoints)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                $"At most {options.WebhookOptions.MaxEndpoints} endpoints (KnockBox:MaxWebhooks).");
+            return;
+        }
+
+        var endpoint = new WebhookEndpoint(
+            Id: body.Id!,
+            Name: string.IsNullOrWhiteSpace(body.Name) ? existing?.Name ?? body.Id! : body.Name.Trim(),
+            Url: url!,
+            Events: events,
+            Enabled: body.Enabled ?? existing?.Enabled ?? true);
+
+        var warning = options.Settings.UpsertWebhook(endpoint);
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
+            Detail: events.Count == 0
+                // Stated because it is the opposite of what an empty multi-select looks like it means.
+                ? "Saved. With no events selected it receives all of them."
+                : $"Saved, subscribed to {events.Count} event(s)."));
+    }
+
+    private static async Task RemoveWebhook(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (!options.Settings.RemoveWebhook(id, out var warning))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No webhook with id '{id}'.");
+            return;
+        }
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: "Removed."));
+    }
+
+    private static async Task TestWebhook(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (options.Webhooks is not { } dispatcher)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "Webhooks are switched off (KnockBox:WebhooksEnabled=false).");
+            return;
+        }
+
+        var endpoint = options.Settings.Webhooks
+            .FirstOrDefault(w => string.Equals(w.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (endpoint is null)
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No webhook with id '{id}'.");
+            return;
+        }
+
+        // Sent through the real delivery path, and AWAITED rather than queued: the operator clicked this to
+        // find out whether the URL works, so the answer belongs in the response instead of appearing in a
+        // panel a poll later. A disabled endpoint is still tested — testing is how you check one before
+        // enabling it.
+        var result = await dispatcher.DeliverAsync(endpoint, WebhookDispatcher.Payload(
+            WebhookEvent.MaintenanceChanged,
+            "Test notification from the KnockBox admin portal.",
+            options.Time.GetUtcNow(),
+            title: "Test"), ctx.RequestAborted);
+
+        if (!result.Ok)
+        {
+            // 502: the request here was fine, the upstream endpoint is what failed — the same reading the
+            // marketplace routes give an unreachable catalog host.
+            await Refuse(ctx, StatusCodes.Status502BadGateway,
+                $"Delivery failed ({result.Status?.ToString() ?? "no response"}): {result.Error}");
+            return;
+        }
+
+        await WriteAction(ctx, new AdminActionResponse(true,
+            Detail: $"Delivered ({result.Status})." + (endpoint.Enabled ? "" : " This endpoint is disabled, so it receives nothing until you enable it.")));
     }
 
     // ── Plumbing ──────────────────────────────────────────────────────────────

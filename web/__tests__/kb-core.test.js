@@ -30,6 +30,9 @@ import {
   ordinal,
   FAVICONS,
   pickRandomFavicon,
+  shouldShowAnnouncement,
+  announcementSeverity,
+  announcementText,
 } from '../kb-core.js';
 
 describe('normalizeReady', () => {
@@ -546,5 +549,36 @@ describe('ordinal', () => {
   it('returns non-numeric input unchanged', () => {
     expect(ordinal('win')).toBe('win');
     expect(ordinal('1.5')).toBe('1.5');
+  });
+});
+
+describe('announcements', () => {
+  it('shows a non-empty announcement the player has not dismissed', () => {
+    const a = { id: 'a1', text: 'Maintenance soon' };
+    expect(shouldShowAnnouncement(a, null)).toBe(true);
+    expect(shouldShowAnnouncement(a, 'a0')).toBe(true);
+    expect(shouldShowAnnouncement(a, 'a1')).toBe(false);
+  });
+
+  it('shows nothing for a missing or blank announcement', () => {
+    expect(shouldShowAnnouncement(null, null)).toBe(false);
+    expect(shouldShowAnnouncement({ id: 'a1', text: '   ' }, null)).toBe(false);
+    expect(shouldShowAnnouncement({ id: 'a1' }, null)).toBe(false);
+  });
+
+  it('validates severity to a known value, because it becomes a class name', () => {
+    expect(announcementSeverity('warning')).toBe('warning');
+    expect(announcementSeverity('info')).toBe('info');
+    for (const bad of ['critical', '', null, undefined, 'info warning', 42]) {
+      expect(announcementSeverity(bad)).toBe('info');
+    }
+  });
+
+  it('prefixes a game-scoped announcement with the game title', () => {
+    const a = { id: 'a1', text: 'retires on the 15th.' };
+    expect(announcementText(a, 'Word Rush')).toBe('Word Rush: retires on the 15th.');
+    // No name resolved (a game since uninstalled) → the text alone, never a raw id.
+    expect(announcementText(a, null)).toBe('retires on the 15th.');
+    expect(announcementText(a, '  ')).toBe('retires on the 15th.');
   });
 });

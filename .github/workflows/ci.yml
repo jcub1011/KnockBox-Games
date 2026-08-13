@@ -126,6 +126,7 @@ jobs:
             -e KnockBox__GamesPollSeconds=2 \
             -e KnockBox__MarketplaceCatalogUrl=http://127.0.0.1:9000/CATALOG.json \
             -e KnockBox__MarketplaceDownloadBaseUrl=http://127.0.0.1:9000 \
+            -e KnockBox__MetricSampleSeconds=2 \
             knockbox:ci
           # The catalog host is stood up later (it needs a package to serve). Pointing at it now is free
           # — the URL is only dereferenced on demand — and it buys an assertion that an unreachable
@@ -160,7 +161,8 @@ jobs:
           # Every dashboard read is session-gated, not just the one the old dashboard polled. A new
           # endpoint that forgets RequireSession would serve lobby rosters and log lines to anyone who can
           # reach the port, so assert the whole set rather than a representative.
-          for path in metrics lobbies games logs logs/files packages/jobs marketplace/catalog; do
+          for path in metrics metrics/history lobbies games logs logs/files packages/jobs \
+                      marketplace/catalog limits room-codes announcement webhooks; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8082/admin/api/$path")
             [ "$code" = "401" ] || { echo "/admin/api/$path answered $code unauthenticated, expected 401"; exit 1; }
           done
@@ -168,7 +170,8 @@ jobs:
           for path in maintenance games/rescan lobbies/close lobbies/purge-stale \
                       marketplace/install/x marketplace/sources marketplace/check \
                       packages/x/rollback packages/x/uninstall packages/x/update-policy \
-                      packages/jobs/x/cancel; do
+                      packages/jobs/x/cancel limits room-codes announcement \
+                      announcement/delete webhooks webhooks/x/delete webhooks/x/test; do
             code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
               -d '{}' "http://localhost:8082/admin/api/$path")
             [ "$code" = "401" ] || { echo "POST /admin/api/$path answered $code unauthenticated, expected 401"; exit 1; }
@@ -181,6 +184,9 @@ jobs:
           ! curl -fsS http://localhost:8080/admin/api/lobbies >/dev/null
           ! curl -fsS http://localhost:8080/admin/api/marketplace/catalog >/dev/null
           ! curl -fsS http://localhost:8080/admin/api/packages/jobs >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/limits >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/room-codes >/dev/null
+          ! curl -fsS http://localhost:8080/admin/api/webhooks >/dev/null
           ! curl -fsS http://localhost:8081/admin/ >/dev/null
 
       - name: Admin password can be set, and only once
@@ -305,6 +311,90 @@ jobs:
           # A log filename can't be used to walk out of the logs directory.
           [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies \
             'http://localhost:8082/admin/api/logs/files/..%2F..%2Fapp%2Fdata%2Fadmin.secret')" = "404" ]
+
+      - name: Runtime limits, room codes and the announcement round-trip and persist
+        run: |
+          # Limits: an override applies AND is written to the volume, which together are the feature —
+          # "in force now" without persistence is a footgun, and persisted-but-not-applied is a lie.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"maxLobbiesPerGame":3,"controlMessagesPerSecond":7}' \
+            http://localhost:8082/admin/api/limits | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/limits > /tmp/kb-limits.json
+          grep -q '"maxLobbiesPerGame":3' /tmp/kb-limits.json
+          grep -q '"controlMessagesPerSecond":7' /tmp/kb-limits.json
+          # The set of overridden keys is reported explicitly, so the portal never has to infer one from an
+          # equality test against the configured value.
+          grep -q 'maxLobbiesPerGame' /tmp/kb-limits.json
+          docker exec kb grep -q '"maxLobbiesPerGame": 3' /app/data/admin-settings.json
+          # A burst below 1 against a live rate is refused: it would silently refuse every lobby operation
+          # for everyone, recoverable only by hand-editing the settings file.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{"controlMessagesBurst":0}' \
+            http://localhost:8082/admin/api/limits)" = "400" ]
+          # Reverting removes the rows rather than storing the configured value back.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/limits | grep -q '"success":true'
+          ! docker exec kb grep -q 'maxLobbiesPerGame' /app/data/admin-settings.json
+
+          # Room codes: a blocklist saves, reports what it costs, and is honoured by the generator.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"words":["XQ"],"patterns":["Q7*"]}' \
+            http://localhost:8082/admin/api/room-codes | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/room-codes \
+            > /tmp/kb-codes.json
+          grep -q '"blocked":' /tmp/kb-codes.json
+          grep -q '"codeSpace":1048576' /tmp/kb-codes.json
+          docker exec kb grep -q '"XQ"' /app/data/admin-settings.json
+          # A list that would remove most of the code space is refused with 409 — a starved generator
+          # surfaces to players as "could not create a lobby" with nothing to connect it to the cause.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{"patterns":["*"]}' \
+            http://localhost:8082/admin/api/room-codes)" = "409" ]
+          # An entry the alphabet can never produce is accepted but flagged, not silently useless.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"words":["XO"]}' http://localhost:8082/admin/api/room-codes >/dev/null
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/room-codes \
+            | grep -q '"unreachable":\["XO"\]'
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/room-codes >/dev/null
+
+          # The announcement: posted, persisted, reported live, then cleared.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"text":"CI announcement.","severity":"warning"}' \
+            http://localhost:8082/admin/api/announcement | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/announcement \
+            | grep -q '"text":"CI announcement."'
+          docker exec kb grep -q 'CI announcement.' /app/data/admin-settings.json
+          # Text is required; clearing is its own verb, so an empty post can't silently take the banner down.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{"text":"  "}' \
+            http://localhost:8082/admin/api/announcement)" = "400" ]
+          # An unknown game as the scope is a 404, not a banner scoped to nothing.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{"text":"x","gameId":"no-such-game"}' \
+            http://localhost:8082/admin/api/announcement)" = "404" ]
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/announcement/delete | grep -q '"success":true'
+
+      - name: Metric history is sampled server-side and read through a cursor
+        run: |
+          # MetricSampleSeconds=2 in this container, so a few samples exist by now.
+          for i in $(seq 1 20); do
+            curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/metrics/history \
+              > /tmp/kb-history.json
+            grep -q '"sequence":2' /tmp/kb-history.json && break
+            sleep 1
+          done
+          grep -q '"enabled":true' /tmp/kb-history.json
+          grep -q '"sequence":1' /tmp/kb-history.json
+          LAST=$(sed -n 's/.*"lastSequence":\([0-9]*\).*/\1/p' /tmp/kb-history.json)
+          # The cursor is what makes an open dashboard cheap: asking for everything after the newest
+          # sequence must return an empty set, not the whole retained window again.
+          curl -fsS -b /tmp/kb-admin-cookies \
+            "http://localhost:8082/admin/api/metrics/history?after=$LAST" | grep -q '"samples":\[\]'
+          # Per-game authority CPU is reported alongside relay cost, and is 0 for a browser-side game.
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/metrics \
+            | grep -q '"authorityCpuSeconds"'
 
       - name: Server-authority module is never served from the game origin
         run: |
@@ -471,6 +561,60 @@ jobs:
             docker exec kb-catalog curl -fsS http://127.0.0.1:9000/CATALOG.json >/dev/null 2>&1 && break
             sleep 1
           done
+
+      - name: Webhook endpoints validate their URL and deliver for real
+        run: |
+          # Plain http is refused unless it is loopback — the downloader's own rule, reused rather than
+          # reimplemented, so a URL that registers can never be one the sender would refuse.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"id":"remote","name":"Remote","url":"http://example.com/hook"}' \
+            http://localhost:8082/admin/api/webhooks)" = "400" ]
+          # An id that could not be a route value is refused too.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"id":"bad id","name":"x","url":"https://example.com/hook"}' \
+            http://localhost:8082/admin/api/webhooks)" = "400" ]
+          # An unknown event name is refused with the valid set named.
+          curl -s -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"id":"ops","name":"Ops","url":"https://example.com/hook","events":["nope"]}' \
+            http://localhost:8082/admin/api/webhooks | grep -q 'maintenanceChanged'
+          # http on loopback IS allowed — that exemption is what lets a local monitoring agent work, and
+          # it is what this sidecar is. It registers and persists.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"id":"local","name":"Local agent","url":"http://127.0.0.1:9000/CATALOG.json","events":["maintenanceChanged"]}' \
+            http://localhost:8082/admin/api/webhooks | grep -q '"success":true'
+          docker exec kb grep -q '"id": "local"' /app/data/admin-settings.json
+          # Test posts through the REAL delivery path. The sidecar is a static file server, so it answers
+          # 405 to a POST — which the API reports as a 502 with the upstream's status, rather than claiming
+          # success. That is the assertion worth having: the request genuinely left the process.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            http://localhost:8082/admin/api/webhooks/local/test)" = "502" ]
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/webhooks \
+            > /tmp/kb-webhooks.json
+          grep -q '"lastOk":false' /tmp/kb-webhooks.json
+          grep -q '"lastStatus":405' /tmp/kb-webhooks.json
+          # Toggling maintenance now queues a real delivery to that endpoint; it fails the same way, and
+          # the failure must NOT become another alert (the loop guard) — the dispatcher logs at Warning.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"enabled":true,"message":"CI webhook check."}' \
+            http://localhost:8082/admin/api/maintenance >/dev/null
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"enabled":false}' http://localhost:8082/admin/api/maintenance >/dev/null
+          sleep 2
+          # A handful of failures, not a cascade: the guard being tested is that a failed delivery does not
+          # itself become an alert. Without it, one dead endpoint generates an event per failure forever.
+          FAILURES=$(docker logs kb 2>&1 | grep -c "Webhook 'local' failed")
+          [ "$FAILURES" -ge 1 ] || { echo "Expected the delivery to be attempted and logged"; exit 1; }
+          [ "$FAILURES" -le 6 ] || { echo "Runaway webhook failures ($FAILURES) — loop guard?"; exit 1; }
+          # Removing it takes the row out of the settings file; a second removal is a 404, not a silent OK.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/webhooks/local/delete | grep -q '"success":true'
+          ! docker exec kb grep -q '"id": "local"' /app/data/admin-settings.json
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            http://localhost:8082/admin/api/webhooks/local/delete)" = "404" ]
 
       - name: The managed package root exists and is outside the read-only games mount
         run: |

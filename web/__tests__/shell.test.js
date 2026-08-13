@@ -1272,3 +1272,109 @@ describe('colorToRgb (CSSOM validation)', () => {
     expect(shell.colorToRgb('transparent')).toBeNull(); // non-opaque → unset
   });
 });
+
+describe('operator announcement', () => {
+  it('shows a posted announcement and hides it when cleared', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+
+    ws._recv({
+      type: 'AnnouncementPosted', id: 'a1', text: 'Maintenance in 20 minutes.',
+      postedAt: '2026-08-13T10:00:00Z', severity: 'warning',
+    });
+    await tick();
+
+    expect(el('announcement-banner').hidden).toBe(false);
+    expect(el('announcement-text').textContent).toBe('Maintenance in 20 minutes.');
+    expect(el('announcement-banner').className).toContain('severity-warning');
+
+    ws._recv({ type: 'AnnouncementCleared', id: 'a1' });
+    await tick();
+    expect(el('announcement-banner').hidden).toBe(true);
+  });
+
+  it('labels a game-scoped announcement with the game title', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+
+    ws._recv({
+      type: 'AnnouncementPosted', id: 'a2', text: 'retires on the 15th.',
+      postedAt: '2026-08-13T10:00:00Z', severity: 'info', gameId: 'ttt',
+    });
+    await tick();
+
+    // A raw game id means nothing to a player; the title is what they clicked on.
+    expect(el('announcement-text').textContent).toBe('Tic Tac Toe: retires on the 15th.');
+  });
+
+  it('ignores a severity it does not know rather than putting it in a class', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+
+    ws._recv({
+      type: 'AnnouncementPosted', id: 'a3', text: 'Hi', postedAt: '2026-08-13T10:00:00Z',
+      severity: 'critical"><script>',
+    });
+    await tick();
+
+    expect(el('announcement-banner').className).toBe('home-announcement severity-info');
+  });
+
+  it('remembers a dismissal against the id, so a re-post comes back', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    ws._recv({ type: 'AnnouncementPosted', id: 'a1', text: 'First', postedAt: '2026-08-13T10:00:00Z' });
+    await tick();
+
+    el('announcement-dismiss').click();
+    expect(el('announcement-banner').hidden).toBe(true);
+    expect(localStorage.getItem('kb.announcementDismissed')).toBe('a1');
+
+    // The same one again (e.g. a reconnect re-pushing it) stays dismissed...
+    ws._recv({ type: 'AnnouncementPosted', id: 'a1', text: 'First', postedAt: '2026-08-13T10:00:00Z' });
+    await tick();
+    expect(el('announcement-banner').hidden).toBe(true);
+
+    // ...but an edit mints a new id, so the new wording is shown.
+    ws._recv({ type: 'AnnouncementPosted', id: 'a2', text: 'Second', postedAt: '2026-08-13T10:05:00Z' });
+    await tick();
+    expect(el('announcement-banner').hidden).toBe(false);
+    expect(el('announcement-text').textContent).toBe('Second');
+  });
+
+  it('keeps showing a newer announcement when an older one is cleared', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    ws._recv({ type: 'AnnouncementPosted', id: 'old', text: 'Old', postedAt: '2026-08-13T10:00:00Z' });
+    ws._recv({ type: 'AnnouncementPosted', id: 'new', text: 'New', postedAt: '2026-08-13T10:01:00Z' });
+    await tick();
+
+    // The clear for the OLD one arrives late. Clearing the wrong banner is the bug the id prevents.
+    ws._recv({ type: 'AnnouncementCleared', id: 'old' });
+    await tick();
+    expect(el('announcement-banner').hidden).toBe(false);
+    expect(el('announcement-text').textContent).toBe('New');
+  });
+
+  it('labels a game-scoped announcement that arrives before the catalog reply', async () => {
+    await importShell();
+    shell.connect();
+    const ws = getWs();
+    ws._open();
+    ws._recv({ type: 'Welcome', playerId: 'p1', token: 'tok', gameOrigin: 'http://games.test' });
+    // The server pushes this immediately after Welcome — before the ListGames reply, so `games` is empty.
+    ws._recv({
+      type: 'AnnouncementPosted', id: 'a4', text: 'is having a moment.',
+      postedAt: '2026-08-13T10:00:00Z', gameId: 'ttt',
+    });
+    await tick();
+    expect(el('announcement-text').textContent).toBe('is having a moment.');
+
+    const list = ws.sent.find((f) => f.type === 'ListGames');
+    ws._recv({ cid: list.cid, games: [{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', maxPlayers: 2 }] });
+    await tick();
+
+    // Re-rendered once the titles exist.
+    expect(el('announcement-text').textContent).toBe('Tic Tac Toe: is having a moment.');
+  });
+});

@@ -10,6 +10,14 @@
 <body>
   <!-- ── Home view ─────────────────────────────────────────────────────── -->
   <section id="lobby-view" class="home-container">
+    <!-- Operator announcement. Persistent and dismissible, unlike the 3-second toasts: "maintenance in
+         20 minutes" has to still be there when the player looks up. Hidden until one is posted. -->
+    <div id="announcement-banner" class="home-announcement" hidden>
+      <span class="home-announcement-icon" aria-hidden="true">📣</span>
+      <span class="home-announcement-text" id="announcement-text"></span>
+      <button type="button" class="home-announcement-close" id="announcement-dismiss"
+              aria-label="Dismiss announcement">×</button>
+    </div>
     <div class="hero-banner">
       <div class="hero-ribbon" aria-hidden="true">
         <div class="hero-ribbon-track">
@@ -146,6 +154,6 @@
 
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module">import { bootstrap } from '/shell.js?v=11'; bootstrap();</script>
+  <script type="module">import { bootstrap } from '/shell.js?v=12'; bootstrap();</script>
 </body>
 </html>

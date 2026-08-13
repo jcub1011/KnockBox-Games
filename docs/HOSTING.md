@@ -168,10 +168,16 @@ reachable and keeping it locked.
 
 Two things about it are worth knowing before you rely on it:
 
-- **Operator policy persists, so it also outlives your attention.** Disabling a game or turning on
-  maintenance mode writes to `admin-settings.json` next to the password file, and survives restarts and
-  image updates. That is the point — but it means a maintenance mode you forgot to turn off is still on
-  after tomorrow's deploy, silently refusing every new game. The Overview tab shows the state plainly.
+- **Operator policy persists, so it also outlives your attention.** Disabling a game, turning on maintenance
+  mode, capping lobbies, banning room codes, posting a player announcement or registering a webhook all write
+  to `admin-settings.json` next to the password file, and survive restarts and image updates. That is the
+  point — but it means a maintenance mode you forgot to turn off is still on after tomorrow's deploy, and so
+  is the "back at 09:00" banner from last Tuesday. The Overview and Platform tabs show both plainly.
+- **A webhook URL you register is a credential, stored in that file.** Anyone holding a Discord or Slack
+  webhook URL can post to that channel, so `admin-settings.json` deserves the same care as the password file:
+  it is already required to be on a persisted volume outside the image, and it should not be world-readable.
+  The server never logs the URL and the portal shows only its origin. Deliveries go out over HTTPS, or plain
+  HTTP only to loopback (which is what makes a local monitoring agent work).
 - **Deleting a game does not work on this deployment.** `games/` is mounted read-only below (`:ro`), which
   is the recommendation, so the portal disables Delete and names the blocking path. Use **Disabled**
   instead, or remove the file from the host directory and let hot-reload notice it has gone.
@@ -497,3 +503,17 @@ Defaults are sized for casual play; `0` disables any of them:
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation rate (rejects the create, keeps the connection). |
 | `AdminLoginAttemptsPerMinute` | `10` | Per-IP admin password attempts (`429` + `Retry-After` over the limit). Guards CPU as much as the password: each attempt costs ~0.4 s of a core. Needs `ForwardedHeaders` + `KnownProxies` behind a proxy. |
 | `AdminLoginAttemptsPerMinuteGlobal` | `60` | The same cap across all callers — the CPU ceiling that holds even when the per-IP key is a header the caller wrote. |
+| `MaxLobbies` | `0` (unlimited) | Cap on simultaneous lobbies platform-wide. |
+| `MaxLobbiesPerGame` | `0` (unlimited) | Cap per game, so one popular title can't take every slot. |
+
+**Everything above except the handshake timeout and the two admin-login caps is editable at runtime** from the
+portal's Platform tab, which persists the change and applies it immediately — including to sockets that are
+already connected, which is the point: when you need to tighten a limit, the traffic you are tightening
+against is already there. The values here are what a fresh deployment starts from.
+
+Two more knobs worth setting deliberately on a public server:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `WebhooksEnabled` | `true` | Outbound alerts to Discord/Slack/a monitoring endpoint. `false` ⇒ the server holds no HTTP client for it and makes no outbound request at all. With it on but no endpoint registered, nothing leaves either. |
+| `MetricSampleSeconds` | `15` | How often the server samples counters for the dashboard's history graphs. `0` = off. A sample is a handful of numbers; `MetricHistoryPoints` (default 240) bounds the memory. |

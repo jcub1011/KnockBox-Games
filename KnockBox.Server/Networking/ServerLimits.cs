@@ -28,7 +28,15 @@ public sealed record ServerLimits(
     // into no cap at all for the one thing that actually costs the server: PBKDF2. This bound holds
     // regardless of what any caller claims to be, so it is the CPU ceiling; the per-IP cap remains what
     // keeps one bad actor from spending everyone else's share of it.
-    int AdminLoginAttemptsPerMinuteGlobal)
+    int AdminLoginAttemptsPerMinuteGlobal,
+    // Cap on simultaneous lobbies across the whole platform, and per game. Unlike the buckets above
+    // these bound STATE rather than traffic: every lobby holds a roster, a code out of a 1M-code
+    // namespace and — for a server-authority game — a Jint engine. Two caps rather than one because
+    // they answer different questions: the global one is "how much of this server may players consume",
+    // the per-game one is "how much of it may ONE game consume", so a single popular title can't take
+    // every slot. 0 disables either.
+    int MaxLobbies,
+    int MaxLobbiesPerGame)
 {
     public static ServerLimits FromConfiguration(IConfiguration config) => new(
         TimeSpan.FromSeconds(config.GetValue("KnockBox:HandshakeTimeoutSeconds", 10)),
@@ -42,5 +50,9 @@ public sealed record ServerLimits(
         config.GetValue("KnockBox:AdminLoginAttemptsPerMinute", 10),
         // 60/min ≈ one hash per second ≈ 40% of one core spent on PBKDF2 at the very worst — enough
         // headroom that a room full of operators never notices, low enough that the relay keeps running.
-        config.GetValue("KnockBox:AdminLoginAttemptsPerMinuteGlobal", 60));
+        config.GetValue("KnockBox:AdminLoginAttemptsPerMinuteGlobal", 60),
+        // Unlimited by default: a cap that refuses players is the operator's decision to make, and a
+        // number picked here would be wrong for both a laptop and a 32-core host.
+        config.GetValue("KnockBox:MaxLobbies", 0),
+        config.GetValue("KnockBox:MaxLobbiesPerGame", 0));
 }

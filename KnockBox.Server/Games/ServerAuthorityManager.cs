@@ -27,8 +27,13 @@ public sealed class ServerAuthorityManager(
     TimeProvider time,
     IAuthorityWordService words,
     bool isDevelopment,
-    ILoggerFactory loggerFactory)
+    ILoggerFactory loggerFactory,
+    // Optional: per-game authority cost is a dashboard metric, not a dependency of running games — the same
+    // nullable-metric shape ServerAuthority itself takes, so the many tests that build a manager are unchanged.
+    AuthorityMetrics? metrics = null)
 {
+    private readonly AuthorityMetrics? _metrics = metrics;
+
     private static readonly IReadOnlyDictionary<string, IWordPool> NoWords =
         new Dictionary<string, IWordPool>(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ServerAuthority> _actors = new(StringComparer.OrdinalIgnoreCase);
@@ -114,7 +119,8 @@ public sealed class ServerAuthorityManager(
         }
 
         var actor = new ServerAuthority(lobby, runtime, options, connections, time,
-            _logger, _authorityLogger, relayContainedErrors: isDevelopment, onFatal: HandleFatal);
+            _logger, _authorityLogger, relayContainedErrors: isDevelopment, onFatal: HandleFatal,
+            metrics: _metrics);
         _actors[lobby.Id] = actor;
         if (_logger.IsEnabled(LogLevel.Information))
             _logger.LogInformation("Server authority started for lobby {LobbyId} (game {GameId})", lobby.Id, manifest.Id);

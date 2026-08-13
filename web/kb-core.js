@@ -349,3 +349,32 @@ export function ordinal(n) {
   const suffix = abs >= 11 && abs <= 13 ? 'th' : last === 1 ? 'st' : last === 2 ? 'nd' : last === 3 ? 'rd' : 'th';
   return `${num}${suffix}`;
 }
+
+// ── Platform announcements (operator banner, §4.1) ────────────────────────────
+
+// The severities the banner knows how to draw. Anything else is treated as 'info' rather than being
+// used: the value ends up in a CSS class name, and a server (or a hand-edited settings file) is not a
+// reason to stop validating what goes into the DOM.
+export const ANNOUNCEMENT_SEVERITIES = ['info', 'warning'];
+
+export function announcementSeverity(value) {
+  return ANNOUNCEMENT_SEVERITIES.includes(String(value ?? '')) ? String(value) : 'info';
+}
+
+// Whether the banner should be shown, given the announcement and the id the player last dismissed.
+// Dismissal is per-announcement, not per-session: an operator who edits a notice gets a NEW id, so
+// everyone sees the new wording — which is the whole reason the id exists rather than a boolean.
+export function shouldShowAnnouncement(announcement, dismissedId) {
+  if (!announcement || !String(announcement.text ?? '').trim()) return false;
+  return String(announcement.id ?? '') !== String(dismissedId ?? '');
+}
+
+// The text to render. A game-scoped announcement is prefixed with that game's title, because on the
+// home page the notice is otherwise indistinguishable from a platform-wide one — "retiring on the
+// 15th" needs to say what is retiring. `gameName` is looked up by the caller; an unknown id falls back
+// to no prefix rather than showing a raw id to a player who has never seen one.
+export function announcementText(announcement, gameName) {
+  const text = String(announcement?.text ?? '').trim();
+  const name = String(gameName ?? '').trim();
+  return name ? `${name}: ${text}` : text;
+}

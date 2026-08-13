@@ -258,6 +258,30 @@ public class MessageSerializationTests
         Assert.Equal("p2", d.OwnerId);
     }
 
+    [Fact]
+    public void Announcement_messages_round_trip_with_their_optional_scope()
+    {
+        var posted = new AnnouncementPostedMessage(
+            "a1", "Maintenance in 20 minutes.", DateTimeOffset.UnixEpoch, "warning", "word-rush");
+        var json = JsonSerializer.Serialize<IMessage>(posted, Options);
+        var back = Assert.IsType<AnnouncementPostedMessage>(JsonSerializer.Deserialize<IMessage>(json, Options));
+
+        Assert.Equal(("a1", "Maintenance in 20 minutes.", "warning", "word-rush"),
+            (back.Id, back.Text, back.Severity, back.GameId));
+
+        // Platform-wide is the default shape: no game, info severity.
+        var plain = JsonSerializer.Deserialize<IMessage>(
+            """{ "type": "AnnouncementPosted", "id": "a2", "text": "Hi", "postedAt": "1970-01-01T00:00:00+00:00" }""",
+            Options);
+        var wide = Assert.IsType<AnnouncementPostedMessage>(plain);
+        Assert.Null(wide.GameId);
+        Assert.Equal("info", wide.Severity);
+
+        var cleared = JsonSerializer.Serialize<IMessage>(new AnnouncementClearedMessage("a1"), Options);
+        Assert.Equal("a1", Assert.IsType<AnnouncementClearedMessage>(
+            JsonSerializer.Deserialize<IMessage>(cleared, Options)).Id);
+    }
+
     [Theory]
     [InlineData(typeof(AttachMessage))]
     [InlineData(typeof(ReadyMessage))]
@@ -276,6 +300,8 @@ public class MessageSerializationTests
     [InlineData(typeof(KickedMessage))]
     [InlineData(typeof(LogMessage))]
     [InlineData(typeof(PlayLogMessage))]
+    [InlineData(typeof(AnnouncementPostedMessage))]
+    [InlineData(typeof(AnnouncementClearedMessage))]
     public void Every_new_message_type_has_a_registered_discriminator(Type messageType)
     {
         // Constructing each is overkill; we only assert the polymorphism attribute knows the subtype,

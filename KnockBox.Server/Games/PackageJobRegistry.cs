@@ -220,6 +220,17 @@ public sealed class PackageJobRegistry(TimeProvider clock, int retention = Packa
         }
     }
 
+    /// <summary>
+    /// Called once when a job reaches a terminal state, with the finished job.
+    /// </summary>
+    /// <remarks>
+    /// A settable hook rather than a constructor dependency, the same shape as <c>LobbyCloser.OnClosing</c>:
+    /// this class is the install engine's bookkeeping and has no business knowing that outbound webhooks
+    /// exist. Set once from the composition root, before any request is served. Because
+    /// <see cref="Finish"/> is idempotent, a subscriber is guaranteed exactly one call per job.
+    /// </remarks>
+    public Action<PackageJob>? OnFinished { get; set; }
+
     /// <summary>Moves a job to a terminal state. Idempotent — the first terminal transition wins.</summary>
     public PackageJob? Finish(string jobId, PackageJobStatus status, string phase, string? error = null,
         string? warning = null)
@@ -243,6 +254,12 @@ public sealed class PackageJobRegistry(TimeProvider clock, int retention = Packa
         }
 
         if (_cancels.TryRemove(jobId, out var cts)) cts.Dispose();
+        // Outside the lock, and swallowing: a notification hook must not hold the registry's gate, and a
+        // subscriber that throws must not leave a job un-finished in the caller's eyes.
+        if (finished is not null && OnFinished is { } hook)
+        {
+            try { hook(finished); } catch { /* a notification is never worth failing the job for */ }
+        }
         return finished;
     }
 

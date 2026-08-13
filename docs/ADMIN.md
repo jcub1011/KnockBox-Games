@@ -27,6 +27,12 @@ The landing tab answers "is this server healthy, and what is it carrying".
 | Memory Working Set | Process working set, with the managed heap beneath it. |
 | Process CPU | Measured **between polls**. The sub-line is the lifetime average, which stops moving once the server has been up a while and hides every spike. |
 
+**Recent History** graphs the same four numbers over the retained window. The samples are taken by the
+**server**, not by this page, so the graphs are populated the moment you open the portal — including on a
+different machine, and including after a reload. That matters because you open this page when something has
+already gone wrong. `MetricSampleSeconds=0` turns it off, and the card says so rather than drawing an empty
+chart.
+
 **Deployment problems** appear as a banner above the cards — an unreadable games mount, a missing web
 root, an unwritable log directory, a settings file that couldn't be parsed. These are the same issues that
 replace the *shell's* home page when they're blocking; they're repeated here so you don't have to open the
@@ -46,6 +52,11 @@ The table breaks that down per game. `Frames in` is what clients sent for relay;
 recipient separately, so `Fan-out` is how much the game multiplies its own traffic. `Rate` is measured
 between polls. **`Dropped`** is the column to care about: it counts frames evicted unsent because a
 socket's queue was full, which means that client couldn't keep up.
+
+**`Authority CPU`** is the only real per-game CPU figure this server has, and it is measured rather than
+estimated: the total time this process has spent executing that game's authority module, with the mean per
+call. A game without a `serverAuthority` module shows **`--`**, not `0.00s` — it runs entirely in the
+player's browser and executes nothing here, which is a different statement from "used no measurable CPU".
 
 ### Maintenance Mode
 
@@ -274,10 +285,113 @@ started; anything older is only in the files.
 
 ---
 
-## 5. Where operator policy is stored
+## 6. Platform
 
-Availability overrides, maintenance mode, registered marketplaces and per-game update enrolments are
-written to **`admin-settings.json`**, next to the admin
+Settings, not a live view — and the one tab that **does not poll**. Everything here is a form, and a timer
+would overwrite what you are halfway through typing. It reads when you open the tab, after every save, and
+when you click Refresh.
+
+### Limits & Caps
+
+Abuse protection and capacity, editable at runtime. A change is **in force immediately, including for
+sockets that are already open** — which is the whole point: the connections a flood is arriving on are, by
+definition, already connected. It is also saved, so it survives a restart.
+
+| Field | What it bounds |
+| :--- | :--- |
+| Control messages / second, Control burst | Lobby operations from one shell socket. Sustained spam past the burst closes that connection. |
+| Game messages / second, Game burst | Frames from one game socket. Every frame fans out per recipient, so inbound spam multiplies. |
+| Lobby creates / minute | Per player. Refuses the operation without closing the connection. |
+| Connections per IP | One player legitimately holds two (shell + game) per tab. Only meaningful with `ForwardedHeaders` behind a proxy. |
+| Max lobbies (platform) | Total simultaneous lobbies across every game. |
+| Max lobbies per game | Stops one popular title consuming every remaining slot. |
+
+Three rules worth knowing:
+
+- **Empty means "use the default"** — the value from configuration, shown as the field's placeholder. That is
+  also how you revert one field: clear the box and save. **0** is different: it means *disable this limit
+  entirely*.
+- **A lowered cap never disconnects anyone, and never closes a lobby.** It refuses the next connection or
+  the next lobby. If you cap lobbies below what is already running, the running ones finish and no new ones
+  start until the count falls under the cap; the portal says so when you save.
+- **A rate above 0 with a burst below 1 is refused.** It would refuse *every* message forever, which for the
+  control plane means nobody can create or join a lobby again until someone hand-edits the settings file.
+
+**Set in Configuration** lists four limits that are deliberately *not* editable here. The handshake timeout
+and the reconnect grace window are read when the server starts (the reaper's own interval is derived from
+the grace window), and the two admin-login caps bound the CPU an unauthenticated caller can spend on
+password hashing — a lock that opens from inside the room it protects is not a lock. Change those with
+configuration and restart.
+
+### Player Announcement
+
+One banner, shown on the player home page until they dismiss it or you clear it. Everyone connected sees it
+immediately; anyone who arrives later is sent it on connect, so a notice does not only reach whoever
+happened to be online when you posted it.
+
+- **Scope** is all games, or one game — a game-scoped notice is shown labelled with that game's title.
+- **Severity** is Information or Warning; Warning is the one that catches an eye already looking elsewhere.
+- **Editing is re-posting.** Each post gets a new id and a dismissal is remembered against that id, so an
+  edited notice comes back for everyone who dismissed the previous wording.
+- It is **purely informational**. It stops nothing — maintenance mode (§1) is the control that blocks new
+  lobbies. Announcing something and doing it are separate acts on purpose.
+
+### Banned Room Codes
+
+Codes the generator will never hand out. Two kinds of entry:
+
+- A **word** is blocked as a substring anywhere in a code: `XQ` blocks `XQ4B` and `7XQ2`.
+- A **pattern** matches a whole code, where `?` is one character and `*` any run: `Q7*` blocks every code
+  starting `Q7`, and `?K??` every code whose second character is `K`.
+
+Matching is case-insensitive. Patterns are globs, deliberately **not** regular expressions — this runs on
+the lobby-create path, and an operator-typed regex there is a denial-of-service lever pointed at the thing
+every player needs.
+
+The card reports **exactly** how much of the code space a list removes, counted by walking all 1,048,576
+possible codes. A list that would remove more than **50%** is refused: past that, lobby creation starts
+failing for a reason no player could act on. Codes already in use are never revoked, and an entry using a
+character the alphabet leaves out (`O`, `0`, `I`, `1` — too easily misread aloud) is flagged as unreachable
+rather than silently doing nothing.
+
+### Webhooks
+
+Outbound HTTP POSTs on platform events, to Discord, Slack, or any endpoint that accepts JSON.
+
+| Event | Fires when |
+| :--- | :--- |
+| Errors | Any error-or-worse log event. Rate-limited — see below. |
+| Update applied | A game finished installing or updating. |
+| Update failed | An install, update, rollback or uninstall failed or was cancelled. |
+| Maintenance toggled | Global maintenance mode went on or off. |
+| Resource threshold | Memory or CPU crossed the configured threshold, or came back under it. |
+
+- **Select no events and the endpoint receives all of them** — a registered endpoint that silently receives
+  nothing is the worse of the two possible surprises.
+- The URL must be **https**, or **http on loopback** (for a local monitoring agent). That is the same rule
+  the package downloader applies to a marketplace URL.
+- **One attempt per event, no retries.** The last result per endpoint is shown instead, so a dead endpoint is
+  visible without turning one failed delivery into several at the worst possible moment.
+- **Error alerts are capped** (`WebhookErrorsPerMinute`, default 6/min) and the next delivery carries a count
+  of what was suppressed. An error storm is exactly when this fires most and is worth least per message.
+- The payload carries the same one-line summary as `content` **and** `text`, which is what makes one POST
+  render in Discord *and* Slack with no per-service configuration, alongside structured fields
+  (`event`, `at`, `server`, `gameId`, `level`) for a real monitoring endpoint.
+- Only the **origin** of each URL is shown in the table, and the URL is never logged: a webhook URL is a
+  bearer credential — anyone holding it can post to that channel.
+- **Test** sends through the real delivery path and reports the actual outcome, so you can check a URL before
+  enabling it.
+
+Resource-threshold alerts are **edge-triggered**: crossing fires once, and coming back under fires once.
+Both thresholds are off by default, because a number that fits one host is noise on another.
+
+---
+
+## 7. Where operator policy is stored
+
+Availability overrides, maintenance mode, registered marketplaces, per-game update enrolments, runtime limit
+overrides, the room-code blocklist, the live announcement and the webhook endpoints are all written to
+**`admin-settings.json`**, next to the admin
 password file (`AdminSettingsPath`; by default the same directory as `AdminPasswordPath`, which in the
 image is the persisted `/app/data` volume).
 
@@ -298,6 +412,30 @@ The file is indented and safe to hand-edit while the server is stopped:
   "updates": {
     "word-rush": "drain"
   },
+  "limits": {
+    "maxLobbies": 40,
+    "maxLobbiesPerGame": 8
+  },
+  "roomCodes": {
+    "words": ["XQ"],
+    "patterns": ["Q7*"]
+  },
+  "announcement": {
+    "id": "9f2c…",
+    "text": "Scheduled maintenance at 09:00 UTC.",
+    "postedAt": "2026-08-13T10:00:00+00:00",
+    "severity": "warning",
+    "gameId": null
+  },
+  "webhooks": [
+    {
+      "id": "ops",
+      "name": "Ops channel",
+      "url": "https://discord.com/api/webhooks/…",
+      "events": ["logError", "updateFailed"],
+      "enabled": true
+    }
+  ],
   "sources": [
     {
       "id": "staging",
@@ -310,8 +448,9 @@ The file is indented and safe to hand-edit while the server is stopped:
 }
 ```
 
-Defaults are recorded by **absence**: a game left Available has no `games` row, and one left Manual has no
-`updates` row. Otherwise the file would accumulate an entry per game you ever looked at, and "no override"
+Defaults are recorded by **absence**: a game left Available has no `games` row, one left Manual has no
+`updates` row, a limit left at its default has no `limits` entry, and an empty blocklist or webhook
+list is omitted entirely. Otherwise the file would accumulate an entry per game you ever looked at, and "no override"
 and "explicitly the default" would become two ways to say one thing.
 
 Two behaviours worth knowing:
@@ -330,7 +469,7 @@ also revokes every outstanding session.
 
 ---
 
-## 6. Configuration
+## 8. Configuration
 
 All keys take the `KnockBox:` prefix (`KnockBox__Key` as an environment variable).
 
@@ -346,6 +485,31 @@ All keys take the `KnockBox:` prefix (`KnockBox__Key` as an environment variable
 | `AdminDiskUsageCacheSeconds` | `60` | How long disk measurements are reused. `0` walks the directories on every read. |
 | `AdminLoginAttemptsPerMinute` | `10` | Per-IP password attempts. |
 | `AdminLoginAttemptsPerMinuteGlobal` | `60` | Server-wide password attempts, bounding PBKDF2 CPU regardless of the per-IP key. |
+| `MetricSampleSeconds` | `15` | How often the dashboard's time series takes a sample. `0` = no history and no graphs. |
+| `MetricHistoryPoints` | `240` | Samples retained. 240 x 15s = one hour; memory is a fixed handful of numbers per sample plus one small row per game. |
+
+Capacity and abuse limits are editable from the portal (§6) and persisted, so these are the **starting**
+values a fresh deployment gets:
+
+| Key | Default | What it does |
+| :--- | :--- | :--- |
+| `MaxLobbies` | `0` (unlimited) | Cap on simultaneous lobbies across every game. |
+| `MaxLobbiesPerGame` | `0` (unlimited) | Cap per game, so one popular title can't take every slot. |
+| `ControlMessagesPerSecond` / `…Burst` | `5` / `10` | Lobby operations per shell socket. |
+| `GameMessagesPerSecond` / `…Burst` | `30` / `60` | Frames per game socket. |
+| `LobbyCreatesPerMinute` | `10` | Lobby creates per player. |
+| `MaxConnectionsPerIp` | `32` | Concurrent `/ws` sockets from one address. |
+
+Outbound webhooks (§6):
+
+| Key | Default | What it does |
+| :--- | :--- | :--- |
+| `WebhooksEnabled` | `true` | Off ⇒ no dispatcher, no HTTP client, and the webhook routes refuse naming this key. |
+| `MaxWebhooks` | `8` | Endpoints that may be registered. |
+| `WebhookTimeoutSeconds` | `10` | Per-delivery deadline. A slow endpoint must not hold the queue while alerts drop. |
+| `WebhookErrorsPerMinute` | `6` | Error-log events turned into deliveries. The next alert reports what was suppressed. |
+| `WebhookMemoryThresholdMb` | `0` (off) | Working set that counts as a breach. |
+| `WebhookCpuPercentThreshold` | `0` (off) | Process CPU (percent of one core-equivalent) that counts as a breach. |
 
 Package management and the marketplace (§4):
 
@@ -363,19 +527,23 @@ Package management and the marketplace (§4):
 
 ---
 
-## 7. Not built yet
+## 9. Not built yet
 
 The portal covers live operations. Deliberately absent, and specified in
 [issue 39](https://github.com/jcub1011/KnockBox-Games/issues/39) for later passes:
 
-- **Runtime-editable rate limits and lobby caps.** The limits are read once at startup, and each
-  connection builds its buckets from that snapshot.
-- **Reserved and banned room codes.**
-- **Player-facing announcement banners** (there is no wire message for one).
-- **Outbound webhooks** on critical events.
-- **Historical metric graphs.** The counters are cumulative; the portal differences them between polls but
-  keeps no time series.
 - **Signature verification beyond the published hash.** A catalog commits to a `sha256` and that is
   enforced on every download, but nothing is signed. See [MARKETPLACE.md](./MARKETPLACE.md).
 - **Scheduled update windows.** The check runs on a fixed interval; there is no "only between 03:00 and
   05:00".
+
+**Decided against, rather than deferred:**
+
+- **Reserved room codes** (spec §2.4 also names "reserve or spawn" specific codes such as `TEST` or `DEMO`).
+  With no player accounts there is nobody a reservation could be held *for*: it would have to be handed to
+  whoever created the next lobby for that game, or backed by a phantom lobby the reaper is taught to spare.
+  Both are more machinery than a code you can simply read out loud is worth. Banned codes — the half that
+  protects players — are built (§6).
+- **Per-game memory.** Games run in the player's browser; the only server-side per-game cost is a
+  server-authority module's execution, and that is measured (§1). A memory figure would have to be inferred
+  from engine count times the configured cap, which looks measured and isn't.

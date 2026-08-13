@@ -39,6 +39,9 @@ public sealed class GameLifecycleGate(AdminSettingsStore settings) : IPlatformPo
     public bool MaintenanceMode => settings.MaintenanceMode;
     public string? MaintenanceMessage => settings.MaintenanceMessage;
 
+    /// <summary>Straight through: an announcement is operator policy, and nothing about an install changes it.</summary>
+    public PlatformAnnouncement? Announcement => settings.Announcement;
+
     /// <summary>What the engine is doing to this game, if anything.</summary>
     public GameLifecycle StateOf(string gameId) =>
         _states.TryGetValue(gameId, out var state) ? state : GameLifecycle.Idle;

@@ -8,11 +8,14 @@
 // display names are untrusted input.
 
 import {
-  AVAILABILITY, TABS, UPDATE_MODES, UPDATE_POLICIES, appendLogEntries, availabilityLabel,
-  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, formatBytes, formatClock, formatCount,
-  formatDuration, formatVersion, isBusyLifecycle, isTerminalJob, jobProgress, lifecycleClass,
-  lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, pluginStatusClass, pluginStatusHint,
-  pluginStatusLabel, ratePerSecond, tabFromHash, uploadGuard, versionAction, versionOptions,
+  AVAILABILITY, CODE_ALPHABET, LIMIT_FIELDS, STARTUP_LIMITS, TABS, UPDATE_MODES, UPDATE_POLICIES,
+  WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare, checkCodeEntry, checkWebhook,
+  cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies, formatBytes, formatClock,
+  formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob, jobProgress, lifecycleClass,
+  lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, noLimitOverrides, pluginStatusClass,
+  pluginStatusHint, pluginStatusLabel, ratePerSecond, seriesCpuPercent, seriesValue, sparklinePath,
+  tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions, webhookEventLabel,
+  webhookLastDelivery,
 } from './admin-core.js';
 
 const el = (id) => document.getElementById(id);
@@ -25,7 +28,11 @@ const el = (id) => document.getElementById(id);
 // — which can reach the network, with a 30-second timeout — is re-read on tab entry, on Refresh, and
 // whenever a job finishes, which is what flips a card from "Update to 1.3.0" to "Up to date" the moment
 // it is true rather than up to 20 seconds later.
-const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000 };
+//
+// The platform tab is 0 — the one tab that does not poll at all. It is a form, not a view: a timer there
+// would overwrite whatever the operator is halfway through typing with the server's current value. It
+// reads on entry, after every save, and when Refresh is clicked.
+const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000, platform: 0 };
 const LOG_VIEW_LIMIT = 500;
 const JOB_VIEW_LIMIT = 50;
 
@@ -47,10 +54,20 @@ let jobCursor = 0;
 const reportedJobs = new Set();
 let uploadXhr = null;
 let uploadFile = null;
+let limitsData = null;
+let codesData = null;
+let announcementData = null;
+let webhookData = null;
+// The blocklist being edited, which is not what is saved until the operator says so.
+let codesDraft = { words: [], patterns: [] };
 
 // Previous counter samples, for the rates admin-core derives. `{ value, at }` pairs — see ratePerSecond.
 let cpuSample = null;
 const gameFrameSamples = new Map();
+// The server-side metric history, and the cursor into it. Held here (not re-fetched whole) because the feed
+// is cursor-polled — the same shape as the log stream and the job feed.
+let historySamples = [];
+let historyCursor = 0;
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 
@@ -224,6 +241,7 @@ const TAB_TITLES = {
   games: 'Game Catalog',
   marketplace: 'Marketplace & Packages',
   logs: 'System Logs',
+  platform: 'Platform Settings',
 };
 
 export function selectTab(tab, { replaceHash = true } = {}) {
@@ -253,7 +271,9 @@ export function selectTab(tab, { replaceHash = true } = {}) {
 
 function startPolling() {
   stopPolling();
-  pollTimer = setInterval(refreshActiveTab, POLL_MS[activeTab] ?? 5000);
+  // 0 (or a tab with no entry) means "no timer" rather than "fall back to 5s": see POLL_MS.
+  const interval = POLL_MS[activeTab] ?? 5000;
+  if (interval > 0) pollTimer = setInterval(refreshActiveTab, interval);
 }
 
 /**
@@ -276,6 +296,7 @@ async function refreshActiveTab() {
     case 'games': await refreshGames(); break;
     case 'marketplace': await refreshJobs(); break;
     case 'logs': await refreshLogs(); break;
+    case 'platform': await refreshPlatform(); break;
   }
   el('last-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
 }
@@ -287,6 +308,71 @@ async function refreshOverview() {
   if (status) applyStatus(status);
   const metrics = await getJson('/admin/api/metrics');
   if (metrics) applyMetrics(metrics);
+  // Cursor-polled, so an open dashboard fetches one new sample per tick rather than the whole hour.
+  const history = await getJson(`/admin/api/metrics/history?after=${historyCursor}`);
+  if (history) applyHistory(history);
+}
+
+// Each graph: a label, how to derive its series from the samples, and how to format one value.
+const GRAPHS = [
+  { key: 'cpu', label: 'CPU', series: (s, cores) => seriesCpuPercent(s, cores), format: (v) => `${v.toFixed(1)}%` },
+  { key: 'memory', label: 'Working set', series: (s) => seriesValue(s, 'workingSetMb'), format: (v) => `${Math.round(v)} MB` },
+  { key: 'players', label: 'Connected players', series: (s) => seriesValue(s, 'players'), format: (v) => Math.round(v).toString() },
+  { key: 'lobbies', label: 'Active lobbies', series: (s) => seriesValue(s, 'lobbies'), format: (v) => Math.round(v).toString() },
+];
+
+function applyHistory(data) {
+  historySamples = mergeSamples(historySamples, data.samples, data.capacity || 240);
+  historyCursor = Math.max(historyCursor, Number(data.lastSequence) || 0);
+
+  el('history-badge').textContent = data.enabled ? `${historySamples.length} samples` : 'Off';
+  el('history-note').textContent = data.enabled
+    ? `Sampled every ${data.sampleSeconds}s by the server, keeping ${data.capacity} points `
+      + `(~${Math.round((data.capacity * data.sampleSeconds) / 60)} minutes). Survives switching tabs, `
+      + 'reloading, and opening the portal somewhere else.'
+    : 'History is off (KnockBox:MetricSampleSeconds=0), so there is nothing to graph.';
+
+  const host = el('history-graphs');
+  host.innerHTML = '';
+  if (!data.enabled) return;
+
+  for (const graph of GRAPHS) {
+    const points = downsample(graph.series(historySamples, data.processorCount || 1));
+    const { path, max, last } = sparklinePath(points, { width: 240, height: 44 });
+
+    const card = document.createElement('div');
+    card.className = 'graph-card';
+    card.dataset.graph = graph.key;
+
+    const label = document.createElement('div');
+    label.className = 'graph-label';
+    label.textContent = graph.label;
+
+    const value = document.createElement('div');
+    value.className = 'graph-value';
+    // Two samples are needed for a rate, so an empty graph is a real state early on, not a fault.
+    value.textContent = last === null ? '--' : graph.format(last);
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'sparkline');
+    svg.setAttribute('viewBox', '0 0 240 44');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', `${graph.label} over the retained history`);
+    if (path) {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      line.setAttribute('d', path);
+      line.setAttribute('fill', 'none');
+      svg.appendChild(line);
+    }
+
+    const scale = document.createElement('div');
+    scale.className = 'graph-scale';
+    scale.textContent = path ? `peak ${graph.format(max)}` : 'collecting…';
+
+    card.append(label, value, svg, scale);
+    host.appendChild(card);
+  }
 }
 
 function applyStatus(data) {
@@ -368,6 +454,11 @@ function applyMetrics(data) {
       formatBytes(game.socketBytesSent),
       rate === null ? '--' : `${rate.toFixed(1)}/s`,
       formatCount(game.framesDropped),
+      // A dash, not 0.000s, for a game with no authority module: it runs in the browser and costs this
+      // process no CPU at all, which is a different statement from "it used no measurable CPU".
+      game.authorityCalls > 0
+        ? `${game.authorityCpuSeconds.toFixed(2)}s (${game.authorityAverageMs.toFixed(1)} ms/call)`
+        : '--',
     ]);
     // Dropped frames mean a socket couldn't keep up, which is the one number here that is a problem
     // rather than just a measurement.
@@ -1369,6 +1460,392 @@ async function addSource() {
   }
 }
 
+// ── Platform settings ─────────────────────────────────────────────────────────
+
+async function refreshPlatform() {
+  const limits = await getJson('/admin/api/limits');
+  if (limits) renderLimits(limits);
+  const announcement = await getJson('/admin/api/announcement');
+  if (announcement) renderAnnouncement(announcement);
+  const webhooks = await getJson('/admin/api/webhooks');
+  if (webhooks) renderWebhooks(webhooks);
+  const codes = await getJson('/admin/api/room-codes');
+  if (codes) {
+    codesData = codes;
+    // The draft starts as whatever is saved. Chips are added and removed locally and posted as one list,
+    // so a half-finished edit can be abandoned by leaving the tab — no half-applied blocklist.
+    codesDraft = { words: [...(codes.words || [])], patterns: [...(codes.patterns || [])] };
+    renderRoomCodes();
+  }
+}
+
+/**
+ * Draws the limits form. Rows are built from LIMIT_FIELDS rather than written out in index.html: eight
+ * fields x (label + input + hint + default value) is a lot of markup to keep in step with the server's
+ * record by hand, and the table is already the thing a test pins against it.
+ *
+ * An overridden field shows its number; a field nobody has touched shows an empty box with its default as
+ * the placeholder. That is the whole UI for "revert": clear the box and save.
+ */
+function renderLimits(data) {
+  limitsData = data;
+  const host = el('limits-fields');
+  const focused = document.activeElement?.dataset?.limitKey || null;
+  const kept = new Map(
+    [...host.querySelectorAll('input[data-limit-key]')].map((input) => [input.dataset.limitKey, input.value]));
+  host.innerHTML = '';
+
+  const overridden = new Set(data.overridden || []);
+  for (const field of LIMIT_FIELDS) {
+    const row = document.createElement('div');
+    row.className = 'field-row';
+
+    const label = document.createElement('label');
+    label.className = 'limit-label';
+    label.textContent = field.label;
+    label.htmlFor = `limit-${field.key}`;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.className = 'text-input filter-narrow';
+    input.id = `limit-${field.key}`;
+    input.dataset.limitKey = field.key;
+    input.placeholder = `Default: ${data.defaults?.[field.key] ?? '--'}`;
+    input.title = field.hint;
+    // Don't fight the operator's cursor — the same rule the maintenance message follows. On entry, or
+    // after a save, the server's value wins; a field being edited keeps what is in it.
+    input.value = focused === field.key
+      ? kept.get(field.key) ?? ''
+      : overridden.has(field.key) ? String(data.effective?.[field.key] ?? '') : '';
+
+    const hint = document.createElement('span');
+    hint.className = 'limit-hint';
+    hint.textContent = overridden.has(field.key)
+      ? `Overridden — the default is ${data.defaults?.[field.key] ?? '--'}`
+      : field.hint;
+
+    row.append(label, input, hint);
+    host.appendChild(row);
+  }
+
+  const anyOverridden = (data.overridden || []).length > 0;
+  el('limits-badge').hidden = !anyOverridden;
+  el('limits-save').disabled = false;
+  el('limits-reset').disabled = !anyOverridden;
+  el('limits-note').textContent = anyOverridden
+    ? `${data.overridden.length} of ${LIMIT_FIELDS.length} limits are overridden. `
+      + `${formatCount(data.activeLobbies)} lobbies and ${formatCount(data.connectedPlayers)} players right now.`
+    : 'Every limit is at its default.';
+
+  const startupBody = el('limits-startup-body');
+  startupBody.innerHTML = '';
+  for (const field of STARTUP_LIMITS) {
+    const row = document.createElement('tr');
+    appendCells(row, [field.label, String(data[field.key] ?? '--')]);
+    startupBody.appendChild(row);
+  }
+}
+
+async function saveLimits() {
+  const raw = {};
+  for (const input of document.querySelectorAll('#limits-fields input[data-limit-key]')) {
+    raw[input.dataset.limitKey] = input.value;
+  }
+  const checked = validateLimits(raw);
+  if (!checked.ok) { toast(checked.error, 'error'); return; }
+
+  // Tightening a limit is not destructive, but it is felt immediately by everyone connected, so the two
+  // that can refuse a player outright get a confirmation naming what is running right now.
+  const capping = checked.values.maxLobbies !== null || checked.values.maxLobbiesPerGame !== null;
+  if (capping && !noLimitOverrides(checked.values) && !await confirmAction(
+    `Apply these limits now? They take effect for connections that are already open. `
+    + `${formatCount(limitsData?.activeLobbies)} lobbies are running; a cap below that number lets them `
+    + `finish but starts no new ones until the count falls under it.`, 'Apply Limits')) return;
+
+  if (await postJson('/admin/api/limits', checked.values)) refreshPlatform();
+}
+
+function renderAnnouncement(data) {
+  announcementData = data;
+  const live = !!data.text;
+
+  const badge = el('announce-badge');
+  badge.textContent = live ? 'Live' : 'None';
+  badge.className = `badge ${live ? 'badge-warning' : 'badge-muted'}`;
+
+  // Don't fight the operator's cursor — same rule as the maintenance message and the limit fields.
+  const text = el('announce-text');
+  if (document.activeElement !== text) text.value = data.text || '';
+  text.maxLength = data.maxLength || 200;
+
+  const severity = el('announce-severity');
+  if (document.activeElement !== severity) severity.value = data.severity === 'warning' ? 'warning' : 'info';
+
+  // The scope selector is built from the games the server reported, so it can't offer one that would be
+  // refused as unknown.
+  const scope = el('announce-game');
+  const wanted = document.activeElement === scope ? scope.value : (data.gameId || '');
+  scope.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = 'All games';
+  scope.appendChild(all);
+  for (const game of data.games || []) {
+    const option = document.createElement('option');
+    option.value = game.id;
+    option.textContent = game.name;
+    scope.appendChild(option);
+  }
+  scope.value = [...scope.options].some((o) => o.value === wanted) ? wanted : '';
+
+  el('announce-clear').disabled = !live;
+  el('announce-note').textContent = live
+    ? `Posted ${formatClock(data.postedAt)}. ${formatCount(data.connectedPlayers)} player(s) connected now.`
+    : `No announcement. ${formatCount(data.connectedPlayers)} player(s) connected — they would see one immediately.`;
+}
+
+async function postAnnouncement() {
+  const text = el('announce-text').value.trim();
+  if (!text) { toast('Enter the message players should see.', 'error'); return; }
+
+  if (await postJson('/admin/api/announcement', {
+    text,
+    severity: el('announce-severity').value,
+    gameId: el('announce-game').value || null,
+  })) refreshPlatform();
+}
+
+async function clearAnnouncement() {
+  if (!announcementData?.text) return;
+  if (!await confirmAction(
+    'Take the banner down for every player? Anyone reading it now loses it immediately.',
+    'Clear Banner')) return;
+  if (await postJson('/admin/api/announcement/delete', {})) refreshPlatform();
+}
+
+function renderWebhooks(data) {
+  webhookData = data;
+  const endpoints = data.endpoints || [];
+
+  el('hook-badge').textContent = `${endpoints.length} / ${data.maxEndpoints ?? '--'}`;
+  el('hook-empty').classList.toggle('hidden', endpoints.length > 0);
+  el('hook-table').classList.toggle('hidden', endpoints.length === 0);
+  el('hook-note').textContent = data.enabled
+    ? `Delivered ${formatCount(data.delivered)}, failed ${formatCount(data.failed)}, dropped `
+      + `${formatCount(data.dropped)}, error alerts suppressed ${formatCount(data.suppressed)} `
+      + `(cap ${data.errorsPerMinute}/min, ${data.timeoutSeconds}s timeout). One attempt per event, no retries.`
+    : 'Webhooks are switched off (KnockBox:WebhooksEnabled=false). Saved endpoints are listed but nothing is sent.';
+
+  // The checkbox row is rebuilt from the server's own event list, so a new event kind needs no markup here.
+  const eventsHost = el('hook-events');
+  if (!eventsHost.dataset.built) {
+    for (const value of data.knownEvents || []) {
+      const label = document.createElement('label');
+      label.className = 'checkbox-label';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.value = value;
+      box.dataset.hookEvent = value;
+      const text = document.createElement('span');
+      text.textContent = webhookEventLabel(value);
+      label.title = WEBHOOK_EVENTS.find((e) => e.value === value)?.hint || '';
+      label.append(box, text);
+      eventsHost.appendChild(label);
+    }
+    eventsHost.dataset.built = '1';
+  }
+
+  const body = el('hook-body');
+  body.innerHTML = '';
+  for (const endpoint of endpoints) {
+    const row = document.createElement('tr');
+    row.dataset.hookId = endpoint.id;
+
+    const name = document.createElement('td');
+    const strong = document.createElement('strong');
+    strong.textContent = endpoint.name || endpoint.id;
+    const url = document.createElement('div');
+    url.className = 'source-url';
+    // The URL is a bearer credential (anyone with a Discord webhook URL can post to that channel), so only
+    // its origin is shown — enough to tell two endpoints apart, without putting the secret on screen.
+    url.textContent = originOf(endpoint.url);
+    name.append(strong, url);
+
+    const events = document.createElement('td');
+    events.textContent = (endpoint.events || []).length === 0
+      ? 'All events'
+      : endpoint.events.map(webhookEventLabel).join(', ');
+
+    const last = document.createElement('td');
+    const delivery = webhookLastDelivery(endpoint);
+    last.textContent = delivery ? `${delivery} · ${formatClock(endpoint.lastAt)}` : 'Never sent';
+    if (delivery && endpoint.lastOk === false) row.classList.add('row-warn');
+
+    const actions = document.createElement('td');
+    actions.className = 'col-actions';
+    const test = document.createElement('button');
+    test.className = 'btn btn-secondary btn-small';
+    test.textContent = 'Test';
+    test.addEventListener('click', () => testWebhook(endpoint.id));
+    const remove = document.createElement('button');
+    remove.className = 'btn btn-danger btn-small';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', () => removeWebhook(endpoint));
+    actions.append(test, remove);
+
+    if (!endpoint.enabled) {
+      const disabled = document.createElement('span');
+      disabled.className = 'badge badge-muted';
+      disabled.textContent = 'Disabled';
+      name.appendChild(disabled);
+    }
+
+    row.append(name, events, last, actions);
+    body.appendChild(row);
+  }
+}
+
+/** Just the origin of a URL — see the note in renderWebhooks about why the path is not shown. */
+function originOf(url) {
+  try { return new URL(url).origin; } catch { return url || ''; }
+}
+
+async function addWebhook() {
+  const checked = checkWebhook({ id: el('hook-id').value, url: el('hook-url').value });
+  if (!checked.ok) { toast(checked.error, 'error'); return; }
+
+  const events = [...document.querySelectorAll('#hook-events input[data-hook-event]')]
+    .filter((box) => box.checked)
+    .map((box) => box.value);
+
+  if (await postJson('/admin/api/webhooks', {
+    id: checked.id,
+    name: el('hook-name').value.trim() || checked.id,
+    url: checked.url,
+    events,
+  })) {
+    el('hook-id').value = '';
+    el('hook-name').value = '';
+    el('hook-url').value = '';
+    refreshPlatform();
+  }
+}
+
+async function removeWebhook(endpoint) {
+  if (!await confirmAction(
+    `Remove '${endpoint.name || endpoint.id}'? Events stop being posted there immediately. `
+    + 'The URL is not stored anywhere else, so you would have to paste it again.',
+    'Remove Endpoint')) return;
+  if (await postJson(`/admin/api/webhooks/${encodeURIComponent(endpoint.id)}/delete`, {})) refreshPlatform();
+}
+
+async function testWebhook(id) {
+  // Awaited by the server through the real delivery path, so the toast is the actual answer rather than
+  // "queued" — which is what an operator clicking Test wants to know.
+  if (await postJson(`/admin/api/webhooks/${encodeURIComponent(id)}/test`, {})) refreshPlatform();
+}
+
+function renderRoomCodes() {
+  const alphabet = codesData?.alphabet || CODE_ALPHABET;
+  const unreachable = new Set(codesData?.unreachable || []);
+
+  for (const [host, entries, pattern] of [
+    [el('code-words'), codesDraft.words, false],
+    [el('code-patterns'), codesDraft.patterns, true],
+  ]) {
+    host.innerHTML = '';
+    for (const entry of entries) {
+      const chip = document.createElement('span');
+      const flagged = unreachable.has(entry) || checkCodeEntry(entry, { pattern, alphabet }).unreachable;
+      chip.className = `member-chip ${flagged ? 'chip-unreachable' : ''}`;
+      if (flagged) {
+        // Distinct characters: "has no O" reads as an explanation, "has no O, O" reads as a bug.
+        const missing = [...new Set([...entry].filter((c) => c !== '?' && c !== '*' && !alphabet.includes(c)))];
+        chip.title = `The code alphabet has no ${missing.join(', ')}, so this can never match a generated code.`;
+      }
+
+      const text = document.createElement('span');
+      text.textContent = entry;
+      const remove = document.createElement('button');
+      remove.className = 'chip-action';
+      remove.textContent = '×';
+      remove.title = `Remove ${entry}`;
+      remove.addEventListener('click', () => {
+        const list = pattern ? codesDraft.patterns : codesDraft.words;
+        list.splice(list.indexOf(entry), 1);
+        renderRoomCodes();
+      });
+      chip.append(text, remove);
+      host.appendChild(chip);
+    }
+    if (entries.length === 0) {
+      const none = document.createElement('span');
+      none.className = 'limit-hint';
+      none.textContent = pattern ? 'No patterns blocked.' : 'No words blocked.';
+      host.appendChild(none);
+    }
+  }
+
+  const blocked = codesData?.blocked ?? 0;
+  const share = blockedShare(blocked, codesData?.codeSpace);
+  const badge = el('codes-badge');
+  const total = codesDraft.words.length + codesDraft.patterns.length;
+  badge.hidden = total === 0;
+  badge.textContent = `${total} / ${codesData?.maxEntries ?? '--'}`;
+  badge.className = 'badge badge-muted';
+
+  const saved = (codesData?.words?.length ?? 0) + (codesData?.patterns?.length ?? 0);
+  const dirty = total !== saved
+    || codesDraft.words.some((w) => !(codesData?.words || []).includes(w))
+    || codesDraft.patterns.some((p) => !(codesData?.patterns || []).includes(p));
+  el('codes-note').textContent = dirty
+    ? 'Unsaved changes. Nothing is blocked until you save.'
+    : blocked > 0
+      ? `Blocking ${formatCount(blocked)} of ${formatCount(codesData?.codeSpace)} possible codes`
+        + `${share === null ? '' : ` (${share.toFixed(1)}%)`}. The limit is `
+        + `${codesData?.maxBlockedPercent ?? '--'}%.`
+      : 'No codes are blocked.';
+}
+
+function addRoomCode(pattern) {
+  const input = el(pattern ? 'code-pattern' : 'code-word');
+  const checked = checkCodeEntry(input.value, { pattern, alphabet: codesData?.alphabet });
+  if (!checked.ok) { toast(checked.error, 'error'); return; }
+
+  const list = pattern ? codesDraft.patterns : codesDraft.words;
+  if (list.includes(checked.value)) { toast(`${checked.value} is already blocked.`, 'warning'); return; }
+  list.push(checked.value);
+  input.value = '';
+  // Said at the moment of typing, where it can still be changed, rather than as a footnote after saving.
+  if (checked.unreachable) {
+    toast(`${checked.value} can never be generated — the code alphabet has no O, 0, I or 1.`, 'warning');
+  }
+  renderRoomCodes();
+}
+
+async function saveRoomCodes() {
+  if (await postJson('/admin/api/room-codes', codesDraft)) refreshPlatform();
+}
+
+async function clearRoomCodes() {
+  if (!(codesDraft.words.length || codesDraft.patterns.length)) return;
+  if (!await confirmAction(
+    'Remove every blocked word and pattern? The generator will be able to produce any code again.',
+    'Clear All')) return;
+  codesDraft = { words: [], patterns: [] };
+  await saveRoomCodes();
+}
+
+async function revertLimits() {
+  if (!await confirmAction(
+    'Drop every limit override and go back to the defaults? Applies immediately.',
+    'Revert All')) return;
+  const cleared = {};
+  for (const field of LIMIT_FIELDS) cleared[field.key] = null;
+  if (await postJson('/admin/api/limits', cleared)) refreshPlatform();
+}
+
 function wire() {
   el('setup-form').addEventListener('submit', onSetupSubmit);
   el('login-form').addEventListener('submit', onLoginSubmit);
@@ -1430,6 +1907,23 @@ function wire() {
   // whatever was in flight. One line, and the classic version of this bug.
   document.addEventListener('dragover', (e) => e.preventDefault());
   document.addEventListener('drop', (e) => e.preventDefault());
+
+  el('limits-save').addEventListener('click', saveLimits);
+  el('limits-reset').addEventListener('click', revertLimits);
+  el('limits-refresh').addEventListener('click', refreshPlatform);
+
+  el('hook-add').addEventListener('click', addWebhook);
+
+  el('announce-post').addEventListener('click', postAnnouncement);
+  el('announce-clear').addEventListener('click', clearAnnouncement);
+
+  el('code-word-add').addEventListener('click', () => addRoomCode(false));
+  el('code-pattern-add').addEventListener('click', () => addRoomCode(true));
+  // Enter in the box adds the entry rather than doing nothing: this is a list you build by typing.
+  el('code-word').addEventListener('keydown', (e) => { if (e.key === 'Enter') addRoomCode(false); });
+  el('code-pattern').addEventListener('keydown', (e) => { if (e.key === 'Enter') addRoomCode(true); });
+  el('codes-save').addEventListener('click', saveRoomCodes);
+  el('codes-clear').addEventListener('click', clearRoomCodes);
 
   el('log-filter-level').addEventListener('change', resetLogStream);
   el('log-filter-category').addEventListener('input', resetLogStream);

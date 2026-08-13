@@ -3,11 +3,14 @@
 // kb-core.test.js, and the reason admin-core.js exists as a module of its own.
 import { describe, it, expect } from 'vitest';
 import {
-  AVAILABILITY, LIFECYCLE, PLUGIN_STATUS, TABS, UPDATE_MODES, UPDATE_POLICIES, appendLogEntries,
-  availabilityLabel, cpuPercentBetween, filterCatalog, filterGames, filterLobbies, formatBytes,
-  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, pluginStatusClass, pluginStatusLabel,
-  ratePerSecond, tabFromHash, uploadGuard, versionAction, versionOptions,
+  AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS, UPDATE_MODES,
+  UPDATE_POLICIES, appendLogEntries, availabilityLabel, cpuPercentBetween, filterCatalog, filterGames,
+  filterLobbies, formatBytes, formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle,
+  isTerminalJob, jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, noLimitOverrides,
+  pluginStatusClass, pluginStatusLabel, ratePerSecond, tabFromHash, uploadGuard, validateLimits,
+  versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS, webhookEventLabel,
+  checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue, seriesCpuPercent,
+  downsample, sparklinePath,
 } from '../admin/admin-core.js';
 
 describe('tabFromHash', () => {
@@ -528,5 +531,252 @@ describe('uploadGuard', () => {
 
   it('does not enforce a cap it was not given', () => {
     expect(uploadGuard(file('demo.kbg', 9_000_000_000)).ok).toBe(true);
+  });
+});
+
+describe('platform limit fields', () => {
+  it('covers exactly the eight limits the server lets an operator change', () => {
+    // Pinned against AdminLimitValues / OperatorLimits. A knob added on one side only shows up here,
+    // rather than as a field that silently never saves.
+    expect(LIMIT_FIELDS.map((f) => f.key).sort()).toEqual([
+      'controlMessagesBurst', 'controlMessagesPerSecond', 'gameMessagesBurst', 'gameMessagesPerSecond',
+      'lobbyCreatesPerMinute', 'maxConnectionsPerIp', 'maxLobbies', 'maxLobbiesPerGame',
+    ]);
+    for (const field of LIMIT_FIELDS) {
+      expect(field.label).toBeTruthy();
+      expect(field.hint).toBeTruthy();
+    }
+  });
+
+  it('lists the startup-only limits, which are deliberately NOT editable', () => {
+    // Two are startup-derived (the reaper's interval comes from the grace window); two bound PBKDF2 CPU
+    // for an unauthenticated caller, and a lock that opens from inside the room is not a lock.
+    expect(STARTUP_LIMITS.map((f) => f.key)).toEqual([
+      'handshakeTimeoutSeconds', 'disconnectGraceSeconds',
+      'adminLoginAttemptsPerMinute', 'adminLoginAttemptsPerMinuteGlobal',
+    ]);
+    // And none of them is also editable — that would be two answers to one question.
+    const editable = new Set(LIMIT_FIELDS.map((f) => f.key));
+    for (const field of STARTUP_LIMITS) expect(editable.has(field.key)).toBe(false);
+  });
+});
+
+describe('validateLimits', () => {
+  const blank = () => Object.fromEntries(LIMIT_FIELDS.map((f) => [f.key, '']));
+
+  it('reads a blank field as null, which is how an override is cleared', () => {
+    const result = validateLimits(blank());
+    expect(result.ok).toBe(true);
+    for (const field of LIMIT_FIELDS) expect(result.values[field.key]).toBeNull();
+    expect(noLimitOverrides(result.values)).toBe(true);
+  });
+
+  it('keeps zero as zero, because zero disables a limit', () => {
+    const result = validateLimits({ ...blank(), maxLobbies: '0' });
+    expect(result.values.maxLobbies).toBe(0);
+    // Zero is an override — "no limit at all" is a decision, not the absence of one.
+    expect(noLimitOverrides(result.values)).toBe(false);
+  });
+
+  it('accepts a fractional rate but not a fractional count', () => {
+    expect(validateLimits({ ...blank(), gameMessagesPerSecond: '2.5' }).ok).toBe(true);
+    const result = validateLimits({ ...blank(), maxConnectionsPerIp: '2.5' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/whole number/);
+  });
+
+  it('rejects negatives and junk, naming the field', () => {
+    expect(validateLimits({ ...blank(), maxLobbies: '-1' }).error).toMatch(/Max lobbies \(platform\)/);
+    expect(validateLimits({ ...blank(), maxLobbies: 'lots' }).ok).toBe(false);
+  });
+
+  it('rejects a burst below one against a live rate — a lockout, not a limit', () => {
+    const result = validateLimits({ ...blank(), controlMessagesPerSecond: '5', controlMessagesBurst: '0' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/at least 1/);
+
+    // Turning the limit off entirely stays legitimate.
+    expect(validateLimits({ ...blank(), controlMessagesPerSecond: '0', controlMessagesBurst: '0' }).ok).toBe(true);
+  });
+
+  it('leaves a burst-only edit to the server, which knows the configured rate', () => {
+    // Only the server can pair this with the configured rate, so the client must not guess either way.
+    expect(validateLimits({ ...blank(), controlMessagesBurst: '0' }).ok).toBe(true);
+  });
+});
+
+describe('checkCodeEntry', () => {
+  it('normalises to upper case, because the join side does too', () => {
+    expect(checkCodeEntry('xq').value).toBe('XQ');
+    expect(checkCodeEntry('  q7* ', { pattern: true }).value).toBe('Q7*');
+  });
+
+  it('allows wildcards only in a pattern', () => {
+    expect(checkCodeEntry('Q7*', { pattern: true }).ok).toBe(true);
+    const word = checkCodeEntry('Q7*');
+    expect(word.ok).toBe(false);
+    expect(word.error).toMatch(/pattern field/);
+  });
+
+  it('rejects anything longer than could match a code', () => {
+    expect(checkCodeEntry('ABCD').ok).toBe(true);
+    expect(checkCodeEntry('ABCDE').ok).toBe(false);
+    // A pattern may be longer than the code, because its wildcards are characters too.
+    expect(checkCodeEntry('A*B*C?', { pattern: true }).ok).toBe(true);
+  });
+
+  it('rejects blanks and punctuation', () => {
+    for (const bad of ['', '   ', null, undefined, 'A-B', 'A B']) expect(checkCodeEntry(bad).ok).toBe(false);
+  });
+
+  it('accepts but flags an entry the alphabet can never produce', () => {
+    // O/0/I/1 are left out of the code alphabet as too easily misread aloud. Blocking a word containing
+    // one is legal and pointless, so it is reported rather than refused.
+    const unreachable = checkCodeEntry('XO');
+    expect(unreachable.ok).toBe(true);
+    expect(unreachable.unreachable).toBe(true);
+    expect(checkCodeEntry('XQ').unreachable).toBe(false);
+    expect(checkCodeEntry('A*', { pattern: true }).unreachable).toBe(false);
+  });
+});
+
+describe('blockedShare', () => {
+  it('expresses blocked codes as a percentage of the space', () => {
+    expect(blockedShare(1024, 1_048_576)).toBeCloseTo(0.0977, 3);
+    expect(blockedShare(524_288, 1_048_576)).toBe(50);
+  });
+
+  it('has no answer without both numbers', () => {
+    expect(blockedShare(null, 1000)).toBeNull();
+    expect(blockedShare(10, 0)).toBeNull();
+    expect(blockedShare(10, undefined)).toBeNull();
+  });
+});
+
+describe('webhook helpers', () => {
+  it('covers exactly the events the server defines', () => {
+    // Pinned against WebhookEvent. A new event kind added server-side shows up here as a failing test
+    // rather than as a checkbox nobody added.
+    expect(WEBHOOK_EVENTS.map((e) => e.value)).toEqual([
+      'logError', 'updateApplied', 'updateFailed', 'maintenanceChanged', 'resourceThreshold',
+    ]);
+    for (const event of WEBHOOK_EVENTS) expect(event.hint).toBeTruthy();
+    expect(webhookEventLabel('logError')).toBe('Errors');
+    expect(webhookEventLabel('somethingNew')).toBe('somethingNew'); // unknown passes through
+  });
+
+  it('accepts https anywhere and http only on loopback', () => {
+    expect(checkWebhook({ id: 'ops', url: 'https://hooks.slack.com/services/x' }).ok).toBe(true);
+    expect(checkWebhook({ id: 'ops', url: 'http://127.0.0.1:9099/hook' }).ok).toBe(true);
+    expect(checkWebhook({ id: 'ops', url: 'http://localhost/hook' }).ok).toBe(true);
+    // Mirrors the server's IsAllowedUrl — a URL that passes here must be one the sender will accept.
+    expect(checkWebhook({ id: 'ops', url: 'http://example.com/hook' }).ok).toBe(false);
+    expect(checkWebhook({ id: 'ops', url: 'ftp://example.com/hook' }).ok).toBe(false);
+    expect(checkWebhook({ id: 'ops', url: 'not a url' }).ok).toBe(false);
+  });
+
+  it('rejects an id that could not be a route value', () => {
+    expect(checkWebhook({ id: 'my-ops_2', url: 'https://e.com/h' }).ok).toBe(true);
+    for (const bad of ['', '   ', 'has space', 'slash/es', 'x'.repeat(33)]) {
+      expect(checkWebhook({ id: bad, url: 'https://e.com/h' }).ok).toBe(false);
+    }
+  });
+
+  it('trims what it hands back, so the request carries the cleaned values', () => {
+    const result = checkWebhook({ id: '  ops  ', url: '  https://e.com/h  ' });
+    expect(result.id).toBe('ops');
+    expect(result.url).toBe('https://e.com/h');
+  });
+
+  it('distinguishes a bad status from never getting one', () => {
+    expect(webhookLastDelivery({ lastAt: 'x', lastOk: true, lastStatus: 204 })).toBe('OK (204)');
+    expect(webhookLastDelivery({ lastAt: 'x', lastOk: false, lastStatus: 404 })).toBe('Failed (404)');
+    // No status means DNS/TLS/timeout, which reads very differently from a 404.
+    expect(webhookLastDelivery({ lastAt: 'x', lastOk: false, lastStatus: null, lastError: 'No such host.' }))
+      .toContain('No response');
+    expect(webhookLastDelivery({})).toBeNull();
+  });
+});
+
+describe('metric history helpers', () => {
+  const at = (seconds) => new Date(Date.UTC(2026, 7, 13, 12, 0, seconds)).toISOString();
+  const sample = (seq, seconds, fields = {}) => ({ sequence: seq, at: at(seconds), ...fields });
+
+  it('merges cursor-polled samples by sequence, dropping duplicates', () => {
+    const held = [sample(1, 0), sample(2, 15)];
+    const merged = mergeSamples(held, [sample(2, 15), sample(3, 30)]);
+    expect(merged.map((s) => s.sequence)).toEqual([1, 2, 3]);
+  });
+
+  it('keeps only the newest `limit` samples', () => {
+    const many = Array.from({ length: 300 }, (_, i) => sample(i + 1, i * 15));
+    const merged = mergeSamples([], many, 240);
+    expect(merged.length).toBe(240);
+    expect(merged[0].sequence).toBe(61);
+  });
+
+  it('turns a cumulative counter into per-second rates', () => {
+    const samples = [
+      sample(1, 0, { framesOut: 0 }),
+      sample(2, 10, { framesOut: 100 }),
+      sample(3, 20, { framesOut: 300 }),
+    ];
+    expect(seriesRate(samples, 'framesOut').map((p) => p.value)).toEqual([10, 20]);
+  });
+
+  it('omits a pair whose counter went backwards instead of plotting a trough', () => {
+    // A counter that decreases means the server restarted. A false zero at exactly that moment is worse
+    // than a gap, because a gap looks like what it is.
+    const samples = [
+      sample(1, 0, { framesOut: 500 }),
+      sample(2, 10, { framesOut: 5 }),
+      sample(3, 20, { framesOut: 25 }),
+    ];
+    expect(seriesRate(samples, 'framesOut').map((p) => p.value)).toEqual([2]);
+  });
+
+  it('reads a gauge series straight through, skipping junk', () => {
+    const samples = [sample(1, 0, { players: 3 }), sample(2, 15, {}), sample(3, 30, { players: 7 })];
+    expect(seriesValue(samples, 'players').map((p) => p.value)).toEqual([3, 7]);
+  });
+
+  it('expresses CPU as a percentage of one core-equivalent', () => {
+    const samples = [sample(1, 0, { cpuSeconds: 0 }), sample(2, 10, { cpuSeconds: 4 })];
+    // 4 CPU-seconds over 10 wall seconds on 2 cores = 20%, matching cpuPercentBetween's convention.
+    expect(seriesCpuPercent(samples, 2)[0].value).toBeCloseTo(20);
+  });
+
+  it('downsamples by averaging buckets, so a spike survives', () => {
+    const points = Array.from({ length: 100 }, (_, i) => ({ at: at(i), value: i === 50 ? 1000 : 1 }));
+    const reduced = downsample(points, 10);
+    expect(reduced.length).toBe(10);
+    // Taking every Nth point would let sampling luck decide whether the spike appears at all.
+    expect(Math.max(...reduced.map((p) => p.value))).toBeGreaterThan(50);
+  });
+
+  it('leaves a short series alone', () => {
+    const points = [{ at: at(0), value: 1 }, { at: at(1), value: 2 }];
+    expect(downsample(points, 10)).toBe(points);
+  });
+
+  it('builds a path with one point per sample, and refuses to draw a single point', () => {
+    const path = sparklinePath([{ at: at(0), value: 1 }, { at: at(1), value: 3 }, { at: at(2), value: 2 }],
+      { width: 100, height: 20 });
+    expect(path.path.startsWith('M')).toBe(true);
+    expect(path.path.match(/L/g).length).toBe(2);
+    expect(path.max).toBe(3);
+    expect(path.last).toBe(2);
+
+    // Fewer than two points is a real state early on — the caller shows "collecting…" rather than an empty
+    // box that reads as broken.
+    expect(sparklinePath([{ at: at(0), value: 5 }]).path).toBeNull();
+    expect(sparklinePath([]).path).toBeNull();
+  });
+
+  it('does not divide by zero for a flat series', () => {
+    const flat = Array.from({ length: 5 }, (_, i) => ({ at: at(i), value: 7 }));
+    const result = sparklinePath(flat, { width: 100, height: 20 });
+    expect(result.path).toContain('M');
+    expect(result.path).not.toContain('NaN');
   });
 });

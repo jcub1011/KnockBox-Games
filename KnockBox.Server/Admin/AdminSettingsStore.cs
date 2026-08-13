@@ -1,6 +1,9 @@
 using System.Text.Json;
+using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
+using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
+using KnockBox.Server.Webhooks;
 
 namespace KnockBox.Server.Admin;
 
@@ -173,6 +176,137 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     }
 
     /// <summary>
+    /// The operator's overrides of the runtime-editable limits, or <see cref="OperatorLimits.None"/> when
+    /// they have never been touched. Held as data: this class stores policy, and
+    /// <see cref="LimitsProvider"/> is what lays it over the configured baseline.
+    /// </summary>
+    public OperatorLimits Limits => _state.Limits;
+
+    /// <summary>
+    /// Records new limit overrides. Returns null on success, or a message explaining why they could not
+    /// be persisted (they are in effect regardless, until the next restart).
+    /// </summary>
+    /// <remarks>
+    /// The caller publishes them to <see cref="LimitsProvider"/> — deliberately not done here, because
+    /// this class is read on the lobby-create path and has no business holding a reference to the
+    /// networking layer. Validation is the caller's job too, for the same reason: the merged answer
+    /// depends on the configured baseline, which lives with the provider.
+    /// </remarks>
+    public string? SetLimits(OperatorLimits limits)
+    {
+        lock (_writeGate)
+        {
+            // Empty is the default, recorded by absence — the same trick availability and update policy
+            // use, so reverting every field leaves no trace rather than a row full of nulls.
+            _state = _state with { Limits = limits.IsEmpty ? OperatorLimits.None : limits };
+            _logger.LogInformation("Admin changed the runtime limit overrides.");
+            return Save();
+        }
+    }
+
+    /// <summary>
+    /// The compiled room-code blocklist. Compiled once per change rather than per draw: the lobby-create
+    /// path reads this on every code it generates.
+    /// </summary>
+    public RoomCodeFilter RoomCodes => _state.RoomCodes;
+
+    /// <summary>The live player-facing announcement, or null when none is posted.</summary>
+    public PlatformAnnouncement? Announcement => _state.Announcement;
+
+    /// <summary>Registered outbound webhook endpoints, in registration order.</summary>
+    public IReadOnlyList<WebhookEndpoint> Webhooks => _state.Webhooks;
+
+    /// <summary>
+    /// Adds a webhook endpoint, or replaces the one with the same id. Returns null on success, or a message
+    /// explaining why it could not be persisted (it is in effect regardless, until the next restart).
+    /// </summary>
+    public string? UpsertWebhook(WebhookEndpoint endpoint)
+    {
+        lock (_writeGate)
+        {
+            var webhooks = _state.Webhooks
+                .Where(w => !string.Equals(w.Id, endpoint.Id, StringComparison.OrdinalIgnoreCase))
+                .Append(endpoint)
+                .ToList();
+            _state = _state with { Webhooks = webhooks };
+            // The URL is not logged: an endpoint URL is a bearer credential — anyone holding a Discord or
+            // Slack webhook URL can post to that channel — and the log file is read by more people than
+            // the settings file is.
+            _logger.LogInformation("Admin registered webhook {WebhookId} ({Events} event(s)).",
+                endpoint.Id, endpoint.Events?.Count ?? 0);
+            return Save();
+        }
+    }
+
+    /// <summary>Removes a webhook endpoint. False when there was no such id.</summary>
+    public bool RemoveWebhook(string id, out string? warning)
+    {
+        lock (_writeGate)
+        {
+            var webhooks = _state.Webhooks
+                .Where(w => !string.Equals(w.Id, id, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (webhooks.Count == _state.Webhooks.Count)
+            {
+                warning = null;
+                return false;
+            }
+
+            _state = _state with { Webhooks = webhooks };
+            _logger.LogInformation("Admin removed webhook {WebhookId}.", id);
+            warning = Save();
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Posts an announcement, replacing any current one, or clears it with null. Returns null on success,
+    /// or a message explaining why it could not be persisted (it is in effect regardless, until restart).
+    /// </summary>
+    /// <remarks>
+    /// Telling the connected players is the CALLER's job, not this method's — the same division the
+    /// maintenance toggle already follows. This class is read on the lobby-create path and must not hold a
+    /// reference to the connection registry; and a change has to survive being un-broadcastable (nobody
+    /// connected, a socket wedged) rather than being rolled back because a fan-out went badly.
+    /// </remarks>
+    public string? SetAnnouncement(PlatformAnnouncement? announcement)
+    {
+        lock (_writeGate)
+        {
+            _state = _state with { Announcement = announcement };
+            if (announcement is null) _logger.LogInformation("Admin cleared the player announcement.");
+            else
+                _logger.LogInformation("Admin posted a {Severity} announcement{Scope}: {Text}",
+                    announcement.Severity,
+                    announcement.GameId is null ? " for the whole platform" : $" for '{announcement.GameId}'",
+                    announcement.Text);
+            return Save();
+        }
+    }
+
+    /// <summary>
+    /// Replaces the room-code blocklist. Returns null on success, or a message explaining why it could not
+    /// be persisted (it is in effect regardless, until the next restart).
+    /// </summary>
+    /// <remarks>
+    /// A full replacement rather than add/remove operations, because the portal edits the list as a whole
+    /// and a two-call shape would let a failed second call leave a list nobody asked for. Validation of how
+    /// MUCH it blocks belongs to the caller — the store's job is to record policy, not to have opinions
+    /// about the code space.
+    /// </remarks>
+    public string? SetRoomCodes(RoomCodeFilter filter)
+    {
+        lock (_writeGate)
+        {
+            _state = _state with { RoomCodes = filter };
+            _logger.LogInformation(
+                "Admin set the room-code blocklist: {Words} word(s), {Patterns} pattern(s).",
+                filter.Words.Count, filter.Patterns.Count);
+            return Save();
+        }
+    }
+
+    /// <summary>
     /// Turns global maintenance mode on or off. Returns null on success, or a message explaining why
     /// the change could not be persisted (it is in effect regardless, until the next restart).
     /// </summary>
@@ -239,8 +373,16 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     /// </remarks>
     private string? Save()
     {
+        // Positional on purpose — a named-argument version of this call would let a new field be added to
+        // AdminSettings and quietly never be written, which is a data-loss bug that compiles.
         var settings = new AdminSettings(
-            _state.MaintenanceMode, _state.MaintenanceMessage, _state.Games, _state.Sources, _state.Updates);
+            _state.MaintenanceMode, _state.MaintenanceMessage, _state.Games, _state.Sources, _state.Updates,
+            _state.Limits.IsEmpty ? null : _state.Limits,
+            _state.RoomCodes.IsEmpty
+                ? null
+                : new BannedRoomCodes(_state.RoomCodes.Words, _state.RoomCodes.Patterns),
+            _state.Announcement,
+            _state.Webhooks.Count == 0 ? null : _state.Webhooks);
         var temp = FilePath + ".tmp";
         try
         {
@@ -269,11 +411,16 @@ public sealed class AdminSettingsStore : IPlatformPolicy
         string? MaintenanceMessage,
         IReadOnlyDictionary<string, GameAvailability> Games,
         IReadOnlyList<RegisteredMarketplace> Sources,
-        IReadOnlyDictionary<string, UpdatePolicy> Updates)
+        IReadOnlyDictionary<string, UpdatePolicy> Updates,
+        OperatorLimits Limits,
+        RoomCodeFilter RoomCodes,
+        PlatformAnnouncement? Announcement,
+        IReadOnlyList<WebhookEndpoint> Webhooks)
     {
         public static readonly State Default =
             new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer), [],
-                new Dictionary<string, UpdatePolicy>(GameIdComparer));
+                new Dictionary<string, UpdatePolicy>(GameIdComparer), OperatorLimits.None,
+                RoomCodeFilter.Empty, null, []);
 
         public static State From(AdminSettings settings)
         {
@@ -308,7 +455,54 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 sources.Add(source);
             }
 
-            return new State(settings.MaintenanceMode, settings.MaintenanceMessage, games, sources, updates);
+            // Limits are kept as read. They can't be judged here — whether a partial override is safe
+            // depends on the configured baseline it will be laid over, which lives with LimitsProvider,
+            // so Program.cs validates them at startup and ignores an unusable object with a warning.
+            // Compile() drops unusable entries rather than rejecting the list, the same way a marketplace
+            // row missing its URL is dropped — this file may have been hand-edited.
+            var roomCodes = RoomCodeFilter.Compile(settings.RoomCodes?.Words, settings.RoomCodes?.Patterns);
+
+            // An announcement with no text is not an announcement — a hand-edited object missing its
+            // message would otherwise render as an empty banner nobody can explain.
+            var announcement = string.IsNullOrWhiteSpace(settings.Announcement?.Text)
+                ? null
+                : Normalize(settings.Announcement);
+
+            // Same discipline as the marketplace list: a row whose id or URL is unusable is dropped on its
+            // own rather than costing the operator the rest of their endpoints.
+            var webhooks = new List<WebhookEndpoint>();
+            foreach (var hook in settings.Webhooks ?? [])
+            {
+                if (!MarketplaceSourceRegistry.IsValidId(hook.Id)
+                    || !WebhookDispatcher.IsAllowedUrl(hook.Url)
+                    || webhooks.Any(w => string.Equals(w.Id, hook.Id, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                webhooks.Add(hook);
+            }
+
+            return new State(settings.MaintenanceMode, settings.MaintenanceMessage, games, sources, updates,
+                settings.Limits ?? OperatorLimits.None, roomCodes, announcement, webhooks);
         }
+
+        /// <summary>
+        /// Fills in what a hand-edited announcement may be missing: an id (a dismissal is remembered
+        /// against it, so it must exist), a timestamp, and a severity we recognise.
+        /// </summary>
+        private static PlatformAnnouncement Normalize(PlatformAnnouncement announcement) => announcement with
+        {
+            Id = string.IsNullOrWhiteSpace(announcement.Id) ? Guid.NewGuid().ToString("N") : announcement.Id,
+            Text = announcement.Text.Trim(),
+            Severity = AnnouncementSeverity(announcement.Severity),
+            PostedAt = announcement.PostedAt == default ? DateTimeOffset.UtcNow : announcement.PostedAt,
+            GameId = string.IsNullOrWhiteSpace(announcement.GameId) ? null : announcement.GameId.Trim(),
+        };
     }
+
+    /// <summary>
+    /// The severities the shell knows how to draw. An unrecognised one reads as "info" rather than being
+    /// passed through: it ends up in a CSS class name, and trusting an arbitrary string there is how a
+    /// settings file becomes a styling injection.
+    /// </summary>
+    public static string AnnouncementSeverity(string? severity) =>
+        string.Equals(severity, "warning", StringComparison.OrdinalIgnoreCase) ? "warning" : "info";
 }

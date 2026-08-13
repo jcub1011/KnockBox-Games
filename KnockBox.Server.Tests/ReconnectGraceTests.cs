@@ -38,7 +38,7 @@ public class ReconnectGraceTests
         var limits = ServerLimits.FromConfiguration(config);
         var time = new MutableTimeProvider(Now);
         var handler = new WebSocketHandler(connections, lobbies, catalog,
-            TestAuthorities.Manager(connections, lobbies), tokens, limits,
+            TestAuthorities.Manager(connections, lobbies), tokens, new LimitsProvider(limits),
             PlatformPolicy.OpenPlatform, new RelayMetrics(), time,
             NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
         return (handler, connections, lobbies, tokens, time);

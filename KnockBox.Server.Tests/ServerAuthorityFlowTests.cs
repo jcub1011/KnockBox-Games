@@ -76,7 +76,7 @@ public class ServerAuthorityFlowTests : IDisposable
         var cfg = ConfigFactory.FromPairs(config);
         var limits = ServerLimits.FromConfiguration(cfg);
         var authorities = TestAuthorities.Manager(connections, lobbies, gamesRoot: _root, config: cfg);
-        var handler = new WebSocketHandler(connections, lobbies, catalog, authorities, tokens, limits,
+        var handler = new WebSocketHandler(connections, lobbies, catalog, authorities, tokens, new LimitsProvider(limits),
             PlatformPolicy.OpenPlatform, new RelayMetrics(), TimeProvider.System, NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
         return (handler, connections, lobbies, authorities, tokens, catalog, gameId);
     }

@@ -32,7 +32,7 @@ public class HandshakeHardeningTests
             new GameCatalog(Path.GetTempPath(), NullLogger<GameCatalog>.Instance),
             TestAuthorities.Manager(connections, lobbies),
             new TokenService(new ConfigurationBuilder().Build(), TimeProvider.System, NullLogger<TokenService>.Instance),
-            limits,
+            new LimitsProvider(limits),
             PlatformPolicy.OpenPlatform,
             new RelayMetrics(),
             TimeProvider.System,

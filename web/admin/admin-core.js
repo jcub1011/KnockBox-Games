@@ -6,7 +6,7 @@
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 /** The dashboard tabs, in sidebar order. The nav's data-tab attributes must match these. */
-export const TABS = ['overview', 'lobbies', 'games', 'marketplace', 'logs'];
+export const TABS = ['overview', 'lobbies', 'games', 'marketplace', 'logs', 'platform'];
 
 /**
  * The tab a URL fragment selects, or the first tab when the fragment names nothing valid. Driving the
@@ -433,6 +433,321 @@ export const UPDATE_POLICIES = [
 export function formatVersion(version) {
   const text = String(version ?? '').trim();
   return text ? `v${text.replace(/^v/i, '')}` : '--';
+}
+
+// ── Platform limits ───────────────────────────────────────────────────────────
+
+/**
+ * The runtime-editable limits, in the order the form renders them. `key` is the wire name on both
+ * AdminLimitValues and AdminLimitsRequest, so a field is one entry here and nothing else client-side.
+ *
+ * The table lives here rather than in admin.js for the same reason AVAILABILITY does: a test can pin it
+ * against the server's own record, which is what catches a knob added on one side only.
+ */
+export const LIMIT_FIELDS = [
+  {
+    key: 'controlMessagesPerSecond', label: 'Control messages / second', integer: false,
+    hint: 'Lobby operations from one shell socket. Sustained spam past the burst closes the connection.',
+  },
+  {
+    key: 'controlMessagesBurst', label: 'Control burst', integer: false,
+    hint: 'How many control messages may arrive back-to-back. Must be at least 1 unless the rate is 0.',
+  },
+  {
+    key: 'gameMessagesPerSecond', label: 'Game messages / second', integer: false,
+    hint: 'Per game socket. A host broadcasting state ~20x/s sits well under the default of 30.',
+  },
+  {
+    key: 'gameMessagesBurst', label: 'Game burst', integer: false,
+    hint: 'Absorbs legitimate spikes, e.g. a host re-syncing several joiners at once.',
+  },
+  {
+    key: 'lobbyCreatesPerMinute', label: 'Lobby creates / minute', integer: true,
+    hint: 'Per player. Refuses the operation without closing the connection — codes are a shared namespace.',
+  },
+  {
+    key: 'maxConnectionsPerIp', label: 'Connections per IP', integer: true,
+    hint: 'One player legitimately holds two (shell + game) per tab. Behind a proxy this needs ForwardedHeaders.',
+  },
+  {
+    key: 'maxLobbies', label: 'Max lobbies (platform)', integer: true,
+    hint: 'Total simultaneous lobbies across every game. Existing lobbies are never closed by a cap.',
+  },
+  {
+    key: 'maxLobbiesPerGame', label: 'Max lobbies per game', integer: true,
+    hint: 'Stops one popular game consuming every remaining slot.',
+  },
+];
+
+/** The startup-only limits, with why each one is not editable here. */
+export const STARTUP_LIMITS = [
+  { key: 'handshakeTimeoutSeconds', label: 'Handshake timeout (s)' },
+  { key: 'disconnectGraceSeconds', label: 'Reconnect grace (s)' },
+  { key: 'adminLoginAttemptsPerMinute', label: 'Admin login attempts / minute (per IP)' },
+  { key: 'adminLoginAttemptsPerMinuteGlobal', label: 'Admin login attempts / minute (server-wide)' },
+];
+
+/**
+ * Turns the form's raw strings into the override object the server takes, or reports the first field that
+ * doesn't make sense.
+ *
+ * A blank field is `null` — "not overridden" — which is also how the operator reverts one. That is why the
+ * request is a full replacement rather than a patch: with a patch, blank and absent would be the same
+ * bytes and could not mean two different things.
+ *
+ * The server validates this again and is the authority. Doing it here too is not duplication for its own
+ * sake: a round trip to be told "that's not a number" is a worse form than one that says so as you type.
+ */
+export function validateLimits(raw, fields = LIMIT_FIELDS) {
+  const values = {};
+  for (const field of fields) {
+    const text = String(raw?.[field.key] ?? '').trim();
+    if (text === '') { values[field.key] = null; continue; }
+
+    const n = Number(text);
+    if (!Number.isFinite(n) || n < 0) {
+      return { ok: false, error: `${field.label} must be 0 or more, or empty to use the default.`, values: null };
+    }
+    if (field.integer && !Number.isInteger(n)) {
+      return { ok: false, error: `${field.label} must be a whole number.`, values: null };
+    }
+    values[field.key] = n;
+  }
+
+  // The one combination that locks everyone out rather than merely limiting them, checked here so the
+  // operator hears it before the round trip. Only judged when BOTH halves are on the form — a burst
+  // against a configured rate is the server's call, since only it knows that rate.
+  for (const [rateKey, burstKey, name] of [
+    ['controlMessagesPerSecond', 'controlMessagesBurst', 'Control'],
+    ['gameMessagesPerSecond', 'gameMessagesBurst', 'Game'],
+  ]) {
+    const rate = values[rateKey];
+    const burst = values[burstKey];
+    if (rate !== null && rate > 0 && burst !== null && burst < 1) {
+      return { ok: false, error: `${name} burst must be at least 1 while its rate is above 0, or every message is refused.`, values: null };
+    }
+  }
+
+  return { ok: true, error: null, values };
+}
+
+/** True when nothing on the form is overridden — what "revert all" produces. */
+export function noLimitOverrides(values, fields = LIMIT_FIELDS) {
+  return fields.every((f) => values?.[f.key] === null || values?.[f.key] === undefined);
+}
+
+// ── Room codes ────────────────────────────────────────────────────────────────
+
+/** The code alphabet, mirrored from LobbyManager.CodeAlphabet. The server reports it too — this is the
+ *  fallback so the form can validate before the first response arrives. */
+export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+export const CODE_LENGTH = 4;
+
+/**
+ * Normalises and checks one blocklist entry, returning `{ ok, value, error, unreachable }`.
+ *
+ * `unreachable` is not an error: the entry is legal, but the generator can never produce it because the
+ * alphabet omits O/0/I/1 (too easily misread aloud). Saying so is the whole point — an entry that looks
+ * like it is working and isn't is worse than one that is refused.
+ */
+export function checkCodeEntry(raw, { pattern = false, alphabet = CODE_ALPHABET } = {}) {
+  const value = String(raw ?? '').trim().toUpperCase();
+  if (!value) return { ok: false, value, error: 'Enter something to block.', unreachable: false };
+
+  const allowed = pattern ? /^[A-Z0-9?*]+$/ : /^[A-Z0-9]+$/;
+  if (!allowed.test(value)) {
+    return {
+      ok: false,
+      value,
+      error: pattern
+        ? 'A pattern may contain letters, digits, ? (one character) and * (any run).'
+        : 'A word may contain only letters and digits. Use the pattern field for ? and *.',
+      unreachable: false,
+    };
+  }
+  // A word longer than a code can never occur inside one. A pattern may be longer than the code only
+  // because its wildcards are characters too.
+  const limit = pattern ? CODE_LENGTH + 2 : CODE_LENGTH;
+  if (value.length > limit) {
+    return {
+      ok: false,
+      value,
+      error: `Codes are ${CODE_LENGTH} characters, so nothing longer than ${limit} can match one.`,
+      unreachable: false,
+    };
+  }
+
+  const unreachable = [...value].some((c) => c !== '?' && c !== '*' && !alphabet.includes(c));
+  return { ok: true, value, error: null, unreachable };
+}
+
+/** Blocked codes as a share of the whole space, for the readout. Null when either number is missing. */
+export function blockedShare(blocked, codeSpace) {
+  const b = toNumber(blocked);
+  const space = toNumber(codeSpace);
+  if (b === null || space === null || space <= 0) return null;
+  return (b / space) * 100;
+}
+
+// ── Metric history (§5.2) ─────────────────────────────────────────────────────
+
+/**
+ * Merges newly-polled samples into the ones already held, de-duped by `sequence` and bounded.
+ *
+ * Same shape as appendLogEntries and mergeJobs, and for the same reason: the endpoint is cursor-polled, so
+ * a reconnect or a re-entered tab can hand back samples we already have.
+ */
+export function mergeSamples(existing, incoming, limit = 240) {
+  const bySeq = new Map();
+  for (const sample of [...(existing || []), ...(incoming || [])]) {
+    if (sample && Number.isFinite(Number(sample.sequence))) bySeq.set(Number(sample.sequence), sample);
+  }
+  return [...bySeq.values()]
+    .sort((a, b) => Number(a.sequence) - Number(b.sequence))
+    .slice(-Math.max(1, limit));
+}
+
+/**
+ * Turns a cumulative counter into a series of per-second rates, one per adjacent pair of samples.
+ *
+ * Keeps ratePerSecond's discipline: a pair that yields no answer (no elapsed time, or a counter that went
+ * backwards, meaning the server restarted) is **omitted** rather than plotted as zero. A false trough at the
+ * moment of a restart is worse than a gap, because a gap looks like what it is.
+ */
+export function seriesRate(samples, key) {
+  const points = [];
+  for (let i = 1; i < (samples?.length ?? 0); i++) {
+    const rate = ratePerSecond(
+      { value: samples[i - 1][key], at: samples[i - 1].at },
+      { value: samples[i][key], at: samples[i].at });
+    if (rate !== null) points.push({ at: samples[i].at, value: rate });
+  }
+  return points;
+}
+
+/** A gauge series (memory, players — values, not counters) as plot points. */
+export function seriesValue(samples, key) {
+  return (samples || [])
+    .map((s) => ({ at: s.at, value: Number(s[key]) }))
+    .filter((p) => Number.isFinite(p.value));
+}
+
+/**
+ * CPU percent of one core-equivalent, per adjacent pair. `cores` divides the rate, so 100% means one core
+ * saturated regardless of machine size — the same convention cpuPercentBetween uses for the live number.
+ */
+export function seriesCpuPercent(samples, cores) {
+  return seriesRate(samples, 'cpuSeconds')
+    .map((p) => ({ at: p.at, value: cores > 0 ? (p.value / cores) * 100 : p.value }));
+}
+
+/**
+ * Reduces a series to at most `max` points by averaging equal-width buckets.
+ *
+ * An hour of 15-second samples is 240 points in a chart a couple of hundred pixels wide, so most of them
+ * land on a pixel that already has one. Averaging rather than taking every Nth keeps a spike visible instead
+ * of letting sampling luck decide whether it appears at all.
+ */
+export function downsample(points, max = 120) {
+  const list = points || [];
+  if (list.length <= max || max < 1) return list;
+  const bucketSize = list.length / max;
+  const out = [];
+  for (let i = 0; i < max; i++) {
+    const from = Math.floor(i * bucketSize);
+    const to = Math.min(list.length, Math.floor((i + 1) * bucketSize));
+    if (to <= from) continue;
+    let sum = 0;
+    for (let j = from; j < to; j++) sum += list[j].value;
+    out.push({ at: list[to - 1].at, value: sum / (to - from) });
+  }
+  return out;
+}
+
+/**
+ * An SVG path for a sparkline, plus the range it was drawn against.
+ *
+ * Returns `{ path, min, max, last }`, or `path: null` when there is nothing to draw — the caller shows a
+ * "not enough data yet" note rather than an empty box that looks broken. The y-axis starts at 0 for a
+ * counter-derived series so a rate that doubled looks like it doubled; a flat series gets a small span so it
+ * draws a line through the middle instead of dividing by zero.
+ */
+export function sparklinePath(points, { width = 240, height = 40, padding = 2 } = {}) {
+  const list = (points || []).filter((p) => Number.isFinite(Number(p.value)));
+  if (list.length < 2) return { path: null, min: 0, max: 0, last: list[0]?.value ?? null };
+
+  const values = list.map((p) => Number(p.value));
+  const max = Math.max(...values);
+  const min = Math.min(0, ...values);
+  const span = max - min || Math.max(1, Math.abs(max)) * 0.1;
+
+  const usableWidth = Math.max(1, width - padding * 2);
+  const usableHeight = Math.max(1, height - padding * 2);
+  const step = usableWidth / (list.length - 1);
+
+  const path = values
+    .map((value, i) => {
+      const x = padding + i * step;
+      const y = padding + usableHeight - ((value - min) / span) * usableHeight;
+      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  return { path, min, max, last: values[values.length - 1] };
+}
+
+// ── Webhooks ──────────────────────────────────────────────────────────────────
+
+/**
+ * The events an endpoint can subscribe to, with what each one actually means. Pinned against the server's
+ * WebhookEvent enum by a test, the same way AVAILABILITY is against GameAvailability.
+ */
+export const WEBHOOK_EVENTS = [
+  { value: 'logError', label: 'Errors', hint: 'Any error-or-worse log event. Rate-limited, with a count of what was suppressed.' },
+  { value: 'updateApplied', label: 'Update applied', hint: 'A game finished installing or updating.' },
+  { value: 'updateFailed', label: 'Update failed', hint: 'An install, update or rollback failed or was cancelled.' },
+  { value: 'maintenanceChanged', label: 'Maintenance toggled', hint: 'Global maintenance mode was turned on or off.' },
+  { value: 'resourceThreshold', label: 'Resource threshold', hint: 'Memory or CPU crossed the configured threshold, or came back under it.' },
+];
+
+export function webhookEventLabel(value) {
+  return WEBHOOK_EVENTS.find((e) => e.value === value)?.label ?? value;
+}
+
+/**
+ * Whether a webhook endpoint is worth sending to the server, and why not if it isn't.
+ *
+ * The URL rule mirrors the server's (which is the downloader's `IsAllowedUrl`): https anywhere, or http on
+ * loopback for a local monitoring agent. Checked here only so the operator hears it before the round trip —
+ * the server is still the authority, and a refusal from it is surfaced rather than second-guessed.
+ */
+export function checkWebhook({ id, url } = {}) {
+  const cleanId = String(id ?? '').trim();
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(cleanId)) {
+    return { ok: false, error: 'Id must be 1-32 characters: letters, digits, dash or underscore.' };
+  }
+
+  const cleanUrl = String(url ?? '').trim();
+  let parsed;
+  try { parsed = new URL(cleanUrl); } catch { parsed = null; }
+  if (!parsed) return { ok: false, error: 'Enter the full URL, including https://.' };
+
+  const loopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]';
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    return { ok: false, error: 'The URL must be https, or http on loopback (for a local monitoring agent).' };
+  }
+  return { ok: true, error: null, id: cleanId, url: cleanUrl };
+}
+
+/** How the last delivery went, as one short phrase. Null when nothing has been sent yet. */
+export function webhookLastDelivery(endpoint) {
+  if (!endpoint?.lastAt) return null;
+  if (endpoint.lastOk) return `OK${endpoint.lastStatus ? ` (${endpoint.lastStatus})` : ''}`;
+  // No status means the request never got one — DNS, TLS or a timeout — which reads very differently from
+  // a 404, so the two are not collapsed into "failed".
+  return endpoint.lastStatus
+    ? `Failed (${endpoint.lastStatus})`
+    : `No response${endpoint.lastError ? `: ${endpoint.lastError}` : ''}`;
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────

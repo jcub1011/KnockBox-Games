@@ -28,7 +28,7 @@ public sealed class WebSocketHandler(
     GameCatalog catalog,
     ServerAuthorityManager authorities,
     TokenService tokens,
-    ServerLimits limits,
+    LimitsProvider limitsProvider,
     IPlatformPolicy policy,
     RelayMetrics relay,
     TimeProvider time,
@@ -41,6 +41,11 @@ public sealed class WebSocketHandler(
     // Game-emitted log lines get their own category ("KnockBox.GameLog") so an operator can filter
     // or re-level untrusted game output independently of the server's own diagnostics.
     private readonly ILogger _gameLogger = loggerFactory.CreateLogger("KnockBox.GameLog");
+
+    // The limits in force RIGHT NOW. Read per use rather than captured once, because an operator can
+    // edit the runtime-editable ones from the admin portal and the sockets a flood is arriving on are,
+    // by definition, already open. The per-connection buckets are handed a delegate for the same reason.
+    private ServerLimits Limits => limitsProvider.Current;
 
     // Cap on a single game log line, so a game can't flood the sink with one enormous string. The
     // data plane's token bucket already bounds the RATE of frames; this bounds the SIZE of each.
@@ -62,14 +67,15 @@ public sealed class WebSocketHandler(
             IMessage? first;
             using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                if (limits.HandshakeTimeout > TimeSpan.Zero) handshake.CancelAfter(limits.HandshakeTimeout);
+                var handshakeTimeout = Limits.HandshakeTimeout;
+                if (handshakeTimeout > TimeSpan.Zero) handshake.CancelAfter(handshakeTimeout);
                 try
                 {
                     first = await ReceiveMessageAsync(socket, handshake.Token);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    logger.LogWarning("Closing connection: no handshake frame within {Timeout}.", limits.HandshakeTimeout);
+                    logger.LogWarning("Closing connection: no handshake frame within {Timeout}.", handshakeTimeout);
                     await socket.CloseOutputAsync(WebSocketCloseStatus.ProtocolError, "Handshake timeout", CancellationToken.None);
                     return;
                 }
@@ -119,14 +125,28 @@ public sealed class WebSocketHandler(
         var sendLoop = connection.SendLoopAsync(ct);
         connection.Send(ConnectionManager.Serialize(
             new WelcomeMessage(playerId, tokens.IssueIdentity(playerId), gameOrigin)));
+
+        // A live announcement follows Welcome, so a player who connects after it was posted sees the same
+        // banner as everyone who was already here. Pushed as the same message the portal broadcasts rather
+        // than added as a Welcome field: WelcomeMessage is mirrored by the Phaser and Godot SDKs, and a
+        // banner is not worth a wire change in three clients. An older shell ignores an unknown type.
+        if (policy.Announcement is { } announcement)
+        {
+            connection.Send(ConnectionManager.Serialize(new AnnouncementPostedMessage(
+                announcement.Id, announcement.Text, announcement.PostedAt,
+                announcement.Severity, announcement.GameId)));
+        }
+
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Player {PlayerId} ({Name}) connected (control)", playerId, displayName);
 
         // Control traffic is rare (lobby ops); sustained spam past the burst is hostile or a bug —
         // either way, terminate. Lobby creation gets its own slower bucket (codes are a shared,
         // guessable namespace) but only rejects the op, it doesn't kill the connection.
-        var inboundBucket = new TokenBucket(limits.ControlMessagesPerSecond, limits.ControlMessagesBurst, time);
-        var lobbyCreateBucket = new TokenBucket(limits.LobbyCreatesPerMinute / 60.0, limits.LobbyCreatesPerMinute, time);
+        var inboundBucket = new TokenBucket(
+            () => new RateLimit(Limits.ControlMessagesPerSecond, Limits.ControlMessagesBurst), time);
+        var lobbyCreateBucket = new TokenBucket(
+            () => new RateLimit(Limits.LobbyCreatesPerMinute / 60.0, Limits.LobbyCreatesPerMinute), time);
 
         try
         {
@@ -286,6 +306,30 @@ public sealed class WebSocketHandler(
             // string through, exactly as it does for MaintenanceMessage.
             conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
                 policy.UnavailableReason(game.Id) ?? $"'{game.Name}' is currently unavailable.")));
+            return;
+        }
+
+        // Capacity, after the policy gates and — like them — before LeaveLobbiesExcept, so a player told
+        // "the server is full" keeps the lobby they were already in. Two caps, checked in that order: the
+        // global one is about this server's total load, the per-game one stops one popular title taking
+        // every remaining slot. Enforced here rather than behind IPlatformPolicy because neither policy
+        // implementation knows anything about live lobbies, and this method already holds the manager
+        // that does. The message names the limit: "try again later" with no reason reads as a bug.
+        if (Limits.MaxLobbies > 0 && lobbies.Count >= Limits.MaxLobbies)
+        {
+            logger.LogWarning("Refused a lobby for '{GameId}': the server-wide cap of {Cap} is reached.",
+                game.Id, Limits.MaxLobbies);
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
+                $"The server has reached its limit of {Limits.MaxLobbies} games running at once; try again shortly.")));
+            return;
+        }
+        if (Limits.MaxLobbiesPerGame > 0 && lobbies.CountForGame(game.Id) >= Limits.MaxLobbiesPerGame)
+        {
+            logger.LogWarning("Refused a lobby for '{GameId}': its per-game cap of {Cap} is reached.",
+                game.Id, Limits.MaxLobbiesPerGame);
+            conn.Send(ConnectionManager.Serialize(new ErrorMessage(m.Cid,
+                $"'{game.Name}' has reached its limit of {Limits.MaxLobbiesPerGame} games running at once; " +
+                "try again shortly or pick another game.")));
             return;
         }
 
@@ -605,7 +649,8 @@ public sealed class WebSocketHandler(
 
         // Every relayed frame fans out O(lobby size), so inbound spam multiplies on the way out.
         // The burst absorbs legitimate spikes (a host re-syncing several joiners at once).
-        var inboundBucket = new TokenBucket(limits.GameMessagesPerSecond, limits.GameMessagesBurst, time);
+        var inboundBucket = new TokenBucket(
+            () => new RateLimit(Limits.GameMessagesPerSecond, Limits.GameMessagesBurst), time);
 
         try
         {
@@ -776,7 +821,7 @@ public sealed class WebSocketHandler(
     // disabled (0) this is just the old immediate-leave behaviour.
     private void HandleControlDisconnect(Connection conn)
     {
-        if (limits.DisconnectGrace <= TimeSpan.Zero)
+        if (Limits.DisconnectGrace <= TimeSpan.Zero)
         {
             LeaveCurrentLobby(conn);
             return;
@@ -821,7 +866,7 @@ public sealed class WebSocketHandler(
     /// rather than evicted — this makes the sweep self-healing against a disconnect/reconnect race.</summary>
     public void ReapDisconnectedPlayers()
     {
-        var cutoff = time.GetUtcNow() - limits.DisconnectGrace;
+        var cutoff = time.GetUtcNow() - Limits.DisconnectGrace;
         foreach (var lobby in lobbies.Snapshot())
         {
             foreach (var pid in lobby.ExpiredDisconnects(cutoff))
