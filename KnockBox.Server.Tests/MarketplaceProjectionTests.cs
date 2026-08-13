@@ -127,13 +127,20 @@ public class MarketplaceProjectionTests
     }
 
     [Fact]
-    public void An_entry_with_no_id_is_skipped()
+    public void An_entry_with_no_id_is_reported_as_unusable_rather_than_dropped()
     {
+        // PluginUpdateEvaluator deliberately keeps a malformed entry as Unusable instead of discarding it,
+        // and dropping it here silently undid that: a publisher whose entry is broken needs to be told,
+        // and a game that simply never appears reads as this server's fault rather than their catalog's.
         var rows = MarketplaceProjection.Project(
             [Catalog(Source("official"), Plugin("alpha"), Plugin("", "1.0.0"))],
             Installed(), Managed(), App);
 
-        Assert.Single(rows);
+        Assert.Equal(2, rows.Count);
+        var broken = Assert.Single(rows, r => r.Id.Length == 0);
+        Assert.Equal("unusable", broken.Status);
+        // Not blank: a row with no name reads as a rendering bug rather than as the bad entry it is.
+        Assert.NotEmpty(broken.Name);
     }
 
     [Fact]

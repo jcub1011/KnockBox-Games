@@ -85,10 +85,27 @@ public class PackageManagerTests : IDisposable
         {
             var job = _jobs.Get(jobId);
             if (job is { IsTerminal: true }) return job;
+            // Pump WHILE waiting, not afterwards. Placing a package only renames the .kbg and asks for a
+            // rescan; an apply then holds the game's lifecycle gate closed until the installer reports the
+            // files actually extracted, so a job cannot reach a terminal state until some reconcile pass
+            // runs. In the server that pass comes from GameCatalog.Discovered; here this loop stands in
+            // for it. Pumping only after the job settled would wait for something nothing was driving.
+            PumpInstaller();
             await Task.Delay(25);
         }
         Assert.Fail($"Job {jobId} never finished (last phase: {_jobs.Get(jobId)?.Phase}).");
         return null!;
+    }
+
+    /// <summary>Waits for a job to reach a phase WITHOUT driving the installer, unlike SettleAsync.</summary>
+    private async Task WaitForPhaseAsync(string jobId, string phase)
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            if (_jobs.Get(jobId)?.Phase == phase) return;
+            await Task.Delay(10);
+        }
+        Assert.Fail($"Job {jobId} never reached '{phase}' (last phase: {_jobs.Get(jobId)?.Phase}).");
     }
 
     /// <summary>Runs installer passes until the extracted game appears, as the running server would.</summary>
@@ -131,6 +148,42 @@ public class PackageManagerTests : IDisposable
         await Assert.ThrowsAsync<PackageManager.PackageTooLargeException>(
             () => manager.ReceiveAsync(Bytes(new byte[4096])));
 
+        Assert.Empty(Directory.GetFiles(ManagedPackageLayout.StagingDir(_paths.GamesManagedRoot)));
+    }
+
+    [Fact]
+    public async Task A_byte_cap_of_zero_means_no_limit_rather_than_refusing_everything()
+    {
+        // GamePackageLimits' own doc, GamePackageReader and INFRASTRUCTURE.md §9 all say a non-positive
+        // value disables that individual check. This path compared against it unconditionally, so an
+        // operator following the docs to lift the cap instead had every upload refused at its first byte
+        // for exceeding "the 0-byte limit".
+        var manager = new PackageManager(
+            _paths, _catalog, _installer, _jobs, _gate, _lobbies,
+            new LobbyCloser(_lobbies, _connections, NullLogger<LobbyCloser>.Instance),
+            new GamePackageLimits(0, 1000, 10_000), new PackageManagerOptions(), _clock,
+            NullLogger<PackageManager>.Instance);
+
+        using var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+
+        Assert.True(File.Exists(staged.Path));
+    }
+
+    [Fact]
+    public async Task A_corrupt_package_is_refused_with_a_reason_and_leaves_no_staged_file()
+    {
+        // A payload that is not valid Brotli throws InvalidDataException, which is neither
+        // GamePackageException nor IOException — so it escaped the catch here, surfaced as an unhandled
+        // 500 the operator could do nothing with, and skipped the Dispose that removes the staged upload.
+        var manager = New();
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.CorruptBrotli("demo")));
+
+        var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
+
+        Assert.False(start.Started);
+        Assert.Equal(PackageRefusal.Invalid, start.Refusal);
+        Assert.NotNull(start.Error);
+        Assert.False(File.Exists(staged.Path));
         Assert.Empty(Directory.GetFiles(ManagedPackageLayout.StagingDir(_paths.GamesManagedRoot)));
     }
 
@@ -307,6 +360,43 @@ public class PackageManagerTests : IDisposable
         Assert.Null(_lobbies.Get(lobby!.Id));
         Assert.True(_catalog.TryGet("demo", out var manifest));
         Assert.Equal("2.0.0", manifest.Version);
+    }
+
+    [Fact]
+    public async Task The_game_stays_gated_until_the_new_files_have_actually_been_extracted()
+    {
+        // Place() only renames the .kbg and asks for a rescan; the extraction happens on a later installer
+        // pass, which then swaps the live directory aside. Releasing the gate at the end of Place meant a
+        // force update closed every lobby, announced "Updated to 2.0.0", re-opened the game — and a player
+        // starting a lobby in that window got the OLD build and then 404s mid-session as it was swapped
+        // underneath them. Which is the exact outcome force and drain modes exist to prevent.
+        var manager = New();
+        await UploadAsync(manager, PackageFixture.Versioned("demo", "Demo", "1.0.0"));
+        PumpInstaller();
+
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")));
+        var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Force);
+        Assert.True(start.Started, start.Error);
+
+        // Nothing is driving reconcile passes here, so the package is placed but not yet extracted.
+        await WaitForPhaseAsync(start.Job!.JobId, "Extracting files.");
+        Assert.Equal(GameLifecycle.Updating, _gate.StateOf("demo"));
+        Assert.False(_gate.CanCreateLobby("demo"));
+        Assert.False(_jobs.Get(start.Job.JobId)!.IsTerminal);
+        // Still serving 1.0.0 — which is precisely why the gate must not have been released.
+        Assert.True(_catalog.TryGet("demo", out var during));
+        Assert.Equal("1.0.0", during.Version);
+
+        // SettleAsync drives the passes, standing in for the server's Discovered→Reconcile loop.
+        var job = await SettleAsync(start.Job.JobId);
+
+        Assert.Equal(PackageJobStatus.Succeeded, job.Status);
+        Assert.Null(job.Warning);
+        Assert.Equal(GameLifecycle.Idle, _gate.StateOf("demo"));
+        Assert.True(_gate.CanCreateLobby("demo"));
+        PumpInstaller();
+        Assert.True(_catalog.TryGet("demo", out var after));
+        Assert.Equal("2.0.0", after.Version);
     }
 
     [Fact]

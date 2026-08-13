@@ -156,4 +156,50 @@ internal static class PackageFixture
 
     /// <summary>Opens a package from bytes for a reader-level test.</summary>
     internal static ZipArchive Open(byte[] package) => new(new MemoryStream(package), ZipArchiveMode.Read);
+
+    /// <summary>
+    /// A package whose declared-Brotli payload is not valid Brotli.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from a truncated archive: this one opens cleanly, its header validates, and it fails only
+    /// when something actually decompresses a payload — which is how a partial download, a bit-rotted
+    /// backup, or a file copied out of a broken build presents. That is the shape whose
+    /// <c>InvalidDataException</c> used to escape every caller's catch.
+    /// </remarks>
+    /// <param name="corruptFile">Which entry to fill with garbage.</param>
+    internal static byte[] CorruptBrotli(string id = "demo", string corruptFile = "GAME.json")
+    {
+        var manifest = id == "demo"
+            ? DefaultManifest
+            : $$"""{"id":"{{id}}","name":"{{id}}","entry":"index.html","maxPlayers":2}""";
+        var files = new File[]
+        {
+            new("GAME.json", Bytes(manifest), Brotli: true),
+            new("index.html", Bytes("<!doctype html><title>demo</title>"), Brotli: true),
+        };
+
+        // Built the ordinary way first, so the header — sizes, hashes, the whole file list — is exactly
+        // what a real packer would write. Only the stored bytes of one entry are then replaced, which is
+        // precisely the difference between "malformed package" and "corrupt payload".
+        var package = Build(id, id, files);
+        using var source = Open(package);
+        var rewritten = new List<(string Name, byte[] Data, int Attributes)>();
+        foreach (var entry in source.Entries)
+        {
+            byte[] data;
+            if (entry.FullName == corruptFile + ".br")
+            {
+                data = [0xFF, 0xFE, 0xFD, 0xFC, 0x00, 0x11, 0x22, 0x33];
+            }
+            else
+            {
+                using var stream = entry.Open();
+                using var buffer = new MemoryStream();
+                stream.CopyTo(buffer);
+                data = buffer.ToArray();
+            }
+            rewritten.Add((entry.FullName, data, 0));
+        }
+        return Zip(rewritten);
+    }
 }

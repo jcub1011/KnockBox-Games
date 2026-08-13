@@ -720,8 +720,20 @@ if (webhookDispatcher is not null && webhookQueue is not null)
                 title: $"{job.Kind} {job.Status}", gameId: job.GameId, detail: job.Error));
     };
 
-    var draining = Task.Run(() => webhookDispatcher.RunAsync(app.Lifetime.ApplicationStopping));
-    app.Lifetime.ApplicationStopping.Register(() => webhookQueue.Complete());
+    // The drain runs on its own token, NOT ApplicationStopping. Handing it ApplicationStopping cancelled
+    // ReadAllAsync the instant shutdown began, so the Complete() below — whose whole purpose is to let the
+    // loop finish the queue and exit — could never flush anything; the alerts explaining why the server is
+    // going down were exactly the ones dropped. Completing the channel ends the loop on its own, and the
+    // deadline is the backstop so a dead endpoint (bounded by WebhookTimeoutSeconds per attempt, one
+    // attempt each) still cannot hold shutdown open.
+    var drainGrace = TimeSpan.FromSeconds(5);
+    var drainCts = new CancellationTokenSource();
+    var draining = Task.Run(() => webhookDispatcher.RunAsync(drainCts.Token));
+    app.Lifetime.ApplicationStopping.Register(() =>
+    {
+        webhookQueue.Complete();
+        drainCts.CancelAfter(drainGrace);
+    });
     // Referenced so the task isn't collected, and so a fault surfaces in the log rather than as silence.
     _ = draining.ContinueWith(t =>
         app.Logger.LogError(t.Exception, "The webhook drain task faulted."),

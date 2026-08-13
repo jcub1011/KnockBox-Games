@@ -174,6 +174,8 @@ internal static class AdminApi
                 RequireSession(options, WriteGuard(ctx => AddSource(ctx, options))));
             routes.MapPost("/admin/api/marketplace/sources/{id}/delete",
                 RequireSession(options, WriteGuard(ctx => RemoveSource(ctx, options))));
+            routes.MapPost("/admin/api/marketplace/sources/{id}/enabled",
+                RequireSession(options, WriteGuard(ctx => SetSourceEnabled(ctx, options))));
             routes.MapPost("/admin/api/marketplace/check",
                 RequireSession(options, WriteGuard(ctx => CheckForUpdates(ctx, options))));
             routes.MapPost("/admin/api/packages/{id}/update-policy",
@@ -851,20 +853,34 @@ internal static class AdminApi
 
         _ = Task.Run(() =>
         {
-            registry.SetStatus(job.JobId, PackageJobStatus.Applying, "Removing files.");
-            var result = operations.DeleteGame(gameId);
-            if (result.Success)
+            // Wrapped the way PackageManager wraps its own workers, and for a sharper reason here: this
+            // job is already Applying, which is past the point Cancel will act on. An escaping exception
+            // would fault the task silently and leave the job non-terminal forever — ActiveFor would keep
+            // returning it, so every later install/update/rollback/uninstall of this game would 409 until
+            // the process restarted. DeleteGame only catches IO/UnauthorizedAccess around its own
+            // deletes, so a throw out of lobby closing or a bad path reaches here.
+            try
             {
-                logger.LogWarning("Admin uninstalled '{GameId}', closing {Lobbies} lobby/lobbies.",
-                    gameId, result.LobbiesClosed);
-                registry.Finish(job.JobId, PackageJobStatus.Succeeded,
-                    result.LobbiesClosed > 0
-                        ? $"Uninstalled, and closed {result.LobbiesClosed} running lobby/lobbies."
-                        : "Uninstalled.");
+                registry.SetStatus(job.JobId, PackageJobStatus.Applying, "Removing files.");
+                var result = operations.DeleteGame(gameId);
+                if (result.Success)
+                {
+                    logger.LogWarning("Admin uninstalled '{GameId}', closing {Lobbies} lobby/lobbies.",
+                        gameId, result.LobbiesClosed);
+                    registry.Finish(job.JobId, PackageJobStatus.Succeeded,
+                        result.LobbiesClosed > 0
+                            ? $"Uninstalled, and closed {result.LobbiesClosed} running lobby/lobbies."
+                            : "Uninstalled.");
+                }
+                else
+                {
+                    registry.Finish(job.JobId, PackageJobStatus.Failed, "Failed.", result.Error);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                registry.Finish(job.JobId, PackageJobStatus.Failed, "Failed.", result.Error);
+                logger.LogError(ex, "Uninstall job {JobId} for '{GameId}' failed.", job.JobId, gameId);
+                registry.Finish(job.JobId, PackageJobStatus.Failed, "Failed.", ex.Message);
             }
         });
 
@@ -975,8 +991,12 @@ internal static class AdminApi
         {
             if (body.SourceId is { Length: > 0 } wanted
                 && !string.Equals(source.Source.Id, wanted, StringComparison.OrdinalIgnoreCase)) continue;
+            // p?.Id, not p.Id: Plugins comes from catalog JSON we did not write, where `null` survives as
+            // a list element whatever the element type says. Both other readers already guard it
+            // (MarketplaceClient, PluginUpdateEvaluator) — without it a stray null renders the tab fine
+            // and then 500s the moment somebody clicks Install.
             if (source.Catalog?.Plugins?.FirstOrDefault(
-                    p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase)) is not { } match) continue;
+                    p => string.Equals(p?.Id, id, StringComparison.OrdinalIgnoreCase)) is not { } match) continue;
             plugin = match;
             client = registry.For(source.Source.Id);
             break;
@@ -1062,6 +1082,31 @@ internal static class AdminApi
         }
 
         await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: "Removed."));
+    }
+
+    /// <summary>
+    /// Switches a marketplace off without losing its configuration — including the official one, which is
+    /// what <see cref="RemoveSource"/> and <c>MarketplaceSourceRegistry.Validate</c> both point an operator
+    /// at when they try to remove it.
+    /// </summary>
+    private static async Task SetSourceEnabled(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminSourceEnabledRequest);
+        if (body?.Enabled is not { } enabled)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, "Send { \"enabled\": true | false }.");
+            return;
+        }
+
+        if (!options.Settings.SetSourceEnabled(id, enabled, out var warning))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No marketplace with id '{id}'.");
+            return;
+        }
+
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
+            Detail: enabled ? "Enabled." : "Disabled; it offers nothing until you switch it back on."));
     }
 
     private static async Task SetUpdatePolicy(HttpContext ctx, Options options)
@@ -1438,11 +1483,17 @@ internal static class AdminApi
                 return;
             }
 
-        var filter = RoomCodeFilter.Compile(body.Words, body.Patterns);
-        if (filter.Count > RoomCodeFilter.MaxEntries)
+        // `dropped`, not filter.Count: Compile trims to the cap itself, so the compiled filter can never
+        // exceed it and a `filter.Count > MaxEntries` test could never fire — an over-cap save answered
+        // 200 and silently discarded the overflow. Asking Compile what it had to throw away is the only
+        // way to tell, and counting the submitted lists instead would refuse a list that was only over
+        // the cap before de-duplication.
+        var filter = RoomCodeFilter.Compile(body.Words, body.Patterns, out var dropped);
+        if (dropped > 0)
         {
             await Refuse(ctx, StatusCodes.Status400BadRequest,
-                $"At most {RoomCodeFilter.MaxEntries} entries. One pattern usually replaces many words.");
+                $"At most {RoomCodeFilter.MaxEntries} entries, and that list has {dropped} too many. " +
+                "One pattern usually replaces many words.");
             return;
         }
 

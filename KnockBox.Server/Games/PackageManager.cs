@@ -57,23 +57,121 @@ public readonly record struct PackageJobStart(PackageJob? Job, PackageRefusal Re
 /// dictionary entry is inspectable, which is what lets a second click be answered with "this is already
 /// happening, here it is" instead of a silent queue — and a draining job may hold its game for hours.
 /// </remarks>
-public sealed class PackageManager(
-    ContentPaths.Resolved paths,
-    GameCatalog catalog,
-    GamePackageInstaller? installer,
-    PackageJobRegistry jobs,
-    GameLifecycleGate lifecycle,
-    LobbyManager lobbies,
-    LobbyCloser closer,
-    GamePackageLimits limits,
-    PackageManagerOptions options,
-    TimeProvider clock,
-    ILogger<PackageManager> logger)
+public sealed class PackageManager
 {
-    private readonly SemaphoreSlim _installSlots = new(options.MaxConcurrentInstalls, options.MaxConcurrentInstalls);
+    private readonly ContentPaths.Resolved paths;
+    private readonly GameCatalog catalog;
+    private readonly GamePackageInstaller? installer;
+    private readonly PackageJobRegistry jobs;
+    private readonly GameLifecycleGate lifecycle;
+    private readonly LobbyManager lobbies;
+    private readonly LobbyCloser closer;
+    private readonly GamePackageLimits limits;
+    private readonly PackageManagerOptions options;
+    private readonly TimeProvider clock;
+    private readonly ILogger<PackageManager> logger;
+    private readonly SemaphoreSlim _installSlots;
+
+    /// <remarks>
+    /// A written-out constructor rather than a primary one for one reason: it subscribes to the
+    /// installer's <see cref="GamePackageInstaller.Installed"/> event. <see cref="ApplyAsync"/> holds a
+    /// game's lifecycle gate closed until that event arrives, so the subscription is not decoration — it
+    /// is what stops every apply stalling for <see cref="ExtractionWait"/>. Wiring it from the composition
+    /// root instead would make this class depend on external wiring to reach its own invariant, the same
+    /// reason <c>ServerAuthorityManager.HandleFatal</c> stops its own actor rather than trusting a hook.
+    /// </remarks>
+    public PackageManager(
+        ContentPaths.Resolved paths,
+        GameCatalog catalog,
+        GamePackageInstaller? installer,
+        PackageJobRegistry jobs,
+        GameLifecycleGate lifecycle,
+        LobbyManager lobbies,
+        LobbyCloser closer,
+        GamePackageLimits limits,
+        PackageManagerOptions options,
+        TimeProvider clock,
+        ILogger<PackageManager> logger)
+    {
+        this.paths = paths;
+        this.catalog = catalog;
+        this.installer = installer;
+        this.jobs = jobs;
+        this.lifecycle = lifecycle;
+        this.lobbies = lobbies;
+        this.closer = closer;
+        this.limits = limits;
+        this.options = options;
+        this.clock = clock;
+        this.logger = logger;
+        _installSlots = new SemaphoreSlim(options.MaxConcurrentInstalls, options.MaxConcurrentInstalls);
+
+        if (installer is not null) installer.Installed += NoteExtracted;
+    }
 
     /// <summary>The job feed the portal polls.</summary>
     public PackageJobRegistry Jobs => jobs;
+
+    /// <summary>
+    /// How long an apply waits for the installer to actually extract what it just placed, before giving up
+    /// and reporting the job done with a warning.
+    /// </summary>
+    /// <remarks>
+    /// Generous, because it covers writing a multi-hundred-megabyte WASM game to disk — but bounded, and
+    /// that bound is the point. The gate this wait holds closed makes the game unlaunchable, and
+    /// <see cref="Admin.GameLifecycleGate"/> is deliberately never persisted precisely so that a game can
+    /// never be left permanently unstartable; waiting forever here would reintroduce that within one
+    /// process. In practice the extraction lands on the very next reconcile pass — the catalog's rescan
+    /// debounce is half a second and <c>Adopt</c> waives the two-pass settle check for a file this server
+    /// renamed into place itself.
+    /// </remarks>
+    internal static readonly TimeSpan ExtractionWait = TimeSpan.FromMinutes(5);
+
+    // gameId -> the apply waiting for that game's extraction. One entry per game at most: the job registry
+    // already refuses a second job for a game that has one running.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource>
+        _awaitingExtraction = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Subscribes to the extraction of <paramref name="gameId"/>. Call BEFORE placing the package: the
+    /// installer's pass can finish before the placing thread runs again.
+    /// </summary>
+    private ExtractionWatch WatchForExtraction(string gameId)
+    {
+        // No installer means nothing ever extracts (KnockBox:Packages=false), so there is nothing to wait
+        // for — and waiting anyway would stall every job for the full timeout.
+        if (installer is null) return new ExtractionWatch(this, gameId, null);
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _awaitingExtraction[gameId] = completion;
+        return new ExtractionWatch(this, gameId, completion);
+    }
+
+    /// <summary>Handles <see cref="GamePackageInstaller.Installed"/>; subscribed in the constructor.</summary>
+    private void NoteExtracted(string gameId)
+    {
+        if (_awaitingExtraction.TryRemove(gameId, out var completion)) completion.TrySetResult();
+    }
+
+    /// <summary>One pending extraction wait. Disposing it deregisters, whatever the outcome.</summary>
+    private sealed class ExtractionWatch(PackageManager owner, string gameId, TaskCompletionSource? completion)
+        : IDisposable
+    {
+        /// <summary>True once the extraction is observed; false when the wait timed out.</summary>
+        public async Task<bool> WaitAsync()
+        {
+            if (completion is null) return true;
+            return await Task.WhenAny(completion.Task, Task.Delay(ExtractionWait)).ConfigureAwait(false)
+                == completion.Task;
+        }
+
+        public void Dispose()
+        {
+            if (completion is not null)
+                owner._awaitingExtraction.TryRemove(
+                    new KeyValuePair<string, TaskCompletionSource>(gameId, completion));
+        }
+    }
 
     /// <summary>Whether portal installs are possible at all, and why not when they aren't.</summary>
     public string? InstallBlockedReason()
@@ -138,7 +236,12 @@ public sealed class PackageManager(
                 while ((read = await body.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
                 {
                     total += read;
-                    if (total > limits.MaxBytes) throw new PackageTooLargeException(limits.MaxBytes);
+                    // `> 0` per GamePackageLimits' own convention that a non-positive value disables that
+                    // individual check (GamePackageReader applies it the same way). Without it,
+                    // MaxPackageBytes=0 — which the docs present as "no limit" — refused every upload at
+                    // its first byte, complaining about a 0-byte limit.
+                    if (limits.MaxBytes > 0 && total > limits.MaxBytes)
+                        throw new PackageTooLargeException(limits.MaxBytes);
                     await file.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -180,6 +283,18 @@ public sealed class PackageManager(
         {
             staged.Dispose();
             return PackageJobStart.No(PackageRefusal.Invalid, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            // Belt and braces behind the specific catch above. Reading an archive somebody uploaded touches
+            // ZIP, Brotli and JSON, and the cost of having missed one exception type here is not just a 500
+            // with no reason — it is skipping staged.Dispose() and stranding a file that may be hundreds of
+            // megabytes in .staging until the process restarts. Whether we enumerated every type correctly
+            // should not decide that.
+            logger.LogError(ex, "Unexpected failure inspecting an uploaded package.");
+            staged.Dispose();
+            return PackageJobStart.No(PackageRefusal.Invalid,
+                $"The package could not be read ({ex.Message}).");
         }
 
         var refusal = CheckReplaceable(identity.Id);
@@ -356,6 +471,15 @@ public sealed class PackageManager(
             return PackageJobStart.No(PackageRefusal.Invalid,
                 $"The retained version of '{id}' can no longer be installed: {ex.Message}");
         }
+        catch (Exception ex)
+        {
+            // A backup that rotted on disk is precisely the case this path exists to survive, so it must
+            // not depend on having named every way a corrupt archive can fail. See StartInstallFromFile.
+            logger.LogError(ex, "Unexpected failure inspecting the retained package for '{GameId}'.", id);
+            staged.Dispose();
+            return PackageJobStart.No(PackageRefusal.Invalid,
+                $"The retained version of '{id}' could not be read ({ex.Message}).");
+        }
 
         var job = jobs.Create(PackageJobKind.Rollback, PackageJobSource.Backup, id,
             installed.Manifest.Name, installed.Manifest.Version, identity.Version, mode);
@@ -394,15 +518,7 @@ public sealed class PackageManager(
             var token = jobs.TokenFor(job.JobId);
             try
             {
-                await _installSlots.WaitAsync(token).ConfigureAwait(false);
-                try
-                {
-                    await ApplyAsync(job, staged, identity, consumedBackup, token).ConfigureAwait(false);
-                }
-                finally
-                {
-                    _installSlots.Release();
-                }
+                await ApplyAsync(job, staged, identity, consumedBackup, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -425,21 +541,61 @@ public sealed class PackageManager(
         PackageJob job, StagedPackage staged, PackageIdentity identity, string? consumedBackup,
         CancellationToken cancellationToken)
     {
+        // The lobby wait comes BEFORE the install slot. A drain-mode job waits here for as long as one
+        // lobby keeps playing, which is open-ended by design — holding the slot across it meant a single
+        // draining game left every unrelated install, update and rollback sitting in Queued behind it, on
+        // the default MaxConcurrentInstalls of 1. The slot bounds bandwidth and peak disk; waiting for
+        // players to finish consumes neither.
         if (!await WaitForLobbiesAsync(job, cancellationToken).ConfigureAwait(false)) return;
 
-        lifecycle.Enter(job.GameId, GameLifecycle.Updating);
-        jobs.SetStatus(job.JobId, PackageJobStatus.Applying, "Installing files.");
+        await _installSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lifecycle.Enter(job.GameId, GameLifecycle.Updating);
+            jobs.SetStatus(job.JobId, PackageJobStatus.Applying, "Installing files.");
 
-        var warning = Place(job.GameId, staged.Path, identity, consumedBackup);
-
-        jobs.Finish(job.JobId, PackageJobStatus.Succeeded,
-            job.Kind switch
+            // Registered before Place, not after: Place ends with ScheduleRescan, and the installer's pass
+            // can complete before this thread gets another slice. Subscribing afterwards would miss it and
+            // then wait out the full timeout for something that had already happened.
+            var extracted = WatchForExtraction(job.GameId);
+            string? warning;
+            try
             {
-                PackageJobKind.Rollback => $"Rolled back to {identity.Version ?? "the retained version"}.",
-                PackageJobKind.Update => $"Updated to {identity.Version ?? "the new version"}.",
-                _ => "Installed.",
-            },
-            warning: warning);
+                warning = Place(job.GameId, staged.Path, identity, consumedBackup, job.FromVersion);
+            }
+            catch
+            {
+                extracted.Dispose();
+                throw;
+            }
+
+            using (extracted)
+            {
+                jobs.SetStatus(job.JobId, PackageJobStatus.Applying, "Extracting files.");
+                if (!await extracted.WaitAsync().ConfigureAwait(false))
+                {
+                    logger.LogWarning(
+                        "Placed the package for '{GameId}' but did not observe it extracted within {Wait}.",
+                        job.GameId, ExtractionWait);
+                    const string late = "The package was installed, but the server has not yet seen it " +
+                        "extracted — players may be served the previous build until it is.";
+                    warning = warning is null ? late : $"{warning} {late}";
+                }
+            }
+
+            jobs.Finish(job.JobId, PackageJobStatus.Succeeded,
+                job.Kind switch
+                {
+                    PackageJobKind.Rollback => $"Rolled back to {identity.Version ?? "the retained version"}.",
+                    PackageJobKind.Update => $"Updated to {identity.Version ?? "the new version"}.",
+                    _ => "Installed.",
+                },
+                warning: warning);
+        }
+        finally
+        {
+            _installSlots.Release();
+        }
     }
 
     /// <summary>
@@ -526,7 +682,9 @@ public sealed class PackageManager(
     /// happens on the next pass rather than the one after it.</item>
     /// </list>
     /// </remarks>
-    private string? Place(string gameId, string stagedPath, PackageIdentity identity, string? consumedBackup)
+    private string? Place(
+        string gameId, string stagedPath, PackageIdentity identity, string? consumedBackup,
+        string? replacedVersion)
     {
         var target = ManagedPackageLayout.PackagePath(paths.GamesManagedRoot, gameId);
         string? warning = null;
@@ -535,7 +693,11 @@ public sealed class PackageManager(
         {
             try
             {
-                var previous = InstalledVersion(gameId);
+                // The version recorded when the JOB was created, not whatever the catalog reports now.
+                // The catalog lags a placement by a rescan, so back-to-back updates inside one debounce
+                // window would label the second backup with the version the first one replaced — and that
+                // label is the only thing an operator has to pick a rollback target by.
+                var previous = replacedVersion;
                 Directory.CreateDirectory(ManagedPackageLayout.BackupDir(paths.GamesManagedRoot, gameId));
                 File.Copy(target, BackupPath(gameId, previous), overwrite: true);
             }
@@ -716,9 +878,6 @@ public sealed class PackageManager(
             throw new GamePackageException($"it could not be read ({ex.Message}).");
         }
     }
-
-    private string? InstalledVersion(string gameId) =>
-        catalog.GameLocations.TryGetValue(gameId, out var location) ? location.Manifest.Version : null;
 
     private static string Describe(Exception ex) => ex switch
     {

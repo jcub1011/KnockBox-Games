@@ -289,14 +289,29 @@ public static class GamePackageReader
         // being allowed to expand freely — declared sizes are attacker-controlled (see CopyCounted).
         var chunk = new byte[8192];
         int read;
-        while ((read = source.Read(chunk, 0, chunk.Length)) > 0)
+        try
         {
-            buffer.Write(chunk, 0, read);
-            if (buffer.Length > MaxManifestBytes)
+            while ((read = source.Read(chunk, 0, chunk.Length)) > 0)
             {
-                throw new GamePackageException(
-                    $"{GamePackage.ManifestEntryName} expands past the {MaxManifestBytes}-byte limit.");
+                buffer.Write(chunk, 0, read);
+                if (buffer.Length > MaxManifestBytes)
+                {
+                    throw new GamePackageException(
+                        $"{GamePackage.ManifestEntryName} expands past the {MaxManifestBytes}-byte limit.");
+                }
             }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+        {
+            // BOTH types, because the two codecs disagree: a corrupt deflate stream throws
+            // InvalidDataException while BrotliStream throws InvalidOperationException ("Decoder ran into
+            // invalid data"). Neither is a GamePackageException or an IOException, so both sailed past
+            // every caller's catch — surfacing as an unhandled 500 with nothing an operator could act on,
+            // and skipping the cleanup those catch blocks do. This method already documents
+            // GamePackageException for "corrupt"; honour that, the same way OpenArchive maps ZipFile's.
+            throw new GamePackageException(
+                $"{GamePackage.ManifestEntryName} could not be decompressed ({ex.Message}); " +
+                "the package is corrupt.");
         }
 
         return buffer.ToArray();
@@ -336,13 +351,22 @@ public static class GamePackageReader
 
             long copied;
             byte[] hash;
-            using (var entryStream = file.Entry.Open())
-            using (Stream source = file.Brotli ? new BrotliStream(entryStream, CompressionMode.Decompress) : entryStream)
-            using (var output = File.Create(target))
-            using (var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            try
             {
+                using var entryStream = file.Entry.Open();
+                using Stream source = file.Brotli ? new BrotliStream(entryStream, CompressionMode.Decompress) : entryStream;
+                using var output = File.Create(target);
+                using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 copied = CopyCounted(source, output, hasher, limits.MaxBytes, total, file.LogicalPath, cancellationToken);
                 hash = hasher.GetHashAndReset();
+            }
+            catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+            {
+                // Same mapping, and the same two types, as ReadManifestBytes: a corrupt compressed payload
+                // must reach the caller as the package-level failure it is, so the install job reports a
+                // reason instead of dying on an exception nobody catches.
+                throw new GamePackageException(
+                    $"'{file.LogicalPath}' could not be decompressed ({ex.Message}); the package is corrupt.");
             }
             total += copied;
 

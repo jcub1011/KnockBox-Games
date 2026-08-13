@@ -30,8 +30,14 @@ WORKDIR /app
 # It needs its own dir because the service's default (next to the binary, /app) is root-owned while the
 # app runs as $APP_UID — the write would fail — and /app lives inside the image, so the password would
 # be lost on every image update. Mount a volume here to persist it (see docker-compose.yml).
-RUN mkdir -p /games /app/logs /app/games-compressed /app/games-unpacked /app/data \
-    && chown $APP_UID /app/logs /app/games-compressed /app/games-unpacked /app/data
+#
+# /app/games-managed holds packages the ADMIN PORTAL installed (marketplace downloads and uploads) plus
+# the previous versions retained for rollback. Created and owned here for the same reason as /app/data —
+# /app itself is root-owned, so the app user cannot make it at startup — and, like /app/data, it is NOT
+# regenerable: a marketplace package can be fetched again, an uploaded one exists nowhere else. Mount a
+# volume here (compose does) so portal installs survive an image update.
+RUN mkdir -p /games /app/logs /app/games-compressed /app/games-unpacked /app/games-managed /app/data \
+    && chown $APP_UID /app/logs /app/games-compressed /app/games-unpacked /app/games-managed /app/data
 USER $APP_UID
 # Three plain-HTTP ports keep the three-origin model working with no proxy: 8080 = shell, 8081 = games
 # origin, 8082 = admin portal. Map the first two 1:1 on the host (or set KnockBox__GamesOrigin) — the
@@ -45,6 +51,7 @@ ENV KnockBox__GamesRoot=/games \
     KnockBox__LogsRoot=/app/logs \
     KnockBox__GamesCompressedRoot=/app/games-compressed \
     KnockBox__GamesUnpackedRoot=/app/games-unpacked \
+    KnockBox__GamesManagedRoot=/app/games-managed \
     KnockBox__GamesPort=8081 \
     KnockBox__GamesPollSeconds=10 \
     KnockBox__AdminPort=8082 \

@@ -54,6 +54,7 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminInstallRequest))]
 [JsonSerializable(typeof(AdminUpdatePolicyRequest))]
 [JsonSerializable(typeof(AdminSourceRequest))]
+[JsonSerializable(typeof(AdminSourceEnabledRequest))]
 [JsonSerializable(typeof(AdminLimitsRequest))]
 [JsonSerializable(typeof(AdminRoomCodesRequest))]
 [JsonSerializable(typeof(AdminAnnouncementRequest))]

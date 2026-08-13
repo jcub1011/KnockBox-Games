@@ -465,11 +465,31 @@ describe('versionAction', () => {
   });
 
   it('refuses when the deployment cannot install at all', () => {
-    const action = versionAction(
-      { ...installed, installBlockedReason: 'the managed folder is not writable' }, '1.3.0');
+    // Passed IN, not read off the entry: the block reason is a property of the response (the managed root
+    // is unwritable for every game or none of them), and no such field is ever sent on an entry. Reading
+    // it from the entry made this branch unreachable in production while a test like this still passed.
+    const action = versionAction(installed, '1.3.0', 'the managed folder is not writable');
 
     expect(action.kind).toBe('none');
     expect(action.blockedReason).toMatch(/not writable/);
+  });
+
+  it('ignores a block reason on the entry, which the server never sends there', () => {
+    const action = versionAction(
+      { ...installed, installBlockedReason: 'the managed folder is not writable' }, '1.3.0');
+
+    expect(action.kind).toBe('update');
+    expect(action.blockedReason).toBe(null);
+  });
+
+  it('refuses to reinstall a game no source offers, instead of posting a request that must 404', () => {
+    // An upload, or a withdrawn catalog entry: the install route resolves the id out of the fetched
+    // catalogs, so "Reinstall" here could only ever fail.
+    const action = versionAction(
+      { ...installed, status: 'installedOnly', availableVersion: null }, '1.2.0');
+
+    expect(action.kind).toBe('none');
+    expect(action.blockedReason).toMatch(/upload/i);
   });
 });
 

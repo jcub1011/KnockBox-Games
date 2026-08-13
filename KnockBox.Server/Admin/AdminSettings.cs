@@ -40,6 +40,13 @@ public enum GameAvailability
 /// marketplace DTOs: this is parsed from a file an operator may have hand-edited, so a missing or
 /// misspelled key must degrade to a default rather than throw.
 /// </remarks>
+/// <param name="OfficialSourceDisabled">
+/// Whether the built-in marketplace is switched off. Recorded by its <em>absence</em> when the source is
+/// enabled — the same convention <see cref="GameAvailability.Available"/> and
+/// <see cref="UpdatePolicy.Manual"/> follow, so the file only ever records what an operator changed. It
+/// cannot live in <c>Sources</c>: that list is the <em>extra</em> marketplaces, and the official one is
+/// built from <c>MarketplaceOptions</c> rather than stored.
+/// </param>
 public sealed record AdminSettings(
     bool MaintenanceMode = false,
     string? MaintenanceMessage = null,
@@ -49,7 +56,8 @@ public sealed record AdminSettings(
     OperatorLimits? Limits = null,
     BannedRoomCodes? RoomCodes = null,
     PlatformAnnouncement? Announcement = null,
-    IReadOnlyList<WebhookEndpoint>? Webhooks = null);
+    IReadOnlyList<WebhookEndpoint>? Webhooks = null,
+    bool OfficialSourceDisabled = false);
 
 /// <summary>
 /// An outbound endpoint the operator registered, and which events it wants (spec §4.2).

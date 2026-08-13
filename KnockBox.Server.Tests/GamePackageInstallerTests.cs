@@ -938,4 +938,62 @@ public class GamePackageInstallerTests : IDisposable
         Assert.Contains("Second", System.IO.File.ReadAllText(Installed("portal", "GAME.json")),
             StringComparison.Ordinal);
     }
+
+    // ── An unreadable root ────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void A_missing_root_does_not_stop_the_other_root_installing()
+    {
+        // A missing root used to abandon the WHOLE pass, so one folder the server could not read — a
+        // managed root whose creation failed at startup, say — silently switched off .kbg hot-drop for
+        // games/ as well. The platform's headline feature, dead behind one non-blocking diagnostic.
+        var installer = New();
+        Directory.Delete(_managedRoot, recursive: true);
+        Drop("demo.kbg", PackageFixture.Valid("demo", "Demo"));
+
+        Assert.True(RunToCompletion(installer));
+
+        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")));
+        // And it is REPORTED rather than only logged: this string reaches the deployment-warning page.
+        Assert.Contains("could not be read", installer.InstallFailure ?? "", StringComparison.Ordinal);
+        Assert.Contains(_managedRoot, installer.InstallFailure ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_game_installed_from_a_root_that_vanishes_is_left_alone_rather_than_uninstalled()
+    {
+        // This is why skipping the root is not the same as ignoring it. "The folder is unreadable" and
+        // "every package in it was deleted" are indistinguishable from the pass's point of view, and only
+        // one of them should cost players a game that is working perfectly well.
+        var installer = New();
+        DropManaged("portal.kbg", PackageFixture.Valid("portal", "Portal"));
+        Drop("demo.kbg", PackageFixture.Valid("demo", "Demo"));
+        RunToCompletion(installer);
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+
+        Directory.Delete(_managedRoot, recursive: true);
+        // Well past the two passes it takes to uninstall a package that is genuinely gone.
+        for (var i = 0; i < 6; i++) installer.Reconcile();
+
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+    }
+
+    [Fact]
+    public void A_package_genuinely_removed_from_a_healthy_root_is_still_uninstalled()
+    {
+        // The counterpart to the test above: protecting a blind root must not have switched uninstall off
+        // for the roots the pass can actually see.
+        var installer = New();
+        DropManaged("portal.kbg", PackageFixture.Valid("portal", "Portal"));
+        Drop("demo.kbg", PackageFixture.Valid("demo", "Demo"));
+        RunToCompletion(installer);
+
+        Directory.Delete(_managedRoot, recursive: true);
+        System.IO.File.Delete(Path.Combine(_gamesRoot, "demo.kbg"));
+        for (var i = 0; i < 6; i++) installer.Reconcile();
+
+        Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+    }
 }

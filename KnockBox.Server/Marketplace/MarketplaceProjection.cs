@@ -74,15 +74,25 @@ public static class MarketplaceProjection
             {
                 var plugin = status.Entry;
                 var id = plugin.Id ?? "";
-                if (id.Length == 0) continue;
 
-                var shadowedBy = claimed.GetValueOrDefault(id);
-                if (shadowedBy is null) claimed[id] = source.Source.Id;
+                // An entry with no id is KEPT, as the Unusable row the evaluator already made it. Dropping
+                // it here silently un-did that decision: a malformed catalog entry is exactly what a
+                // publisher needs to be told about, and a page that just doesn't show their game reads as
+                // this server's fault. It claims no id (there is none to claim, and every such row across
+                // every source would otherwise collide on ""), and versionAction refuses to act on an
+                // unusable row, so the card renders with its reason and a disabled button.
+                var shadowedBy = id.Length == 0 ? null : claimed.GetValueOrDefault(id);
+                if (id.Length > 0 && shadowedBy is null) claimed[id] = source.Source.Id;
 
                 installed.TryGetValue(id, out var location);
                 rows.Add(new MarketplaceEntry(
                     id,
-                    plugin.Name ?? id,
+                    // Blank counts as absent, not just null — the fallback exists so a row always has
+                    // something to render, and an empty string reads as a rendering bug rather than as
+                    // the malformed entry it is. An id-less entry has no id to fall back to either.
+                    string.IsNullOrWhiteSpace(plugin.Name)
+                        ? (id.Length > 0 ? id : "(unnamed entry)")
+                        : plugin.Name,
                     plugin.Description,
                     plugin.Author?.Name,
                     plugin.Tags,

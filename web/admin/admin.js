@@ -112,8 +112,19 @@ async function getJson(path) {
  *
  * The JSON content type is always sent because the server's mutation guard requires it — a plain form
  * post is the one shape SameSite=Strict historically leaked on, so the API refuses anything else.
+ *
+ * `errorEl` redirects the failure message into an inline element instead of a toast. A form's rejection
+ * belongs beside the fields that caused it and has to stay on screen while they are corrected, which a
+ * toast that fades cannot do.
  */
-async function postJson(path, body) {
+async function postJson(path, body, { errorEl = null } = {}) {
+  const fail = (message) => {
+    if (!errorEl) { toast(message, 'error'); return false; }
+    errorEl.textContent = message;
+    errorEl.classList.remove('hidden');
+    return false;
+  };
+
   try {
     const res = await request(path, {
       method: 'POST',
@@ -123,9 +134,9 @@ async function postJson(path, body) {
     if (!res) return false;
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.success) {
-      toast(data?.error || `That didn't work (${res.status}).`, 'error');
-      return false;
+      return fail(data?.error || `That didn't work (${res.status}).`);
     }
+    if (errorEl) errorEl.classList.add('hidden');
     // Success with something worth saying: `detail` explains what the action did and did not do (chiefly
     // that disabling a game leaves its running lobbies alone), `warning` that a policy change is live but
     // wasn't written to disk.
@@ -133,9 +144,8 @@ async function postJson(path, body) {
     else toast(data.detail || 'Done.', 'success');
     return true;
   } catch (err) {
-    toast('Network error.', 'error');
     console.error(`POST ${path} failed:`, err);
-    return false;
+    return fail('Network error.');
   }
 }
 
@@ -322,8 +332,16 @@ const GRAPHS = [
 ];
 
 function applyHistory(data) {
+  // The server's sequence is authoritative, not a high-water mark of what we have seen. MetricHistory is
+  // in-memory, so a restart begins numbering at 1 again — and clamping upward meant every subsequent
+  // `?after=<pre-restart seq>` matched nothing and all four graphs froze on the old picture until
+  // somebody reloaded the page. That is exactly the moment an operator is watching them. A sequence that
+  // went BACKWARDS is the restart signal: drop the samples from the previous process rather than drawing
+  // them continuously with the new ones, which would show a gap that never happened.
+  const sequence = Number(data.lastSequence) || 0;
+  if (sequence < historyCursor) historySamples = [];
+  historyCursor = sequence;
   historySamples = mergeSamples(historySamples, data.samples, data.capacity || 240);
-  historyCursor = Math.max(historyCursor, Number(data.lastSequence) || 0);
 
   el('history-badge').textContent = data.enabled ? `${historySamples.length} samples` : 'Off';
   el('history-note').textContent = data.enabled
@@ -1122,7 +1140,9 @@ function marketplaceCard(entry) {
   action.type = 'button';
   action.className = 'btn btn-small mkt-action';
   const refresh = () => {
-    const decided = versionAction(entry, version.value);
+    // The block reason is response-level, not per entry — see versionAction.
+    const decided = versionAction(entry, version.value,
+      catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
     action.textContent = decided.label;
     action.className = `btn btn-small mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
     action.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
@@ -1351,7 +1371,13 @@ function startUpload() {
     uploadXhr = null;
     el('upload-submit').disabled = false;
     el('upload-abort').classList.add('hidden');
-    if (xhr.status === 401) { handleUnauthorized(); return; }
+    // Close the dialog BEFORE the login form goes up: handleUnauthorized swaps the page over, and the
+    // upload backdrop would otherwise sit on top of it with nothing to dismiss it.
+    if (xhr.status === 401) {
+      el('upload-backdrop').classList.add('hidden');
+      handleUnauthorized();
+      return;
+    }
 
     let body = null;
     try { body = JSON.parse(xhr.responseText); } catch { /* a non-JSON error page */ }
@@ -1420,9 +1446,26 @@ function renderSources() {
 
     const count = document.createElement('span');
     count.className = 'badge badge-muted';
-    count.textContent = source.error ? 'unreachable' : `${source.entries} game(s)`;
+    // A disabled source is never fetched, so "0 game(s)" would read as an empty catalog rather than as
+    // one nobody asked for.
+    if (source.enabled === false) count.textContent = 'disabled';
+    else count.textContent = source.error ? 'unreachable' : `${source.entries} game(s)`;
     if (source.error) count.title = source.error;
     row.appendChild(count);
+
+    // Every source can be switched off without losing its configuration — and for the built-in one this
+    // is the ONLY control, since it can't be removed.
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'btn btn-small source-toggle';
+    toggle.textContent = source.enabled === false ? 'Enable' : 'Disable';
+    toggle.onclick = async () => {
+      const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
+      if (await postJson(url, { enabled: source.enabled === false })) {
+        refreshCatalog({ refresh: true });
+      }
+    };
+    row.appendChild(toggle);
 
     if (!source.builtIn) {
       const remove = document.createElement('button');
@@ -1448,15 +1491,14 @@ async function addSource() {
     downloadBaseUrl: el('mkt-source-download').value.trim() || 'https://github.com',
   };
   // The URL rule is NOT re-implemented here: it lives in MarketplaceClient, and a second copy in JS is
-  // exactly the drift this codebase avoids. The server's message is what the operator sees.
-  if (await postJson('/admin/api/marketplace/sources', body)) {
+  // exactly the drift this codebase avoids. The server's message is what the operator sees — shown beside
+  // the form it rejected, since that is where the field they have to fix is.
+  if (await postJson('/admin/api/marketplace/sources', body, { errorEl: el('mkt-settings-error') })) {
     for (const id of ['mkt-source-id', 'mkt-source-name', 'mkt-source-url', 'mkt-source-download']) {
       el(id).value = '';
     }
     await refreshCatalog({ refresh: true });
     renderSources();
-  } else {
-    el('mkt-settings-error').classList.add('hidden');
   }
 }
 

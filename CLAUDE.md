@@ -339,6 +339,13 @@ is), and must be absent for two passes before its game is uninstalled (so delete
 drop a live game). `Reconcile()` returns `Pending` for both of those deferrals — the caller must
 rescan, or that work stalls until an unrelated file event arrives.
 
+A **missing or unreadable package root is skipped, not fatal to the pass.** The hazard the old
+whole-pass bail guarded against is real but narrow — an unreadable root is indistinguishable from every
+package in it having been deleted — so it is answered by treating games whose `PackageMarker` names that
+root as live (never uninstalled) while the healthy roots install and uninstall normally, and by reporting
+it through `InstallFailure` so it reaches the deployment-warning page. Bailing outright meant one bad root
+silently switched off `.kbg` hot-drop for the other one too.
+
 `Games/GamePackageReader.cs` treats packages as untrusted: full validation before any byte is written,
 manual entry iteration (**never** `ZipFile.ExtractToDirectory` — no caps, can't pre-validate, and on
 .NET 7+ it restores the entry's Unix file mode), strict path rules, and byte caps counted **while
@@ -374,6 +381,20 @@ inside one filesystem tick would otherwise look identical and the second would n
 is the likeliest way to hit that). `GamePackageInstaller.Adopt` then vouches for the file so it installs
 on the next pass rather than waiting out the two-pass settle check, which exists for copy-in and has no
 bearing on an atomic rename.
+
+**Placing is not installing, and the lifecycle gate spans both.** `Place` only renames the `.kbg` and asks
+for a rescan; the extraction — and `SwapIntoPlace` moving the live directory aside — happens on a later
+installer pass. So `ApplyAsync` waits on `GamePackageInstaller.Installed` (a new event, raised only for a
+real extraction) before finishing the job and releasing `GameLifecycleGate`. Releasing it at the end of
+`Place` meant a force update closed every lobby, reported success, re-opened the game, and served a player
+who started a lobby in that window the **old** build — then 404s mid-session as it was swapped underneath
+them, which is the exact outcome force and drain exist to prevent. The wait is bounded
+(`PackageManager.ExtractionWait`) and times out into a job *warning* rather than holding the gate forever:
+those states are never persisted precisely so a game can't be left permanently unstartable. `PackageManager`
+subscribes in its own constructor rather than from `Program.cs` — its correctness depends on the event, and
+a class must not need external wiring to reach its own invariant. The install **slot** is taken *after*
+`WaitForLobbiesAsync`, not around it: a drain wait is open-ended, and holding the single slot across it left
+every unrelated install queued behind one draining game.
 
 **Jobs, not blocking requests** — a download plus extraction outlives any request and a drain is
 open-ended, so every operation answers `202` + `jobId` and the portal polls a cursor change feed. This is

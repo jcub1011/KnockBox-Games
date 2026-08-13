@@ -177,5 +177,21 @@ export function stubClipboard({ fail = false } = {}) {
   return writeText;
 }
 
-// Lets a microtask/await chain settle (request→reply resolution, themeHeader's awaited sampling).
-export const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * Lets a microtask/await chain settle (request→reply resolution, themeHeader's awaited sampling).
+ *
+ * Works under both clocks, which is what lets a whole describe block opt into fake timers without
+ * rewriting every helper that awaits one of these. A plain `setTimeout(0)` never fires once
+ * `vi.useFakeTimers()` has replaced the timer functions; the workaround used to be
+ * `useFakeTimers({ shouldAdvanceTime: true })`, a hybrid clock that also advances with real time — and
+ * that reintroduces precisely the wall-clock sensitivity fake timers exist to remove. The launch overlay
+ * arms real 300–420 ms timers (the morph and its safety net), so on a loaded machine one could fire
+ * between an event being dispatched and the assertion about it. That is why those tests failed roughly
+ * one run in four, only as part of the full suite, and never on their own.
+ *
+ * `advanceTimersByTimeAsync(0)` drains the queued zero-delay callbacks on the fake clock and yields to
+ * the microtask queue between them, so an await chain settles with no real time passing at all.
+ */
+export const tick = () => (vi.isFakeTimers()
+  ? vi.advanceTimersByTimeAsync(0)
+  : new Promise((resolve) => setTimeout(resolve, 0)));

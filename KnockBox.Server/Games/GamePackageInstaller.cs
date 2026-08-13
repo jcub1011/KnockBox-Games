@@ -108,6 +108,28 @@ public sealed class GamePackageInstaller(
     /// </summary>
     internal int TrackedPackages => _lastSeen.Count + _quarantined.Count + _installedIds.Count;
 
+    /// <summary>
+    /// Raised with a game id the moment its files have actually been extracted and swapped into place.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="GameCatalog.Discovered"/>, which says the catalog has been re-read — a
+    /// pass in which nothing was extracted still fires that. The one caller that needs this precision is
+    /// <see cref="PackageManager"/>: placing a package only renames the <c>.kbg</c> and asks for a rescan,
+    /// so without a signal at THIS point an update reported success, released the game's lifecycle gate,
+    /// and let a player start a lobby on the old build moments before the directory was swapped under it.
+    ///
+    /// Raised on the (serialized) reconcile thread, so a handler must not block; the only one completes a
+    /// <c>TaskCompletionSource</c>. A throwing handler is contained here rather than being allowed to
+    /// abandon the rest of the pass.
+    /// </remarks>
+    public event Action<string>? Installed;
+
+    private void OnInstalled(string gameId)
+    {
+        try { Installed?.Invoke(gameId); }
+        catch (Exception ex) { logger.LogError(ex, "An Installed handler threw; continuing."); }
+    }
+
     /// <summary>The outcome of a pass, and whether another one is owed.</summary>
     /// <param name="Changed">Something was installed or uninstalled: the catalog should rediscover.</param>
     /// <param name="Pending">
@@ -165,14 +187,26 @@ public sealed class GamePackageInstaller(
         DrainAdoptions();
 
         // Materialize eagerly so an access failure throws HERE. Pruning on a failed listing would read
-        // "no packages exist" and uninstall the entire library over a transient permissions problem, so
-        // this must return before the prune step rather than continuing with an empty list. A root that
-        // is merely MISSING is the same hazard for the same reason — it is indistinguishable from every
-        // package in it having been deleted — so it bails too.
+        // "no packages exist" and uninstall the entire library over a transient permissions problem. A
+        // root that is merely MISSING is the same hazard for the same reason — it is indistinguishable
+        // from every package in it having been deleted.
+        //
+        // But that hazard is confined to the games installed FROM the unreadable root, so it is answered
+        // by protecting those (see `blindRoots` at the uninstall step) rather than by abandoning the whole
+        // pass. Abandoning it meant one root the server could not read — a games-managed folder whose
+        // creation failed at startup, say — silently switched off `.kbg` hot-drop for the other root as
+        // well, leaving the platform's headline feature dead behind a single non-blocking diagnostic.
         var packages = new List<(string Path, string Root)>();
+        var blindRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unreadable = new List<string>();
         foreach (var root in roots)
         {
-            if (!Directory.Exists(root.Path)) return default;
+            if (!Directory.Exists(root.Path))
+            {
+                blindRoots.Add(root.Token);
+                unreadable.Add($"'{root.Path}' does not exist");
+                continue;
+            }
 
             List<string> found;
             try
@@ -181,9 +215,11 @@ public sealed class GamePackageInstaller(
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                logger.LogError(ex, "Cannot list game packages in {Path}; leaving installed packages untouched.",
+                logger.LogError(ex, "Cannot list game packages in {Path}; leaving its installed packages untouched.",
                     root.Path);
-                return default;
+                blindRoots.Add(root.Token);
+                unreadable.Add($"'{root.Path}' could not be listed ({ex.Message})");
+                continue;
             }
 
             // Sorted WITHIN each root and appended in root order, rather than one sort across all of
@@ -256,15 +292,21 @@ public sealed class GamePackageInstaller(
             }
         }
 
-        var uninstall = Uninstall(live);
+        var uninstall = Uninstall(live, blindRoots);
         changed |= uninstall.Changed;
         pending |= uninstall.Pending;
 
         Forget(packages, seenPaths);
 
-        InstallFailure = failures.Count == 0
-            ? null
-            : $"{failures.Count} game package(s) could not be installed — {string.Join("; ", failures)}";
+        // An unreadable root is reported alongside a malformed package rather than only logged: both mean
+        // "a game you expect to be here isn't", and this is the string the deployment-warning page shows.
+        var problems = new List<string>();
+        if (failures.Count > 0)
+            problems.Add($"{failures.Count} game package(s) could not be installed — {string.Join("; ", failures)}");
+        if (unreadable.Count > 0)
+            problems.Add($"{unreadable.Count} package folder(s) could not be read — {string.Join("; ", unreadable)}. " +
+                "Games installed from them are left in place, but nothing there can be installed or removed.");
+        InstallFailure = problems.Count == 0 ? null : string.Join(" ", problems);
         return new ReconcileResult(changed, pending);
     }
 
@@ -406,6 +448,11 @@ public sealed class GamePackageInstaller(
 
             _installedIds[path] = id;
             Seed(plan, id, target);
+            // Raised only for a real extraction — the two "already installed and current" fast paths above
+            // return before this. PackageManager holds the game's lifecycle gate closed until it fires, so
+            // an update stays unlaunchable until the new files are the ones being served rather than only
+            // until the .kbg was renamed into place.
+            OnInstalled(id);
             return new ReconcileResult(Changed: true, Pending: false);
         }
         finally
@@ -550,7 +597,14 @@ public sealed class GamePackageInstaller(
     /// well as name so a "demo.kbg" appearing in one root does not vouch for an extracted game that came
     /// from a same-named package in the other.
     /// </param>
-    private ReconcileResult Uninstall(HashSet<string> live)
+    /// <param name="blindRoots">
+    /// Root tokens this pass could not read at all. A game installed from one of them is left alone
+    /// unconditionally: "the folder is unreadable" and "every package in it was deleted" look identical
+    /// from here, and only one of those should cost players their game. This is what lets an unreadable
+    /// root be skipped instead of abandoning the whole pass — the healthy roots still install and
+    /// uninstall normally.
+    /// </param>
+    private ReconcileResult Uninstall(HashSet<string> live, HashSet<string> blindRoots)
     {
         if (!Directory.Exists(unpackedRoot)) return default;
 
@@ -577,7 +631,8 @@ public sealed class GamePackageInstaller(
             // No marker means this folder was not put here by a completed install (a crash mid-swap, or
             // something an operator dropped into a server-owned cache). Either way it is not ours to
             // keep, but it still goes through the same patience as a vanished package.
-            if (marker is { } found && live.Contains(LiveKey(found.Root, found.Source)))
+            if (marker is { } found
+                && (live.Contains(LiveKey(found.Root, found.Source)) || blindRoots.Contains(found.Root)))
             {
                 _absentPasses.Remove(name);
                 continue;

@@ -379,8 +379,14 @@ export function versionOptions(entry) {
  *
  * `blockedReason` is set when the row cannot be acted on at all; the caller disables the button and uses
  * the reason as its tooltip, the same pattern the games tab already uses for a non-deletable game.
+ *
+ * `installBlocked` is the DEPLOYMENT-level reason nothing can be installed at all (an unwritable managed
+ * root, packages switched off). It is a property of the response, not of an entry — the server reports it
+ * once as `installBlockedReason` alongside `canInstall` — so the caller has to pass it in. Reading it off
+ * `entry` instead, as this used to, silently never matched: no such field is ever sent on an entry, so on
+ * a deployment that cannot install anything every card offered an enabled button that could only fail.
  */
-export function versionAction(entry, selected) {
+export function versionAction(entry, selected, installBlocked = null) {
   if (!entry) return { kind: 'none', label: 'Install', danger: false, blockedReason: 'Nothing selected.' };
 
   if (entry.status === 'incompatible' || entry.status === 'unusable') {
@@ -391,8 +397,8 @@ export function versionAction(entry, selected) {
       blockedReason: entry.reason || pluginStatusHint(entry.status),
     };
   }
-  if (entry.installBlockedReason) {
-    return { kind: 'none', label: 'Install', danger: false, blockedReason: entry.installBlockedReason };
+  if (installBlocked) {
+    return { kind: 'none', label: 'Install', danger: false, blockedReason: installBlocked };
   }
 
   const options = versionOptions(entry);
@@ -409,6 +415,18 @@ export function versionAction(entry, selected) {
     return { kind: 'rollback', label: 'Roll back', danger: true, blockedReason: null };
   }
   if (target.kind === 'installed' || (target.version ?? '') === (entry.installedVersion ?? '')) {
+    // A reinstall re-fetches from the source that offers the game — and `installedOnly` means no enabled
+    // source offers it (an upload, or an entry that was withdrawn). The install route resolves the id out
+    // of the fetched catalogs, so the button could only ever produce a 404. Say why instead.
+    if (entry.status === 'installedOnly') {
+      return {
+        kind: 'none',
+        label: 'Reinstall',
+        danger: false,
+        blockedReason: 'No enabled marketplace offers this game, so there is nothing to reinstall from. '
+          + 'Upload the package again to replace it.',
+      };
+    }
     return { kind: 'reinstall', label: 'Reinstall', danger: false, blockedReason: null };
   }
   return { kind: 'update', label: 'Update', danger: false, blockedReason: null };

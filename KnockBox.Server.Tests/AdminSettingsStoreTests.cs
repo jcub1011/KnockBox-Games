@@ -1,5 +1,6 @@
 using KnockBox.Server.Admin;
 using KnockBox.Server.Lobbies;
+using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using Microsoft.Extensions.Configuration;
@@ -431,5 +432,65 @@ public class AdminSettingsStoreTests : IDisposable
         Assert.Equal(GameAvailability.Disabled, store.GetAvailability("tictactoe"));
         Assert.NotNull(warning);
         Assert.Contains("restart", warning);
+    }
+
+    [Fact]
+    public void A_null_row_in_a_hand_edited_list_is_dropped_rather_than_crashing_the_server()
+    {
+        // `[null]` is valid JSON and nullable annotations are erased at runtime, so this deserializes to a
+        // list holding a null. Dereferencing it threw an NRE — which is neither IOException nor
+        // JsonException, so it escaped Load()'s catch, out of the constructor, and stopped the host
+        // booting. A hand-edited typo must cost the operator that row, not their server.
+        File.WriteAllText(_settingsPath, """
+            {
+              "maintenanceMode": true,
+              "sources": [null, { "id": "mirror", "name": "Mirror",
+                                  "catalogUrl": "https://example.com/CATALOG.json",
+                                  "downloadBaseUrl": "https://example.com" }],
+              "webhooks": [null, { "id": "ops", "name": "Ops", "url": "https://example.com/hook" }]
+            }
+            """);
+
+        var store = NewStore();
+
+        // The rest of the file still loaded: the bad row is dropped on its own, not with its neighbours.
+        Assert.True(store.MaintenanceMode);
+        Assert.Equal("mirror", Assert.Single(store.Sources).Id);
+        Assert.Equal("ops", Assert.Single(store.Webhooks).Id);
+    }
+
+    [Fact]
+    public void The_official_marketplace_can_be_switched_off_and_stays_off_across_a_restart()
+    {
+        // Two API error messages and the operator guide all say the built-in source is "disable-able but
+        // never removable". Its enabled flag was hard-coded true, so that was advice with nothing behind
+        // it. It has no row in `sources` (it is built from configuration), hence its own key.
+        var store = NewStore();
+        Assert.True(store.OfficialSourceEnabled);
+
+        Assert.True(store.SetSourceEnabled(MarketplaceSourceRegistry.OfficialId, false, out var warning));
+        Assert.Null(warning);
+        Assert.False(store.OfficialSourceEnabled);
+        Assert.False(NewStore().OfficialSourceEnabled);   // survives the restart
+
+        Assert.True(store.SetSourceEnabled(MarketplaceSourceRegistry.OfficialId, true, out _));
+        Assert.True(NewStore().OfficialSourceEnabled);
+    }
+
+    [Fact]
+    public void Disabling_a_registered_source_keeps_its_configuration()
+    {
+        // Disable, not remove: the point is that the URLs survive so it can be switched back on.
+        var store = NewStore();
+        store.UpsertSource(new RegisteredMarketplace(
+            "mirror", "Mirror", "https://example.com/CATALOG.json", "https://example.com"));
+
+        Assert.True(store.SetSourceEnabled("mirror", false, out _));
+
+        var source = Assert.Single(NewStore().Sources);
+        Assert.False(source.Enabled);
+        Assert.Equal("https://example.com/CATALOG.json", source.CatalogUrl);
+
+        Assert.False(store.SetSourceEnabled("nosuch", false, out _));
     }
 }

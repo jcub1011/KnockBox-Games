@@ -275,6 +275,43 @@ public class WebhookDispatcherTests : IDisposable
     }
 
     [Fact]
+    public void Suppressed_is_cumulative_rather_than_being_reset_by_the_alert_that_reports_it()
+    {
+        // The rider on an alert is a since-last-alert delta; the property is the running total the portal
+        // reports. Serving both from one counter meant reading "3 suppressed" after 47 had been.
+        var queue = new WebhookQueue();
+        var logSink = new WebhookLogSink(queue, Options(errorsPerMinute: 1), _time);
+        var sink = (ILogEventSink)logSink;
+
+        for (var i = 0; i < 5; i++) sink.Emit(Event(LogEventLevel.Error, $"boom {i}", "KnockBox"));
+        Assert.Equal(4, logSink.Suppressed);
+
+        _time.Advance(TimeSpan.FromMinutes(1));
+        sink.Emit(Event(LogEventLevel.Error, "again", "KnockBox"));      // reports and clears the delta
+        _time.Advance(TimeSpan.FromMinutes(1));
+        for (var i = 0; i < 3; i++) sink.Emit(Event(LogEventLevel.Error, $"more {i}", "KnockBox"));
+
+        Assert.Equal(6, logSink.Suppressed);   // 4 + 2, never going backwards
+    }
+
+    [Fact]
+    public void Zero_errors_per_minute_means_no_alerts_rather_than_unlimited_ones()
+    {
+        // TokenBucket reads a non-positive rate as "limiting disabled" and lets everything through, which
+        // is right for a throttle and exactly wrong here: 0 is what an operator sets to quieten this, and
+        // handing them every Error event would flood the chat channel they were trying to silence.
+        var queue = new WebhookQueue();
+        var logSink = new WebhookLogSink(queue, Options(errorsPerMinute: 0), _time);
+        var sink = (ILogEventSink)logSink;
+
+        for (var i = 0; i < 25; i++) sink.Emit(Event(LogEventLevel.Error, $"boom {i}", "KnockBox"));
+
+        Assert.Equal(0, queue.Accepted);
+        // Not counted as suppressed either: nothing was skipped under pressure, the feature is just off.
+        Assert.Equal(0, logSink.Suppressed);
+    }
+
+    [Fact]
     public void A_log_event_whose_property_throws_still_produces_an_alert()
     {
         var queue = new WebhookQueue();

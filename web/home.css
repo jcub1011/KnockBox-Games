@@ -793,6 +793,12 @@ body.in-game::after {
     box-shadow: var(--shadow-card-rest);
 }
 
+/* shell.js toggles the banner via the `hidden` attribute (and index.html ships it hidden), so the
+   display rule above has to be undone the same way the Play Log's is — otherwise `display: flex` beats
+   the UA `[hidden] { display: none }` and an empty bordered notice is drawn above the hero on every
+   load, announcement or not. */
+.home-announcement[hidden] { display: none; }
+
 /* The one severity that should catch an eye already looking elsewhere. */
 .home-announcement.severity-warning {
     border-color: var(--banner-yellow);

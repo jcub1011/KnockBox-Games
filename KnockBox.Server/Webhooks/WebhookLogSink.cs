@@ -37,24 +37,38 @@ public sealed class WebhookLogSink : ILogEventSink
 
     private readonly WebhookQueue _queue;
     private readonly TimeProvider _time;
-    private readonly TokenBucket _budget;
+    private readonly TokenBucket? _budget;
     private long _suppressed;
+    private long _suppressedSinceLastAlert;
 
     public WebhookLogSink(WebhookQueue queue, WebhookOptions options, TimeProvider time)
     {
         _queue = queue;
         _time = time;
-        var perMinute = Math.Max(0, options.ErrorsPerMinute);
-        // Burst equal to the rate: a first spike gets through in full, then the refill paces it.
-        _budget = new TokenBucket(perMinute / 60.0, perMinute, time);
+        // A rate of zero means NO error alerts, not unbounded ones. TokenBucket treats a non-positive
+        // rate as "limiting disabled" and lets everything through, which is the right reading for a
+        // *throttle* and exactly the wrong one here: an operator setting this to 0 is muting the
+        // feature, and handing them every Error event in the process would flood the very channel they
+        // were trying to quieten. So the null bucket is the mute, and Emit checks for it.
+        _budget = options.ErrorsPerMinute > 0
+            // Burst equal to the rate: a first spike gets through in full, then the refill paces it.
+            ? new TokenBucket(options.ErrorsPerMinute / 60.0, options.ErrorsPerMinute, time)
+            : null;
     }
 
-    /// <summary>Error events not turned into a notification because of the rate cap. Cumulative.</summary>
+    /// <summary>
+    /// Error events not turned into a notification because of the rate cap. Cumulative — it never
+    /// decreases, so the portal can report it as a total. The rider on the next alert uses a separate
+    /// since-last-alert counter.
+    /// </summary>
     public long Suppressed => Interlocked.Read(ref _suppressed);
 
     void ILogEventSink.Emit(LogEvent logEvent)
     {
         if (logEvent.Level < LogEventLevel.Error) return;
+        // Muted (ErrorsPerMinute <= 0). Not counted as suppressed: nothing was skipped because of
+        // pressure, the feature is simply off.
+        if (_budget is null) return;
 
         var category = SourceContext(logEvent);
         // Guard 1: never report our own failures. See the class remarks.
@@ -65,10 +79,11 @@ public sealed class WebhookLogSink : ILogEventSink
         if (!_budget.TryTake())
         {
             Interlocked.Increment(ref _suppressed);
+            Interlocked.Increment(ref _suppressedSinceLastAlert);
             return;
         }
 
-        var suppressed = Interlocked.Exchange(ref _suppressed, 0);
+        var suppressed = Interlocked.Exchange(ref _suppressedSinceLastAlert, 0);
         var message = Render(logEvent);
         var summary = suppressed > 0
             ? $"{logEvent.Level}: {message} (+{suppressed} more suppressed)"

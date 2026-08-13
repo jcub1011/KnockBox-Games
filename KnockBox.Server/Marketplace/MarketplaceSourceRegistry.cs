@@ -57,8 +57,11 @@ public sealed partial class MarketplaceSourceRegistry(
     /// <summary>Every source, official first, then registration order.</summary>
     public IReadOnlyList<RegisteredMarketplace> Sources =>
     [
+        // Its URLs are configuration, but its enabled flag is operator policy — hard-coding it true made
+        // "disable it instead" (what Validate and the delete route both tell an operator, and what
+        // docs/ADMIN.md documents) impossible to actually do.
         new(OfficialId, "Official KnockBox marketplace", options.CatalogUrl, options.DownloadBaseUrl,
-            Enabled: true),
+            Enabled: settings.OfficialSourceEnabled),
         .. settings.Sources,
     ];
 

@@ -35,6 +35,14 @@ public sealed class RoomCodeFilter
     /// <summary>Longest entry worth storing: nothing longer can occur inside a code.</summary>
     public const int MaxEntryLength = LobbyManager.CodeLength;
 
+    /// <summary>
+    /// Longest <em>pattern</em>: the same limit plus room for the wildcards themselves, which are syntax
+    /// rather than characters a code has to contain (<c>A*B*C</c> is 5 characters and matches 4-character
+    /// codes). <see cref="IsPattern"/> and <see cref="ValidateEntry"/> must agree on this, or the API
+    /// refuses globs the compiler would have accepted.
+    /// </summary>
+    public const int MaxPatternLength = MaxEntryLength + 2;
+
     private readonly string[] _words;
     private readonly string[] _patterns;
 
@@ -60,7 +68,22 @@ public sealed class RoomCodeFilter
     /// Compiles a blocklist, dropping entries that aren't usable rather than rejecting the whole list —
     /// the same discipline the settings file's other rows get, since this may have been hand-edited.
     /// </summary>
-    public static RoomCodeFilter Compile(IEnumerable<string>? words, IEnumerable<string>? patterns)
+    public static RoomCodeFilter Compile(IEnumerable<string>? words, IEnumerable<string>? patterns) =>
+        Compile(words, patterns, out _);
+
+    /// <summary>
+    /// The same compile, reporting how many usable entries had to be dropped to fit
+    /// <see cref="MaxEntries"/>.
+    /// </summary>
+    /// <remarks>
+    /// Two callers with opposite needs, which is why the count is an out parameter rather than a throw.
+    /// LOADING a hand-edited settings file has nobody to tell, so it drops and carries on. The admin API
+    /// does have somebody to tell, and must: it cannot re-derive this from the returned filter, because
+    /// the filter has already been trimmed to the cap — which is what made its own over-cap check
+    /// unreachable and let an over-cap save answer 200 while quietly discarding entries.
+    /// </remarks>
+    public static RoomCodeFilter Compile(
+        IEnumerable<string>? words, IEnumerable<string>? patterns, out int dropped)
     {
         var cleanWords = new List<string>();
         var cleanPatterns = new List<string>();
@@ -78,12 +101,17 @@ public sealed class RoomCodeFilter
             cleanPatterns.Add(entry);
         }
 
-        // Trim to the cap from the end, so an over-long hand-edited list keeps its first entries rather
-        // than silently keeping an arbitrary subset.
+        // Trim to the cap from the end of whichever list is currently longer, so an over-long hand-edited
+        // list loses its trailing entries without losing a whole CATEGORY. Always taking from patterns
+        // first (the obvious reading of "from the end", since patterns are listed second) emptied them
+        // out entirely before touching a single word — and one glob covers a family of codes that would
+        // take many words to express, so that traded away the most valuable entries first.
+        dropped = 0;
         while (cleanWords.Count + cleanPatterns.Count > MaxEntries)
         {
-            if (cleanPatterns.Count > 0) cleanPatterns.RemoveAt(cleanPatterns.Count - 1);
-            else cleanWords.RemoveAt(cleanWords.Count - 1);
+            var from = cleanWords.Count >= cleanPatterns.Count ? cleanWords : cleanPatterns;
+            from.RemoveAt(from.Count - 1);
+            dropped++;
         }
 
         return cleanWords.Count == 0 && cleanPatterns.Count == 0
@@ -124,9 +152,15 @@ public sealed class RoomCodeFilter
     {
         var entry = Normalize(raw);
         if (entry is null) return "Enter something to block.";
-        if (entry.Length > MaxEntryLength)
-            return $"Codes are {LobbyManager.CodeLength} characters, so nothing longer than " +
-                   $"{MaxEntryLength} can ever appear in one.";
+        // A pattern gets the longer limit IsPattern allows: its wildcards are syntax, not characters that
+        // have to appear in a code, so a legal 5-character glob like A*B*C matches a 4-character code
+        // perfectly well. Applying the word limit to both refused those with a message about code length
+        // that simply isn't true of globs — and the form's maxlength invites typing one.
+        if (entry.Length > (pattern ? MaxPatternLength : MaxEntryLength))
+            return pattern
+                ? $"A pattern can be at most {MaxPatternLength} characters, wildcards included."
+                : $"Codes are {LobbyManager.CodeLength} characters, so nothing longer than " +
+                  $"{MaxEntryLength} can ever appear in one.";
         if (pattern && !IsPattern(entry))
             return "A pattern may contain only the code alphabet plus ? (one character) and * (any run).";
         if (!pattern && !IsWord(entry))
@@ -217,7 +251,7 @@ public sealed class RoomCodeFilter
 
     private static bool IsPattern(string entry)
     {
-        if (entry.Length is 0 or > MaxEntryLength + 2) return false; // room for the wildcards themselves
+        if (entry.Length is 0 or > MaxPatternLength) return false;
         foreach (var c in entry)
             if (!char.IsAsciiLetterOrDigit(c) && c is not ('?' or '*')) return false;
         return true;

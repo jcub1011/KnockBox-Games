@@ -250,9 +250,13 @@ provided by `games/`, a full disk — surfaces on the job, not on the upload dia
 
 ### Sources
 
-**Sources…** lists the registered marketplaces. The official one is built in: you can disable it, but not
-remove it. Extra ones need an `https` catalog URL (plain `http` is allowed only against loopback, which is
-what an offline mirror or a test uses), and are capped by `MarketplaceMaxSources`.
+**Sources…** lists the registered marketplaces, each with a **Disable** button. Disabling keeps a source's
+configuration but stops it being fetched, so it offers nothing until you switch it back on — the official
+one is built in and this is the only control it has, since it cannot be removed. Extra ones need an `https`
+catalog URL (plain `http` is allowed only against loopback, which is what an offline mirror or a test uses),
+and are capped by `MarketplaceMaxSources`. The official source's off switch is the one marketplace setting
+stored under its own key (`officialSourceDisabled`) rather than in `sources`, because it has no row there —
+its URLs come from configuration.
 
 If two sources offer the same game id, the first wins and the loser's card says so rather than silently
 disappearing. A source that can't be reached reports its error and does not stop the others — one dead
@@ -374,6 +378,9 @@ Outbound HTTP POSTs on platform events, to Discord, Slack, or any endpoint that 
   visible without turning one failed delivery into several at the worst possible moment.
 - **Error alerts are capped** (`WebhookErrorsPerMinute`, default 6/min) and the next delivery carries a count
   of what was suppressed. An error storm is exactly when this fires most and is worth least per message.
+  Set it to **`0` to send no error alerts at all** — unlike the connection rate limits, `0` here is off, not
+  unlimited, because the value you reach for to quieten a chat channel must not be the one that floods it.
+  The other event kinds (maintenance, updates, resource thresholds) are unaffected.
 - The payload carries the same one-line summary as `content` **and** `text`, which is what makes one POST
   render in Discord *and* Slack with no per-service configuration, alongside structured fields
   (`event`, `at`, `server`, `gameId`, `level`) for a real monitoring endpoint.
@@ -507,7 +514,7 @@ Outbound webhooks (§6):
 | `WebhooksEnabled` | `true` | Off ⇒ no dispatcher, no HTTP client, and the webhook routes refuse naming this key. |
 | `MaxWebhooks` | `8` | Endpoints that may be registered. |
 | `WebhookTimeoutSeconds` | `10` | Per-delivery deadline. A slow endpoint must not hold the queue while alerts drop. |
-| `WebhookErrorsPerMinute` | `6` | Error-log events turned into deliveries. The next alert reports what was suppressed. |
+| `WebhookErrorsPerMinute` | `6` | Error-log events turned into deliveries; `0` sends none (off, **not** unlimited). The next alert reports what was suppressed. |
 | `WebhookMemoryThresholdMb` | `0` (off) | Working set that counts as a breach. |
 | `WebhookCpuPercentThreshold` | `0` (off) | Process CPU (percent of one core-equivalent) that counts as a breach. |
 

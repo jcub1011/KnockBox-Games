@@ -10,8 +10,11 @@ namespace KnockBox.Server.Webhooks;
 /// <param name="MaxEndpoints">How many endpoints may be registered.</param>
 /// <param name="Timeout">Per-delivery deadline. Short: this is a notification, and a slow endpoint must not
 /// hold the drain task while the queue behind it fills and starts dropping alerts.</param>
-/// <param name="ErrorsPerMinute">Cap on error-log events turned into deliveries. An error storm is exactly
-/// when this feature is most likely to fire and least likely to be useful per-message — see
+/// <param name="ErrorsPerMinute">Cap on error-log events turned into deliveries, or <c>0</c> to send no
+/// error alerts at all. Note that <c>0</c> means OFF here rather than "unlimited" as it does for the
+/// connection rate limits: this knob gates outbound traffic to someone else's chat channel, so the value an
+/// operator reaches for to quieten it must not be the one that floods it. An error storm is exactly when
+/// this feature is most likely to fire and least likely to be useful per-message — see
 /// <see cref="WebhookLogSink"/>.</param>
 /// <param name="MemoryThresholdMb">Working set that counts as a breach, or 0 to not watch memory.</param>
 /// <param name="CpuPercentThreshold">Process CPU (percent of one core-equivalent) that counts as a breach,

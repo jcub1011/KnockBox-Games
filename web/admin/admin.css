@@ -344,6 +344,15 @@ body {
   display: none !important;
 }
 
+/* The portal hides some elements by CLASS and others by the `hidden` ATTRIBUTE (admin.js sets
+   `el('limits-badge').hidden`, `el('codes-badge').hidden`, …). The UA sheet's `[hidden]` rule loses to
+   any component rule that sets `display` — `.badge` sets `inline-block` — so without this the
+   attribute is inert and those elements are always drawn. Global rather than per-component: every
+   `.hidden` user is one rule, and this should be too. */
+[hidden] {
+  display: none !important;
+}
+
 /* Uptime is by far the longest value on the metrics grid ("12d 4h 31m 9s"), and at the shared size it
    wrapped mid-value into two lines while every neighbouring card stayed one. Shrink this one rather than
    every card, so the numbers that matter stay large. */

@@ -818,6 +818,35 @@ describe('history graphs', () => {
     expect(later[later.length - 1].url).toContain('after=3');
   });
 
+  it('restarts the graphs when the server does, instead of freezing on the old picture', async () => {
+    // MetricHistory is in-memory, so a restart begins numbering at 1 again. Clamping the cursor upward
+    // meant every later `?after=<pre-restart seq>` matched nothing and all four graphs held the old
+    // picture until somebody reloaded — at exactly the moment an operator is watching them.
+    vi.useFakeTimers();
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(el('history-badge').textContent).toBe('3 samples');
+
+    // The server came back: sequences restart low, and it can only offer what it has sampled since.
+    // `fake.routes` is the live table the mock reads, so replacing one entry redirects it mid-test.
+    fake.routes['GET /admin/api/metrics/history'] = {
+      body: { ...HISTORY, samples: [historySample(1, 0)], lastSequence: 1 },
+    };
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // The pre-restart samples are dropped rather than drawn continuously with the new ones, which would
+    // show a gap that never happened.
+    expect(el('history-badge').textContent).toBe('1 samples');
+
+    // And the next poll asks from the server's sequence, not the stale high-water mark. Clamping upward
+    // kept sending after=3 forever, which matched nothing and froze every graph.
+    await vi.advanceTimersByTimeAsync(5000);
+    const calls = fake.calls.filter((c) => c.path === '/admin/api/metrics/history');
+    expect(calls[calls.length - 1].url).toContain('after=1');
+  });
+
   it('says history is off rather than drawing an empty chart', async () => {
     await openOverview({
       'GET /admin/api/metrics/history': {

@@ -501,6 +501,23 @@ describe('enterGame (EnterGame)', () => {
 });
 
 describe('launch overlay', () => {
+  // FAKE TIMERS FOR THE WHOLE BLOCK, and this is load-bearing rather than tidiness.
+  //
+  // The overlay arms short real timers — the morph runs 300 ms and its safety net fires at 420 ms, the
+  // fade teardown at 220 ms — so under real timers these tests raced the machine: on a loaded CI box more
+  // than 420 ms could pass between dispatching a `load` event and asserting on what it did, and the
+  // safety timer would have already stripped the morph class and swapped the background. Worse, vitest
+  // reuses one `window` per file, so a timer armed by an EARLIER test's module copy is still pending and
+  // lands in the middle of a later one. Both mechanisms scale with how long the suite takes, which is why
+  // adding tests elsewhere in the file made this block start failing about one run in four while it stayed
+  // green whenever the file ran alone.
+  //
+  // Individual cases used to reach for `vi.useFakeTimers({ shouldAdvanceTime: true })`, a hybrid clock
+  // that still advances with real time — it kept `tick()` working but left the race intact. `tick()` now
+  // works under either clock (see helpers.js), so the block can take the fully fake one. The file-level
+  // afterEach already restores real timers.
+  beforeEach(() => vi.useFakeTimers());
+
   // Drive enterGame to a live iframe. Returns the frame element.
   async function embedGame(ws, { lobbyId = 'AB12', gameId = 'ttt' } = {}) {
     shell.enterGame({ type: 'EnterGame', lobbyId, gameId, hostId: 'p1', players: [] });
@@ -676,7 +693,6 @@ describe('launch overlay', () => {
       const frame = await launchWithTile(ws);
       stubMorphAnimation();   // never resolved
 
-      vi.useFakeTimers({ shouldAdvanceTime: true });
       frame.dispatchEvent(new Event('load'));
       expect(document.body.classList.contains('in-game')).toBe(false);
 
@@ -691,8 +707,6 @@ describe('launch overlay', () => {
       await createLobbySuccess(ws, { lobbyId: 'AB12' });
       const frame = await embedGame(ws);
 
-      // shouldAdvanceTime keeps tick()'s setTimeout(0) working while still allowing a manual jump.
-      vi.useFakeTimers({ shouldAdvanceTime: true });
       frame.dispatchEvent(new Event('load'));
 
       expect(el('game-view').classList.contains('launch-morph')).toBe(false);
@@ -807,7 +821,6 @@ describe('launch overlay', () => {
     it('escalates to a hint and an escape hatch once the launch is clearly slow', async () => {
       await importShell();
       await bootWithGames();
-      vi.useFakeTimers();
       shell.createLobby('ttt');
 
       expect(el('launch-hint').hidden).toBe(true);
@@ -822,7 +835,6 @@ describe('launch overlay', () => {
     it('force-dismisses a launch that never resolves, so it cannot hide a running game', async () => {
       await importShell();
       await bootWithGames();
-      vi.useFakeTimers();
       shell.createLobby('ttt');
 
       vi.advanceTimersByTime(LAUNCH_MAX_MS);

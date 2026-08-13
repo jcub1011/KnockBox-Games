@@ -132,6 +132,53 @@ public class RoomCodeFilterTests
         var many = Enumerable.Range(0, 100).Select(i => $"{(char)('A' + i % 24)}{i % 10}").ToArray();
         Assert.True(RoomCodeFilter.Compile(many, null).Count <= RoomCodeFilter.MaxEntries);
     }
+
+    [Fact]
+    public void Compile_reports_what_the_cap_made_it_drop()
+    {
+        // The count is the ONLY way a caller can tell an over-cap list from one that just fits: the
+        // returned filter has already been trimmed, so testing its Count against the cap can never fail.
+        // The admin API's over-cap 400 was written that way and was unreachable, so an over-cap save
+        // answered 200 and silently discarded the overflow.
+        var many = Enumerable.Range(0, RoomCodeFilter.MaxEntries + 5)
+            .Select(i => $"{(char)('A' + i % 24)}{i % 10}{i % 8}").ToArray();
+
+        RoomCodeFilter.Compile(many, null, out var dropped);
+
+        Assert.Equal(5, dropped);
+        RoomCodeFilter.Compile(many.Take(RoomCodeFilter.MaxEntries), null, out var none);
+        Assert.Equal(0, none);
+    }
+
+    [Fact]
+    public void Trimming_to_the_cap_does_not_empty_out_the_patterns_first()
+    {
+        // One glob covers a family of codes that would take many words to express, so discarding every
+        // pattern before touching a single word traded away the most valuable entries first — while the
+        // comment on that loop claimed it kept "its first entries".
+        var words = Enumerable.Range(0, RoomCodeFilter.MaxEntries)
+            .Select(i => $"{(char)('A' + i % 24)}{i % 10}{i % 8}").ToArray();
+
+        var filter = RoomCodeFilter.Compile(words, ["A*", "B*"], out var dropped);
+
+        Assert.Equal(2, dropped);
+        Assert.Equal(RoomCodeFilter.MaxEntries, filter.Count);
+        Assert.Equal(2, filter.Patterns.Count);
+    }
+
+    [Fact]
+    public void A_pattern_may_be_longer_than_a_code_because_its_wildcards_are_syntax()
+    {
+        // A*B*C is five characters and matches four-character codes perfectly well. Applying the word
+        // limit to patterns refused it with a message about code length that is simply untrue of globs —
+        // and the portal's own input invites one, since it allows six characters.
+        Assert.Null(RoomCodeFilter.ValidateEntry("A*B*C", pattern: true));
+        Assert.True(RoomCodeFilter.Compile(null, ["A*B*C"]).Patterns.Count == 1);
+
+        // Still bounded, and still the word limit for a word.
+        Assert.NotNull(RoomCodeFilter.ValidateEntry("A*B*C*D", pattern: true));
+        Assert.NotNull(RoomCodeFilter.ValidateEntry("ABCDE", pattern: false));
+    }
 }
 
 /// <summary>The generator's side of the blocklist: it never emits a blocked code, and never spends the

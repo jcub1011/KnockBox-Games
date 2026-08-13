@@ -154,6 +154,55 @@ public sealed class AdminSettingsStore : IPlatformPolicy
         }
     }
 
+    /// <summary>
+    /// Whether the built-in official marketplace is switched on. Extra sources carry their own flag on
+    /// their row; the official one has no row to carry it, so it lives here.
+    /// </summary>
+    public bool OfficialSourceEnabled => !_state.OfficialSourceDisabled;
+
+    /// <summary>
+    /// Enables or disables a marketplace, official or otherwise, without losing its configuration.
+    /// Returns false when there is no such source; otherwise null on success, or a message explaining why
+    /// it could not be persisted (it is in effect regardless, until the next restart).
+    /// </summary>
+    /// <remarks>
+    /// The official source is handled here rather than being refused, because the portal and two API error
+    /// messages already tell operators to disable it instead of removing it — and until this existed, that
+    /// was advice with nothing behind it.
+    /// </remarks>
+    public bool SetSourceEnabled(string id, bool enabled, out string? warning)
+    {
+        lock (_writeGate)
+        {
+            if (string.Equals(id, MarketplaceSourceRegistry.OfficialId, StringComparison.OrdinalIgnoreCase))
+            {
+                _state = _state with { OfficialSourceDisabled = !enabled };
+                _logger.LogInformation("Admin {Action} the official marketplace.",
+                    enabled ? "enabled" : "disabled");
+                warning = Save();
+                return true;
+            }
+
+            var index = -1;
+            for (var i = 0; i < _state.Sources.Count; i++)
+                if (string.Equals(_state.Sources[i].Id, id, StringComparison.OrdinalIgnoreCase)) index = i;
+
+            if (index < 0)
+            {
+                warning = null;
+                return false;
+            }
+
+            var sources = _state.Sources.ToList();
+            sources[index] = sources[index] with { Enabled = enabled };
+            _state = _state with { Sources = sources };
+            _logger.LogInformation("Admin {Action} marketplace {SourceId}.",
+                enabled ? "enabled" : "disabled", id);
+            warning = Save();
+            return true;
+        }
+    }
+
     /// <summary>Removes a registered marketplace. False when there was no such id.</summary>
     public bool RemoveSource(string id, out string? warning)
     {
@@ -382,7 +431,8 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 ? null
                 : new BannedRoomCodes(_state.RoomCodes.Words, _state.RoomCodes.Patterns),
             _state.Announcement,
-            _state.Webhooks.Count == 0 ? null : _state.Webhooks);
+            _state.Webhooks.Count == 0 ? null : _state.Webhooks,
+            _state.OfficialSourceDisabled);
         var temp = FilePath + ".tmp";
         try
         {
@@ -415,12 +465,13 @@ public sealed class AdminSettingsStore : IPlatformPolicy
         OperatorLimits Limits,
         RoomCodeFilter RoomCodes,
         PlatformAnnouncement? Announcement,
-        IReadOnlyList<WebhookEndpoint> Webhooks)
+        IReadOnlyList<WebhookEndpoint> Webhooks,
+        bool OfficialSourceDisabled)
     {
         public static readonly State Default =
             new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer), [],
                 new Dictionary<string, UpdatePolicy>(GameIdComparer), OperatorLimits.None,
-                RoomCodeFilter.Empty, null, []);
+                RoomCodeFilter.Empty, null, [], false);
 
         public static State From(AdminSettings settings)
         {
@@ -443,11 +494,15 @@ public sealed class AdminSettingsStore : IPlatformPolicy
             }
 
             // Same discipline for the source list: a hand-edited row missing its URL is dropped, not
-            // fatal, and a duplicate id keeps the first.
+            // fatal, and a duplicate id keeps the first. The null check is not redundant with the
+            // element type: `"sources": [null]` is valid JSON, nullable annotations are erased at
+            // runtime, and dereferencing it here would throw an NRE past Load()'s catch filter — turning
+            // a hand-edited typo into a server that will not boot.
             var sources = new List<RegisteredMarketplace>();
             foreach (var source in settings.Sources ?? [])
             {
-                if (!MarketplaceSourceRegistry.IsValidId(source.Id)
+                if (source is null
+                    || !MarketplaceSourceRegistry.IsValidId(source.Id)
                     || !MarketplaceClient.IsAllowedUrl(source.CatalogUrl)
                     || !MarketplaceClient.IsAllowedUrl(source.DownloadBaseUrl)
                     || sources.Any(s => string.Equals(s.Id, source.Id, StringComparison.OrdinalIgnoreCase)))
@@ -473,7 +528,8 @@ public sealed class AdminSettingsStore : IPlatformPolicy
             var webhooks = new List<WebhookEndpoint>();
             foreach (var hook in settings.Webhooks ?? [])
             {
-                if (!MarketplaceSourceRegistry.IsValidId(hook.Id)
+                if (hook is null
+                    || !MarketplaceSourceRegistry.IsValidId(hook.Id)
                     || !WebhookDispatcher.IsAllowedUrl(hook.Url)
                     || webhooks.Any(w => string.Equals(w.Id, hook.Id, StringComparison.OrdinalIgnoreCase)))
                     continue;
@@ -481,7 +537,8 @@ public sealed class AdminSettingsStore : IPlatformPolicy
             }
 
             return new State(settings.MaintenanceMode, settings.MaintenanceMessage, games, sources, updates,
-                settings.Limits ?? OperatorLimits.None, roomCodes, announcement, webhooks);
+                settings.Limits ?? OperatorLimits.None, roomCodes, announcement, webhooks,
+                settings.OfficialSourceDisabled);
         }
 
         /// <summary>

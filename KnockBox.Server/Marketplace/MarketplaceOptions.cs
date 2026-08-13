@@ -61,8 +61,20 @@ public sealed record MarketplaceOptions(
             .TrimEnd('/'),
         config.GetValue("KnockBox:MarketplaceMaxCatalogBytes", Default.MaxCatalogBytes),
         config.GetValue("KnockBox:MarketplaceMaxDownloadBytes", Default.MaxDownloadBytes),
-        TimeSpan.FromSeconds(config.GetValue("KnockBox:MarketplaceCatalogTimeoutSeconds",
-            (int)Default.CatalogTimeout.TotalSeconds)),
-        TimeSpan.FromSeconds(config.GetValue("KnockBox:MarketplaceDownloadTimeoutSeconds",
-            (int)Default.DownloadTimeout.TotalSeconds)));
+        Timeout(config, "KnockBox:MarketplaceCatalogTimeoutSeconds", Default.CatalogTimeout),
+        Timeout(config, "KnockBox:MarketplaceDownloadTimeoutSeconds", Default.DownloadTimeout));
+
+    /// <summary>
+    /// A configured timeout, floored. Unlike the byte caps, a timeout has no useful "off" value: 0 cancels
+    /// the request before it is sent (every fetch fails, and the failure names a timeout that looks
+    /// deliberate), and a negative one makes <c>CancelAfter</c> throw <c>ArgumentOutOfRangeException</c> —
+    /// from a constructor, past every catch filter downstream. So an unusable value falls back to the
+    /// default rather than being honoured, the same way <c>MarketplaceSourceRegistry</c> treats a
+    /// non-positive source cap.
+    /// </summary>
+    private static TimeSpan Timeout(IConfiguration config, string key, TimeSpan fallback)
+    {
+        var seconds = config.GetValue(key, (int)fallback.TotalSeconds);
+        return seconds > 0 ? TimeSpan.FromSeconds(seconds) : fallback;
+    }
 }

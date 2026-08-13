@@ -336,7 +336,12 @@ describe('marketplace actions', () => {
 
     // The URL rule lives in MarketplaceClient. A second copy in JS is exactly the drift this avoids.
     expect(fake.calls.some((c) => c.path === '/admin/api/marketplace/sources')).toBe(true);
-    expect(el('toast-host').textContent).toContain('absolute https URL');
+    // Inline beside the form, not as a toast: the operator has to read it while correcting the field it
+    // is about, and a toast fades. (The element was previously only ever HIDDEN on failure, so the reason
+    // reached nobody at all.)
+    const error = el('mkt-settings-error');
+    expect(error.textContent).toContain('absolute https URL');
+    expect(error.classList.contains('hidden')).toBe(false);
   });
 });
 

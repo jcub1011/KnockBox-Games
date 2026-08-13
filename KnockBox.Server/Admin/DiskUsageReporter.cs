@@ -79,6 +79,12 @@ public sealed class DiskUsageReporter(
         var cached = _cached;
         if (cached is null) return _cached = Measure();
 
+        // Caching off (0, or a nonsense negative) means measure HERE. Falling through to the staleness
+        // check below would schedule a background walk and still return the previous report, so every
+        // read would pay for a walk and none would see its result — which is the opposite of what an
+        // operator turning the cache off to diagnose a wrong-looking size is asking for.
+        if (_cacheDuration <= TimeSpan.Zero) return _cached = Measure();
+
         if (clock.GetUtcNow() - cached.TakenAt >= _cacheDuration) ScheduleRefresh();
         return cached;
     }

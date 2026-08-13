@@ -515,6 +515,12 @@ public sealed record AdminSourceRequest(
     bool? Enabled = null);
 
 /// <summary>
+/// Switches one marketplace on or off. Nullable for the same reason as <see cref="AdminSourceRequest"/>'s
+/// members: an omitted field must be refused, not read as <c>false</c> and silently disable a source.
+/// </summary>
+public sealed record AdminSourceEnabledRequest(bool? Enabled = null);
+
+/// <summary>
 /// The complete set of limit overrides. A full <b>replacement</b>, not a patch: a null member means "not
 /// overridden, use the default", which is also how the portal reverts one field. A patch shape
 /// could not tell "leave this alone" from "clear this", and those are the two things an operator does
