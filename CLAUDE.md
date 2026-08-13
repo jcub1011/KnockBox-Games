@@ -403,6 +403,29 @@ is the likeliest way to hit that). `GamePackageInstaller.Adopt` then vouches for
 on the next pass rather than waiting out the two-pass settle check, which exists for copy-in and has no
 bearing on an atomic rename.
 
+**The overwriting rename is retried, and must never become delete-then-move.** `Hosting/AtomicFile.cs`
+wraps `File.Move(..., overwrite: true)` in a tiny bounded retry (4 attempts / ~50 ms ⇒ ~150 ms). On Windows
+that move is `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`, which needs delete access to the destination and so
+fails outright while *anything* holds a handle — a virus scanner or the search indexer opening the file
+microseconds after it was written is enough, and was: a marketplace download died with
+`UnauthorizedAccessException` once in ~50 full test runs, discarding a verified package the next attempt
+would have placed. Deleting first would trade that rare transient failure for a rare *permanent* one, which
+is the window the single rename exists to close. The budget is small because every caller is holding
+something — `AdminSettingsStore.Save` runs under `_writeGate` (a `System.Threading.Lock`, so the sync form
+there is forced, not preferred) and `PackageManager.Place` holds an install slot. A real ACL denial or
+read-only mount still fails, with the original exception, ~150 ms later. Four call sites use it:
+`MarketplaceClient.DownloadAsync` (async, and it passes the **caller's** token, not its download deadline —
+by then the transfer is verified, and `timeout.Token` would both abort a valid publish and mislabel it
+"downloading timed out"), `PackageManager.Place`, `AdminSettingsStore.Save`, and
+`GameAssetPrecompressor.SaveIndex`. The precompressor's two *per-file* moves deliberately do **not**:
+they're already caught per file and retried by the next reconcile pass, a finer granularity than this adds
+— but `SaveIndex` is caught per **game**, so losing it re-Brotlis the whole game at max effort.
+Tests are split for a reason: a real sharing violation is unreproducible on the Linux CI runners
+(`rename(2)` ignores open handles, and .NET's `FileShare.None` is an advisory `flock` that `rename` never
+consults), so `AtomicFile.Retry` takes an injected operation for the portable tests, and the Windows-only
+pair feeds a real `File.Move` through that same seam — releasing the handle from *inside* the operation, so
+ordering is guaranteed rather than raced.
+
 **Placing is not installing, and the lifecycle gate spans both.** `Place` only renames the `.kbg` and asks
 for a rescan; the extraction — and `SwapIntoPlace` moving the live directory aside — happens on a later
 installer pass. So `ApplyAsync` waits on `GamePackageInstaller.Installed` (a new event, raised only for a

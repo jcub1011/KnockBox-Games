@@ -733,7 +733,11 @@ public sealed class PackageManager
         try { if (File.Exists(target)) previousStamp = File.GetLastWriteTimeUtc(target); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* stamp from the clock */ }
 
-        File.Move(stagedPath, target, overwrite: true);
+        // Retried briefly: a scanner holding the target for a few milliseconds must not fail an install
+        // whose bytes are already downloaded and validated. Synchronous on purpose — the backup File.Copy
+        // above is unbounded and synchronous already, so ~150ms here is noise beside it, and Place stays
+        // one straight-line sequence.
+        AtomicFile.MoveWithRetry(stagedPath, target);
         try
         {
             // Strictly LATER than whatever was there before, not merely "now". The installer keys

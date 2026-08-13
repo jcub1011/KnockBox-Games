@@ -1,4 +1,5 @@
 using System.Text.Json;
+using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
@@ -471,7 +472,10 @@ public sealed class AdminSettingsStore : IPlatformPolicy
 
             File.WriteAllBytes(temp,
                 JsonSerializer.SerializeToUtf8Bytes(settings, AdminSettingsJsonContext.Default.AdminSettings));
-            File.Move(temp, FilePath, overwrite: true);
+            // Retried briefly, and synchronously: this runs under _writeGate, which is a
+            // System.Threading.Lock, so awaiting here would not compile. That is also why the retry
+            // budget is bounded so tightly — every other admin write is behind this lock.
+            AtomicFile.MoveWithRetry(temp, FilePath);
             LoadError = null; // a successful write supersedes an earlier read failure
             return null;
         }

@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using KnockBox.Contracts;
+using KnockBox.Server.Hosting;
 
 namespace KnockBox.Server.Games;
 
@@ -472,7 +473,11 @@ public sealed class GameAssetPrecompressor(
             var tmp = path + ".tmp";
             File.WriteAllLines(tmp, index.Select(e =>
                 $"{e.Value.MtimeTicks}\t{e.Value.Length}\t{(e.Value.Produced ? 1 : 0)}\t{e.Key}"));
-            File.Move(tmp, path, overwrite: true);
+            // Retried, unlike the two per-file moves in this class: losing THIS one costs the whole
+            // game's freshness index, so the next pass re-compresses every asset at SmallestSize —
+            // the ~49s-per-large-asset bill the seed path exists to avoid. The catch below still means
+            // a genuine failure is a warning and nothing more.
+            AtomicFile.MoveWithRetry(tmp, path);
         }
         catch (Exception ex)
         {

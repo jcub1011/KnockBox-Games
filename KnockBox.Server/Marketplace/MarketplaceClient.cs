@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using KnockBox.Contracts;
 using KnockBox.Server.Games;
+using KnockBox.Server.Hosting;
 using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Marketplace;
@@ -289,7 +290,13 @@ public sealed partial class MarketplaceClient
             // Only now does it earn the .kbg name — nothing that failed above can be mistaken for a
             // package by whatever ends up scanning this directory.
             var final = Path.Combine(destinationDirectory, $"{id}-{Convert.ToHexStringLower(hash)[..12]}{GamePackage.Extension}");
-            File.Move(partial, final, overwrite: true);
+            // The CALLER's token, not timeout.Token: the transfer is complete and hash-verified by now,
+            // so the download deadline has done its job, and letting it abort a ≤150ms rename would
+            // discard a valid package worth up to MaxDownloadBytes. It would also lie about why — the
+            // filter below turns a timeout.Token cancellation into "downloading timed out", which is not
+            // what a rename failure is.
+            await AtomicFile.MoveWithRetryAsync(partial, final, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
 
             _logger.LogInformation(
                 "Downloaded marketplace package {Id} {Version} ({Bytes} bytes) from {Repo}@{Tag}.",
