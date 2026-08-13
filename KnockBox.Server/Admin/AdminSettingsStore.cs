@@ -254,6 +254,35 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     }
 
     /// <summary>
+    /// The operator's chosen update schedule, or null when they have never set one — in which case the
+    /// configured default (<c>KnockBox:MarketplaceUpdate*</c>) stands. Same record-by-absence shape as
+    /// <see cref="Limits"/>, and for the same reason: "I never chose" and "I chose the same thing the
+    /// default happens to be" are different facts, and only the second should survive a change of default.
+    /// </summary>
+    public UpdateSchedule? UpdateSchedule => _state.Schedule;
+
+    /// <summary>
+    /// Records a new update schedule, or null to fall back to the configured default. Returns null on
+    /// success, or a message explaining why it could not be persisted (it is in effect regardless, until
+    /// the next restart).
+    /// </summary>
+    /// <remarks>
+    /// Re-arming the timer is the caller's job, not this one's — the same split as <see cref="SetLimits"/>
+    /// and <see cref="LimitsProvider"/>. This class records policy; <see cref="UpdateScheduler"/> acts on it.
+    /// </remarks>
+    public string? SetUpdateSchedule(UpdateSchedule? schedule)
+    {
+        lock (_writeGate)
+        {
+            var next = schedule?.Normalize();
+            _state = _state with { Schedule = next };
+            _logger.LogInformation("Admin set the marketplace update schedule to {Schedule}.",
+                next?.Describe() ?? "the configured default");
+            return Save();
+        }
+    }
+
+    /// <summary>
     /// The compiled room-code blocklist. Compiled once per change rather than per draw: the lobby-create
     /// path reads this on every code it generates.
     /// </summary>
@@ -432,7 +461,8 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 : new BannedRoomCodes(_state.RoomCodes.Words, _state.RoomCodes.Patterns),
             _state.Announcement,
             _state.Webhooks.Count == 0 ? null : _state.Webhooks,
-            _state.OfficialSourceDisabled);
+            _state.OfficialSourceDisabled,
+            _state.Schedule);
         var temp = FilePath + ".tmp";
         try
         {
@@ -466,12 +496,13 @@ public sealed class AdminSettingsStore : IPlatformPolicy
         RoomCodeFilter RoomCodes,
         PlatformAnnouncement? Announcement,
         IReadOnlyList<WebhookEndpoint> Webhooks,
-        bool OfficialSourceDisabled)
+        bool OfficialSourceDisabled,
+        UpdateSchedule? Schedule)
     {
         public static readonly State Default =
             new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer), [],
                 new Dictionary<string, UpdatePolicy>(GameIdComparer), OperatorLimits.None,
-                RoomCodeFilter.Empty, null, [], false);
+                RoomCodeFilter.Empty, null, [], false, null);
 
         public static State From(AdminSettings settings)
         {
@@ -538,7 +569,11 @@ public sealed class AdminSettingsStore : IPlatformPolicy
 
             return new State(settings.MaintenanceMode, settings.MaintenanceMessage, games, sources, updates,
                 settings.Limits ?? OperatorLimits.None, roomCodes, announcement, webhooks,
-                settings.OfficialSourceDisabled);
+                settings.OfficialSourceDisabled,
+                // Normalized rather than validated: an out-of-range hour is dropped to the default like any
+                // other hand-edited junk here, and normalizing on the way IN means the timer arithmetic
+                // downstream never has to defend against an hour of 25.
+                settings.Schedule?.Normalize());
         }
 
         /// <summary>

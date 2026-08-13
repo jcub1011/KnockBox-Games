@@ -44,6 +44,7 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminAnnouncementResponse))]
 [JsonSerializable(typeof(AdminWebhooksResponse))]
 [JsonSerializable(typeof(AdminMetricHistoryResponse))]
+[JsonSerializable(typeof(AdminUpdateScheduleResponse))]
 // Request bodies.
 [JsonSerializable(typeof(AdminCloseLobbiesRequest))]
 [JsonSerializable(typeof(AdminPurgeStaleRequest))]
@@ -59,6 +60,7 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminRoomCodesRequest))]
 [JsonSerializable(typeof(AdminAnnouncementRequest))]
 [JsonSerializable(typeof(AdminWebhookRequest))]
+[JsonSerializable(typeof(AdminUpdateScheduleRequest))]
 // The roster projection handed to an authority module's init(players) (ServerAuthorityManager).
 [JsonSerializable(typeof(IReadOnlyList<Player>))]
 // Not a wire type, but it goes through the same source-generated serializer for the same reason:

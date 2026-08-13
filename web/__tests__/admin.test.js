@@ -254,6 +254,19 @@ describe('auth state selects the view', () => {
     await tick();
 
     expect(el('server-status-text').textContent).toMatch(/unreachable/i);
+    expect(el('server-status-pill').hidden).toBe(false);
+  });
+
+  it('keeps the status pill out of the header while nothing is wrong', async () => {
+    // It is a fault indicator, not a heartbeat: a pill reading "Admin Port Active" on a page the admin
+    // port itself served can only ever be true, so it told an operator nothing.
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('server-status-pill').hidden).toBe(true);
   });
 });
 

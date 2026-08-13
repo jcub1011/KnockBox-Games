@@ -65,10 +65,20 @@ function webhooks({ endpoints = [], enabled = true } = {}) {
   };
 }
 
+function schedule(over = {}) {
+  return {
+    cadence: 'daily', dayOfWeek: 'sunday', hourUtc: 3, overridden: false,
+    summary: 'daily at 03:00 UTC', nextRunUtc: '2026-08-14T03:00:00.0000000+00:00', enrolled: 2,
+    ...over,
+  };
+}
+
 function routes(overrides = {}) {
   return {
     'GET /admin/api/auth/status': { body: { configured: true, authenticated: true } },
     'GET /admin/api/limits': { body: limits() },
+    'GET /admin/api/updates/schedule': { body: schedule() },
+    '* /admin/api/updates/schedule': { body: { success: true, detail: 'Update checks run hourly, on the hour.' } },
     '* /admin/api/limits': { body: { success: true, detail: 'In force now.' } },
     'GET /admin/api/room-codes': { body: codes() },
     '* /admin/api/room-codes': { body: { success: true, detail: 'No codes are blocked.' } },
@@ -363,6 +373,108 @@ describe('banned room codes', () => {
 
     // The client deliberately doesn't try to compute this — only the server walks the code space.
     expect(el('toast-host').textContent).toContain('over the 50% limit');
+  });
+});
+
+describe('update schedule', () => {
+  it('renders the schedule in force and when it next runs', async () => {
+    await openPlatform();
+
+    expect(el('schedule-cadence').value).toBe('daily');
+    expect(el('schedule-hour').value).toBe('3');
+    // The hours are built in JS rather than as 24 <option>s of markup, and each carries the reader's own
+    // clock beside the UTC hour it stores — the schedule is UTC, but nobody should have to convert it.
+    expect(el('schedule-hour').options.length).toBe(24);
+    expect(el('schedule-hour').options[3].textContent).toContain('03:00 UTC');
+    expect(el('schedule-hour').options[3].textContent).toContain('local');
+    expect(el('schedule-note').textContent).toContain('daily at 03:00 UTC');
+    expect(el('schedule-note').textContent).toContain('2 game(s) enrolled');
+    // Not overridden: this is still the configured default.
+    expect(el('schedule-badge').hidden).toBe(true);
+  });
+
+  it('badges a schedule the operator chose', async () => {
+    await openPlatform({
+      'GET /admin/api/updates/schedule': {
+        body: schedule({ cadence: 'weekly', dayOfWeek: 'tuesday', hourUtc: 14, overridden: true }),
+      },
+    });
+
+    expect(el('schedule-badge').hidden).toBe(false);
+    expect(el('schedule-cadence').value).toBe('weekly');
+    expect(el('schedule-day').value).toBe('tuesday');
+    expect(el('schedule-hour').value).toBe('14');
+  });
+
+  it('greys out the fields the cadence does not use, without discarding them', async () => {
+    // Disabled rather than hidden: a control that vanishes makes an operator wonder whether the value
+    // went with it, and weekly → daily → weekly has to come back to the day they picked.
+    await openPlatform({
+      'GET /admin/api/updates/schedule': {
+        body: schedule({ cadence: 'weekly', dayOfWeek: 'friday', overridden: true }),
+      },
+    });
+    expect(el('schedule-day').disabled).toBe(false);
+    expect(el('schedule-hour').disabled).toBe(false);
+
+    el('schedule-cadence').value = 'daily';
+    el('schedule-cadence').dispatchEvent(new Event('change'));
+    expect(el('schedule-day').disabled).toBe(true);
+    expect(el('schedule-hour').disabled).toBe(false);
+    expect(el('schedule-day').value).toBe('friday');
+
+    el('schedule-cadence').value = 'hourly';
+    el('schedule-cadence').dispatchEvent(new Event('change'));
+    expect(el('schedule-day').disabled).toBe(true);
+    expect(el('schedule-hour').disabled).toBe(true);
+  });
+
+  it('posts the chosen cadence, day and hour', async () => {
+    await openPlatform();
+
+    el('schedule-cadence').value = 'weekly';
+    el('schedule-cadence').dispatchEvent(new Event('change'));
+    el('schedule-day').value = 'wednesday';
+    el('schedule-hour').value = '21';
+    el('schedule-save').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST' && c.path === '/admin/api/updates/schedule');
+    expect(post).toBeTruthy();
+    expect(post.body).toEqual({ cadence: 'weekly', dayOfWeek: 'wednesday', hourUtc: 21 });
+  });
+
+  it('reverts to the configured default by posting nothing', async () => {
+    // Same shape as clearing every limit override: absence is how "use the default" is said.
+    await openPlatform();
+
+    el('schedule-reset').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST' && c.path === '/admin/api/updates/schedule');
+    expect(post.body).toEqual({});
+  });
+
+  it('says so and disables the form when the marketplace is switched off', async () => {
+    await openPlatform({
+      'GET /admin/api/updates/schedule': { status: 409, body: { error: 'The marketplace is disabled.' } },
+    });
+
+    expect(el('schedule-cadence').disabled).toBe(true);
+    expect(el('schedule-save').disabled).toBe(true);
+    expect(el('schedule-note').textContent).toContain('MarketplaceEnabled=false');
+  });
+
+  it('warns when a schedule has nothing enrolled to act on', async () => {
+    // A schedule with no enrolled game makes no request at all, so an operator who set one and saw
+    // nothing happen would reasonably conclude it was broken.
+    await openPlatform({
+      'GET /admin/api/updates/schedule': { body: schedule({ enrolled: 0 }) },
+    });
+
+    expect(el('schedule-note').textContent).toContain('No game is enrolled');
   });
 });
 

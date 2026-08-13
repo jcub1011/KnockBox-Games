@@ -80,6 +80,64 @@ export function formatClock(iso) {
   return Number.isNaN(at.getTime()) ? '--' : at.toLocaleTimeString();
 }
 
+/** An ISO timestamp as a local date AND time, for something that may be days away. */
+export function formatDateTime(iso) {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? '--' : at.toLocaleString();
+}
+
+// ── Update schedule ───────────────────────────────────────────────────────────
+
+/**
+ * The label for one hour in the schedule's hour picker: the UTC hour it stores, and the same instant on
+ * the reader's own clock.
+ *
+ * The schedule IS UTC, and the stored value never moves — that is the whole point of choosing UTC. But
+ * "14:00 UTC" alone leaves the operator doing the arithmetic to answer the only question they actually
+ * have, which is whether the check lands somewhere quiet for them. So both are shown.
+ *
+ * The local half is computed against a REFERENCE DATE (today by default), because an offset is a
+ * property of an instant, not of a zone: somewhere on daylight saving, an hour labelled 10:00 in
+ * January reads 11:00 in July. Labelling it "as of today" is honest and useful; pretending a fixed
+ * mapping exists would not be. A local time that lands on the day before or after carries that, since
+ * "03:00 UTC" reading as "10:00 PM" is otherwise quietly the wrong evening.
+ */
+export function hourOptionLabel(hourUtc, reference = new Date()) {
+  const utc = `${String(hourUtc).padStart(2, '0')}:00 UTC`;
+  const at = new Date(Date.UTC(
+    reference.getUTCFullYear(), reference.getUTCMonth(), reference.getUTCDate(), hourUtc));
+  if (Number.isNaN(at.getTime())) return utc;
+
+  const local = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const dayShift = at.getDate() - at.getUTCDate();
+  // Compare the day-of-month, correcting for a month boundary (31 → 1 is +1 day, not −30).
+  const shift = dayShift > 1 ? -1 : dayShift < -1 ? 1 : dayShift;
+  const suffix = shift === 0 ? '' : shift < 0 ? ', prev. day' : ', next day';
+  return `${utc} (${local} local${suffix})`;
+}
+
+/**
+ * The sentence under the update-schedule form.
+ *
+ * The next run is stated in the operator's OWN time zone even though the schedule is set in UTC: the
+ * point of the line is "will this happen when I think it will", and answering it in the same zone they
+ * just typed proves nothing. The enrolment count is here because a schedule with nothing enrolled makes
+ * no request at all — an operator who set one and saw no activity would otherwise assume it was broken.
+ */
+export function scheduleNote(schedule) {
+  if (!schedule) return '';
+  const parts = [`Checks run ${schedule.summary || 'on no schedule'}.`];
+  parts.push(schedule.nextRunUtc
+    ? `Next check ${formatDateTime(schedule.nextRunUtc)} (your time).`
+    : 'No check is scheduled.');
+  const enrolled = toNumber(schedule.enrolled) ?? 0;
+  parts.push(enrolled > 0
+    ? `${formatCount(enrolled)} game(s) enrolled in automatic updates.`
+    : 'No game is enrolled in automatic updates, so a check currently installs nothing — '
+      + 'set a game’s update policy on the Marketplace tab.');
+  return parts.join(' ');
+}
+
 // ── Rates from cumulative counters ────────────────────────────────────────────
 
 /**

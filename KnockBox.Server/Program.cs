@@ -38,7 +38,14 @@ var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot, games
 // note below). Master switch — off ⇒ exactly the on-the-fly behavior. The other Precompress* knobs and the
 // cache root are read by the precompressor/serving setup further down.
 var precompressEnabled = builder.Configuration.GetValue("KnockBox:Precompress", true);
-var precompressGzip = builder.Configuration.GetValue("KnockBox:PrecompressGzip", true);
+// Gzip variants are OFF by default, unlike Brotli. A .kbg already carries its Brotli blobs, so seeding
+// those costs a byte copy; a .gz has to be produced here at max effort from the extracted file, which is
+// the one expensive thing left on an install. Brotli is accepted by ~97% of browsers and anything else
+// still gets gzip on the fly from ResponseCompression — so the variants on disk buy a slightly better
+// ratio for the last few percent of clients, at the price of the slowest step of every cold boot. An
+// operator who wants them can say so; when they do, PruneOrphanVariants removes them again on the next
+// reconcile if they change their mind.
+var precompressGzip = builder.Configuration.GetValue("KnockBox:PrecompressGzip", false);
 var precompressMinBytes = builder.Configuration.GetValue("KnockBox:PrecompressMinBytes", 1024);
 // Periodic reconcile interval. The Discovered event already covers manifest add/remove/edit; this is
 // the schedule that also catches asset-only edits under Docker bind-mount polling (the poll only
@@ -287,6 +294,14 @@ if (marketplaceOptions.Enabled)
         sp.GetRequiredService<ILoggerFactory>()));
     // The policy layer over the install engine — which games this server may update on its own.
     builder.Services.AddSingleton<GameUpdateCoordinator>();
+    // …and the schedule it runs on. Registered here rather than unconditionally, like everything else
+    // marketplace-shaped: with the marketplace off there is nothing to check and no timer to arm.
+    builder.Services.AddSingleton(sp => new UpdateScheduler(
+        sp.GetRequiredService<GameUpdateCoordinator>(),
+        sp.GetRequiredService<AdminSettingsStore>(),
+        UpdateSchedule.FromConfiguration(builder.Configuration),
+        sp.GetRequiredService<TimeProvider>(),
+        sp.GetRequiredService<ILogger<UpdateScheduler>>()));
 }
 // Outbound webhooks. Registered only when enabled, exactly like the marketplace registry, so a disabled
 // deployment holds no HttpClient — and consumers resolve it as nullable and report the switch rather than
@@ -301,10 +316,6 @@ if (webhookQueue is not null)
         webhookQueue, sp.GetRequiredService<AdminSettingsStore>(), webhookHttp, webhookOptions,
         sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<WebhookDispatcher>>()));
 }
-// How often the scheduled check runs. 0 = never; the portal's own Refresh is unaffected either way.
-var marketplacePollMinutes = marketplaceOptions.Enabled
-    ? builder.Configuration.GetValue("KnockBox:MarketplacePollMinutes", 360)
-    : 0;
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ConnectionManager>();
 // Explicit factory (not AddSingleton<LobbyManager>) so the clock that stamps Lobby.CreatedAt — which
@@ -667,34 +678,14 @@ if (precompressor is not null && precompressReconcileSeconds > 0)
 }
 
 // Scheduled marketplace check: fetch the registered catalogs and start an update for each game the
-// operator ENROLLED (nothing is enrolled by default, and a pass with an empty enrolment makes no
-// request at all). 6 hours by default — the catalog is a CDN-fronted file with ETag support, so a poll
-// is one 304 and no re-parse, and games publish rarely; a tighter interval multiplied across every
-// deployment is unkind to the origin for no gain. 0 = off. Disposed on shutdown.
-Timer? marketplacePollTimer = null;
-if (marketplacePollMinutes > 0 && app.Services.GetService<GameUpdateCoordinator>() is { } updateCoordinator)
+// operator ENROLLED (nothing is enrolled by default, and a pass with an empty enrolment makes no request
+// at all). The schedule itself — daily at 03:00 UTC unless configured or changed in the portal — belongs
+// to UpdateScheduler, which owns a re-armable timer so an edit applies to this process rather than the
+// next one. Present only when the marketplace is enabled. Disposed on shutdown.
+if (app.Services.GetService<UpdateScheduler>() is { } updateScheduler)
 {
-    var interval = TimeSpan.FromMinutes(marketplacePollMinutes);
-    // Jittered first tick, so a fleet restarted together doesn't thunder at the catalog host.
-    var first = interval + TimeSpan.FromSeconds(Random.Shared.Next(0, 300));
-    marketplacePollTimer = new Timer(_ =>
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                var pass = await updateCoordinator.RunOnceAsync(app.Lifetime.ApplicationStopping);
-                if (pass.Started > 0)
-                    app.Logger.LogInformation("Scheduled marketplace check started {Started} update(s).",
-                        pass.Started);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                app.Logger.LogError(ex, "Scheduled marketplace check failed.");
-            }
-        });
-    }, null, first, interval);
-    app.Lifetime.ApplicationStopping.Register(() => marketplacePollTimer.Dispose());
+    updateScheduler.Start(app.Lifetime.ApplicationStopping);
+    app.Lifetime.ApplicationStopping.Register(updateScheduler.Dispose);
 }
 
 // The webhook drain: one long-lived task posting whatever lands in the queue. Not a timer — the queue is
@@ -1027,6 +1018,7 @@ app.MapWhen(
             packageLimits,
             app.Services.GetService<MarketplaceSourceRegistry>(),
             app.Services.GetService<GameUpdateCoordinator>(),
+            app.Services.GetService<UpdateScheduler>(),
             adminLogBuffer,
             app.Services.GetRequiredService<DiskUsageReporter>(),
             relayMetrics,

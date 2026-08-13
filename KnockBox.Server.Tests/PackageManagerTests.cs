@@ -1,7 +1,9 @@
+using System.Text;
 using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
+using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using Microsoft.Extensions.Configuration;
@@ -26,6 +28,7 @@ public class PackageManagerTests : IDisposable
     private readonly GameLifecycleGate _gate;
     private readonly LobbyManager _lobbies;
     private readonly ConnectionManager _connections = new();
+    private readonly FakeHttpMessageHandler _http = new();
 
     private static readonly GamePackageLimits Generous = new(100L * 1024 * 1024, 1000, 10_000);
 
@@ -607,5 +610,73 @@ public class PackageManagerTests : IDisposable
 
         Assert.Single(backups);
         Assert.Null(backups[0].Version);
+    }
+
+    // ── Marketplace installs ──────────────────────────────────────────────────────────────────────
+    // The download path, over a faked origin. Everything above drives StartInstallFromFile, which never
+    // touches MarketplaceClient — so none of it exercised RunDownload, and a self-deadlock there went
+    // unnoticed until an operator watched a real install sit in "Verifying the package." forever.
+
+    /// <summary>Publishes a real package at its derived release URL and returns the catalog entry.</summary>
+    private MarketplacePlugin Publish(string id = "demo", string version = "1.0.0")
+    {
+        var package = MarketplaceFixture.Package(id, version);
+        _http.Map(MarketplaceFixture.AssetUrl($"{id}.kbg"), package, contentType: "application/octet-stream");
+
+        var json = MarketplaceFixture.Catalog(new MarketplaceFixture.Entry(
+            Id: id, Version: version,
+            SourceJson: MarketplaceFixture.Source($"{id}.kbg", MarketplaceFixture.Sha256(package))));
+        return MarketplaceClient.Parse(Encoding.UTF8.GetBytes(json)).Plugins![0];
+    }
+
+    private MarketplaceClient Downloader() => new(
+        _http.Client(), MarketplaceFixture.Options(), Generous, NullLogger<MarketplaceClient>.Instance);
+
+    [Fact]
+    public async Task A_marketplace_install_finishes_rather_than_stalling_after_the_download()
+    {
+        var manager = New();
+
+        var start = manager.StartMarketplaceInstall(Downloader(), Publish(), PackageApplyMode.Force);
+
+        Assert.True(start.Started, start.Error);
+        var job = await SettleAsync(start.Job!.JobId);
+        Assert.Equal(PackageJobStatus.Succeeded, job.Status);
+        PumpInstaller();
+        Assert.True(_catalog.TryGet("demo", out var manifest));
+        Assert.Equal("1.0.0", manifest.Version);
+    }
+
+    [Fact]
+    public async Task A_marketplace_install_gives_its_install_slot_back()
+    {
+        // The failure this guards is not a failed job — it is a hung one. RunDownload used to hold the
+        // single install permit across ApplyAsync, which waits on the same semaphore, so the job wedged
+        // in Verifying (still cancellable, since that status is) and never released the permit. Nothing
+        // in the job feed said so; every later install, upload, rollback and uninstall simply queued
+        // behind it until the process restarted. So the invariant is asserted directly.
+        var manager = New(new PackageManagerOptions { MaxConcurrentInstalls = 1 });
+
+        var start = manager.StartMarketplaceInstall(Downloader(), Publish(), PackageApplyMode.Force);
+        var job = await SettleAsync(start.Job!.JobId);
+
+        Assert.Equal(PackageJobStatus.Succeeded, job.Status);
+        Assert.Equal(1, manager.AvailableInstallSlots);
+    }
+
+    [Fact]
+    public async Task A_second_operation_runs_after_a_marketplace_install_rather_than_queueing_forever()
+    {
+        // The operator-visible half of the same bug: with one permit leaked, the next thing they tried
+        // sat in Queued with no explanation.
+        var manager = New(new PackageManagerOptions { MaxConcurrentInstalls = 1 });
+        await SettleAsync(
+            manager.StartMarketplaceInstall(Downloader(), Publish(), PackageApplyMode.Force).Job!.JobId);
+        PumpInstaller();
+
+        var second = await UploadAsync(manager, PackageFixture.Versioned("demo", "Demo", "2.0.0"));
+
+        Assert.Equal(PackageJobStatus.Succeeded, second.Status);
+        Assert.Equal(1, manager.AvailableInstallSlots);
     }
 }

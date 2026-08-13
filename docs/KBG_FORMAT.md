@@ -190,6 +190,35 @@ straight into its serving cache at install time and skip the re-compression enti
 archive (tar + Brotli/xz) compresses marginally better but produces one opaque stream, so it cannot
 be reused this way.
 
+### Why the server still extracts (`games-unpacked/`)
+
+The saving above is real but narrower than "the server never compresses", and it is worth being precise
+about, because the obvious next question is why a package is extracted at all rather than served from the
+archive. Six reasons, in rough order of how hard each is to work around:
+
+1. **Only part of a package is Brotli.** The packer stores `.png/.jpg/.webp/.mp3/.mp4/.woff2` and friends
+   as `identity` — usually the majority of a game's bytes. None of those has a compressed variant to
+   serve, by design.
+2. **Integrity is verified during extraction, once.** The declared size and SHA-256 of every file are
+   checked against the *decompressed* bytes as they are written, with the byte cap enforced while copying
+   because the declared sizes are attacker-controlled. Serving from the archive would move that work to
+   request time or drop it.
+3. **Every negotiation miss falls through to the raw file**, which is where the content type, `ETag`,
+   `Content-Length` and range support come from: identity clients, files under `PrecompressMinBytes`,
+   incompressible extensions, `Precompress=false`, and every thumbnail.
+4. **Some files are read as files, not served.** `GAME.json`, a `serverAuthority` module and the
+   `authorityWords` dictionaries are opened from disk (and cached by mtime and length) — and they are
+   deliberately excluded from the compressed cache, so a variant-only store would hold nothing for them.
+5. **Discovery is directory-shaped**: the catalog enumerates directories under each root and requires the
+   folder name to equal the manifest `id`.
+6. **`games/` is mounted read-only in production**, so nothing can be expanded in place. A separate
+   writable root is what makes hot-dropping a `.kbg` possible there at all.
+
+So `games-unpacked/` is not a staging area for re-compression: it is the filesystem the rest of the server
+assumes. What the format removes is the ~49-second-per-asset maximum-effort Brotli pass, which is the
+expensive part. (Gzip variants are the one thing still built locally, which is why they are off by
+default — see `KnockBox:PrecompressGzip` in [`INFRASTRUCTURE.md`](./INFRASTRUCTURE.md) §9.)
+
 ## Relationship to plain game folders
 
 A KnockBox server supports both. A plain `games/<id>/` folder and a `games/<id>.kbg` archive are

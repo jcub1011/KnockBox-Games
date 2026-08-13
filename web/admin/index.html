@@ -15,9 +15,12 @@
         <span class="brand-title">KnockBox<span class="brand-accent">Portal</span></span>
       </div>
       <div class="header-actions">
-        <div class="status-pill" id="server-status-pill">
+        <!-- Only ever rendered when something is wrong. An "Admin Port Active" pill could by
+             construction never be read while it was false: this page is served BY the admin port, so
+             the pill was green or the whole portal was absent. Hidden until showErrorStatus paints it. -->
+        <div class="status-pill" id="server-status-pill" hidden>
           <span class="status-dot"></span>
-          <span id="server-status-text">Connecting...</span>
+          <span id="server-status-text"></span>
         </div>
         <button id="logout-btn" class="btn btn-secondary hidden">Log Out</button>
       </div>
@@ -349,6 +352,49 @@
                 <button class="btn btn-secondary btn-small" id="limits-refresh">Refresh</button>
               </div>
               <p class="panel-card-note" id="limits-note"></p>
+            </div>
+
+            <!-- Lives here rather than on the Marketplace tab because it is a FORM, and Platform is the
+                 one tab that never polls (POLL_MS.platform = 0). The Marketplace tab re-reads its catalog
+                 whenever a job finishes, which would re-render this mid-edit. -->
+            <div class="panel-card">
+              <div class="panel-card-header">
+                <h3>Update Schedule</h3>
+                <span class="badge" id="schedule-badge" hidden>Overridden</span>
+              </div>
+              <p class="panel-card-note">
+                When this server checks its marketplaces for newer versions of the games you enrolled in
+                automatic updates (Marketplace tab). Times are <strong>UTC</strong>, so the schedule does
+                not move with a host's time zone or with daylight saving. A check also runs shortly after
+                every start; <strong>Refresh Catalog</strong> on the Marketplace tab checks right now
+                regardless of this.
+              </p>
+              <div class="field-row">
+                <select id="schedule-cadence" class="text-input filter-narrow">
+                  <option value="off">Never</option>
+                  <option value="hourly">Hourly</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+                <select id="schedule-day" class="text-input filter-narrow">
+                  <option value="sunday">Sunday</option>
+                  <option value="monday">Monday</option>
+                  <option value="tuesday">Tuesday</option>
+                  <option value="wednesday">Wednesday</option>
+                  <option value="thursday">Thursday</option>
+                  <option value="friday">Friday</option>
+                  <option value="saturday">Saturday</option>
+                </select>
+                <!-- Not filter-narrow: each option carries the UTC hour AND the reader's local time. -->
+                <select id="schedule-hour" class="text-input"></select>
+              </div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="schedule-save">Save Schedule</button>
+                <button class="btn btn-secondary" id="schedule-reset">Revert to Default</button>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary btn-small" id="schedule-refresh">Refresh</button>
+              </div>
+              <p class="panel-card-note" id="schedule-note"></p>
             </div>
 
             <div class="panel-card">

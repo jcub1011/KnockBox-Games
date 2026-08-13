@@ -10,7 +10,7 @@ import {
   pluginStatusClass, pluginStatusLabel, ratePerSecond, tabFromHash, uploadGuard, validateLimits,
   versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS, webhookEventLabel,
   checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue, seriesCpuPercent,
-  downsample, sparklinePath,
+  downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
 } from '../admin/admin-core.js';
 
 describe('tabFromHash', () => {
@@ -79,6 +79,76 @@ describe('formatCount and formatClock', () => {
   it('renders a parseable timestamp and rejects junk', () => {
     expect(formatClock('2026-08-12T20:19:37.000Z')).not.toBe('--');
     expect(formatClock('not a date')).toBe('--');
+  });
+
+  it('renders a date as well as a time for something days away', () => {
+    expect(formatDateTime('2026-08-16T03:00:00.000Z')).not.toBe('--');
+    expect(formatDateTime('not a date')).toBe('--');
+  });
+});
+
+describe('scheduleNote', () => {
+  const base = {
+    summary: 'weekly, Sundays at 03:00 UTC',
+    nextRunUtc: '2026-08-16T03:00:00.000Z',
+    enrolled: 2,
+  };
+
+  it('states the schedule, the next run and the enrolment', () => {
+    const note = scheduleNote(base);
+
+    expect(note).toContain('weekly, Sundays at 03:00 UTC');
+    expect(note).toContain('(your time)');
+    expect(note).toContain('2 game(s) enrolled');
+  });
+
+  it('says nothing is scheduled when checks are off', () => {
+    expect(scheduleNote({ ...base, summary: 'never (scheduled checks are off)', nextRunUtc: null }))
+      .toContain('No check is scheduled.');
+  });
+
+  it('warns when a schedule has nothing to act on', () => {
+    // A pass with an empty enrolment makes no request at all, so the schedule alone does nothing —
+    // an operator who set one and saw no activity would reasonably think it was broken.
+    expect(scheduleNote({ ...base, enrolled: 0 })).toContain('No game is enrolled');
+  });
+
+  it('renders nothing at all when the marketplace is off', () => {
+    expect(scheduleNote(null)).toBe('');
+  });
+});
+
+describe('hourOptionLabel', () => {
+  // Pinned against a fixed reference date so the assertions don't move with the calendar. The LOCAL half
+  // is whatever zone the test host is in, so it is asserted structurally rather than by value.
+  const reference = new Date(Date.UTC(2026, 7, 13, 12));
+
+  it('always states the UTC hour it stores', () => {
+    expect(hourOptionLabel(3, reference)).toContain('03:00 UTC');
+    expect(hourOptionLabel(14, reference)).toContain('14:00 UTC');
+    expect(hourOptionLabel(0, reference)).toContain('00:00 UTC');
+  });
+
+  it('adds the reader’s own clock beside it', () => {
+    // The stored value is UTC and never moves; the label exists so nobody has to do the arithmetic.
+    expect(hourOptionLabel(9, reference)).toMatch(/09:00 UTC \(.+ local(, (prev\.|next) day)?\)/);
+  });
+
+  it('marks an hour that lands on a different local day', () => {
+    // Across all 24 hours, any zone but UTC pushes at least one of them onto a neighbouring date, and
+    // "03:00 UTC → 10:00 PM" without that marker is quietly the wrong evening.
+    const labels = Array.from({ length: 24 }, (_, h) => hourOptionLabel(h, reference));
+    const offsetMinutes = reference.getTimezoneOffset();
+    const shifted = labels.filter((l) => /prev\. day|next day/.test(l));
+    if (offsetMinutes === 0) expect(shifted).toHaveLength(0);
+    else expect(shifted.length).toBeGreaterThan(0);
+  });
+
+  it('does not report a day shift across a month boundary', () => {
+    // 31 → 1 is one day, not minus thirty: comparing day-of-month naively inverts the marker on the
+    // last day of a month, which is the one day nobody would test by hand.
+    const label = hourOptionLabel(23, new Date(Date.UTC(2026, 7, 31, 12)));
+    expect(label).not.toMatch(/prev\. day/);
   });
 });
 

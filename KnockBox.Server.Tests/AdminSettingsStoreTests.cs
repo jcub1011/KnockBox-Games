@@ -364,6 +364,65 @@ public class AdminSettingsStoreTests : IDisposable
         Assert.Equal(["A?"], store.RoomCodes.Patterns);
     }
 
+    // ── Update schedule ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void A_fresh_server_records_no_update_schedule()
+    {
+        // Null, not the default object: "never chose" and "chose the same thing the default happens to
+        // be" are different facts, and only the second should survive a change of default.
+        Assert.Null(NewStore().UpdateSchedule);
+    }
+
+    [Fact]
+    public void An_update_schedule_survives_a_restart()
+    {
+        Assert.Null(NewStore().SetUpdateSchedule(
+            new UpdateSchedule(UpdateCadence.Weekly, DayOfWeek.Tuesday, 14)));
+
+        var reloaded = NewStore().UpdateSchedule;
+        Assert.NotNull(reloaded);
+        Assert.Equal(UpdateCadence.Weekly, reloaded.Cadence);
+        Assert.Equal(DayOfWeek.Tuesday, reloaded.DayOfWeek);
+        Assert.Equal(14, reloaded.HourUtc);
+    }
+
+    [Fact]
+    public void Clearing_the_schedule_removes_the_object_rather_than_recording_the_default()
+    {
+        var store = NewStore();
+        store.SetUpdateSchedule(new UpdateSchedule(UpdateCadence.Hourly));
+        store.SetUpdateSchedule(null);
+
+        Assert.Null(NewStore().UpdateSchedule);
+        Assert.Contains("\"schedule\": null", File.ReadAllText(_settingsPath));
+    }
+
+    [Fact]
+    public void The_schedule_is_written_as_names_an_operator_can_hand_edit()
+    {
+        NewStore().SetUpdateSchedule(new UpdateSchedule(UpdateCadence.Weekly, DayOfWeek.Friday, 6));
+
+        var written = File.ReadAllText(_settingsPath);
+        Assert.Contains("\"cadence\": \"weekly\"", written);
+        Assert.Contains("\"dayOfWeek\": \"friday\"", written);
+    }
+
+    [Fact]
+    public void A_hand_edited_schedule_with_an_impossible_hour_falls_back_to_the_default()
+    {
+        // Normalized on the way IN, so the timer arithmetic downstream never sees an hour of 99.
+        File.WriteAllText(_settingsPath, """
+        {
+          "schedule": { "cadence": "daily", "dayOfWeek": "sunday", "hourUtc": 99 }
+        }
+        """);
+
+        var store = NewStore();
+        Assert.Null(store.LoadError);
+        Assert.Equal(UpdateSchedule.Default.HourUtc, store.UpdateSchedule!.HourUtc);
+    }
+
     // ── Player announcement (§4.1) ─────────────────────────────────────────────
 
     [Fact]

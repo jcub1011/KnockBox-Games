@@ -7,6 +7,7 @@ using KnockBox.Server.Games.Words;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace KnockBox.Server.Tests;
@@ -223,4 +224,46 @@ internal sealed class FakeWebSocket(bool blockSends = false) : WebSocket
     public override void Dispose() { }
     public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> b, CancellationToken c) =>
         Task.FromResult(new WebSocketReceiveResult(0, WebSocketMessageType.Close, true));
+}
+
+/// <summary>
+/// Records every line logged, with its level, so a test can assert on what a component said as well as
+/// what it did.
+/// </summary>
+/// <remarks>
+/// Typed (<c>ILogger&lt;T&gt;</c>) because most collaborators here take the generic form, and rendering
+/// through the supplied <c>formatter</c> rather than reading the state means a test sees exactly the
+/// string an operator would.
+/// </remarks>
+internal sealed class RecordingLogger<T> : ILogger<T>
+{
+    public List<(LogLevel Level, string Message)> Lines { get; } = [];
+
+    public IEnumerable<string> At(LogLevel level) =>
+        Lines.Where(l => l.Level == level).Select(l => l.Message);
+
+    /// <summary>
+    /// Invoked with each line as it is logged, before it is recorded.
+    /// </summary>
+    /// <remarks>
+    /// A logging call is a deterministic point INSIDE a component's own work, which makes it the seam a
+    /// test needs to re-enter that component mid-operation. Two threads and a <c>Barrier</c> cannot do
+    /// this: a barrier guarantees both threads reach it, not that the second one calls in before the
+    /// first has finished, so the "concurrent" case it is meant to exercise happens only sometimes.
+    /// </remarks>
+    public Action<LogLevel, string>? OnLog { get; set; }
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    // True for every level: a test asserting that something was logged at Debug rather than Information
+    // is asking a question the component can only answer if Debug is enabled.
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        var message = formatter(state, exception);
+        OnLog?.Invoke(logLevel, message);
+        Lines.Add((logLevel, message));
+    }
 }

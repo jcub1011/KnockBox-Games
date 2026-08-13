@@ -109,7 +109,14 @@ would multiply the request rate for five nobody is looking at, and the games tab
 - **Game Catalog** — availability, disk footprint, delete, rescan, lifecycle badges.
 - **Marketplace & Packages** — catalogs, install/update/rollback/uninstall, upload, the operations list.
 - **System Logs** — the live stream plus raw file download.
-- **Platform** — runtime limits & lobby caps, the player announcement, banned room codes, webhook endpoints.
+- **Platform** — runtime limits & lobby caps, the marketplace update schedule, the player announcement,
+  banned room codes, webhook endpoints.
+
+There is **no "admin port active" indicator**, and the absence is deliberate: `#server-status-pill` ships
+`hidden` and is painted only by `showErrorStatus`. A pill reporting that the admin port is up, on a page
+that port just served, can never be read while it is false. (Its CSS needs `.status-pill[hidden]` for the
+same reason `.home-announcement[hidden]` does — see the launch-overlay note about `display: flex` beating
+the UA `[hidden]` rule.)
 
 **`POLL_MS.platform = 0`: the Platform tab is the only one that does not poll**, and `startPolling` treats a
 falsy interval as "no timer" rather than falling back to 5 s. It is a set of forms, not a view — a poll would
@@ -314,6 +321,20 @@ which `Hosting/DeploymentDiagnostics.cs` surfaces (with other file-access proble
 bootstrap) by replacing the shell home page with `Hosting/DeploymentWarningPage.cs` — see the
 home-page warning middleware in `Program.cs` and `docs/HOSTING.md`.
 
+**A rescan that changed nothing logs nothing new.** Discovery re-runs on every file event, on the
+bind-mount poll and whenever `GamePackageInstaller` asks for another pass, so the overwhelming majority of
+scans find exactly what the last one found — and reporting the whole catalog each time buried the one pass
+that mattered, both in the log file and in `AdminLogBuffer`'s bounded ring, which is what an operator reads
+when something has gone wrong. `GameCatalog.PassLog` therefore **defers** the routine lines (`Discovered
+game …`, `Skipping game …`, `Game catalog ready …`) and picks their level at the end of the pass: as asked
+for when the pass changed something, `Debug` when its signature matches the last published one. Template and
+args are kept apart so the eventual call is still structured — the portal filters on level and
+`SourceContext`, and pre-rendering would hand it one opaque string. Exceptions and an unreadable games root
+are logged where they happen and never demoted; an unreadable primary root also **clears** the signature, so
+the pass that recovers reports the whole catalog rather than matching a pre-outage one and going quiet.
+`Discovered` still fires on every pass — only the logging is conditional, and a test says so, because the
+installer and the precompressor reconcile off that event.
+
 GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`, `version` (optional,
 never validated — the marketplace's installed-side version, see below),
 `crossOriginIsolated` (optional, for threaded engine exports), and `themeColor` /
@@ -396,6 +417,17 @@ a class must not need external wiring to reach its own invariant. The install **
 `WaitForLobbiesAsync`, not around it: a drain wait is open-ended, and holding the single slot across it left
 every unrelated install queued behind one draining game.
 
+**`_installSlots` is acquired in exactly two disjoint windows, and that is load-bearing.** `RunDownload`
+holds it across the download only and **releases before calling `ApplyAsync`**, which takes it again for the
+apply. Holding it across the call is a self-deadlock on the default `MaxConcurrentInstalls` of 1 — and it
+shipped that way: every marketplace install wedged in `Verifying` forever while the download had in fact
+succeeded, and since `Verifying` is `Cancellable` the job stayed cancellable, which is what made it look
+like anything but a deadlock. The leaked permit then queued every later install, upload, rollback and
+uninstall behind it until a restart. Uploads were unaffected (they never enter `RunDownload`), which is why
+"upload works, marketplace doesn't" was the reported shape. `PackageManagerTests` now drives a real
+marketplace install over `FakeHttpMessageHandler` and asserts `AvailableInstallSlots` returns to full after
+every job kind — a leaked permit does not fail a job, it hangs one, so nothing in the job feed would say so.
+
 **Jobs, not blocking requests** — a download plus extraction outlives any request and a drain is
 open-ended, so every operation answers `202` + `jobId` and the portal polls a cursor change feed. This is
 the **third** use of that house pattern (after `AdminLogBuffer`): still no SSE and no second socket role.
@@ -417,8 +449,23 @@ the enum, because every `PluginUpdateStatus` is a statement about a catalog *ent
 statement about the absence of one.
 
 **Update policy** is per game and persisted (`manual`/`auto`/`drain`/`force`, recorded by *absence* when
-manual, like `Available`); `Admin/GameUpdateCoordinator.cs` is the schedule. With nothing enrolled a pass
+manual, like `Available`); `Admin/GameUpdateCoordinator.cs` is one pass of it. With nothing enrolled a pass
 **makes no outbound request at all**, so a default deployment doesn't quietly start phoning home.
+
+**When that pass runs is a wall-clock schedule, not an interval.** `Admin/UpdateSchedule.cs` is the
+persisted policy (`off`/`hourly`/`daily`/`weekly` + day + hour, **UTC**, default daily at 03:00, recorded by
+absence like `OperatorLimits`) and `Admin/UpdateScheduler.cs` owns a **one-shot timer re-armed after every
+fire** — a periodic timer can only say "every N since this process started", which drifts off the chosen
+hour on every restart and cannot express "Sundays at 3am" at all. Re-computing each time is also what lets
+`Reschedule()` apply a portal edit to *this* process; the timer used to be a local in `Program.cs` with no
+handle in DI, which is why it couldn't be. `NextDue` is **strictly after** the moment passed in — the
+scheduler re-arms from the instant it just fired, and an inclusive answer would hand back that same instant
+and spin. Out-of-range values go through `Normalize()` in `NextDue` and `Describe()` both, so a hand-edited
+hour of 99 cannot mean 23:00 to the timer and 03:00 to the portal. A pass also runs **~30 s after boot**
+(free when nothing is enrolled), and every due time carries up to 5 minutes of jitter because a fixed hour
+would otherwise sync a whole fleet onto one second. The portal form lives on the **Platform** tab, not
+Marketplace: it is a form, and Platform is the only tab that never polls (Marketplace re-reads its catalog
+whenever a job finishes, which would re-render it mid-edit).
 
 `Admin/GameLifecycleGate.cs` holds the transient `Draining`/`Updating` states and implements
 `IPlatformPolicy` by composing `AdminSettingsStore` and ANDing its own answer. They are **never
@@ -628,7 +675,9 @@ and, in a container, on a persisted volume outside the image — the settings fi
 that survives a restart), `AdminStaleLobbyMinutes`/`AdminLogBufferSize`/`AdminDiskUsageCacheSeconds`
 (dashboard behaviour; see `docs/ADMIN.md`), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
-(pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
+(pre-compressed game-asset cache; **`PrecompressGzip` defaults to `false`** — a `.kbg`'s Brotli blobs are
+copied verbatim for free, but a `.gz` has to be built here at max effort, and the ~3% of clients without
+Brotli still get gzip on the fly), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
 (`.kbg` install; the root must be writable and outside `games/`),
 `MaxLobbies`/`MaxLobbiesPerGame` (capacity caps; also editable at runtime from the portal and persisted),
 `MetricSampleSeconds`/`MetricHistoryPoints` (the dashboard's time series; `0` = off),
@@ -636,7 +685,8 @@ fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMin
 (outbound webhooks; `Enabled=false` ⇒ no dispatcher and no HttpClient at all),
 `GamesManagedRoot`/`ManagedPackages`/`PackageBackupCount`/`MaxConcurrentInstalls`/`PackageJobRetention`
 (portal installs; the managed root must be writable, outside `games/`, and — unlike the caches — backed up),
-`MarketplacePollMinutes`/`MarketplaceMaxSources` (the scheduled check and extra catalogs),
+`MarketplaceUpdate{Cadence,HourUtc,DayOfWeek}`/`MarketplaceMaxSources` (the *starting* update schedule —
+the portal overrides it and persists — and extra catalogs),
 `Marketplace{Enabled,CatalogUrl,DownloadBaseUrl,MaxCatalogBytes,MaxDownloadBytes,CatalogTimeoutSeconds,DownloadTimeoutSeconds}`
 (official marketplace; `Enabled=false` ⇒ no outbound HttpClient at all), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
 `ForwardedHeaders`/`KnownProxies`/`AllowedOrigins` (behind a reverse proxy),

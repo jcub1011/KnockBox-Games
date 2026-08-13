@@ -80,24 +80,30 @@ body {
   gap: 1rem;
 }
 
+/* The pill is a fault indicator, not a heartbeat — admin.js toggles it via the `hidden` attribute, so
+   there is only ever one colour to state and it is stated here rather than inline. */
 .status-pill {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   font-size: 0.85rem;
-  color: var(--text-muted);
+  color: var(--error-color);
   background: rgba(255, 255, 255, 0.05);
   padding: 0.4rem 0.8rem;
   border-radius: 9999px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--error-color);
 }
+
+/* `display: flex` above beats the UA `[hidden] { display: none }`, so hiding it has to be undone the
+   same way — otherwise an empty pill is drawn in the header on every load. */
+.status-pill[hidden] { display: none; }
 
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background-color: var(--success-color);
-  box-shadow: 0 0 8px var(--success-color);
+  background-color: var(--error-color);
+  box-shadow: 0 0 8px var(--error-color);
 }
 
 /* Buttons */

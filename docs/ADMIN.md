@@ -327,6 +327,31 @@ the grace window), and the two admin-login caps bound the CPU an unauthenticated
 password hashing — a lock that opens from inside the room it protects is not a lock. Change those with
 configuration and restart.
 
+### Update Schedule
+
+When this server checks its marketplaces for newer versions of the games you enrolled in automatic updates
+(§4). **Daily at 03:00 UTC** unless you change it — a catalog changes a handful of times a year, an enrolled
+game updating within a day of publication is well inside what anyone expects, and a check that finds
+something ends in a game being swapped, which should land when the fewest people are playing.
+
+- **Cadence** is Never, Hourly, Daily or Weekly. Weekly also takes a day; daily and weekly take an hour.
+- **Times are UTC**, so the schedule does not move when the host's time zone or its tzdata does, and does
+  not shift by an hour twice a year. The line under the form restates the next run in *your* zone, which is
+  the only way to check that what you set is what you meant.
+- **A check also runs ~30 s after every start.** Someone who has just restarted a server is exactly the
+  person who wants to know whether anything is out of date, and waiting until the small hours to find out
+  is not useful. It costs nothing on a default deployment: with nothing enrolled, a pass makes no outbound
+  request at all.
+- Each due time carries **up to 5 minutes of jitter**, so a fleet on the same schedule doesn't reach the
+  catalog host at the same second.
+- The schedule does not gate **Refresh Catalog** on the Marketplace tab. That checks right now, always.
+- A schedule with nothing enrolled installs nothing — the form says so rather than leaving you to wonder
+  why a schedule you set never does anything.
+
+This card is on the Platform tab rather than the Marketplace tab because it is a form, and Platform is the
+one tab that never polls. The Marketplace tab re-reads its catalog whenever an operation finishes, which
+would re-render a half-typed field.
+
 ### Player Announcement
 
 One banner, shown on the player home page until they dismiss it or you clear it. Everyone connected sees it
@@ -396,7 +421,8 @@ Both thresholds are off by default, because a number that fits one host is noise
 
 ## 7. Where operator policy is stored
 
-Availability overrides, maintenance mode, registered marketplaces, per-game update enrolments, runtime limit
+Availability overrides, maintenance mode, registered marketplaces, per-game update enrolments, the update
+schedule, runtime limit
 overrides, the room-code blocklist, the live announcement and the webhook endpoints are all written to
 **`admin-settings.json`**, next to the admin
 password file (`AdminSettingsPath`; by default the same directory as `AdminPasswordPath`, which in the
@@ -418,6 +444,11 @@ The file is indented and safe to hand-edit while the server is stopped:
   },
   "updates": {
     "word-rush": "drain"
+  },
+  "schedule": {
+    "cadence": "weekly",
+    "dayOfWeek": "tuesday",
+    "hourUtc": 14
   },
   "limits": {
     "maxLobbies": 40,
@@ -456,7 +487,8 @@ The file is indented and safe to hand-edit while the server is stopped:
 ```
 
 Defaults are recorded by **absence**: a game left Available has no `games` row, one left Manual has no
-`updates` row, a limit left at its default has no `limits` entry, and an empty blocklist or webhook
+`updates` row, a limit left at its default has no `limits` entry, a schedule you never chose has no
+`schedule` object (the configured one stands), and an empty blocklist or webhook
 list is omitted entirely. Otherwise the file would accumulate an entry per game you ever looked at, and "no override"
 and "explicitly the default" would become two ways to say one thing.
 
@@ -528,7 +560,9 @@ Package management and the marketplace (§4):
 | `MaxConcurrentInstalls` | `1` | Downloads/extractions in flight at once. Bounds bandwidth and peak disk, not the number of jobs. |
 | `PackageJobRetention` | `50` | Finished operations kept for the list. Never evicts a running one. |
 | `MarketplaceEnabled` | `true` | Off ⇒ no catalog is fetched and the server holds no HTTP client at all. |
-| `MarketplacePollMinutes` | `360` | Scheduled check for enrolled games. `0` disables it. With nothing enrolled it makes no request regardless. |
+| `MarketplaceUpdateCadence` | `daily` | Scheduled check for enrolled games: `off`, `hourly`, `daily`, `weekly`. The **starting** value only — the Platform tab overrides it and persists. With nothing enrolled it makes no request regardless. |
+| `MarketplaceUpdateHourUtc` | `3` | Hour (0-23 UTC) the daily/weekly check runs at. |
+| `MarketplaceUpdateDayOfWeek` | `sunday` | Day the weekly check runs on. |
 | `MarketplaceMaxSources` | `8` | Extra marketplaces that may be registered, beyond the built-in official one. |
 | `MaxPackageBytes` | 512 MiB | Also the upload cap, enforced against bytes actually received. |
 

@@ -27,4 +27,5 @@ namespace KnockBox.Server.Admin;
 [JsonSerializable(typeof(WebhookEndpoint))]
 [JsonSerializable(typeof(IReadOnlyList<WebhookEndpoint>))]
 [JsonSerializable(typeof(IReadOnlyList<string>))]
+[JsonSerializable(typeof(UpdateSchedule))]
 public partial class AdminSettingsJsonContext : JsonSerializerContext { }

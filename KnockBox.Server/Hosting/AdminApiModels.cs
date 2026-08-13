@@ -430,6 +430,43 @@ public sealed record AdminRoomCodesResponse(
     string Alphabet,
     int CodeLength);
 
+// ── Update schedule ──────────────────────────────────────────────────────────
+
+/// <summary>
+/// When the scheduled marketplace check runs, and when it next will.
+/// </summary>
+/// <param name="Cadence">"off", "hourly", "daily" or "weekly".</param>
+/// <param name="DayOfWeek">"sunday"…"saturday". Meaningful for weekly only, but always reported so the
+/// portal can round-trip the form without inventing a value when the operator switches cadence.</param>
+/// <param name="HourUtc">0-23. Meaningful for daily and weekly.</param>
+/// <param name="Overridden">False ⇒ this is the configured default and the settings file records nothing.
+/// Reported explicitly rather than inferred from an equality test, exactly like the limits form's
+/// <see cref="AdminLimitsResponse.Overridden"/>.</param>
+/// <param name="NextRunUtc">
+/// When the next check is due, or null when checks are off. This is the field that tells an operator the
+/// schedule they just saved is actually live — a form that only echoes back what they typed proves
+/// nothing about whether a timer was re-armed.
+/// </param>
+/// <param name="Enrolled">How many games are enrolled in automatic updates. With none, a pass makes no
+/// request at all, so a schedule on its own does nothing and the portal should say so.</param>
+public sealed record AdminUpdateScheduleResponse(
+    string Cadence,
+    string DayOfWeek,
+    int HourUtc,
+    bool Overridden,
+    string Summary,
+    string? NextRunUtc,
+    int Enrolled);
+
+/// <summary>
+/// Sets the schedule. A null <paramref name="Cadence"/> reverts to the configured default, the same way
+/// clearing every field of the limits form does.
+/// </summary>
+public sealed record AdminUpdateScheduleRequest(
+    string? Cadence = null,
+    string? DayOfWeek = null,
+    int? HourUtc = null);
+
 // ── Announcements ────────────────────────────────────────────────────────────
 
 /// <summary>The live announcement (or none), and who is currently connected to see one.</summary>

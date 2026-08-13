@@ -1,4 +1,5 @@
 using KnockBox.Server.Games;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 using File = KnockBox.Server.Tests.PackageFixture.File;
@@ -31,11 +32,21 @@ public class GamePackageInstallerTests : IDisposable
 
     private static readonly GamePackageLimits Generous = new(100L * 1024 * 1024, 1000, 10_000);
 
+    /// <summary>
+    /// Everything the installers built by <see cref="New"/> logged. Kept so a failed assertion can say
+    /// WHY nothing installed: the installer catches an unexpected IO failure, logs it and moves on, so a
+    /// test that only reads the extracted file reports a bare DirectoryNotFoundException about the file
+    /// it wanted rather than the error that stopped it appearing.
+    /// </summary>
+    private readonly RecordingLogger<GamePackageInstaller> _log = new();
+
+    /// <summary>The installer's errors, or "" — for use as an assertion message.</summary>
+    private string Errors => string.Join(" | ", _log.At(LogLevel.Error));
+
     /// <summary>An installer over both package roots, games/ first — the production ordering.</summary>
     private GamePackageInstaller New(GameAssetPrecompressor? precompressor = null, GamePackageLimits? limits = null) =>
         new([new(_gamesRoot, PackageMarker.GamesRoot), new(_managedRoot, PackageMarker.ManagedRoot)],
-            _unpackedRoot, limits ?? Generous, precompressor,
-            NullLogger<GamePackageInstaller>.Instance);
+            _unpackedRoot, limits ?? Generous, precompressor, _log);
 
     /// <summary>An installer over games/ only — the shape a deployment with ManagedPackages=false runs.</summary>
     private GamePackageInstaller GamesRootOnly() =>
@@ -108,9 +119,9 @@ public class GamePackageInstallerTests : IDisposable
 
         // The folder is named from the id, NOT the archive filename — GameCatalog requires the folder
         // name to equal the manifest id.
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
-        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")));
-        Assert.True(System.IO.File.Exists(Installed("demo", "index.html")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
+        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")), Errors);
+        Assert.True(System.IO.File.Exists(Installed("demo", "index.html")), Errors);
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "anything")));
     }
 
@@ -135,8 +146,11 @@ public class GamePackageInstallerTests : IDisposable
             new File("assets/code.js", payload, Brotli: true),
             new File("assets/note.txt", PackageFixture.Bytes("plain"))));
 
-        RunToCompletion(New());
+        var installer = New();
+        RunToCompletion(installer);
 
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
+        Assert.Null(installer.InstallFailure);
         Assert.Equal(payload, System.IO.File.ReadAllBytes(Installed("demo", Path.Combine("assets", "code.js"))));
         Assert.Equal("plain", System.IO.File.ReadAllText(Installed("demo", Path.Combine("assets", "note.txt"))));
     }
@@ -180,7 +194,7 @@ public class GamePackageInstallerTests : IDisposable
     {
         Drop("demo.kbg", PackageFixture.Valid("demo"));
         var installer = New();
-        Assert.True(RunToCompletion(installer));
+        Assert.True(RunToCompletion(installer), Errors);
 
         // A marker inside the extracted folder records which package file and version produced it.
         var result = installer.Reconcile();
@@ -205,13 +219,13 @@ public class GamePackageInstallerTests : IDisposable
         // distinguishes the two, which is exactly the case Drop's stamping makes deterministic.
         Drop("demo.kbg", PackageFixture.Valid("demo", null, null, new File("old.txt", PackageFixture.Bytes("old"))));
         RunToCompletion(New());
-        Assert.True(System.IO.File.Exists(Installed("demo", "old.txt")));
+        Assert.True(System.IO.File.Exists(Installed("demo", "old.txt")), Errors);
 
         // Replace with a version that no longer contains old.txt.
         Drop("demo.kbg", PackageFixture.Valid("demo", null, null, new File("new.txt", PackageFixture.Bytes("new"))));
         Assert.True(RunToCompletion(New()));
 
-        Assert.True(System.IO.File.Exists(Installed("demo", "new.txt")));
+        Assert.True(System.IO.File.Exists(Installed("demo", "new.txt")), Errors);
         // The swap replaces the folder wholesale, so nothing survives from the previous version.
         Assert.False(System.IO.File.Exists(Installed("demo", "old.txt")));
     }
@@ -231,7 +245,7 @@ public class GamePackageInstallerTests : IDisposable
         System.IO.File.SetLastWriteTimeUtc(path, frozen); // pretend the clock never moved
 
         Assert.True(RunToCompletion(New()));
-        Assert.True(System.IO.File.Exists(Installed("demo", "new.txt")));
+        Assert.True(System.IO.File.Exists(Installed("demo", "new.txt")), Errors);
         Assert.False(System.IO.File.Exists(Installed("demo", "old.txt")));
     }
 
@@ -256,7 +270,7 @@ public class GamePackageInstallerTests : IDisposable
         var path = Drop("demo.kbg", PackageFixture.Valid("demo"));
         var installer = New();
         RunToCompletion(installer);
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
 
         System.IO.File.Delete(path);
 
@@ -265,7 +279,7 @@ public class GamePackageInstallerTests : IDisposable
         var first = installer.Reconcile();
         Assert.False(first.Changed);
         Assert.True(first.Pending, "the countdown must ask for another pass");
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
 
         var second = installer.Reconcile();
         Assert.True(second.Changed);
@@ -299,7 +313,7 @@ public class GamePackageInstallerTests : IDisposable
         Drop("demo.kbg", PackageFixture.Valid("demo"));
         var installer = New();
         RunToCompletion(installer);
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
 
         var path = Path.Combine(_gamesRoot, "demo.kbg");
         for (var i = 0; i < 4; i++)
@@ -337,22 +351,35 @@ public class GamePackageInstallerTests : IDisposable
     }
 
     [Fact]
-    public async Task Concurrent_passes_do_not_collapse_the_settle_guard()
+    public void A_pass_requested_mid_pass_does_not_collapse_the_settle_guard()
     {
         // Both guards compare a pass against what the PREVIOUS pass recorded, so they only mean anything
         // if passes are separated by real time. The coalescing gate used to run a second pass immediately
         // on behalf of a caller that arrived mid-pass, which made a package dropped microseconds ago look
         // settled — defeating the one check that stops a half-copied archive from being read.
+        //
+        // Re-entered from INSIDE the pass rather than from a second thread. Two threads and a Barrier
+        // guarantee only that both threads reach the barrier — not that the second calls Reconcile before
+        // the first has returned. Under load they ran back to back instead, two sequential passes saw an
+        // unchanged file, and the package installed exactly as this test says it must not: a failure that
+        // reported a real invariant broken when nothing was wrong.
         Drop("demo.kbg", PackageFixture.Valid("demo"));
-        var installer = New();
 
-        using var barrier = new Barrier(2);
-        await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        GamePackageInstaller? installer = null;
+        var reentrantResult = new GamePackageInstaller.ReconcileResult(Changed: true, Pending: true); // deliberately not default
+        var reentered = 0;
+        // The settle check logs before returning, which is a point guaranteed to be inside the pass.
+        _log.OnLog = (_, _) =>
         {
-            barrier.SignalAndWait();
-            installer.Reconcile();
-        })));
+            if (Interlocked.Exchange(ref reentered, 1) == 0) reentrantResult = installer!.Reconcile();
+        };
+        installer = New();
 
+        var result = installer.Reconcile();
+
+        Assert.Equal(1, reentered); // the mid-pass call really did happen, so the rest means something
+        Assert.Equal(default, reentrantResult); // it was turned away rather than served a pass of its own
+        Assert.True(result.Pending, "the running pass must report that another is owed");
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "demo")),
             "a package must never install within a single burst of overlapping passes");
     }
@@ -384,7 +411,7 @@ public class GamePackageInstallerTests : IDisposable
             Assert.False(result.Changed);
             Assert.Null(installer.InstallFailure);
         }
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
     }
 
     [Fact]
@@ -412,7 +439,7 @@ public class GamePackageInstallerTests : IDisposable
         Drop("demo.kbg", PackageFixture.Valid("demo"));
         var installer = New();
         RunToCompletion(installer);
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
 
         System.IO.File.SetUnixFileMode(_gamesRoot, UnixFileMode.None);
         try
@@ -424,7 +451,7 @@ public class GamePackageInstallerTests : IDisposable
             // over a transient permissions problem.
             installer.Reconcile();
             installer.Reconcile();
-            Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+            Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
         }
         finally
         {
@@ -445,7 +472,7 @@ public class GamePackageInstallerTests : IDisposable
         var installer = New();
         RunToCompletion(installer);
 
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "good")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "good")), Errors);
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "bad")));
         Assert.NotNull(installer.InstallFailure);
         Assert.Contains("bad.kbg", installer.InstallFailure);
@@ -480,8 +507,8 @@ public class GamePackageInstallerTests : IDisposable
 
         // Quarantine is keyed on (path, mtime, length), so replacing the file clears it.
         Drop("demo.kbg", PackageFixture.Valid("demo"));
-        Assert.True(RunToCompletion(installer));
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(RunToCompletion(installer), Errors);
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
     }
 
     [Fact]
@@ -507,8 +534,8 @@ public class GamePackageInstallerTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
 
         System.IO.File.WriteAllBytes(path, package); // the copy finishes
-        Assert.True(RunToCompletion(installer));
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(RunToCompletion(installer), Errors);
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
     }
 
     [Fact]
@@ -599,8 +626,8 @@ public class GamePackageInstallerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(true)]   // the DEFAULT (KnockBox:PrecompressGzip), and the case that regressed
-    [InlineData(false)]
+    [InlineData(true)]   // KnockBox:PrecompressGzip opted back on — the case that regressed
+    [InlineData(false)]  // the default
     public void A_seeded_asset_is_not_recompressed_by_the_next_reconcile(bool gzip)
     {
         // Seeding writes an index row keyed to the extracted file's (mtime, length) — the same thing the
@@ -670,7 +697,7 @@ public class GamePackageInstallerTests : IDisposable
 
         Drop("demo.kbg", PackageFixture.Valid("demo", null, null,
             new File("code.js", PackageFixture.Bytes("already-dense bytes the packer stored raw"))));
-        Assert.True(RunToCompletion(New(precompressor)));
+        Assert.True(RunToCompletion(New(precompressor)), Errors);
 
         Assert.False(System.IO.File.Exists(variant),
             "the previous version's variant must not survive an upgrade that stores the file raw");
@@ -712,7 +739,7 @@ public class GamePackageInstallerTests : IDisposable
             new File("code.js", PackageFixture.Filler(), Brotli: true)));
 
         Assert.True(RunToCompletion(New(precompressor: null)));
-        Assert.True(System.IO.File.Exists(Installed("demo", "code.js")));
+        Assert.True(System.IO.File.Exists(Installed("demo", "code.js")), Errors);
         Assert.False(Directory.Exists(_compressedRoot));
     }
 
@@ -764,8 +791,8 @@ public class GamePackageInstallerTests : IDisposable
 
         Assert.True(RunToCompletion(New()));
 
-        Assert.True(System.IO.File.Exists(Installed("hand", "GAME.json")));
-        Assert.True(System.IO.File.Exists(Installed("portal", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("hand", "GAME.json")), Errors);
+        Assert.True(System.IO.File.Exists(Installed("portal", "GAME.json")), Errors);
     }
 
     [Fact]
@@ -808,8 +835,8 @@ public class GamePackageInstallerTests : IDisposable
 
         RunToCompletion(New());
 
-        Assert.True(System.IO.File.Exists(Installed("alpha", "GAME.json")));
-        Assert.True(System.IO.File.Exists(Installed("beta", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("alpha", "GAME.json")), Errors);
+        Assert.True(System.IO.File.Exists(Installed("beta", "GAME.json")), Errors);
     }
 
     [Fact]
@@ -826,7 +853,7 @@ public class GamePackageInstallerTests : IDisposable
         // "shared.kbg" is still present — in the other root. Matching on the name alone would read that
         // as "beta's package is still there" and keep a game whose package is gone.
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "beta")));
-        Assert.True(System.IO.File.Exists(Installed("alpha", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("alpha", "GAME.json")), Errors);
     }
 
     [Fact]
@@ -860,7 +887,7 @@ public class GamePackageInstallerTests : IDisposable
 
         RunToCompletion(GamesRootOnly());
 
-        Assert.True(System.IO.File.Exists(Installed("hand", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("hand", "GAME.json")), Errors);
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
     }
 
@@ -877,7 +904,7 @@ public class GamePackageInstallerTests : IDisposable
         var result = installer.Reconcile();
 
         Assert.False(result.Changed);
-        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")), Errors);
     }
 
     // ── Adoption ──────────────────────────────────────────────────────────────────────────────────
@@ -895,7 +922,7 @@ public class GamePackageInstallerTests : IDisposable
         var result = installer.Reconcile(); // ONE pass
 
         Assert.True(result.Changed);
-        Assert.True(System.IO.File.Exists(Installed("portal", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("portal", "GAME.json")), Errors);
     }
 
     [Fact]
@@ -951,9 +978,9 @@ public class GamePackageInstallerTests : IDisposable
         Directory.Delete(_managedRoot, recursive: true);
         Drop("demo.kbg", PackageFixture.Valid("demo", "Demo"));
 
-        Assert.True(RunToCompletion(installer));
+        Assert.True(RunToCompletion(installer), Errors);
 
-        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")));
+        Assert.True(System.IO.File.Exists(Installed("demo", "GAME.json")), Errors);
         // And it is REPORTED rather than only logged: this string reaches the deployment-warning page.
         Assert.Contains("could not be read", installer.InstallFailure ?? "", StringComparison.Ordinal);
         Assert.Contains(_managedRoot, installer.InstallFailure ?? "", StringComparison.OrdinalIgnoreCase);
@@ -969,14 +996,14 @@ public class GamePackageInstallerTests : IDisposable
         DropManaged("portal.kbg", PackageFixture.Valid("portal", "Portal"));
         Drop("demo.kbg", PackageFixture.Valid("demo", "Demo"));
         RunToCompletion(installer);
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")), Errors);
 
         Directory.Delete(_managedRoot, recursive: true);
         // Well past the two passes it takes to uninstall a package that is genuinely gone.
         for (var i = 0; i < 6; i++) installer.Reconcile();
 
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")), Errors);
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "demo")), Errors);
     }
 
     [Fact]
@@ -994,6 +1021,6 @@ public class GamePackageInstallerTests : IDisposable
         for (var i = 0; i < 6; i++) installer.Reconcile();
 
         Assert.False(Directory.Exists(Path.Combine(_unpackedRoot, "demo")));
-        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")));
+        Assert.True(Directory.Exists(Path.Combine(_unpackedRoot, "portal")), Errors);
     }
 }

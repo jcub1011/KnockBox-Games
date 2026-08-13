@@ -90,6 +90,11 @@ public sealed class GameCatalog : IDisposable
     private volatile string? _scanError;
     public string? ScanError => _scanError;
 
+    // What the last published scan found, as one comparable string (see PassLog). A pass whose
+    // signature matches this one discovered the same games in the same folders and had the same
+    // complaints about everything else, so it is logged at Debug instead of repeating itself.
+    private volatile string _lastSignature = "";
+
     /// <summary>
     /// Raised at the end of every successful <see cref="Discover"/>, after the atomic swap, with the
     /// freshly-published catalog as an id → <see cref="GameLocation"/> map. Lets derived state (the
@@ -135,10 +140,55 @@ public sealed class GameCatalog : IDisposable
     /// </summary>
     public IReadOnlyDictionary<string, GameLocation> GameLocations => _games;
 
+    /// <summary>
+    /// The routine lines one <see cref="Discover"/> pass wants to log, held until the pass knows
+    /// whether it changed anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>Deferred rather than logged as they happen because the <b>level</b> depends on the outcome.
+    /// A rescan that finds exactly what the last one found is housekeeping, and between the hot-reload
+    /// watcher, the bind-mount poll and the package installer asking for a pass of its own, the
+    /// overwhelming majority of scans are that. Logging each at Information filled the log file — and
+    /// the portal's bounded log ring, which is the thing an operator reads when something has gone
+    /// wrong — with the same handful of lines repeated until the real event scrolled out of reach.</para>
+    /// <para>The template and its arguments are kept <b>apart</b> so the eventual call is still
+    /// structured: <c>AdminLogBuffer</c> keeps level and <c>SourceContext</c> as properties precisely so
+    /// filtering is exact, and pre-rendering here would hand it one opaque string.</para>
+    /// <para>Only the routine lines defer. An exception, or a games root that could not be read, is
+    /// logged where it happens: neither is a statement about what the catalog contains, and a fault that
+    /// persists across passes is one an operator wants repeated rather than quietly demoted.</para>
+    /// </remarks>
+    private sealed class PassLog
+    {
+        private readonly List<(LogLevel Level, string Template, object?[] Args)> _lines = [];
+        private readonly System.Text.StringBuilder _signature = new();
+
+        /// <param name="level">The level to log at when this pass changed something. An unchanged pass
+        /// logs every line at Debug regardless of what is asked for here.</param>
+        public void Add(LogLevel level, string template, params object?[] args)
+        {
+            _lines.Add((level, template, args));
+            // Separators no message template or path contains, so two different passes can't collide by
+            // running their fields together.
+            _signature.Append(template).Append('\u001f');
+            foreach (var arg in args) _signature.Append(arg).Append('\u001e');
+            _signature.Append('\n');
+        }
+
+        public string Signature => _signature.ToString();
+
+        public void Flush(ILogger logger, bool changed)
+        {
+            foreach (var (level, template, args) in _lines)
+                logger.Log(changed ? level : LogLevel.Debug, template, args);
+        }
+    }
+
     /// <summary>Scans every games root and atomically swaps in the rebuilt catalog.</summary>
     public void Discover()
     {
         var next = new Dictionary<string, GameLocation>(StringComparer.OrdinalIgnoreCase);
+        var pass = new PassLog();
         string? primaryError = null;
 
         for (var i = 0; i < _roots.Count; i++)
@@ -176,7 +226,7 @@ public sealed class GameCatalog : IDisposable
                 continue;
             }
 
-            foreach (var dir in dirs) TryAddGame(dir, root, next);
+            foreach (var dir in dirs) TryAddGame(dir, root, next, pass);
         }
 
         _scanError = primaryError;
@@ -193,12 +243,21 @@ public sealed class GameCatalog : IDisposable
             _logger.LogWarning(
                 "Keeping the previously discovered {Count} game(s): the games folder could not be read this pass.",
                 _games.Count);
+            // Forget what the last good pass found, so the one that recovers reports the whole catalog at
+            // Information rather than matching a signature from before the outage and going quiet — the
+            // recovery is exactly the thing an operator watching a broken mount is waiting to see.
+            _lastSignature = "";
             return;
         }
 
         _games = next; // atomic publish
-        if (_logger.IsEnabled(LogLevel.Information))
-            _logger.LogInformation("Game catalog ready: {Count} game(s) [{Ids}]", next.Count, string.Join(", ", next.Keys));
+
+        pass.Add(LogLevel.Information, "Game catalog ready: {Count} game(s) [{Ids}]",
+            next.Count, string.Join(", ", next.Keys));
+        var signature = pass.Signature;
+        var changed = signature != _lastSignature;
+        _lastSignature = signature;
+        pass.Flush(_logger, changed);
 
         // Notify after the swap so handlers see the published catalog. A misbehaving handler must not
         // break hot-reload, so swallow and log — Discover() is itself called from timer callbacks.
@@ -207,7 +266,7 @@ public sealed class GameCatalog : IDisposable
     }
 
     /// <summary>Validates one candidate game directory and adds it to <paramref name="next"/>.</summary>
-    private void TryAddGame(string dir, string root, Dictionary<string, GameLocation> next)
+    private void TryAddGame(string dir, string root, Dictionary<string, GameLocation> next, PassLog pass)
     {
         var manifestPath = Path.Combine(dir, "GAME.json");
         if (!File.Exists(manifestPath)) return;
@@ -217,7 +276,7 @@ public sealed class GameCatalog : IDisposable
             var manifest = JsonSerializer.Deserialize(File.ReadAllText(manifestPath), KnockBoxProtocolContext.Default.GameManifest);
             if (manifest is null || string.IsNullOrWhiteSpace(manifest.Id))
             {
-                _logger.LogWarning("Skipping {Path}: empty or invalid manifest.", manifestPath);
+                pass.Add(LogLevel.Warning, "Skipping {Path}: empty or invalid manifest.", manifestPath);
                 return;
             }
 
@@ -225,13 +284,13 @@ public sealed class GameCatalog : IDisposable
             var folderName = new DirectoryInfo(dir).Name;
             if (!string.Equals(folderName, manifest.Id, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning("Skipping game '{Id}': folder name '{Folder}' must match the manifest id.", manifest.Id, folderName);
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': folder name '{Folder}' must match the manifest id.", manifest.Id, folderName);
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(manifest.Entry))
             {
-                _logger.LogWarning("Skipping game '{Id}': manifest has no entry.", manifest.Id);
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': manifest has no entry.", manifest.Id);
                 return;
             }
 
@@ -241,25 +300,25 @@ public sealed class GameCatalog : IDisposable
             var dirPrefix = dirFull.EndsWith(Path.DirectorySeparatorChar) ? dirFull : dirFull + Path.DirectorySeparatorChar;
             if (!entryFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning("Skipping game '{Id}': entry '{Entry}' escapes the game folder.", manifest.Id, manifest.Entry);
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': entry '{Entry}' escapes the game folder.", manifest.Id, manifest.Entry);
                 return;
             }
             if (!File.Exists(entryFull))
             {
-                _logger.LogWarning("Skipping game '{Id}': entry file '{Entry}' not found.", manifest.Id, manifest.Entry);
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': entry file '{Entry}' not found.", manifest.Id, manifest.Entry);
                 return;
             }
 
             // A serverAuthority module gets the same treatment as entry (traversal + existence)
             // plus a size cap. Any failure skips the WHOLE game: a game that opted into
             // server-side enforcement must never silently downgrade to the cheatable host mode.
-            if (manifest.ServerAuthority is not null && !ValidateServerAuthority(manifest, dir, dirPrefix))
+            if (manifest.ServerAuthority is not null && !ValidateServerAuthority(manifest, dir, dirPrefix, pass))
                 return;
 
             // authorityWords dictionaries: same traversal + existence + size treatment. They are
             // server-only, so a game declaring them must also opt into serverAuthority. Any failure
             // skips the whole game (a word game with a broken dictionary should fail loud).
-            if (manifest.AuthorityWords is { Count: > 0 } && !ValidateAuthorityWords(manifest, dir, dirPrefix))
+            if (manifest.AuthorityWords is { Count: > 0 } && !ValidateAuthorityWords(manifest, dir, dirPrefix, pass))
                 return;
 
             // First root to claim an id wins. Without this the loser would still have its ASSETS
@@ -267,15 +326,15 @@ public sealed class GameCatalog : IDisposable
             // one folder's manifest with another folder's files — a baffling thing to debug. Say so.
             if (next.TryGetValue(manifest.Id, out var existing))
             {
-                _logger.LogWarning(
+                pass.Add(LogLevel.Warning, 
                     "Duplicate game id '{Id}': keeping {Kept} and ignoring {Ignored}. Two games cannot share an id — " +
                     "rename one, or remove the stale copy.", manifest.Id, existing.Directory, dir);
                 return;
             }
 
             next[manifest.Id] = new GameLocation(manifest, dir);
-            if (_logger.IsEnabled(LogLevel.Information))
-                _logger.LogInformation("Discovered game '{Id}' ({Name}) from {Dir}", manifest.Id, manifest.Name, dir);
+            pass.Add(LogLevel.Information, "Discovered game '{Id}' ({Name}) from {Dir}",
+                manifest.Id, manifest.Name, dir);
         }
         catch (Exception ex)
         {
@@ -283,51 +342,51 @@ public sealed class GameCatalog : IDisposable
         }
     }
 
-    private bool ValidateServerAuthority(GameManifest manifest, string dir, string dirPrefix)
+    private bool ValidateServerAuthority(GameManifest manifest, string dir, string dirPrefix, PassLog pass)
     {
         if (string.IsNullOrWhiteSpace(manifest.ServerAuthority))
         {
-            _logger.LogWarning("Skipping game '{Id}': serverAuthority is empty.", manifest.Id);
+            pass.Add(LogLevel.Warning, "Skipping game '{Id}': serverAuthority is empty.", manifest.Id);
             return false;
         }
         // V1 runs .js modules only (Jint); ".wasm" selects a backend that doesn't exist yet.
         // Skipping (not ignoring the field) keeps the never-silently-downgrade promise.
         if (!manifest.ServerAuthority.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is not a .js module (the WASM backend is not yet supported).",
+            pass.Add(LogLevel.Warning, "Skipping game '{Id}': serverAuthority '{Module}' is not a .js module (the WASM backend is not yet supported).",
                 manifest.Id, manifest.ServerAuthority);
             return false;
         }
         var moduleFull = Path.GetFullPath(Path.Combine(dir, manifest.ServerAuthority));
         if (!moduleFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' escapes the game folder.",
+            pass.Add(LogLevel.Warning, "Skipping game '{Id}': serverAuthority '{Module}' escapes the game folder.",
                 manifest.Id, manifest.ServerAuthority);
             return false;
         }
         if (!File.Exists(moduleFull))
         {
-            _logger.LogWarning("Skipping game '{Id}': serverAuthority file '{Module}' not found.",
+            pass.Add(LogLevel.Warning, "Skipping game '{Id}': serverAuthority file '{Module}' not found.",
                 manifest.Id, manifest.ServerAuthority);
             return false;
         }
         var size = new FileInfo(moduleFull).Length;
         if (size > _authorityMaxScriptBytes)
         {
-            _logger.LogWarning("Skipping game '{Id}': serverAuthority '{Module}' is {Size} bytes (max {Max}).",
+            pass.Add(LogLevel.Warning, "Skipping game '{Id}': serverAuthority '{Module}' is {Size} bytes (max {Max}).",
                 manifest.Id, manifest.ServerAuthority, size, _authorityMaxScriptBytes);
             return false;
         }
         return true;
     }
 
-    private bool ValidateAuthorityWords(GameManifest manifest, string dir, string dirPrefix)
+    private bool ValidateAuthorityWords(GameManifest manifest, string dir, string dirPrefix, PassLog pass)
     {
         // Word data is only reachable from an authority module (kb.words); declaring it without
         // serverAuthority is a misconfiguration — skip loudly rather than silently ignore it.
         if (string.IsNullOrWhiteSpace(manifest.ServerAuthority))
         {
-            _logger.LogWarning("Skipping game '{Id}': authorityWords requires serverAuthority to be set.", manifest.Id);
+            pass.Add(LogLevel.Warning, "Skipping game '{Id}': authorityWords requires serverAuthority to be set.", manifest.Id);
             return false;
         }
 
@@ -335,32 +394,32 @@ public sealed class GameCatalog : IDisposable
         {
             if (string.IsNullOrWhiteSpace(key))
             {
-                _logger.LogWarning("Skipping game '{Id}': an authorityWords entry has an empty key.", manifest.Id);
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': an authorityWords entry has an empty key.", manifest.Id);
                 return false;
             }
             if (decl is null || string.IsNullOrWhiteSpace(decl.File))
             {
-                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' has no file.", manifest.Id, key);
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': authorityWords '{Key}' has no file.", manifest.Id, key);
                 return false;
             }
 
             var fileFull = Path.GetFullPath(Path.Combine(dir, decl.File));
             if (!fileFull.StartsWith(dirPrefix, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' escapes the game folder.",
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': authorityWords '{Key}' file '{File}' escapes the game folder.",
                     manifest.Id, key, decl.File);
                 return false;
             }
             if (!File.Exists(fileFull))
             {
-                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' not found.",
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': authorityWords '{Key}' file '{File}' not found.",
                     manifest.Id, key, decl.File);
                 return false;
             }
             var size = new FileInfo(fileFull).Length;
             if (size > _authorityMaxWordFileBytes)
             {
-                _logger.LogWarning("Skipping game '{Id}': authorityWords '{Key}' file '{File}' is {Size} bytes (max {Max}).",
+                pass.Add(LogLevel.Warning, "Skipping game '{Id}': authorityWords '{Key}' file '{File}' is {Size} bytes (max {Max}).",
                     manifest.Id, key, decl.File, size, _authorityMaxWordFileBytes);
                 return false;
             }

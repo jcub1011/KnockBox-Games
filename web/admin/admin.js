@@ -11,11 +11,11 @@ import {
   AVAILABILITY, CODE_ALPHABET, LIMIT_FIELDS, STARTUP_LIMITS, TABS, UPDATE_MODES, UPDATE_POLICIES,
   WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare, checkCodeEntry, checkWebhook,
   cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies, formatBytes, formatClock,
-  formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob, jobProgress, lifecycleClass,
-  lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, noLimitOverrides, pluginStatusClass,
-  pluginStatusHint, pluginStatusLabel, ratePerSecond, seriesCpuPercent, seriesValue, sparklinePath,
-  tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions, webhookEventLabel,
-  webhookLastDelivery,
+  formatCount, formatDuration, formatVersion, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
+  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, noLimitOverrides,
+  pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond, scheduleNote, seriesCpuPercent,
+  seriesValue, sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions,
+  webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
 const el = (id) => document.getElementById(id);
@@ -98,7 +98,7 @@ async function getJson(path) {
       showErrorStatus(`Request failed (${res.status})`);
       return null;
     }
-    showOkStatus();
+    clearStatus();
     return await res.json();
   } catch (err) {
     showErrorStatus('Network error');
@@ -151,24 +151,17 @@ async function postJson(path, body, { errorEl = null } = {}) {
 
 // ── Status pill ───────────────────────────────────────────────────────────────
 
-// One function per state, both routed through setStatus. The previous shape was an
-// updateServerStatus(online) whose offline branch nothing ever reached — every offline path called
-// showErrorStatus — so the file carried two ways to paint the dot red and a reader had to check both to
-// learn which one ran.
-function showOkStatus() {
-  setStatus('Admin Port Active', 'var(--success-color)');
+// A FAULT indicator, not a heartbeat: it is absent unless something is wrong. There used to be an
+// "Admin Port Active" state, and it could never be read while it was false — this page is served by the
+// admin port, so either the pill said "active" or there was no page to read it on. What is actually
+// worth surfacing is the degraded case: the portal is up but a request to it just failed.
+function clearStatus() {
+  el('server-status-pill').hidden = true;
 }
 
 function showErrorStatus(msg) {
-  setStatus(msg, 'var(--error-color)');
-}
-
-function setStatus(text, color) {
-  const dot = document.querySelector('.status-dot');
-  el('server-status-text').textContent = text;
-  if (!dot) return;
-  dot.style.backgroundColor = color;
-  dot.style.boxShadow = `0 0 8px ${color}`;
+  el('server-status-text').textContent = msg;
+  el('server-status-pill').hidden = false;
 }
 
 // ── Toasts ────────────────────────────────────────────────────────────────────
@@ -214,7 +207,7 @@ export async function checkAuthStatus() {
       return;
     }
     const data = await res.json();
-    showOkStatus();
+    clearStatus();
 
     if (!data.configured) {
       showView('setup-view');
@@ -1507,6 +1500,9 @@ async function addSource() {
 async function refreshPlatform() {
   const limits = await getJson('/admin/api/limits');
   if (limits) renderLimits(limits);
+  // 409 when KnockBox:MarketplaceEnabled=false, which getJson reports as null — the card then says so
+  // rather than showing a schedule nothing would ever act on.
+  renderSchedule(await getJson('/admin/api/updates/schedule'));
   const announcement = await getJson('/admin/api/announcement');
   if (announcement) renderAnnouncement(announcement);
   const webhooks = await getJson('/admin/api/webhooks');
@@ -1606,6 +1602,65 @@ async function saveLimits() {
     + `finish but starts no new ones until the count falls under it.`, 'Apply Limits')) return;
 
   if (await postJson('/admin/api/limits', checked.values)) refreshPlatform();
+}
+
+/**
+ * Draws the update-schedule card. Day and hour are shown whatever the cadence but disabled when it
+ * ignores them, rather than hidden: a control that vanishes makes an operator wonder whether the value
+ * went with it, and switching weekly → daily → weekly has to come back to the day they picked.
+ */
+function renderSchedule(data) {
+  const cadence = el('schedule-cadence');
+  const day = el('schedule-day');
+  const hour = el('schedule-hour');
+
+  // Built here rather than in index.html: 24 <option>s of markup to say "0..23", each also carrying the
+  // reader's local equivalent (see hourOptionLabel).
+  if (!hour.options.length) {
+    for (let h = 0; h < 24; h++) {
+      const option = document.createElement('option');
+      option.value = String(h);
+      option.textContent = hourOptionLabel(h);
+      hour.appendChild(option);
+    }
+  }
+
+  const available = !!data;
+  for (const control of [cadence, day, hour, el('schedule-save'), el('schedule-reset')]) {
+    control.disabled = !available;
+  }
+  el('schedule-badge').hidden = !data?.overridden;
+
+  if (!available) {
+    el('schedule-note').textContent =
+      'The marketplace is switched off (KnockBox:MarketplaceEnabled=false), so nothing is checked on a '
+      + 'schedule.';
+    return;
+  }
+
+  // Don't fight the operator's cursor — the same rule the limits and announcement fields follow.
+  if (document.activeElement !== cadence) cadence.value = data.cadence || 'daily';
+  if (document.activeElement !== day) day.value = data.dayOfWeek || 'sunday';
+  if (document.activeElement !== hour) hour.value = String(data.hourUtc ?? 3);
+
+  applyScheduleCadence();
+  el('schedule-note').textContent = scheduleNote(data);
+}
+
+/** Greys out the fields the chosen cadence does not use. Driven by the select, not by the last save. */
+function applyScheduleCadence() {
+  const cadence = el('schedule-cadence').value;
+  el('schedule-day').disabled = cadence !== 'weekly';
+  el('schedule-hour').disabled = cadence !== 'weekly' && cadence !== 'daily';
+}
+
+async function saveSchedule(revert = false) {
+  const body = revert ? {} : {
+    cadence: el('schedule-cadence').value,
+    dayOfWeek: el('schedule-day').value,
+    hourUtc: Number(el('schedule-hour').value),
+  };
+  if (await postJson('/admin/api/updates/schedule', body)) refreshPlatform();
 }
 
 function renderAnnouncement(data) {
@@ -1955,6 +2010,11 @@ function wire() {
   el('limits-refresh').addEventListener('click', refreshPlatform);
 
   el('hook-add').addEventListener('click', addWebhook);
+
+  el('schedule-cadence').addEventListener('change', applyScheduleCadence);
+  el('schedule-save').addEventListener('click', () => saveSchedule());
+  el('schedule-reset').addEventListener('click', () => saveSchedule(true));
+  el('schedule-refresh').addEventListener('click', refreshPlatform);
 
   el('announce-post').addEventListener('click', postAnnouncement);
   el('announce-clear').addEventListener('click', clearAnnouncement);

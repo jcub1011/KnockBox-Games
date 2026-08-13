@@ -58,6 +58,9 @@ internal static class AdminApi
         // Authorities. Every package route except install keeps working without it.
         MarketplaceSourceRegistry? Marketplace,
         GameUpdateCoordinator? Updates,
+        // Null for the same reason as Marketplace and Updates: with KnockBox:MarketplaceEnabled=false
+        // there is nothing to check, so there is no timer and the schedule routes refuse with 409.
+        UpdateScheduler? Scheduler,
         AdminLogBuffer Logs,
         DiskUsageReporter Disk,
         RelayMetrics Relay,
@@ -120,6 +123,8 @@ internal static class AdminApi
             routes.MapGet("/admin/api/room-codes", RequireSession(options, ctx => RoomCodes(ctx, options)));
             routes.MapGet("/admin/api/announcement", RequireSession(options, ctx => Announcement(ctx, options)));
             routes.MapGet("/admin/api/webhooks", RequireSession(options, ctx => Webhooks(ctx, options)));
+            routes.MapGet("/admin/api/updates/schedule",
+                RequireSession(options, ctx => UpdateScheduleRead(ctx, options)));
 
             // ── Mutations ──
             // Every one of these is gated by RequireSession AND by the mutation guard inside WriteGuard,
@@ -154,6 +159,8 @@ internal static class AdminApi
                 RequireSession(options, WriteGuard(ctx => RemoveWebhook(ctx, options))));
             routes.MapPost("/admin/api/webhooks/{id}/test",
                 RequireSession(options, WriteGuard(ctx => TestWebhook(ctx, options))));
+            routes.MapPost("/admin/api/updates/schedule",
+                RequireSession(options, WriteGuard(ctx => SetUpdateSchedule(ctx, options))));
 
             // ── Packages ──
             // Separate from /games/* on purpose: these are the INSTALLED-side lifecycle, and every one of
@@ -1448,6 +1455,96 @@ internal static class AdminApi
                         "until the count falls below it.";
             return note;
         }
+    }
+
+    // ── Update schedule ───────────────────────────────────────────────────────
+
+    private static Task UpdateScheduleRead(HttpContext ctx, Options options)
+    {
+        if (options.Scheduler is not { } scheduler)
+        {
+            return Refuse(ctx, StatusCodes.Status409Conflict,
+                "The marketplace is disabled (KnockBox:MarketplaceEnabled=false), so nothing is checked " +
+                "on a schedule.");
+        }
+
+        var schedule = scheduler.Current;
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminUpdateScheduleResponse,
+            new AdminUpdateScheduleResponse(
+                Cadence: Camel(schedule.Cadence.ToString()),
+                DayOfWeek: Camel(schedule.DayOfWeek.ToString()),
+                HourUtc: schedule.HourUtc,
+                Overridden: options.Settings.UpdateSchedule is not null,
+                Summary: schedule.Describe(),
+                // Round-trip format, not a rendered date: the portal renders it in the reader's own zone,
+                // and every other timestamp this API emits does the same.
+                NextRunUtc: scheduler.NextRun?.ToUniversalTime().ToString("O"),
+                Enrolled: options.Settings.UpdatePolicies.Count));
+    }
+
+    private static async Task SetUpdateSchedule(HttpContext ctx, Options options)
+    {
+        if (options.Scheduler is not { } scheduler)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "The marketplace is disabled (KnockBox:MarketplaceEnabled=false), so there is no schedule " +
+                "to set.");
+            return;
+        }
+
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminUpdateScheduleRequest)
+                   ?? new AdminUpdateScheduleRequest();
+
+        UpdateSchedule? next = null;
+        if (body.Cadence is { Length: > 0 } rawCadence)
+        {
+            if (!Enum.TryParse<UpdateCadence>(rawCadence, ignoreCase: true, out var cadence)
+                || !Enum.IsDefined(cadence))
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest,
+                    $"'{rawCadence}' is not a cadence. Use off, hourly, daily or weekly.");
+                return;
+            }
+
+            var day = UpdateSchedule.Default.DayOfWeek;
+            if (body.DayOfWeek is { Length: > 0 } rawDay
+                && (!Enum.TryParse(rawDay, ignoreCase: true, out day) || !Enum.IsDefined(day)))
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest,
+                    $"'{rawDay}' is not a day of the week.");
+                return;
+            }
+
+            // Rejected rather than clamped: an operator who typed 25 meant something, and silently
+            // running at 03:00 instead would be a schedule they never chose and would not notice.
+            var hour = body.HourUtc ?? UpdateSchedule.Default.HourUtc;
+            if (hour is < 0 or > 23)
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest,
+                    $"hourUtc must be between 0 and 23 (got {hour}).");
+                return;
+            }
+
+            next = new UpdateSchedule(cadence, day, hour);
+        }
+
+        var warning = options.Settings.SetUpdateSchedule(next);
+        // Re-armed here rather than inside the store: that class records policy and knows nothing about
+        // timers, the same split SetLimits and LimitsProvider keep.
+        scheduler.Reschedule();
+
+        var enrolled = options.Settings.UpdatePolicies.Count;
+        var detail = $"Update checks run {scheduler.Current.Describe()}.";
+        if (scheduler.NextRun is { } due)
+            detail += $" Next check {due.ToUniversalTime():yyyy-MM-dd HH:mm} UTC.";
+        if (enrolled == 0)
+        {
+            // Worth saying out loud: a schedule with nothing enrolled makes no request and installs
+            // nothing, so an operator who set one and saw no activity would reasonably think it was broken.
+            detail += " No game is enrolled in automatic updates yet, so a check currently does nothing —" +
+                      " set a game's update policy on the Marketplace tab.";
+        }
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: detail));
     }
 
     // ── Room codes ────────────────────────────────────────────────────────────

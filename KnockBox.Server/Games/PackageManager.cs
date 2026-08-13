@@ -113,6 +113,17 @@ public sealed class PackageManager
     public PackageJobRegistry Jobs => jobs;
 
     /// <summary>
+    /// Install permits not currently held. Back to <c>MaxConcurrentInstalls</c> whenever nothing is
+    /// installing.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for tests only, and for one specific failure: a job that leaks a permit does not fail — it
+    /// hangs, and every later install, upload, rollback and uninstall queues silently behind it until the
+    /// process restarts. Nothing in the job feed says so, so the invariant has to be asserted directly.
+    /// </remarks>
+    internal int AvailableInstallSlots => _installSlots.CurrentCount;
+
+    /// <summary>
     /// How long an apply waits for the installer to actually extract what it just placed, before giving up
     /// and reporting the job done with a warning.
     /// </summary>
@@ -354,6 +365,13 @@ public sealed class PackageManager
             StagedPackage? staged = null;
             try
             {
+                PackageIdentity identity;
+                // The slot spans the DOWNLOAD ONLY, and is released before ApplyAsync — which takes it
+                // again for the apply itself. It must not be held across the call: ApplyAsync opens with
+                // WaitForLobbiesAsync (open-ended in drain mode) and then waits on this very semaphore, so
+                // holding it here deadlocked every marketplace install against itself on the default
+                // MaxConcurrentInstalls of 1 — the job wedged in Verifying, still cancellable, never
+                // releasing the permit that every later job then queued behind.
                 await _installSlots.WaitAsync(token).ConfigureAwait(false);
                 try
                 {
@@ -373,7 +391,7 @@ public sealed class PackageManager
                     // DownloadAsync already hash-checked and read it; Inspect re-reads the manifest so
                     // the placement path is identical to an upload's, with no second-guessing about
                     // which validation ran where.
-                    var identity = Inspect(downloaded.Path);
+                    identity = Inspect(downloaded.Path);
                     if (!string.Equals(identity.Id, job.GameId, StringComparison.Ordinal))
                         throw new GamePackageException(
                             $"the downloaded package declares id '{identity.Id}', not '{job.GameId}'.");
@@ -381,13 +399,13 @@ public sealed class PackageManager
                     // Hand the file to the staged-package lifetime so failure cleans up either way.
                     staged = new StagedPackage(downloaded.Path, downloaded.Bytes);
                     downloaded = null;
-
-                    await ApplyAsync(job, staged, identity, consumedBackup: null, token).ConfigureAwait(false);
                 }
                 finally
                 {
                     _installSlots.Release();
                 }
+
+                await ApplyAsync(job, staged, identity, consumedBackup: null, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

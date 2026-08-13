@@ -115,9 +115,13 @@ services:
       # Air-gapped or locked-down: no catalog is fetched and the server holds no HttpClient at all.
       # Uploading a .kbg through the portal, rolling one back and uninstalling all still work.
       # KnockBox__MarketplaceEnabled: "false"
-      # How often to check registered catalogs for updates to games you ENROLLED in automatic updates
-      # (nothing is enrolled by default, and with none enrolled no request is made). 0 = never:
-      # KnockBox__MarketplacePollMinutes: "360"
+      # When to check registered catalogs for updates to games you ENROLLED in automatic updates
+      # (nothing is enrolled by default, and with none enrolled no request is made). These set the
+      # STARTING schedule; the portal's Platform tab overrides it and persists to the admin volume.
+      # A check also runs shortly after every start. Times are UTC.
+      # KnockBox__MarketplaceUpdateCadence: "daily"     # off | hourly | daily | weekly
+      # KnockBox__MarketplaceUpdateHourUtc: "3"
+      # KnockBox__MarketplaceUpdateDayOfWeek: "sunday"  # weekly only
       # Previous versions of each portal-installed package kept for one-click rollback. 0 = none:
       # KnockBox__PackageBackupCount: "1"
     restart: unless-stopped

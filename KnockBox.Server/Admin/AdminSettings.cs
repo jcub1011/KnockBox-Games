@@ -47,6 +47,11 @@ public enum GameAvailability
 /// cannot live in <c>Sources</c>: that list is the <em>extra</em> marketplaces, and the official one is
 /// built from <c>MarketplaceOptions</c> rather than stored.
 /// </param>
+/// <param name="Schedule">
+/// When the scheduled update check runs. Null means the configured default
+/// (<c>KnockBox:MarketplaceUpdate*</c>), the same record-by-absence convention <see cref="Limits"/>
+/// follows — the file holds an object here only once an operator has actually chosen a schedule.
+/// </param>
 public sealed record AdminSettings(
     bool MaintenanceMode = false,
     string? MaintenanceMessage = null,
@@ -57,7 +62,8 @@ public sealed record AdminSettings(
     BannedRoomCodes? RoomCodes = null,
     PlatformAnnouncement? Announcement = null,
     IReadOnlyList<WebhookEndpoint>? Webhooks = null,
-    bool OfficialSourceDisabled = false);
+    bool OfficialSourceDisabled = false,
+    UpdateSchedule? Schedule = null);
 
 /// <summary>
 /// An outbound endpoint the operator registered, and which events it wants (spec §4.2).
