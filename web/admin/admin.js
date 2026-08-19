@@ -322,8 +322,8 @@ export function selectSetting(settingKey, { replaceHash = true, scroll = false }
   for (const item of document.querySelectorAll('.tree-item')) {
     item.classList.toggle('active', item.dataset.settingId === activeSettingId);
   }
-  for (const nav of document.querySelectorAll('.nav-item')) {
-    nav.classList.toggle('active', nav.dataset.settingId === activeSettingId || nav.dataset.tab === activeTab);
+  for (const nav of document.querySelectorAll('.nav-item:not(.tree-item)')) {
+    nav.classList.toggle('active', nav.dataset.tab === activeTab);
   }
 
   // Ensure parent group in tree view is expanded
@@ -470,13 +470,17 @@ export function updateScrollspy() {
   if (activeCard && activeCard.dataset.settingId) {
     const settingId = activeCard.dataset.settingId;
     if (settingId !== activeSettingId) {
+      const prevTab = activeTab;
       activeSettingId = settingId;
       const setting = ALL_SETTINGS.find((s) => s.id === settingId);
       if (setting) {
-        activeTab = setting.legacyTab;
+        activeTab = setting.legacyTab || 'overview';
         el('panel-title').textContent = setting.label;
         for (const item of document.querySelectorAll('.tree-item')) {
           item.classList.toggle('active', item.dataset.settingId === activeSettingId);
+        }
+        for (const nav of document.querySelectorAll('.nav-item:not(.tree-item)')) {
+          nav.classList.toggle('active', nav.dataset.tab === activeTab);
         }
         const activeTreeItem = document.querySelector(`.tree-item[data-setting-id="${activeSettingId}"]`);
         const parentGroup = activeTreeItem?.closest('.tree-group');
@@ -484,6 +488,18 @@ export function updateScrollspy() {
           setGroupExpanded(parentGroup, true);
         }
         centerActiveSidebarItem(activeSettingId);
+
+        const hash = activeSettingId.replace(/^setting-/, '');
+        if (location.hash !== `#${hash}`) {
+          history.replaceState(null, '', `#${hash}`);
+        }
+
+        if (activeTab !== prevTab) {
+          if (activeTab === 'logs') { logCursor = 0; logEntries = []; }
+          if (activeTab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
+          refreshActiveTab();
+          startPolling();
+        }
       }
     }
   }
@@ -2176,12 +2192,22 @@ function wire() {
     item.addEventListener('click', (e) => {
       e.preventDefault();
       const settingId = item.dataset.settingId;
-      selectSetting(settingId, { replaceHash: true, scroll: true });
+      const targetEl = el(settingId);
+      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     });
   }
 
   for (const button of document.querySelectorAll('.nav-item:not(.tree-item)')) {
-    button.addEventListener('click', () => selectTab(button.dataset.tab));
+    button.addEventListener('click', (e) => {
+      e.preventDefault();
+      const settingId = settingFromHash(button.dataset.tab);
+      const targetEl = el(settingId);
+      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
   }
 
   // Settings Search

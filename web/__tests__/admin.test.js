@@ -368,7 +368,7 @@ describe('overview', () => {
 });
 
 describe('tree navigation & settings search', () => {
-  it('starts on overview and switches on a tree item click', async () => {
+  it('highlights only the top setting on overview without multi-highlighting other overview settings', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
@@ -377,15 +377,45 @@ describe('tree navigation & settings search', () => {
 
     expect(el('panel-title').textContent).toBe('System Overview');
     expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-history"]').classList.contains('active')).toBe(false);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-cost"]').classList.contains('active')).toBe(false);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-maintenance"]').classList.contains('active')).toBe(false);
 
+    const activeTreeItems = document.querySelectorAll('.tree-item.active');
+    expect(activeTreeItems.length).toBe(1);
+  });
+
+  it('scrolls to target setting on a tree item click without instantly highlighting, letting scroll handle the switch', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    const lobbiesEl = el('setting-lobbies');
+    lobbiesEl.scrollIntoView = vi.fn();
+
+    // Clicking does not instantly switch active highlight or title
     document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').click();
     await tick();
-    await tick();
+
+    expect(lobbiesEl.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+    expect(el('panel-title').textContent).toBe('System Overview');
+    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').classList.contains('active')).toBe(false);
+
+    // When scrolling reaches the card, scrollspy handles activating it
+    for (const card of document.querySelectorAll('.setting-card')) {
+      card.getBoundingClientRect = () => ({ top: 1000, bottom: 1400, height: 400 });
+    }
+    el('setting-overview').getBoundingClientRect = () => ({ top: -600, bottom: -200, height: 400 });
+    lobbiesEl.getBoundingClientRect = () => ({ top: 80, bottom: 480, height: 400 });
+
+    admin.updateScrollspy();
 
     expect(el('panel-title').textContent).toBe('Active Lobbies');
     expect(document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').classList.contains('active')).toBe(true);
     expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(false);
-    // The fragment follows, so a reload or a bookmark lands back here.
     expect(window.location.hash).toBe('#lobbies');
   });
 
