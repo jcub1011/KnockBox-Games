@@ -8,38 +8,32 @@
 // display names are untrusted input.
 
 import {
-  AVAILABILITY, CODE_ALPHABET, LIMIT_FIELDS, STARTUP_LIMITS, TABS, UPDATE_MODES, UPDATE_POLICIES,
-  WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare, checkCodeEntry, checkWebhook,
-  cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies, formatBytes, formatClock,
-  formatCount, formatDuration, formatVersion, getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle,
-  isTerminalJob, jobProgress, lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs,
-  mergeSamples, noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
-  scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, sparklinePath, tabFromHash,
-  uploadGuard, validateLimits, versionAction, versionOptions, webhookEventLabel, webhookLastDelivery,
+  AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
+  UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
+  checkCodeEntry, checkWebhook, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
+  filterSettings, formatBytes, formatClock, formatCount, formatDuration, formatVersion,
+  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
+  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples,
+  noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
+  scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
+  sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions,
+  webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
 const el = (id) => document.getElementById(id);
 
-// How often each tab refreshes while it is the visible one. Only the visible tab polls: five tabs each
-// polling every five seconds would multiply the request rate for four panels nobody is looking at, and
-// the games tab in particular can trigger a disk walk.
-//
-// The marketplace entry is the fastest of the five, but it hits ONLY the in-memory job feed. The catalog
-// — which can reach the network, with a 30-second timeout — is re-read on tab entry, on Refresh, and
-// whenever a job finishes, which is what flips a card from "Update to 1.3.0" to "Up to date" the moment
-// it is true rather than up to 20 seconds later.
-//
-// The platform tab is 0 — the one tab that does not poll at all. It is a form, not a view: a timer there
-// would overwrite whatever the operator is halfway through typing with the server's current value. It
-// reads on entry, after every save, and when Refresh is clicked.
-const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000, platform: 0 };
+// How often live views refresh.
+const POLL_INTERVAL_MS = 5000;
 const LOG_VIEW_LIMIT = 500;
 const JOB_VIEW_LIMIT = 50;
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
 let pollTimer = null;
-let activeTab = TABS[0];
+let activeSettingId = 'setting-overview';
+let activeTab = 'overview';
+let scrollObserver = null;
+
 
 // Latest payloads, kept so a filter change re-renders without a round trip.
 let lobbyData = null;
@@ -220,7 +214,7 @@ export async function checkAuthStatus() {
     } else {
       showView('dashboard-view');
       el('logout-btn').classList.remove('hidden');
-      selectTab(tabFromHash(location.hash), { replaceHash: false });
+      selectSetting(settingFromHash(location.hash), { replaceHash: false, scroll: Boolean(location.hash) });
     }
   } catch (err) {
     showErrorStatus('Network Error');
@@ -235,17 +229,6 @@ const VIEWS = ['setup-view', 'login-view', 'dashboard-view'];
 function showView(id) {
   for (const view of VIEWS) el(view).classList.toggle('hidden', view !== id);
 }
-
-// ── Tabs ──────────────────────────────────────────────────────────────────────
-
-const TAB_TITLES = {
-  overview: 'System Overview',
-  lobbies: 'Active Lobbies',
-  games: 'Game Catalog',
-  marketplace: 'Marketplace & Packages',
-  logs: 'System Logs',
-  platform: 'Platform Settings',
-};
 
 // ── Sidebar collapse state ────────────────────────────────────────────────────
 
@@ -269,6 +252,7 @@ export function setSidebarCollapsed(collapsed, { persist = true } = {}) {
       label.textContent = isCollapsed ? 'Expand' : 'Collapse';
     }
   }
+  updateSidebarScrollIndicators();
   if (persist) {
     setStoredSidebarCollapsed(isCollapsed);
   }
@@ -280,46 +264,239 @@ export function toggleSidebarCollapsed() {
   setSidebarCollapsed(!isCollapsed);
 }
 
-export function selectTab(tab, { replaceHash = true } = {}) {
-  activeTab = TABS.includes(tab) ? tab : TABS[0];
-  el('panel-title').textContent = TAB_TITLES[activeTab];
+export function updateSidebarScrollIndicators() {
+  const dashboardView = el('dashboard-view');
+  const isCollapsed = dashboardView?.classList.contains('sidebar-collapsed');
+  const upBtn = el('sidebar-scroll-up');
+  const downBtn = el('sidebar-scroll-down');
+  const tree = el('sidebar-tree');
+  if (!tree || !upBtn || !downBtn) return;
 
-  for (const button of document.querySelectorAll('.nav-item')) {
-    button.classList.toggle('active', button.dataset.tab === activeTab);
-  }
-  for (const name of TABS) {
-    el(`tab-${name}`).classList.toggle('hidden', name !== activeTab);
-  }
-  if (replaceHash && location.hash !== `#${activeTab}`) {
-    history.replaceState(null, '', `#${activeTab}`);
+  if (!isCollapsed) {
+    upBtn.disabled = true;
+    downBtn.disabled = true;
+    return;
   }
 
-  // Re-reading the log stream from cursor 0 on entry means switching away and back shows the buffer
-  // rather than an empty panel waiting for the next event.
+  const canScrollUp = tree.scrollTop > 4;
+  const canScrollDown = tree.scrollTop + tree.clientHeight < tree.scrollHeight - 4;
+
+  upBtn.disabled = !canScrollUp;
+  downBtn.disabled = !canScrollDown;
+}
+
+export function centerActiveSidebarItem(settingId = activeSettingId) {
+  const tree = el('sidebar-tree');
+  if (!tree) return;
+  const targetId = settingId ?? activeSettingId;
+  if (!targetId) return;
+
+  const activeItem = tree.querySelector(`.tree-item[data-setting-id="${targetId}"]`);
+  if (!activeItem) return;
+
+  const itemTop = activeItem.offsetTop;
+  const itemHeight = activeItem.offsetHeight || 36;
+  const treeHeight = tree.clientHeight;
+  const targetScrollTop = Math.max(0, itemTop - (treeHeight / 2) + (itemHeight / 2));
+
+  if (typeof tree.scrollTo === 'function') {
+    tree.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+  } else {
+    tree.scrollTop = targetScrollTop;
+  }
+
+  updateSidebarScrollIndicators();
+}
+
+// ── Navigation, Tree View & Settings Routing ──────────────────────────────────
+
+export function selectSetting(settingKey, { replaceHash = true, scroll = false } = {}) {
+  const settingId = settingFromHash(settingKey);
+  const setting = ALL_SETTINGS.find((s) => s.id === settingId) ?? ALL_SETTINGS[0];
+  activeSettingId = setting.id;
+  activeTab = setting.legacyTab || 'overview';
+
+  el('panel-title').textContent = setting.label;
+
+  // Highlight active tree item & nav items
+  for (const item of document.querySelectorAll('.tree-item')) {
+    item.classList.toggle('active', item.dataset.settingId === activeSettingId);
+  }
+  for (const nav of document.querySelectorAll('.nav-item')) {
+    nav.classList.toggle('active', nav.dataset.settingId === activeSettingId || nav.dataset.tab === activeTab);
+  }
+
+  // Ensure parent group in tree view is expanded
+  const activeTreeItem = document.querySelector(`.tree-item[data-setting-id="${activeSettingId}"]`);
+  const parentGroup = activeTreeItem?.closest('.tree-group');
+  if (parentGroup) setGroupExpanded(parentGroup, true);
+
+  // Keep the active setting centered in sidebar
+  centerActiveSidebarItem(activeSettingId);
+
+  // Smooth scroll to the target setting if requested
+  if (scroll) {
+    const targetEl = el(activeSettingId);
+    if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  if (replaceHash) {
+    const hash = activeSettingId.replace(/^setting-/, '');
+    if (location.hash !== `#${hash}`) {
+      history.replaceState(null, '', `#${hash}`);
+    }
+  }
+
   if (activeTab === 'logs') { logCursor = 0; logEntries = []; }
-  // Same reasoning for the job feed: a cursor of 0 asks for the whole retained set, so an operator who
-  // spent ten minutes on another tab comes back to the outcomes they missed rather than an empty strip.
   if (activeTab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
 
   refreshActiveTab();
   startPolling();
 }
 
+export function selectTab(tab, { replaceHash = true } = {}) {
+  const settingId = settingFromHash(tab);
+  selectSetting(settingId, { replaceHash, scroll: true });
+}
+
+// ── Tree View Expand/Collapse ─────────────────────────────────────────────────
+
+export function setGroupExpanded(groupEl, expanded) {
+  if (!groupEl) return;
+  const isExp = Boolean(expanded);
+  const header = groupEl.querySelector('.tree-group-header');
+  if (header) header.setAttribute('aria-expanded', String(isExp));
+  groupEl.classList.toggle('group-collapsed', !isExp);
+}
+
+export function toggleGroup(groupId) {
+  const group = document.querySelector(`.tree-group[data-group-id="${groupId}"]`);
+  if (!group) return;
+  const header = group.querySelector('.tree-group-header');
+  const isExpanded = header?.getAttribute('aria-expanded') !== 'false';
+  setGroupExpanded(group, !isExpanded);
+}
+
+// ── Settings Search (Visual Studio Style) ─────────────────────────────────────
+
+export function applySettingsSearch(query = '') {
+  const filter = filterSettings(query, SETTINGS_GROUPS);
+  const clearBtn = el('settings-search-clear');
+  if (clearBtn) clearBtn.classList.toggle('hidden', !filter.isFiltering);
+
+  // Filter right panel setting cards
+  const settingCards = document.querySelectorAll('.setting-card');
+  for (const card of settingCards) {
+    const id = card.dataset.settingId;
+    const visible = !filter.isFiltering || filter.matchingSettingIds.has(id);
+    card.classList.toggle('search-hidden', !visible);
+  }
+
+  // Filter right panel group sections
+  const groupSections = document.querySelectorAll('.settings-group-section');
+  for (const section of groupSections) {
+    const groupId = section.dataset.groupId;
+    const visible = !filter.isFiltering || filter.matchingGroupIds.has(groupId);
+    section.classList.toggle('search-hidden', !visible);
+  }
+
+  // Filter sidebar tree items
+  const treeItems = document.querySelectorAll('.tree-item');
+  for (const item of treeItems) {
+    const id = item.dataset.settingId;
+    const visible = !filter.isFiltering || filter.matchingSettingIds.has(id);
+    item.classList.toggle('search-hidden', !visible);
+  }
+
+  // Filter sidebar tree groups
+  const treeGroups = document.querySelectorAll('.tree-group');
+  for (const group of treeGroups) {
+    const groupId = group.dataset.groupId;
+    const visible = !filter.isFiltering || filter.matchingGroupIds.has(groupId);
+    group.classList.toggle('search-hidden', !visible);
+    if (filter.isFiltering && visible) {
+      setGroupExpanded(group, true);
+    }
+  }
+
+  // Empty search state
+  const emptyBanner = el('settings-search-empty');
+  if (emptyBanner) {
+    emptyBanner.classList.toggle('hidden', filter.totalMatches > 0);
+    const emptyMsg = el('search-empty-msg');
+    if (emptyMsg) {
+      emptyMsg.textContent = `No settings match "${filter.query}".`;
+    }
+  }
+}
+
+export function clearSettingsSearch() {
+  const searchInput = el('settings-search-input');
+  if (searchInput) {
+    searchInput.value = '';
+    applySettingsSearch('');
+    searchInput.focus();
+  }
+}
+
+// ── Scrollspy ─────────────────────────────────────────────────────────────────
+
+export function updateScrollspy() {
+  const cards = [...document.querySelectorAll('.setting-card:not(.search-hidden):not(.hidden)')];
+  if (!cards.length) return;
+
+  const scrollContainer = el('admin-content-scroll') || document.querySelector('.admin-container') || document.documentElement;
+  const containerRect = scrollContainer === document.documentElement
+    ? { top: 0 }
+    : scrollContainer.getBoundingClientRect();
+
+  const isScrollable = (scrollContainer.scrollHeight - scrollContainer.clientHeight) > 50;
+  const atBottom = isScrollable && ((scrollContainer.clientHeight + scrollContainer.scrollTop) >= (scrollContainer.scrollHeight - 50));
+  let activeCard = atBottom ? cards[cards.length - 1] : cards[0];
+
+  if (!atBottom) {
+    const activationLine = containerRect.top + 150;
+    for (let i = cards.length - 1; i >= 0; i--) {
+      const rect = cards[i].getBoundingClientRect();
+      if (rect.top <= activationLine) {
+        activeCard = cards[i];
+        break;
+      }
+    }
+  }
+
+  if (activeCard && activeCard.dataset.settingId) {
+    const settingId = activeCard.dataset.settingId;
+    if (settingId !== activeSettingId) {
+      activeSettingId = settingId;
+      const setting = ALL_SETTINGS.find((s) => s.id === settingId);
+      if (setting) {
+        activeTab = setting.legacyTab;
+        el('panel-title').textContent = setting.label;
+        for (const item of document.querySelectorAll('.tree-item')) {
+          item.classList.toggle('active', item.dataset.settingId === activeSettingId);
+        }
+        const activeTreeItem = document.querySelector(`.tree-item[data-setting-id="${activeSettingId}"]`);
+        const parentGroup = activeTreeItem?.closest('.tree-group');
+        if (parentGroup && parentGroup.classList.contains('group-collapsed')) {
+          setGroupExpanded(parentGroup, true);
+        }
+        centerActiveSidebarItem(activeSettingId);
+      }
+    }
+  }
+}
+
+const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000, platform: 0 };
+
 function startPolling() {
   stopPolling();
-  // 0 (or a tab with no entry) means "no timer" rather than "fall back to 5s": see POLL_MS.
   const interval = POLL_MS[activeTab] ?? 5000;
   if (interval > 0) pollTimer = setInterval(refreshActiveTab, interval);
 }
 
-/**
- * Stops the visible tab's refresh timer.
- *
- * Exported for the test suite, which imports a FRESH copy of this module per case: without it the
- * previous case's interval keeps firing against the next one's fetch stub, and a test that advances
- * timers records requests it never made. Nothing in the page needs to call it — selectTab and the
- * logout path both go through startPolling, which stops the old timer first.
- */
 export function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
@@ -333,6 +510,7 @@ async function refreshActiveTab() {
     case 'marketplace': await refreshJobs(); break;
     case 'logs': await refreshLogs(); break;
     case 'platform': await refreshPlatform(); break;
+    default: await refreshOverview(); break;
   }
   el('last-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
 }
@@ -1986,10 +2164,59 @@ function wire() {
     setSidebarCollapsed(true, { persist: false });
   }
 
-  for (const button of document.querySelectorAll('.nav-item')) {
+  // Tree View & Navigation
+  for (const toggleBtn of document.querySelectorAll('[data-group-toggle]')) {
+    toggleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      toggleGroup(toggleBtn.dataset.groupToggle);
+    });
+  }
+
+  for (const item of document.querySelectorAll('.tree-item')) {
+    item.addEventListener('click', (e) => {
+      e.preventDefault();
+      const settingId = item.dataset.settingId;
+      selectSetting(settingId, { replaceHash: true, scroll: true });
+    });
+  }
+
+  for (const button of document.querySelectorAll('.nav-item:not(.tree-item)')) {
     button.addEventListener('click', () => selectTab(button.dataset.tab));
   }
-  window.addEventListener('hashchange', () => selectTab(tabFromHash(location.hash), { replaceHash: false }));
+
+  // Settings Search
+  const searchInput = el('settings-search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      applySettingsSearch(e.target.value);
+    });
+  }
+  el('settings-search-clear')?.addEventListener('click', clearSettingsSearch);
+  el('search-empty-clear')?.addEventListener('click', clearSettingsSearch);
+
+  // Sidebar scroll indicators (for collapsed state)
+  const tree = el('sidebar-tree');
+  if (tree) {
+    tree.addEventListener('scroll', updateSidebarScrollIndicators, { passive: true });
+  }
+  el('sidebar-scroll-up')?.addEventListener('click', () => {
+    tree?.scrollBy({ top: -80, behavior: 'smooth' });
+  });
+  el('sidebar-scroll-down')?.addEventListener('click', () => {
+    tree?.scrollBy({ top: 80, behavior: 'smooth' });
+  });
+  updateSidebarScrollIndicators();
+
+  const contentScroll = el('admin-content-scroll');
+  if (contentScroll) {
+    contentScroll.addEventListener('scroll', updateScrollspy, { passive: true });
+  }
+  const adminContainer = document.querySelector('.admin-container');
+  if (adminContainer) {
+    adminContainer.addEventListener('scroll', updateScrollspy, { passive: true });
+  }
+  window.addEventListener('scroll', updateScrollspy, { passive: true });
+  window.addEventListener('hashchange', () => selectSetting(settingFromHash(location.hash), { replaceHash: false, scroll: true }));
 
   el('maintenance-toggle').addEventListener('click', async () => {
     const turningOn = el('maintenance-toggle').dataset.enabled !== 'true';

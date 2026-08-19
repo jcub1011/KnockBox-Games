@@ -3,19 +3,238 @@
 // here touches the DOM, fetch or timers, so it is unit-tested in the plain Node environment while
 // admin.js (which does all three) is tested under jsdom.
 
-// ── Tabs ──────────────────────────────────────────────────────────────────────
+// ── Settings Registry & Logical Groups ────────────────────────────────────────
 
-/** The dashboard tabs, in sidebar order. The nav's data-tab attributes must match these. */
+/**
+ * The declarative registry of admin setting groups and individual settings.
+ * Single source of truth for the sidebar tree view, Visual Studio style search indexing,
+ * deep linking, and scrollspy navigation.
+ */
+export const SETTINGS_GROUPS = [
+  {
+    id: 'monitoring',
+    label: 'Monitoring & Health',
+    icon: 'activity',
+    settings: [
+      {
+        id: 'setting-overview',
+        legacyTab: 'overview',
+        label: 'System Overview',
+        icon: 'overview',
+        description: 'Server uptime, active lobbies, connected players, registered games, memory, CPU, and diagnostics.',
+        keywords: ['uptime', 'metrics', 'cpu', 'memory', 'heap', 'players', 'lobbies', 'diagnostics', 'health', 'server'],
+      },
+      {
+        id: 'setting-history',
+        legacyTab: 'overview',
+        label: 'Recent History',
+        icon: 'history',
+        description: 'Time series sparkline charts for CPU, memory, connected players, and active lobbies.',
+        keywords: ['history', 'telemetry', 'graphs', 'sparklines', 'cpu', 'memory', 'samples', 'trends', 'time series'],
+      },
+      {
+        id: 'setting-cost',
+        legacyTab: 'overview',
+        label: 'Per-Game Server Cost',
+        icon: 'cost',
+        description: 'Network relay throughput, socket frames and bytes sent, fan-out ratios, and authority CPU time.',
+        keywords: ['cost', 'traffic', 'network', 'fan-out', 'frames', 'bytes', 'socket', 'relay', 'authority cpu', 'bandwidth'],
+      },
+      {
+        id: 'setting-lobbies',
+        legacyTab: 'lobbies',
+        label: 'Active Lobbies',
+        icon: 'lobbies',
+        description: 'Live lobby directory, room inspection, member lists, kicking players, and closing or purging lobbies.',
+        keywords: ['lobbies', 'rooms', 'players', 'members', 'kick', 'purge', 'stale', 'active', 'sessions'],
+      },
+      {
+        id: 'setting-logs',
+        legacyTab: 'logs',
+        label: 'System Logs',
+        icon: 'logs',
+        description: 'Real-time server log stream, filter by severity level or subsystem, follow live, and download log files.',
+        keywords: ['logs', 'stream', 'events', 'exceptions', 'errors', 'download', 'warnings', 'subsystem', 'diagnostics'],
+      },
+    ],
+  },
+  {
+    id: 'games',
+    label: 'Game Management',
+    icon: 'games',
+    settings: [
+      {
+        id: 'setting-games',
+        legacyTab: 'games',
+        label: 'Game Catalog',
+        icon: 'games',
+        description: 'Installed game catalog, availability controls (available, disabled, staged), disk breakdown, and rescan.',
+        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package'],
+      },
+      {
+        id: 'setting-marketplace',
+        legacyTab: 'marketplace',
+        label: 'Marketplace & Packages',
+        icon: 'marketplace',
+        description: 'Marketplace catalog, package update jobs, manual .kbg uploads, version rollback, and package sources.',
+        keywords: ['marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'jobs', 'operations', 'rollback', 'install'],
+      },
+    ],
+  },
+  {
+    id: 'platform',
+    label: 'Platform Policies & Security',
+    icon: 'platform',
+    settings: [
+      {
+        id: 'setting-maintenance',
+        legacyTab: 'platform',
+        label: 'Maintenance Mode',
+        icon: 'maintenance',
+        description: 'Global maintenance mode toggle and player notification banner, blocking new lobbies across all games.',
+        keywords: ['maintenance', 'drain', 'freeze', 'block lobbies', 'notice', 'offline', 'service'],
+      },
+      {
+        id: 'setting-announcement',
+        legacyTab: 'platform',
+        label: 'Player Announcement',
+        icon: 'announcement',
+        description: 'Broadcast announcement banner displayed on the player home page with configurable severity.',
+        keywords: ['announcement', 'broadcast', 'banner', 'player message', 'notice', 'alert', 'severity', 'info', 'warning'],
+      },
+      {
+        id: 'setting-limits',
+        legacyTab: 'platform',
+        label: 'Limits & Capacity',
+        icon: 'limits',
+        description: 'Abuse protection and capacity limits: message rates, burst caps, IP connection caps, and lobby caps.',
+        keywords: ['limits', 'caps', 'rate limit', 'burst', 'throttle', 'connections', 'messages per second', 'max lobbies', 'capacity'],
+      },
+      {
+        id: 'setting-schedule',
+        legacyTab: 'platform',
+        label: 'Update Schedule',
+        icon: 'schedule',
+        description: 'Automated check schedule for marketplace game updates: cadence, day of week, and UTC hour.',
+        keywords: ['schedule', 'updates', 'cron', 'cadence', 'automatic', 'utc', 'hour', 'check', 'timer'],
+      },
+      {
+        id: 'setting-room-codes',
+        legacyTab: 'platform',
+        label: 'Banned Room Codes',
+        icon: 'roomCodes',
+        description: 'Blocklist of profanity words and wildcard pattern filters the room code generator will never issue.',
+        keywords: ['room codes', 'banned', 'blocked', 'filter', 'profanity', 'words', 'patterns', 'generator', 'blocklist'],
+      },
+      {
+        id: 'setting-webhooks',
+        legacyTab: 'platform',
+        label: 'Webhooks & Alerts',
+        icon: 'webhooks',
+        description: 'Outbound webhook endpoints for error alerts, update completions, maintenance changes, and resource thresholds.',
+        keywords: ['webhooks', 'endpoints', 'events', 'discord', 'slack', 'alerts', 'notifications', 'http', 'integration'],
+      },
+      {
+        id: 'setting-startup-config',
+        legacyTab: 'platform',
+        label: 'Startup Configuration',
+        icon: 'startup',
+        description: 'Immutable server configuration: handshake timeouts, reconnect grace period, login attempt limits, and network isolation.',
+        keywords: ['startup', 'configuration', 'immutable', 'handshake', 'reconnect grace', 'login attempts', 'port isolation', 'security'],
+      },
+    ],
+  },
+];
+
+/** Flat list of all registered settings across all groups. */
+export const ALL_SETTINGS = SETTINGS_GROUPS.flatMap((g) => g.settings);
+
+/** The dashboard tabs/settings IDs in order. */
 export const TABS = ['overview', 'lobbies', 'games', 'marketplace', 'logs', 'platform'];
 
 /**
- * The tab a URL fragment selects, or the first tab when the fragment names nothing valid. Driving the
- * tab from location.hash means a reload, a bookmark and the back button all land where the operator was,
- * which for a page they keep open on a second monitor is the difference between useful and annoying.
+ * Resolves the target setting ID from a URL fragment or query.
+ * Accepts exact setting IDs ('setting-limits'), stripped names ('limits'),
+ * legacy tab names ('platform'), or group IDs ('monitoring').
+ */
+export function settingFromHash(hash, groups = SETTINGS_GROUPS) {
+  const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
+  if (!clean) return groups[0]?.settings[0]?.id ?? 'setting-overview';
+
+  const allSettings = groups.flatMap((g) => g.settings);
+  const exact = allSettings.find((s) => s.id.toLowerCase() === clean);
+  if (exact) return exact.id;
+
+  const withPrefix = allSettings.find((s) => s.id.toLowerCase() === `setting-${clean}`);
+  if (withPrefix) return withPrefix.id;
+
+  const byGroup = groups.find((g) => g.id.toLowerCase() === clean);
+  if (byGroup && byGroup.settings[0]) return byGroup.settings[0].id;
+
+  const byLegacy = allSettings.find((s) => s.legacyTab === clean);
+  if (byLegacy) return byLegacy.id;
+
+  return groups[0]?.settings[0]?.id ?? 'setting-overview';
+}
+
+/**
+ * The tab a URL fragment selects, or the first tab when the fragment names nothing valid.
  */
 export function tabFromHash(hash, tabs = TABS) {
-  const name = String(hash || '').replace(/^#/, '').trim().toLowerCase();
-  return tabs.includes(name) ? name : tabs[0];
+  const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
+  if (!clean) return tabs[0];
+  if (tabs.includes(clean)) return clean;
+  // If it's a setting id like setting-lobbies or lobbies, map to legacy tab
+  const settingId = settingFromHash(hash);
+  const setting = ALL_SETTINGS.find((s) => s.id === settingId);
+  if (setting && tabs.includes(setting.legacyTab)) return setting.legacyTab;
+  return tabs[0];
+}
+
+/**
+ * Evaluates a search query against all groups and settings (title, group label, description, keywords).
+ * Returns which settings and groups should be visible in the tree view and the scrolling panel.
+ */
+export function filterSettings(query, groups = SETTINGS_GROUPS) {
+  const needle = String(query ?? '').trim().toLowerCase();
+  if (!needle) {
+    const allSettingIds = new Set(groups.flatMap((g) => g.settings.map((s) => s.id)));
+    const allGroupIds = new Set(groups.map((g) => g.id));
+    return {
+      query: '',
+      isFiltering: false,
+      matchingSettingIds: allSettingIds,
+      matchingGroupIds: allGroupIds,
+      totalMatches: allSettingIds.size,
+    };
+  }
+
+  const matchingSettingIds = new Set();
+  const matchingGroupIds = new Set();
+
+  for (const group of groups) {
+    const groupMatches = String(group.label || '').toLowerCase().includes(needle);
+    for (const setting of group.settings) {
+      const settingMatches =
+        groupMatches ||
+        String(setting.label || '').toLowerCase().includes(needle) ||
+        String(setting.description || '').toLowerCase().includes(needle) ||
+        (setting.keywords || []).some((kw) => String(kw).toLowerCase().includes(needle));
+
+      if (settingMatches) {
+        matchingSettingIds.add(setting.id);
+        matchingGroupIds.add(group.id);
+      }
+    }
+  }
+
+  return {
+    query: needle,
+    isFiltering: true,
+    matchingSettingIds,
+    matchingGroupIds,
+    totalMatches: matchingSettingIds.size,
+  };
 }
 
 // ── Formatting ────────────────────────────────────────────────────────────────

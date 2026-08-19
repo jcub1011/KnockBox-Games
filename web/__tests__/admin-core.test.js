@@ -4,13 +4,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS, UPDATE_MODES,
-  UPDATE_POLICIES, appendLogEntries, availabilityLabel, cpuPercentBetween, filterCatalog, filterGames,
-  filterLobbies, formatBytes, formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle,
-  isTerminalJob, jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, noLimitOverrides,
-  pluginStatusClass, pluginStatusLabel, ratePerSecond, tabFromHash, uploadGuard, validateLimits,
-  versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS, webhookEventLabel,
-  checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue, seriesCpuPercent,
-  downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
+  UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
+  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterSettings, formatBytes,
+  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
+  jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, noLimitOverrides,
+  pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, uploadGuard,
+  validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
+  webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
+  seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed,
 } from '../admin/admin-core.js';
 
@@ -29,6 +30,72 @@ describe('tabFromHash', () => {
     for (const hash of ['', '#', undefined, null, '#nope', '#tab-lobbies']) {
       expect(tabFromHash(hash)).toBe(TABS[0]);
     }
+  });
+});
+
+describe('settingFromHash', () => {
+  it('selects setting matching exact setting- prefixed id', () => {
+    expect(settingFromHash('#setting-limits')).toBe('setting-limits');
+    expect(settingFromHash('#setting-overview')).toBe('setting-overview');
+  });
+
+  it('selects setting matching short key or legacy tab name', () => {
+    expect(settingFromHash('#limits')).toBe('setting-limits');
+    expect(settingFromHash('#games')).toBe('setting-games');
+    expect(settingFromHash('#overview')).toBe('setting-overview');
+    expect(settingFromHash('#platform')).toBe('setting-maintenance');
+  });
+
+  it('falls back to setting-overview for empty or unknown hash', () => {
+    expect(settingFromHash('')).toBe('setting-overview');
+    expect(settingFromHash('#')).toBe('setting-overview');
+    expect(settingFromHash('#nonexistent-xyz')).toBe('setting-overview');
+  });
+});
+
+describe('SETTINGS_GROUPS and ALL_SETTINGS', () => {
+  it('defines the 3 logical groups with unique ids and settings', () => {
+    expect(SETTINGS_GROUPS.map((g) => g.id)).toEqual(['monitoring', 'games', 'platform']);
+    expect(ALL_SETTINGS.length).toBe(14);
+    for (const setting of ALL_SETTINGS) {
+      expect(setting.id).toMatch(/^setting-/);
+      expect(setting.label).toBeTruthy();
+      expect(setting.description).toBeTruthy();
+      expect(Array.isArray(setting.keywords)).toBe(true);
+    }
+  });
+});
+
+describe('filterSettings', () => {
+  it('returns all settings and groups when query is empty or whitespace', () => {
+    const result = filterSettings('   ');
+    expect(result.isFiltering).toBe(false);
+    expect(result.totalMatches).toBe(ALL_SETTINGS.length);
+    expect(result.matchingGroupIds.size).toBe(SETTINGS_GROUPS.length);
+  });
+
+  it('filters settings by title, description, and keywords', () => {
+    const result = filterSettings('burst');
+    expect(result.isFiltering).toBe(true);
+    expect(result.matchingSettingIds.has('setting-limits')).toBe(true);
+    expect(result.matchingGroupIds.has('platform')).toBe(true);
+    expect(result.matchingGroupIds.has('monitoring')).toBe(false);
+  });
+
+  it('matches group name and includes all group settings', () => {
+    const result = filterSettings('Monitoring');
+    expect(result.isFiltering).toBe(true);
+    expect(result.matchingGroupIds.has('monitoring')).toBe(true);
+    expect(result.matchingSettingIds.has('setting-overview')).toBe(true);
+    expect(result.matchingSettingIds.has('setting-lobbies')).toBe(true);
+  });
+
+  it('returns 0 matches for non-matching query', () => {
+    const result = filterSettings('xyznotarealsetting12345');
+    expect(result.isFiltering).toBe(true);
+    expect(result.totalMatches).toBe(0);
+    expect(result.matchingSettingIds.size).toBe(0);
+    expect(result.matchingGroupIds.size).toBe(0);
   });
 });
 

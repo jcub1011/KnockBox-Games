@@ -367,24 +367,24 @@ describe('overview', () => {
   });
 });
 
-describe('tab router', () => {
-  it('starts on overview and switches on a nav click', async () => {
+describe('tree navigation & settings search', () => {
+  it('starts on overview and switches on a tree item click', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
     await tick();
     await tick();
 
-    expect(el('tab-overview').classList.contains('hidden')).toBe(false);
     expect(el('panel-title').textContent).toBe('System Overview');
+    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(true);
 
-    document.querySelector('.nav-item[data-tab="lobbies"]').click();
+    document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').click();
     await tick();
     await tick();
 
-    expect(el('tab-lobbies').classList.contains('hidden')).toBe(false);
-    expect(el('tab-overview').classList.contains('hidden')).toBe(true);
     expect(el('panel-title').textContent).toBe('Active Lobbies');
+    expect(document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(false);
     // The fragment follows, so a reload or a bookmark lands back here.
     expect(window.location.hash).toBe('#lobbies');
   });
@@ -398,23 +398,69 @@ describe('tab router', () => {
     await tick();
     await tick();
 
-    expect(el('tab-games').classList.contains('hidden')).toBe(false);
     expect(el('panel-title').textContent).toBe('Game Catalog');
+    expect(document.querySelector('.tree-item[data-setting-id="setting-games"]').classList.contains('active')).toBe(true);
   });
 
-  it('marks the active nav item so the sidebar matches the panel', async () => {
+  it('toggles tree groups on group header click', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
     await tick();
+
+    const group = document.querySelector('.tree-group[data-group-id="games"]');
+    const header = group.querySelector('.tree-group-header');
+
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    expect(group.classList.contains('group-collapsed')).toBe(false);
+
+    header.click();
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    expect(group.classList.contains('group-collapsed')).toBe(true);
+
+    header.click();
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    expect(group.classList.contains('group-collapsed')).toBe(false);
+  });
+
+  it('filters settings and sidebar items on search input and clears with X button', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
     await tick();
 
-    document.querySelector('.nav-item[data-tab="logs"]').click();
+    const searchInput = el('settings-search-input');
+    const clearBtn = el('settings-search-clear');
+    expect(clearBtn.classList.contains('hidden')).toBe(true);
+
+    // Search for "limits"
+    searchInput.value = 'limits';
+    searchInput.dispatchEvent(new Event('input'));
     await tick();
 
-    const active = [...document.querySelectorAll('.nav-item.active')];
-    expect(active).toHaveLength(1);
-    expect(active[0].dataset.tab).toBe('logs');
+    expect(clearBtn.classList.contains('hidden')).toBe(false);
+    expect(el('setting-limits').classList.contains('search-hidden')).toBe(false);
+    expect(el('setting-overview').classList.contains('search-hidden')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-limits"]').classList.contains('search-hidden')).toBe(false);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('search-hidden')).toBe(true);
+    expect(el('settings-search-empty').classList.contains('hidden')).toBe(true);
+
+    // Search for nonexistent term
+    searchInput.value = 'nonexistent_setting_query_123';
+    searchInput.dispatchEvent(new Event('input'));
+    await tick();
+
+    expect(el('settings-search-empty').classList.contains('hidden')).toBe(false);
+
+    // Click clear button
+    clearBtn.click();
+    await tick();
+
+    expect(searchInput.value).toBe('');
+    expect(clearBtn.classList.contains('hidden')).toBe(true);
+    expect(el('setting-overview').classList.contains('search-hidden')).toBe(false);
+    expect(el('setting-limits').classList.contains('search-hidden')).toBe(false);
+    expect(el('settings-search-empty').classList.contains('hidden')).toBe(true);
   });
 
   it('polls only the visible tab', async () => {
@@ -426,8 +472,6 @@ describe('tab router', () => {
 
     const pathsBefore = new Set(fake.calls.map((c) => c.path));
     expect(pathsBefore.has('/admin/api/system/status')).toBe(true);
-    // Five tabs each polling would multiply the request rate for four panels nobody is looking at —
-    // and the games one can trigger a disk walk while the catalog one can reach the network.
     expect(pathsBefore.has('/admin/api/lobbies')).toBe(false);
     expect(pathsBefore.has('/admin/api/games')).toBe(false);
     expect(pathsBefore.has('/admin/api/marketplace/catalog')).toBe(false);
@@ -440,17 +484,94 @@ describe('tab router', () => {
     expect(fake.calls.some((c) => c.path === '/admin/api/packages/jobs')).toBe(false);
   });
 
-  it('has a nav item and a panel for every tab, and nothing extra', async () => {
-    // The structural guard loadAdminDom() exists for: adding a tab means touching TABS, TAB_TITLES, the
-    // sidebar and the panel markup, and forgetting one of the four fails only at runtime otherwise.
-    const { TABS } = await import('../admin/admin-core.js');
+  it('has a tree item, group section, and setting card for every registered setting', async () => {
+    const { SETTINGS_GROUPS, ALL_SETTINGS } = await import('../admin/admin-core.js');
 
-    const navTabs = [...document.querySelectorAll('.nav-item')].map((b) => b.dataset.tab);
-    expect(navTabs).toEqual(TABS);
-    for (const tab of TABS) expect(el(`tab-${tab}`)).not.toBeNull();
+    for (const group of SETTINGS_GROUPS) {
+      expect(document.querySelector(`.tree-group[data-group-id="${group.id}"]`)).not.toBeNull();
+      expect(document.querySelector(`.settings-group-section[data-group-id="${group.id}"]`)).not.toBeNull();
+    }
 
-    const panels = [...document.querySelectorAll('.tab-panel')].map((p) => p.id.replace(/^tab-/, ''));
-    expect(panels.sort()).toEqual([...TABS].sort());
+    for (const setting of ALL_SETTINGS) {
+      expect(document.querySelector(`.tree-item[data-setting-id="${setting.id}"]`)).not.toBeNull();
+      expect(document.querySelector(`.setting-card[data-setting-id="${setting.id}"]`)).not.toBeNull();
+    }
+  });
+
+  it('updates active setting and centers sidebar item via scrollspy as user scrolls down the page', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    const tree = el('sidebar-tree');
+    tree.scrollTo = vi.fn();
+
+    // Default all cards to be below the activation line in jsdom
+    for (const card of document.querySelectorAll('.setting-card')) {
+      card.getBoundingClientRect = () => ({ top: 1000, bottom: 1400, height: 400 });
+    }
+
+    el('setting-overview').getBoundingClientRect = () => ({ top: -600, bottom: -200, height: 400 });
+    el('setting-games').getBoundingClientRect = () => ({ top: 80, bottom: 480, height: 400 });
+
+    admin.updateScrollspy();
+
+    expect(document.querySelector('.tree-item[data-setting-id="setting-games"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(false);
+    expect(el('panel-title').textContent).toBe('Game Catalog');
+    expect(tree.scrollTo).toHaveBeenCalled();
+  });
+
+  it('manages scroll up/down indicator buttons via disabled property without layout shifts', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    const upBtn = el('sidebar-scroll-up');
+    const downBtn = el('sidebar-scroll-down');
+    const tree = el('sidebar-tree');
+
+    // In expanded mode, indicators are disabled
+    admin.updateSidebarScrollIndicators();
+    expect(upBtn.disabled).toBe(true);
+    expect(downBtn.disabled).toBe(true);
+
+    // Collapse sidebar
+    admin.setSidebarCollapsed(true, { persist: false });
+
+    // Mock overflow with scroll at top
+    Object.defineProperty(tree, 'scrollTop', { value: 0, writable: true });
+    Object.defineProperty(tree, 'clientHeight', { value: 200, writable: true });
+    Object.defineProperty(tree, 'scrollHeight', { value: 600, writable: true });
+
+    admin.updateSidebarScrollIndicators();
+    expect(upBtn.disabled).toBe(true);
+    expect(downBtn.disabled).toBe(false);
+
+    // Mock scroll in middle
+    tree.scrollTop = 150;
+    admin.updateSidebarScrollIndicators();
+    expect(upBtn.disabled).toBe(false);
+    expect(downBtn.disabled).toBe(false);
+
+    // Mock scroll to bottom
+    tree.scrollTop = 400;
+    admin.updateSidebarScrollIndicators();
+    expect(upBtn.disabled).toBe(false);
+    expect(downBtn.disabled).toBe(true);
+
+    // When in the middle, both are enabled and clicking invokes scrollBy
+    tree.scrollTop = 150;
+    admin.updateSidebarScrollIndicators();
+    tree.scrollBy = vi.fn();
+
+    upBtn.click();
+    expect(tree.scrollBy).toHaveBeenCalledWith({ top: -80, behavior: 'smooth' });
+
+    downBtn.click();
+    expect(tree.scrollBy).toHaveBeenCalledWith({ top: 80, behavior: 'smooth' });
   });
 });
 
