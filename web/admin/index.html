@@ -74,33 +74,37 @@
       <!-- View 3: Admin Dashboard (Authenticated) -->
       <section id="dashboard-view" class="dashboard-grid hidden">
         <!-- Sidebar Navigation -->
-        <aside class="sidebar-nav">
-          <button class="nav-item active" data-tab="overview">
-            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
-            Overview
+        <aside class="sidebar-nav" id="sidebar-nav">
+          <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
+            <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><path d="M15 9l-3 3 3 3"></path></svg>
+            <span class="sidebar-toggle-label">Collapse</span>
           </button>
-          <button class="nav-item" data-tab="lobbies">
+          <button class="nav-item active" data-tab="overview" title="Overview">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+            <span class="nav-label">Overview</span>
+          </button>
+          <button class="nav-item" data-tab="lobbies" title="Active Lobbies">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-            Active Lobbies
+            <span class="nav-label">Active Lobbies</span>
             <span class="nav-count" id="nav-count-lobbies" hidden></span>
           </button>
-          <button class="nav-item" data-tab="games">
+          <button class="nav-item" data-tab="games" title="Game Catalog">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4m-2-2v4m10-2h.01m-3 0h.01"></path></svg>
-            Game Catalog
+            <span class="nav-label">Game Catalog</span>
             <span class="nav-count" id="nav-count-games" hidden></span>
           </button>
-          <button class="nav-item" data-tab="marketplace">
+          <button class="nav-item" data-tab="marketplace" title="Marketplace">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"></path><path d="M3 8h18l-1.5 11a2 2 0 0 1-2 1.75H6.5a2 2 0 0 1-2-1.75z"></path><path d="M9 12v4m6-4v4"></path></svg>
-            Marketplace
+            <span class="nav-label">Marketplace</span>
             <span class="nav-count" id="nav-count-marketplace" hidden></span>
           </button>
-          <button class="nav-item" data-tab="logs">
+          <button class="nav-item" data-tab="logs" title="System Logs">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
-            System Logs
+            <span class="nav-label">System Logs</span>
           </button>
-          <button class="nav-item" data-tab="platform">
+          <button class="nav-item" data-tab="platform" title="Platform">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-            Platform
+            <span class="nav-label">Platform</span>
           </button>
         </aside>
 

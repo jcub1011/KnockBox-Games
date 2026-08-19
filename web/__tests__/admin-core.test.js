@@ -11,6 +11,7 @@ import {
   versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS, webhookEventLabel,
   checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue, seriesCpuPercent,
   downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
+  SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed,
 } from '../admin/admin-core.js';
 
 describe('tabFromHash', () => {
@@ -870,3 +871,66 @@ describe('metric history helpers', () => {
     expect(result.path).not.toContain('NaN');
   });
 });
+
+describe('sidebar collapsed storage', () => {
+  it('reads false when storage is empty or null', () => {
+    const fakeStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+    expect(getStoredSidebarCollapsed(fakeStorage)).toBe(false);
+    expect(getStoredSidebarCollapsed(null)).toBe(false);
+  });
+
+  it('reads true only when the key is strictly "true"', () => {
+    const map = new Map();
+    const fakeStorage = {
+      getItem: (k) => map.get(k) ?? null,
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+
+    map.set(SIDEBAR_COLLAPSED_KEY, 'true');
+    expect(getStoredSidebarCollapsed(fakeStorage)).toBe(true);
+
+    map.set(SIDEBAR_COLLAPSED_KEY, 'false');
+    expect(getStoredSidebarCollapsed(fakeStorage)).toBe(false);
+
+    map.set(SIDEBAR_COLLAPSED_KEY, '1');
+    expect(getStoredSidebarCollapsed(fakeStorage)).toBe(false);
+  });
+
+  it('writes "true" to storage when collapsed is true', () => {
+    const map = new Map();
+    const fakeStorage = {
+      getItem: (k) => map.get(k) ?? null,
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+
+    setStoredSidebarCollapsed(true, fakeStorage);
+    expect(map.get(SIDEBAR_COLLAPSED_KEY)).toBe('true');
+  });
+
+  it('removes the key from storage when collapsed is false', () => {
+    const map = new Map([[SIDEBAR_COLLAPSED_KEY, 'true']]);
+    const fakeStorage = {
+      getItem: (k) => map.get(k) ?? null,
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+
+    setStoredSidebarCollapsed(false, fakeStorage);
+    expect(map.has(SIDEBAR_COLLAPSED_KEY)).toBe(false);
+  });
+
+  it('handles throwing storage gracefully without uncaught errors', () => {
+    const brokenStorage = {
+      getItem: () => { throw new Error('SecurityError'); },
+      setItem: () => { throw new Error('QuotaExceededError'); },
+      removeItem: () => { throw new Error('SecurityError'); },
+    };
+
+    expect(getStoredSidebarCollapsed(brokenStorage)).toBe(false);
+    expect(() => setStoredSidebarCollapsed(true, brokenStorage)).not.toThrow();
+    expect(() => setStoredSidebarCollapsed(false, brokenStorage)).not.toThrow();
+  });
+});
+

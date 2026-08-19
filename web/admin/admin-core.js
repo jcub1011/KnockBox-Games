@@ -849,3 +849,36 @@ export function uploadGuard(file, { maxBytes = 0 } = {}) {
   }
   return { ok: true, error: null };
 }
+
+// ── Sidebar State ─────────────────────────────────────────────────────────────
+
+export const SIDEBAR_COLLAPSED_KEY = 'kb_admin_sidebar_collapsed';
+
+/**
+ * Reads whether the sidebar was stored as collapsed. Returns false when unset, invalid,
+ * or when storage is unavailable.
+ */
+export function getStoredSidebarCollapsed(storage = (typeof localStorage !== 'undefined' ? localStorage : null)) {
+  try {
+    return storage?.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stores the sidebar collapsed preference. Removes or clears when false.
+ */
+export function setStoredSidebarCollapsed(collapsed, storage = (typeof localStorage !== 'undefined' ? localStorage : null)) {
+  try {
+    if (!storage) return;
+    if (collapsed) {
+      storage.setItem(SIDEBAR_COLLAPSED_KEY, 'true');
+    } else {
+      storage.removeItem(SIDEBAR_COLLAPSED_KEY);
+    }
+  } catch {
+    // Quota / security restrictions in restrictive iframe/private browsing modes
+  }
+}
+

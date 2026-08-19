@@ -11,11 +11,11 @@ import {
   AVAILABILITY, CODE_ALPHABET, LIMIT_FIELDS, STARTUP_LIMITS, TABS, UPDATE_MODES, UPDATE_POLICIES,
   WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare, checkCodeEntry, checkWebhook,
   cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies, formatBytes, formatClock,
-  formatCount, formatDuration, formatVersion, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, noLimitOverrides,
-  pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond, scheduleNote, seriesCpuPercent,
-  seriesValue, sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions,
-  webhookEventLabel, webhookLastDelivery,
+  formatCount, formatDuration, formatVersion, getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle,
+  isTerminalJob, jobProgress, lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs,
+  mergeSamples, noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
+  scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, sparklinePath, tabFromHash,
+  uploadGuard, validateLimits, versionAction, versionOptions, webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
 const el = (id) => document.getElementById(id);
@@ -246,6 +246,39 @@ const TAB_TITLES = {
   logs: 'System Logs',
   platform: 'Platform Settings',
 };
+
+// ── Sidebar collapse state ────────────────────────────────────────────────────
+
+/**
+ * Sets the sidebar collapse state, updating DOM classes and ARIA attributes.
+ * Persists to localStorage by default.
+ */
+export function setSidebarCollapsed(collapsed, { persist = true } = {}) {
+  const isCollapsed = Boolean(collapsed);
+  const dashboardView = el('dashboard-view');
+  if (dashboardView) {
+    dashboardView.classList.toggle('sidebar-collapsed', isCollapsed);
+  }
+  const toggleBtn = el('sidebar-toggle');
+  if (toggleBtn) {
+    toggleBtn.setAttribute('aria-expanded', String(!isCollapsed));
+    toggleBtn.setAttribute('aria-label', isCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    toggleBtn.setAttribute('title', isCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    const label = toggleBtn.querySelector('.sidebar-toggle-label');
+    if (label) {
+      label.textContent = isCollapsed ? 'Expand' : 'Collapse';
+    }
+  }
+  if (persist) {
+    setStoredSidebarCollapsed(isCollapsed);
+  }
+}
+
+export function toggleSidebarCollapsed() {
+  const dashboardView = el('dashboard-view');
+  const isCollapsed = dashboardView ? dashboardView.classList.contains('sidebar-collapsed') : false;
+  setSidebarCollapsed(!isCollapsed);
+}
 
 export function selectTab(tab, { replaceHash = true } = {}) {
   activeTab = TABS.includes(tab) ? tab : TABS[0];
@@ -1947,6 +1980,11 @@ function wire() {
   el('setup-form').addEventListener('submit', onSetupSubmit);
   el('login-form').addEventListener('submit', onLoginSubmit);
   el('logout-btn').addEventListener('click', onLogout);
+  el('sidebar-toggle')?.addEventListener('click', toggleSidebarCollapsed);
+
+  if (getStoredSidebarCollapsed()) {
+    setSidebarCollapsed(true, { persist: false });
+  }
 
   for (const button of document.querySelectorAll('.nav-item')) {
     button.addEventListener('click', () => selectTab(button.dataset.tab));

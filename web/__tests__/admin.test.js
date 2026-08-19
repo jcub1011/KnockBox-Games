@@ -898,3 +898,76 @@ describe('history graphs', () => {
     expect(rows[1].textContent).toContain('3.1 ms/call');
   });
 });
+
+describe('sidebar navigation and collapse state', () => {
+  afterEach(() => {
+    try {
+      localStorage.clear();
+    } catch {
+      // ignore
+    }
+  });
+
+  it('toggles sidebar collapse state on button click and persists to localStorage', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    const dashboardView = el('dashboard-view');
+    const toggleBtn = el('sidebar-toggle');
+    expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(false);
+    expect(toggleBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(toggleBtn.getAttribute('aria-label')).toBe('Collapse sidebar');
+    expect(toggleBtn.getAttribute('title')).toBe('Collapse sidebar');
+
+    // Click to collapse
+    toggleBtn.click();
+    expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(true);
+    expect(toggleBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(toggleBtn.getAttribute('aria-label')).toBe('Expand sidebar');
+    expect(toggleBtn.getAttribute('title')).toBe('Expand sidebar');
+    expect(localStorage.getItem('kb_admin_sidebar_collapsed')).toBe('true');
+
+    // Click to expand
+    toggleBtn.click();
+    expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(false);
+    expect(toggleBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(toggleBtn.getAttribute('aria-label')).toBe('Collapse sidebar');
+    expect(toggleBtn.getAttribute('title')).toBe('Collapse sidebar');
+    expect(localStorage.getItem('kb_admin_sidebar_collapsed')).toBeNull();
+  });
+
+  it('restores collapsed state from localStorage on bootstrap', async () => {
+    localStorage.setItem('kb_admin_sidebar_collapsed', 'true');
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    const dashboardView = el('dashboard-view');
+    const toggleBtn = el('sidebar-toggle');
+    expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(true);
+    expect(toggleBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(toggleBtn.getAttribute('aria-label')).toBe('Expand sidebar');
+    expect(toggleBtn.getAttribute('title')).toBe('Expand sidebar');
+  });
+
+  it('supports programmatic setSidebarCollapsed and toggleSidebarCollapsed', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    const dashboardView = el('dashboard-view');
+    admin.setSidebarCollapsed(true, { persist: false });
+    expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(true);
+    expect(localStorage.getItem('kb_admin_sidebar_collapsed')).toBeNull();
+
+    admin.toggleSidebarCollapsed();
+    expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(false);
+  });
+});
+
