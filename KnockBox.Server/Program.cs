@@ -1137,7 +1137,7 @@ app.MapWhen(
             });
             gameApp.UseStaticFiles(GamesCompressedStaticOptions());
         }
-        gameApp.UseStaticFiles(WebStaticOptions());   // /knockbox.js
+        gameApp.UseStaticFiles(WebStaticOptions());   // /knockbox.js + /kb-protocol.js
         gameApp.UseStaticFiles(GamesStaticOptions());
     });
 

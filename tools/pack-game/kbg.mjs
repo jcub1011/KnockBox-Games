@@ -362,8 +362,14 @@ export function readKbg(buffer) {
   return { header, files };
 }
 
-/** Parse a stored-only ZIP via its central directory. Returns entry name -> bytes. */
-function readStoredZip(buffer) {
+/**
+ * Parse a stored-only ZIP via its central directory. Returns entry name -> bytes.
+ *
+ * Exported because the addon installer (addon.mjs) reads its archives with it: the CRC check, the
+ * stored-only rule and the duplicate-name rejection are exactly the validation an untrusted download
+ * needs, and a second reader would be a second place for those rules to be got wrong.
+ */
+export function readStoredZip(buffer) {
   // Scan back for the EOCD; there is no archive comment in a .kbg, but tolerate one.
   let eocd = -1;
   for (let i = buffer.length - 22; i >= 0 && i >= buffer.length - 22 - 0xffff; i--) {

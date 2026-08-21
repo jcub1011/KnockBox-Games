@@ -445,3 +445,8 @@ FodyWeavers.xsd
 # changes, so it is never committed either.
 /games-unpacked/
 /games-managed
+
+# Addon release archives are build output, uploaded to the GitHub release rather than committed.
+# The generated index (.addons/ADDONS.json) IS committed — it is served from raw.githubusercontent
+# and is the trust root every addon install verifies against.
+.addons/*.zip

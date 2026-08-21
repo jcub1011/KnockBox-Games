@@ -12,7 +12,7 @@ import {
   validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
-  SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed,
+  SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge,
 } from '../admin/admin-core.js';
 
 describe('tabFromHash', () => {
@@ -1001,3 +1001,39 @@ describe('sidebar collapsed storage', () => {
   });
 });
 
+
+describe('sdkBadge', () => {
+  const SERVER = '1.0.0';
+
+  it('shows nothing for a game with no SDK stamp', () => {
+    // The common case by far — every hand-written game. A badge here would sit on nearly every card
+    // and say only "this is normal", which is how a column stops being read.
+    expect(sdkBadge({ sdkStatus: 'unknown' }, SERVER)).toBeNull();
+    expect(sdkBadge({}, SERVER)).toBeNull();
+    expect(sdkBadge(null, SERVER)).toBeNull();
+  });
+
+  it('shows nothing for a game already on the current SDK', () => {
+    expect(sdkBadge({ sdkStatus: 'current', sdk: { godot: '1.0.0' } }, SERVER)).toBeNull();
+  });
+
+  it('warns when a game is behind, naming what it was built against', () => {
+    const badge = sdkBadge({ sdkStatus: 'behind', sdk: { godot: '0.1.0' } }, SERVER);
+    expect(badge.label).toBe('SDK outdated');
+    expect(badge.className).toContain('badge-warning');
+    expect(badge.title).toContain('godot 0.1.0');
+    expect(badge.title).toContain('1.0.0');
+  });
+
+  it('reports ahead without alarm, since the game still runs', () => {
+    const badge = sdkBadge({ sdkStatus: 'ahead', sdk: { phaser: '2.0.0' } }, SERVER);
+    expect(badge.label).toBe('SDK newer');
+    expect(badge.className).toContain('badge-muted');
+    expect(badge.title).toMatch(/still run/);
+  });
+
+  it('lists several stamped addons in a stable order', () => {
+    const badge = sdkBadge({ sdkStatus: 'behind', sdk: { web: '0.2.0', godot: '0.1.0' } }, SERVER);
+    expect(badge.title).toContain('godot 0.1.0, web 0.2.0');
+  });
+});

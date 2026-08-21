@@ -40,6 +40,18 @@ namespace KnockBox.Contracts;
 /// hiding the game. Packagers should set it — <c>knockbox-pack</c> copies it into the
 /// <c>.kbg</c> header automatically so the two can't disagree.
 /// </param>
+/// <param name="Sdk">
+/// Optional record of which KnockBox client addon versions this build was made against, as
+/// <c>{ "godot": "1.0.0" }</c>. Written by <c>knockbox pack</c> from the game repo's
+/// <c>knockbox.json</c>, so it reports what was actually installed rather than what the author
+/// remembered.
+///
+/// Never validated and never affects whether a game loads — like <see cref="Version"/>, and for the
+/// same reason: every hand-written game has no stamp at all, and a platform that refused those would
+/// refuse most of what it hosts. Its consumer is the admin portal, which compares it against
+/// <c>KnockBoxSdk</c> so an operator can see a game still running on an addon from three releases
+/// ago. Absent is reported as <i>unknown</i>, deliberately distinct from <i>behind</i>.
+/// </param>
 /// <param name="AuthorityWords">
 /// Optional immutable word dictionaries the game's authority module queries through
 /// <c>kb.words</c> (validate a word, pick a word by index) — keyed by a game-chosen dictionary key.
@@ -61,7 +73,8 @@ public sealed record GameManifest(
     string? ThemeTextColor = null,
     string? ServerAuthority = null,
     IReadOnlyDictionary<string, AuthorityWordDeclaration>? AuthorityWords = null,
-    string? Version = null);
+    string? Version = null,
+    IReadOnlyDictionary<string, string>? Sdk = null);
 
 /// <summary>
 /// One entry in <see cref="GameManifest.AuthorityWords"/>: the game-relative path of a line-delimited

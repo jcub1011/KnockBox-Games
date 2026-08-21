@@ -23,7 +23,8 @@ Solution file is `KnockBox-Games.slnx` (modern `.slnx`, not legacy `.sln`). All 
   (or `--filter "FullyQualifiedName~Namespace.Class.Method"`)
 - Web tests (Vitest, from `web/`): `npm ci && npm test` (watch: `npm run test:watch`)
 - Phaser client tests (from `clients/phaser/`): `npm ci && npm run lint && npm test`
-- pack-game tool tests (from `tools/pack-game/`): `npm ci && npm test`
+- CLI tests (from `tools/pack-game/`): `npm ci && npm test`
+- Build the addon release archives + index: `node tools/build-addons.mjs` (writes `.addons/`)
 - Desktop publish (self-contained win-x64 exe): `dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop`
 
 The `web/` frontend is plain ES modules — **no build step**; it is served directly and baked
@@ -36,17 +37,34 @@ against new markup.
 ## Docker / CI
 
 Docker does not build locally on this machine — verify container changes via GitHub Actions
-(`gh run watch`). CI (`.github/workflows/ci.yml`) runs six jobs:
+(`gh run watch`). CI (`.github/workflows/ci.yml`) runs eight jobs (the last two publish, on
+`main`/`v*` tags only):
 - `dotnet` — .NET build & tests.
 - `aot` — Native AOT publish with `/warnaserror`; any new trim/AOT `ILxxxx` warning fails the
   build (mirrors the Dockerfile build stage, needs clang + zlib). Keeps the server AOT-clean.
 - `web` — shell + SDK Vitest tests.
 - `clients-phaser` — Phaser client lint + tests.
-- `pack-game` — packer tool tests.
+- `pack-game` — CLI tests, **plus a `node tools/build-addons.mjs` run**: the addon manifest's file
+  lists are the release job's only input, so a stale entry fails a PR rather than a tag build.
 - `docker` — image build + smoke test (boots the container, checks shell/SDK serving, hot-reload
   discovery, and that the admin portal binds its own port, claims a password once and stays 404 on the
   public origins — the only place a real listener is exercised). Build context is the repo root;
   `web/` must be present.
+- `publish` — the container image to GHCR (`:develop` from main, semver tags from `v*`).
+
+**Two release tag namespaces, and they must stay separate.** `v1.2.3` releases the *platform* (the
+csproj `<Version>`, which becomes the image's semver tags); `addons-v1.2.3` releases the *client
+addons* (the manifest's `sdkVersion`). The two version numbers are independent by design, so one tag
+namespace made every tag claim both at once: a server-only release failed the `addons` job's
+tag-vs-manifest guard for no real reason, and an addon-only release published an image tagged with a
+version its own assembly didn't report — and `KnockBoxVersion` (from the assembly, not the tag) is
+what marketplace `minAppVersion` bounds are judged against. `v*` is anchored so it does not match
+`addons-v*`; both are listed in the trigger, and `publish`'s `refs/tags/v*` condition already
+excludes the addon namespace.
+- `addons` — **`addons-v*` tags only**: verifies the tag matches `addons.manifest.json`'s `sdkVersion`, builds the
+  addon archives + `ADDONS.json`, uploads the archives to the release, commits the index to `main`, and
+  publishes `knockbox-cli` to npm via **trusted publishing (OIDC)** — which keeps the repo's
+  "no long-lived secrets beyond `GITHUB_TOKEN`" property. Also needs `id-token: write`.
 
 Deployment: the `games/` directory is mounted **read-only** from a stable host path
 **outside** the image, so it survives image updates (see `docs/HOSTING.md`). That read-only-ness is
@@ -66,14 +84,88 @@ that notices a dropped `.kbg` there.
   `ConnectionManager`, `WebSocketHandler`, `ServerLimits`, `TimeProvider`).
 - `KnockBox.Server.Tests` / `KnockBox.Contracts.Tests` — xUnit.
 
-Outside the .NET solution, two Node subprojects (each its own npm package, Vitest-tested):
-- `clients/phaser/` (`knockbox-phaser`) — networking client for Phaser. Ships `kb-core.js`
-  (pure protocol logic, same concept as `web/kb-core.js`), `knockbox-local.js` (server-less
+Outside the .NET solution, three Node subprojects (each its own npm package, Vitest-tested):
+- `web/` (`knockbox-web`, private) — the shell + the reference browser SDK. Not published; baked into
+  the server's publish output by a csproj `Content Include`.
+- `clients/phaser/` (`knockbox-phaser`, private) — networking client for Phaser. Ships `kb-core.js`
+  (pure protocol logic, same concept as `web/kb-protocol.js`), `knockbox-local.js` (server-less
   local peer), and `kb-authority.js` (host-authoritative helper).
-- `tools/pack-game/` (`knockbox-pack-game`) — engine-agnostic CLI (`knockbox-pack`) that packages a
-  game into a drop-in `<id>.kbg` file (`--dir` still emits the plain folder layout). `kbg.mjs` is the
-  dependency-free stored-ZIP writer + Brotli pipeline; its compress-or-store decision deliberately
-  mirrors `GameAssetPrecompressor.ShouldCompress`, so keep the two in sync.
+- `tools/pack-game/` (`knockbox-cli`, **the one published package**) — the game developer CLI. Two
+  subcommands: `knockbox pack` (engine-agnostic packager, the former `knockbox-pack`, which is kept as
+  an alias bin; `--dir` still emits the plain folder layout) and `knockbox addon` (see below).
+  `kbg.mjs` is the dependency-free stored-ZIP writer + Brotli pipeline; its compress-or-store decision
+  deliberately mirrors `GameAssetPrecompressor.ShouldCompress`, so keep the two in sync.
+
+Plus `clients/godot/addons/knockbox/` — a Godot 4 GDScript addon, no npm identity (a `plugin.cfg`
+instead). Its `clients/godot/` wrapper is a dev harness, not a sample game, and Godot is **not** in CI.
+
+### Addon distribution (`docs/ADDONS.md`)
+The client addons are **vendored into game repos** — unavoidably so for Godot, since GDScript compiles
+into the export — and used to be acquired by hand-copying, with nothing recording the version copied.
+They are now published like the games the marketplace serves, that mechanism pointed the other way.
+
+**`clients/addons.manifest.json` `sdkVersion` is the ONLY real version number in the repo.** Releasing
+edits that one line. Every other declaration holds the sentinel `0.0.0-dev` and is filled in by the
+build: `tools/build-addons.mjs` stamps the Godot `plugin.cfg` inside the archive (driven by the
+manifest's own `versionFiles`), CI stamps `tools/pack-game/package.json` before `npm publish`, and
+`Hosting/KnockBoxSdk.cs` **reads the manifest embedded into the assembly** by an `<EmbeddedResource>`
+(embedded, not copied to the publish output: no path to resolve and no file to lose; an unreadable one
+yields `Current == null`, which reports every game as `unknown` rather than mislabelling them all as
+`ahead` off a `0.0.0` fallback). `clients/phaser/` and `web/` `package.json` versions are not tracked at
+all — both are private and unpublished, so the number was pure ceremony.
+
+`AddonManifestTests` (built on `OriginPortBindingTests`' repo-file-consistency pattern, via the shared
+`RepoFile` helper) therefore asserts each in-repo declaration is **still the sentinel** rather than
+that it equals `sdkVersion`: an equality check still permits six real numbers that must be edited
+together, which is exactly the arrangement that had already drifted to three different values. The
+packer is the one thing that resolves the real version from a checkout (`resolveVersion()` falls back
+to the manifest when its own `package.json` reads the sentinel), so a locally built `.kbg` carries the
+same `packedBy` a released one would. The Godot updater **refuses to run** on the sentinel — that means
+it is looking at this source tree, where updating would overwrite the repo's own files.
+
+Compatibility with a server is `minAppVersion`/`maxAppVersion` vs `KnockBoxVersion` — *not* matching
+numbers — so an addon release doesn't force a server release.
+
+**`tools/build-addons.mjs`** (repo tooling, excluded from the npm package) builds one stored-ZIP per
+addon plus `.addons/ADDONS.json`. The index is **generated, never hand-edited**: its `sha256` values are
+the trust root, and a stale hash fails every install with a tampering error that isn't tampering. The
+index is committed (served from raw.githubusercontent); the `.zip`s are release assets and gitignored.
+Same trust model as `docs/MARKETPLACE.md` §3 — required `sha256`, **derived** URLs
+(`{base}/{repo}/releases/download/{tag}/{asset}`), `repo`/`tag`/`asset` pattern-checked before any
+request leaves the process. Version **pinning is served from the index's `versions` history, never a
+guessed URL**: a version the index doesn't publish has no verified hash.
+
+**Archive layout is PROJECT-relative** (`addons/knockbox/…` + `knockbox.json` at the root), which is
+what makes "unzip at your project root" a first-class install rather than a fallback — the same
+convention a Godot AssetLib zip uses. The archive ships the *same* `knockbox.json` the CLI writes,
+**byte-identical**; a test asserts it because nothing at runtime does. That is also why the record
+carries no `archiveSha256`: it can't be known when the release job writes the copy that lives inside
+the archive it would have to hash.
+
+**`add` and `update` take opposite defaults, and that asymmetry is the design.** `add` at the same
+version is a developer saying "make this pristine", so it overwrites a locally-modified file and names
+it — which makes it the *repair* path, with no separate `reset` verb. `update` changes to a different
+version, where silently discarding an edit is a surprise nobody asked for, so it refuses and points at
+`--force`. Both have their own tests or a later "consistency" refactor will collapse them. Pruning is
+scoped to the *recorded* file list, never a directory wipe: a developer's own script in
+`addons/knockbox/` was never ours to delete.
+
+**Godot updates itself** (`clients/godot/addons/knockbox/updater.gd`, two `add_tool_menu_item` actions
+mirroring `update`/`add`). Core-only — `HTTPRequest`, `HashingContext`, `ZIPReader`, `ConfigFile` — so a
+Godot developer needs no Node and no terminal, which matters because they're the audience worst served
+by copy-paste and least likely to have a JS toolchain. Inert until clicked (no timer, no autoload: a
+game project must not phone home while someone types), and `plugin.gd` guards for its absence so the
+file can simply be deleted. Note `--check-only --script` can't resolve `class_name` references without
+the editor's global class cache, which is why `test_authority.gd` fails that check standalone.
+
+**Games record what they were built with.** `GAME.json` gains optional `sdk` (`{ "godot": "1.0.0" }`),
+stamped by `knockbox pack` from the project's `knockbox.json` — read, never asked for on the command
+line, so it reports what was installed rather than what the author remembered. The author's file on
+disk is never modified; the stamp is generated into the package (which is why `plan()`'s `contents` map
+now accepts a `Buffer` as well as a source path). Never validated, like `Version`.
+`KnockBoxSdk.StatusOf` → `unknown`/`current`/`behind`/`ahead`; the portal badges only the two
+actionable ones, because a badge on nearly every card is not read. **`unknown` must stay distinct from
+`behind`** — most games carry no stamp, and flagging them all trains an operator to ignore the column.
 
 ### One `/ws` endpoint, two roles (the core idea)
 `/ws` is served on **both** the shell origin and the game origin. The **first frame** selects the role:
@@ -339,7 +431,8 @@ GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
 never validated — the marketplace's installed-side version, see below),
 `crossOriginIsolated` (optional, for threaded engine exports), and `themeColor` /
 `themeTextColor` (optional CSS colors the shell tints the in-game header chrome with;
-shell-validated, so invalid values are ignored — no CSS injection).
+shell-validated, so invalid values are ignored — no CSS injection), and `sdk` (optional
+`{ "<addon>": "<version>" }`, stamped by `knockbox pack`, never validated — see Addon distribution).
 
 ### `.kbg` game packages
 A game can be installed as a single `.kbg` file instead of a folder: copying it into `games/` is the
@@ -615,10 +708,21 @@ therefore resolves a game's folder through the catalog — `GameCatalog.TryGetDi
 all see both. The origin gate is path-based and so is unaffected by which root won; the installer
 skips seeding compressed variants of the never-served files.
 
-### Web SDK (`web/knockbox.js`)
-Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
+### Web SDK (`web/knockbox.js` + `web/kb-protocol.js`)
+Games load `<script type="module" src="/knockbox.js">`, which ES-imports `./kb-protocol.js` — so the
+game origin must serve **both** (it mounts the whole `web/` folder, and a CI smoke check asserts the
+sibling, since a 200 on the SDK alone proves nothing about its imports). `kb-protocol.js` is the
+game-facing protocol core — the 11 symbols a game needs — and `kb-core.js` **re-exports** all of them
+so `shell.js`/`admin*` import from it unchanged. The split exists because `kb-core.js` is the *shell's*
+module (favicons, colour math, launch-overlay geometry, play log, announcements) and `/knockbox.js`
+used to drag all ~21 KB of it into every game to reach 9 symbols; it is also what makes the `web` addon
+a real 2-file package. Add a game-facing helper to `kb-protocol.js`, a shell-only one to `kb-core.js` —
+`web/__tests__/client-parity.test.js` pins that export list and compares it against the Phaser and
+Godot ports (with a named allowlist for the Godot gaps, which fails if it goes stale either way).
+
+Key API: properties `playerId`,
 `players`, `isHost` (plus `authority`/`ownerId`/`isOwner` for server-authority mode, normalized via
-`kb-core.js` `normalizeReady`); callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
+`kb-protocol.js` `normalizeReady`); callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
 `onPlayerDisconnected`, `onPlayerConnected` (the last two: a peer's tab dropped but is held for the
 reconnect grace window, then returned — they stay in `players` throughout), `onOwnerChanged`; send
 methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
@@ -628,7 +732,7 @@ as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPl
 forwards it to that player's **control** socket, where the shell persists the most-recent 50 in
 `localStorage` (`kb.playLog`) and renders them in the home-page Play Log).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested
-protocol helpers (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
+shell helpers plus the `kb-protocol.js` re-exports (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
 `partitionPlayLogMetadata`, `ordinal`; launch copy: `launchMessage`). Close code **1008** is
 terminal (no reconnect); other closes back off exponentially.
 

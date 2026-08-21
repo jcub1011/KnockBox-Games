@@ -1,4 +1,17 @@
-# pack-game — KnockBox game packer
+# knockbox-cli — the KnockBox game developer CLI
+
+Two jobs, one tool:
+
+```sh
+npx knockbox pack  --in dist --manifest GAME.json   # package a game into a .kbg
+npx knockbox addon add godot                        # install / update / verify a client addon
+```
+
+`knockbox addon` is documented in [`docs/ADDONS.md`](../../docs/ADDONS.md); the rest of this file is
+the packer. `knockbox-pack` remains as an alias for the packer, and bare flags with no subcommand
+still run it, so every existing `knockbox-pack --in …` invocation keeps working.
+
+## pack — the game packer
 
 An engine-agnostic CLI that packages any game into a single drop-in **`.kbg`** file for the KnockBox
 platform. An administrator copies that one file into the server's games directory and the server
@@ -21,13 +34,16 @@ Brotli streams straight into its HTTP serving cache instead of re-compressing th
 ## Usage
 
 ```sh
-node tools/pack-game/pack-game.mjs --in <built-dir> --manifest <GAME.json> [options]
+npx knockbox pack --in <built-dir> --manifest <GAME.json> [options]
+
+# from a checkout, without installing:
+node tools/pack-game/knockbox.mjs pack --in <built-dir> --manifest <GAME.json> [options]
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `--in <dir>` | Folder of built static files to package. **Required.** |
-| `--manifest <file>` | Path to `GAME.json`; copied verbatim into the package. **Required.** |
+| `--manifest <file>` | Path to `GAME.json`; copied into the package (plus the SDK stamp below). **Required.** |
 | `--out <file\|dir>` | Where to write the `.kbg`. Default: this platform's `games/<id>.kbg`. A directory gets `<dir>/<id>.kbg`. |
 | `--dir <dir>` | Write the uncompressed `<dir>/<id>/` folder layout **instead of** a `.kbg`. |
 | `--build "<cmd>"` | Optional command to run before assembling (in `--cwd`). |
@@ -36,11 +52,30 @@ node tools/pack-game/pack-game.mjs --in <built-dir> --manifest <GAME.json> [opti
 | `--version <s>` | Stamp a game version into the package; the server logs it on install. |
 | `--quality <0-11>` | Brotli quality. Default `11` (max). Lower is dramatically faster to pack. |
 | `--no-clean` | With `--dir` only: don't wipe the target `<id>/` folder first. |
+| `--no-sdk-stamp` | Don't record the installed addon versions (from `knockbox.json`) in `GAME.json`. |
 | `-h`, `--help` | Show help. |
 
-With no `--out`, the packer writes `games/<id>.kbg` inside this platform's checkout (resolved
-relative to the tool's own location), where it installs and appears within ~1–2 seconds — no server
-restart. Pass `--out dist/` (or any path) to build somewhere that doesn't touch the platform.
+With no `--out`, the packer writes `games/<id>.kbg` inside the **enclosing KnockBox checkout**, where
+it installs and appears within ~1–2 seconds — no server restart. Pass `--out dist/` (or any path) to
+build somewhere that doesn't touch the platform.
+
+Run from outside a checkout (the normal case once installed from npm), there is no such directory to
+default to, so `--out` becomes **required** — or set `KNOCKBOX_GAMES_DIR` to your server's games
+directory and it is used instead. This used to be resolved blindly relative to the tool's own
+location, which quietly created a `games/` folder inside the developer's own project.
+
+### The SDK stamp
+
+If your project has a `knockbox.json` (written by `knockbox addon`), the packer records the installed
+addon versions in the packaged manifest:
+
+```json
+{ "id": "my-game", "…": "…", "sdk": { "phaser": "1.0.0" } }
+```
+
+Your `GAME.json` on disk is not modified — the stamp is generated into the package. The server never
+validates it; the admin portal uses it to flag a game still built against an old addon. Most games
+have no `knockbox.json` and are packed unchanged. `--no-sdk-stamp` opts out.
 
 **Packing is slow on purpose.** Brotli at quality 11 takes ~50 seconds for a 38 MB WASM export. That
 cost is paid once here instead of on every server cold start, which is the whole point of the

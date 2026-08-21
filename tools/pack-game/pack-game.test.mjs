@@ -466,3 +466,65 @@ describe("packaged output shape", () => {
     expect(statSync(target).size).toBeLessThan(stats.raw);
   });
 });
+
+describe("SDK stamping", () => {
+  /** Write a project knockbox.json, the shape `knockbox addon` produces. */
+  function installed(addons) {
+    writeFileSync(join(work.root, "knockbox.json"), JSON.stringify({
+      addons: Object.fromEntries(Object.entries(addons).map(([id, version]) => [id, { version, files: {} }])),
+    }));
+  }
+
+  it("records the installed addon versions in the packaged GAME.json", async () => {
+    installed({ godot: "1.2.0" });
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out + "/", cwd: work.root });
+
+    const { files } = readKbg(readFileSync(target));
+    expect(JSON.parse(files.get("GAME.json").toString("utf8"))).toEqual({ ...VALID, sdk: { godot: "1.2.0" } });
+  });
+
+  it("leaves the author's GAME.json on disk untouched", async () => {
+    installed({ godot: "1.2.0" });
+    const path = manifest(VALID);
+    await pack({ in: work.src, manifest: path, out: work.out + "/", cwd: work.root });
+    // The stamp is generated into the package, never written back: the author's file is theirs.
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(VALID);
+  });
+
+  it("stamps the folder output too", async () => {
+    installed({ phaser: "1.0.0", web: "1.0.0" });
+    await pack({ in: work.src, manifest: manifest(VALID), dir: work.out, cwd: work.root });
+
+    const written = JSON.parse(readFileSync(join(work.out, "demo", "GAME.json"), "utf8"));
+    expect(written.sdk).toEqual({ phaser: "1.0.0", web: "1.0.0" });
+  });
+
+  it("ships the manifest verbatim when the project has no knockbox.json", async () => {
+    // The common case by far — every hand-written game, and anything on the server-served
+    // /knockbox.js. Pinned with an explicit cwd so it does not depend on where the tests were run.
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out + "/", cwd: work.root });
+    const { files } = readKbg(readFileSync(target));
+    expect(JSON.parse(files.get("GAME.json").toString("utf8"))).toEqual(VALID);
+  });
+
+  it("ignores an unreadable knockbox.json rather than failing the pack", async () => {
+    // A diagnostic stamp must never be the reason a build fails; the portal reports the absence as
+    // "unknown", which is true.
+    writeFileSync(join(work.root, "knockbox.json"), "{ this is not json");
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out + "/", cwd: work.root });
+    expect(JSON.parse(readKbg(readFileSync(target)).files.get("GAME.json").toString("utf8"))).toEqual(VALID);
+  });
+
+  it("omits the stamp when a knockbox.json records no addons", async () => {
+    writeFileSync(join(work.root, "knockbox.json"), JSON.stringify({ addons: {} }));
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out + "/", cwd: work.root });
+    expect(JSON.parse(readKbg(readFileSync(target)).files.get("GAME.json").toString("utf8")).sdk).toBeUndefined();
+  });
+
+  it("can be turned off with --no-sdk-stamp", async () => {
+    installed({ godot: "1.2.0" });
+    expect(parseArgs(["--no-sdk-stamp"])).toEqual({ sdk: false });
+    const { target } = await pack({ in: work.src, manifest: manifest(VALID), out: work.out + "/", cwd: work.root, sdk: false });
+    expect(JSON.parse(readKbg(readFileSync(target)).files.get("GAME.json").toString("utf8")).sdk).toBeUndefined();
+  });
+});

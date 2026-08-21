@@ -1,6 +1,6 @@
 // KnockBox Networking API — the game's "just send/receive over a websocket" client library.
 //
-// Loaded inside a game served from the GAME ORIGIN, as an ES module (so it can share kb-core.js):
+// Loaded inside a game served from the GAME ORIGIN, as an ES module (so it can share kb-protocol.js):
 //   <script type="module" src="/knockbox.js"></script>
 //   <script type="module" src="game.js"></script>   <!-- runs after, reads window.KnockBox -->
 //
@@ -34,7 +34,7 @@ import {
   normalizeReady,
   rosterAdd,
   rosterRemove,
-} from './kb-core.js';
+} from './kb-protocol.js';
 
 (function () {
   const launch = parseLaunchParams(location.hash);

@@ -3,8 +3,17 @@ name: CI
 on:
   push:
     branches: [main, 'feat/**', 'fix/**']
-    # Release tags (v1.2.3) re-run the suite on the tagged commit and trigger the publish job.
-    tags: ['v*']
+    # Two release namespaces, because there are two independent version numbers and a tag has to name
+    # exactly one of them:
+    #   v1.2.3         the PLATFORM — KnockBox.Server.csproj <Version>; publishes the container image.
+    #   addons-v1.2.3  the CLIENT ADDONS — clients/addons.manifest.json sdkVersion; publishes the addon
+    #                  archives, ADDONS.json and the npm CLI.
+    # Sharing one namespace made every tag claim both numbers at once: a server-only release failed the
+    # addons job's tag-vs-manifest guard, and an addon-only release published an image labelled with a
+    # version its own assembly did not report (image tags come from the git tag, KnockBoxVersion from
+    # the assembly) — which the marketplace then compares minAppVersion against.
+    # `v*` is anchored, so it does not match `addons-v*`; both must be listed.
+    tags: ['v*', 'addons-v*']
   pull_request:
     branches: [main]
 
@@ -88,6 +97,12 @@ jobs:
           cache-dependency-path: tools/pack-game/package-lock.json
       - run: npm ci
       - run: npm test
+      # Build the release archives on every run, not just at release time. The manifest's file lists
+      # are the release job's only input, and a stale entry there would otherwise surface for the
+      # first time during a tag build — the one moment it is most expensive to discover.
+      - name: Addon archives build from the manifest
+        working-directory: .
+        run: node tools/build-addons.mjs --out "$RUNNER_TEMP/addons"
 
   docker:
     name: Docker image build & smoke test
@@ -141,6 +156,10 @@ jobs:
           curl -fsS http://localhost:8080/ | grep -qi '<html'
           curl -fsS http://localhost:8080/shell.js >/dev/null
           curl -fsS http://localhost:8081/knockbox.js >/dev/null
+          # /knockbox.js is an ES module that imports ./kb-protocol.js, so a 200 on the SDK alone
+          # proves nothing: if the sibling is missing every game breaks at import time while this
+          # check still passes. Assert the whole module graph the game origin has to serve.
+          curl -fsS http://localhost:8081/kb-protocol.js >/dev/null
 
       # The admin portal is a THIRD origin, and the only thing that makes it reachable is its port being
       # listed in the image's ASPNETCORE_HTTP_PORTS — an explicit port list REPLACES the built-in defaults
@@ -882,3 +901,102 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── Addon release ────────────────────────────────────────────────────────────────────────────────
+  # Publishes the client addons: one archive per addon attached to the GitHub release, an ADDONS.json
+  # index committed to main, and the CLI to npm.
+  #
+  # The index is the trust root for every `knockbox addon` install — download URLs are DERIVED from
+  # repo/tag/asset, never carried in the index, so the sha256 recorded here is the only thing that
+  # attests to the bytes. It is therefore generated from the archives that were just built, never
+  # hand-maintained: a stale hash fails every install with a tampering error that is not tampering.
+  addons:
+    name: Publish addons + CLI
+    runs-on: ubuntu-latest
+    # Same gate as the image publish: only green commits ship.
+    needs: [dotnet, aot, web, clients-phaser, pack-game, docker]
+    # `addons-v*` tags only. Unlike the image (which also publishes :develop from main), an addon
+    # release is a version a game repo will pin, so there is no "latest from main" equivalent.
+    #
+    # The `publish` job needs no matching exclusion: its condition is refs/tags/v*, which an
+    # addons-v* ref does not match, so an addon release correctly leaves the image alone.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/addons-v')
+    concurrency:
+      group: addons-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write    # upload release assets + commit the regenerated index
+      id-token: write    # npm trusted publishing (OIDC) — no long-lived NPM_TOKEN in this repo
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main      # the index is committed to main, not to the detached tag
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # The tag must agree with the manifest, or the index would advertise a version whose archives
+      # were built from different sources. AddonManifestTests already ties every version FILE to the
+      # manifest; this ties the RELEASE to it.
+      - name: Tag matches the manifest's sdkVersion
+        run: |
+          declared="$(node -p "require('./clients/addons.manifest.json').sdkVersion")"
+          tag="${GITHUB_REF_NAME#addons-v}"
+          if [ "$declared" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies $tag but clients/addons.manifest.json declares $declared."                  "Bump the manifest and re-tag — a mismatch would publish an index nobody can install from."
+            exit 1
+          fi
+
+      - name: Build archives + index
+        run: node tools/build-addons.mjs --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+
+      # Pushing a tag does not create a Release, and `gh release upload` requires one to exist — so
+      # create it if it isn't already there (it may be, if the release notes were drafted in the UI
+      # first). --clobber so re-running the job replaces assets instead of erroring on a duplicate.
+      - name: Attach archives to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME"             --title "Client addons $GITHUB_REF_NAME"             --notes "KnockBox client addons. Install with \`npx knockbox addon add <godot|phaser|web>\`, from the Godot Asset Library, or by unzipping an archive below at your project root. See docs/ADDONS.md."
+          gh release upload "$GITHUB_REF_NAME" .addons/*.zip --clobber
+
+      # Committed rather than served off the release: `knockbox addon` reads one stable URL, and the
+      # index has to carry the older releases too so a pinned `--version` stays installable.
+      - name: Commit the index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .addons/ADDONS.json
+          if git diff --cached --quiet; then
+            echo "index unchanged — nothing to commit"
+          else
+            git commit -m "Publish addon index for $GITHUB_REF_NAME"
+            git push origin HEAD:main
+          fi
+
+      # Trusted publishing needs npm >= 11.5.1 (and Node >= 22.14.0). setup-node's bundled npm is
+      # normally new enough, but the publish is the one step where "normally" is not good enough: a
+      # too-old npm fails with an auth error rather than a version error, which reads as a misconfigured
+      # trusted publisher and sends you looking in the wrong place entirely.
+      - name: Ensure an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # The repo copy holds the 0.0.0-dev sentinel so there is no second version number to keep in
+      # step with the manifest; npm needs a real one, so it is stamped here from the same manifest the
+      # archives were built from. Not committed — the sentinel stays the committed value.
+      #
+      # No --provenance: with trusted publishing npm generates and publishes provenance attestations
+      # automatically, and no NODE_AUTH_TOKEN either — the OIDC token from `id-token: write` is the
+      # credential. The trusted publisher on npmjs.com names this workflow by FILENAME, so renaming
+      # ci.yml breaks publishing until the publisher config is updated to match.
+      - name: Publish the CLI to npm
+        working-directory: tools/pack-game
+        run: |
+          version="$(node -p "require('../../clients/addons.manifest.json').sdkVersion")"
+          npm version "$version" --no-git-tag-version --allow-same-version
+          npm ci
+          npm publish --access public
