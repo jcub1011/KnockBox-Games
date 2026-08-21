@@ -1,0 +1,65 @@
+{
+  "$comment": [
+    "The addon set and THE one version number, read by CI (to build the release archives and",
+    "ADDONS.json), by the knockbox CLI's release tooling, and by AddonManifestTests.cs.",
+    "",
+    "One shared sdkVersion covers every client addon and the CLI. Before this file there were five",
+    "hand-maintained numbers for artifacts the docs claimed moved together (godot 0.1.0, phaser",
+    "0.2.0, web 0.1.0, pack-game 0.2.0 twice over) and nothing kept them honest. Bump here; the",
+    "test fails until every declared versionFile agrees.",
+    "",
+    "Compatibility with a server is NOT expressed by matching the server's version — it is",
+    "minAppVersion/maxAppVersion, exactly as a marketplace catalog entry expresses it, compared",
+    "against Hosting/KnockBoxVersion.cs with SemVer from Marketplace/PluginVersion.cs. So an addon",
+    "release does not force a server release, or the reverse.",
+    "",
+    "maxAppVersion is null = no upper bound. An UNPARSEABLE bound counts as incompatible (the rule",
+    "PluginUpdateEvaluator already applies): a constraint we cannot read is not the absence of one."
+  ],
+
+  "schemaVersion": "1.0",
+  "sdkVersion": "1.1.0",
+  "minAppVersion": "1.0.0",
+  "maxAppVersion": null,
+
+  "addons": {
+    "godot": {
+      "engine": "godot4",
+      "description": "Godot 4 GDScript addon (autoload + KBNet + KBAuthority).",
+      "root": "clients/godot/addons/knockbox",
+      "installTo": "addons/knockbox",
+      "files": ["**"],
+      "docs": ["clients/godot/README.md"],
+      "versionFiles": ["clients/godot/addons/knockbox/plugin.cfg"]
+    },
+    "phaser": {
+      "engine": "phaser3",
+      "description": "Phaser 3 global plugin, protocol core, authority helper and server-less local peer.",
+      "root": "clients/phaser",
+      "installTo": "addons/knockbox",
+      "files": [
+        "kb-core.js",
+        "knockbox-plugin.js",
+        "kb-authority.js",
+        "knockbox-local.js",
+        "knockbox-phaser.d.ts",
+        "README.md"
+      ],
+      "versionFiles": ["clients/phaser/package.json"]
+    },
+    "web": {
+      "engine": "vanilla",
+      "description": "Reference vanilla-JS SDK. Normally served by the platform at /knockbox.js — install it only to vendor a pinned copy (offline dev, or an engine export that bundles rather than depends on the platform).",
+      "root": "web",
+      "installTo": "addons/knockbox",
+      "files": ["knockbox.js", "kb-protocol.js"],
+      "versionFiles": ["web/package.json"]
+    }
+  },
+
+  "cli": {
+    "$comment": "Not a runtime addon — the build-time packer/installer, published to npm. Rides the same version so there is exactly one number to bump.",
+    "package": "tools/pack-game",
+    "versionFiles": ["tools/pack-game/package.json"]
+  }
+}

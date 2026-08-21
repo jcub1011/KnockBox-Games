@@ -347,6 +347,43 @@ public class GamePackageReaderTests : IDisposable
     }
 
     [Fact]
+    public void A_corrupt_brotli_payload_is_a_package_failure_rather_than_an_unhandled_decompression_error()
+    {
+        // ReadManifestBytes documents GamePackageException for "corrupt", but BrotliStream throws
+        // InvalidDataException — neither that nor IOException, so it escaped every caller's catch: the
+        // upload route answered an unhandled 500 with no reason for the operator, and skipped disposing a
+        // staged file that may be hundreds of megabytes.
+        var package = PackageFixture.CorruptBrotli();
+
+        using var archive = PackageFixture.Open(package);
+        var plan = GamePackageReader.Read(archive, Generous);   // structurally valid: only the bytes rot
+
+        var ex = Assert.Throws<GamePackageException>(() => GamePackageReader.ReadManifestBytes(plan));
+        Assert.Contains("corrupt", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_corrupt_payload_fails_extraction_the_same_way()
+    {
+        var package = PackageFixture.CorruptBrotli(corruptFile: "index.html");
+        var destination = Path.Combine(Path.GetTempPath(), $"kb-corrupt-{Guid.NewGuid():N}");
+
+        try
+        {
+            using var archive = PackageFixture.Open(package);
+            var plan = GamePackageReader.Read(archive, Generous);
+
+            var ex = Assert.Throws<GamePackageException>(
+                () => GamePackageReader.Extract(plan, destination, Generous));
+            Assert.Contains("index.html", ex.Message);
+        }
+        finally
+        {
+            try { Directory.Delete(destination, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
     public void PeekIdentity_reads_the_id_without_validating_the_file_list()
     {
         // The installer uses this to answer "is what I already installed still current?" cheaply. It must

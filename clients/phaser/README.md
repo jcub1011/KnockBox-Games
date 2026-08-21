@@ -25,7 +25,25 @@ under CommonJS/AMD. No build step required.
 
 ## Install
 
-Register the plugin as a **global plugin** in your `Phaser.Game` config with `start: true` and a
+```bash
+npx knockbox addon add phaser
+```
+
+That writes the files below into `addons/knockbox/` and records the version in `knockbox.json` at your
+project root. Commit both. Nothing to install first — `npx` fetches the CLI on demand, and Node is
+already a prerequisite of any Phaser/Vite toolchain.
+
+No Node? Unzip `knockbox-phaser-<version>.zip` from the
+[releases page](https://github.com/jcub1011/KnockBox-Games/releases) at your project root; the archive
+is laid out project-relative, so it lands identically.
+
+Later: `npx knockbox addon check` verifies the files are unmodified and reports available updates;
+`npx knockbox addon update phaser` moves to a newer version; re-running `add` repairs a file you
+edited by accident. See [`docs/ADDONS.md`](../../docs/ADDONS.md).
+
+### Register the plugin
+
+Register it as a **global plugin** in your `Phaser.Game` config with `start: true` and a
 `mapping`, so every scene can reach it as `this.<mapping>`:
 
 ```js

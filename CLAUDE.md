@@ -23,24 +23,48 @@ Solution file is `KnockBox-Games.slnx` (modern `.slnx`, not legacy `.sln`). All 
   (or `--filter "FullyQualifiedName~Namespace.Class.Method"`)
 - Web tests (Vitest, from `web/`): `npm ci && npm test` (watch: `npm run test:watch`)
 - Phaser client tests (from `clients/phaser/`): `npm ci && npm run lint && npm test`
-- pack-game tool tests (from `tools/pack-game/`): `npm ci && npm test`
+- CLI tests (from `tools/pack-game/`): `npm ci && npm test`
+- Build the addon release archives + index: `node tools/build-addons.mjs` (writes `.addons/`)
 - Desktop publish (self-contained win-x64 exe): `dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop`
 
 The `web/` frontend is plain ES modules — **no build step**; it is served directly and baked
-into publish/Docker output. Only `web/kb-core.js` (pure protocol logic) is unit-tested.
+into publish/Docker output. Unit-tested under `web/__tests__/`: `web/kb-core.js` (pure protocol
+logic, Node env) plus `shell.js` and `knockbox.js` (jsdom, against the **real** `index.html` —
+`helpers.js` injects it, so element ids stay in sync with production markup). `index.html` loads
+`/shell.js?v=N` — **bump `N` whenever you change `shell.js`**, or browsers serve the stale module
+against new markup.
 
 ## Docker / CI
 
 Docker does not build locally on this machine — verify container changes via GitHub Actions
-(`gh run watch`). CI (`.github/workflows/ci.yml`) runs six jobs:
+(`gh run watch`). CI (`.github/workflows/ci.yml`) runs eight jobs (the last two publish, on
+`main`/`v*` tags only):
 - `dotnet` — .NET build & tests.
 - `aot` — Native AOT publish with `/warnaserror`; any new trim/AOT `ILxxxx` warning fails the
   build (mirrors the Dockerfile build stage, needs clang + zlib). Keeps the server AOT-clean.
 - `web` — shell + SDK Vitest tests.
 - `clients-phaser` — Phaser client lint + tests.
-- `pack-game` — packer tool tests.
-- `docker` — image build + smoke test (boots the container, checks shell/SDK serving and
-  hot-reload discovery). Build context is the repo root; `web/` must be present.
+- `pack-game` — CLI tests, **plus a `node tools/build-addons.mjs` run**: the addon manifest's file
+  lists are the release job's only input, so a stale entry fails a PR rather than a tag build.
+- `docker` — image build + smoke test (boots the container, checks shell/SDK serving, hot-reload
+  discovery, and that the admin portal binds its own port, claims a password once and stays 404 on the
+  public origins — the only place a real listener is exercised). Build context is the repo root;
+  `web/` must be present.
+- `publish` — the container image to GHCR (`:develop` from main, semver tags from `v*`).
+
+**Two release tag namespaces, and they must stay separate.** `v1.2.3` releases the *platform* (the
+csproj `<Version>`, which becomes the image's semver tags); `addons-v1.2.3` releases the *client
+addons* (the manifest's `sdkVersion`). The two version numbers are independent by design, so one tag
+namespace made every tag claim both at once: a server-only release failed the `addons` job's
+tag-vs-manifest guard for no real reason, and an addon-only release published an image tagged with a
+version its own assembly didn't report — and `KnockBoxVersion` (from the assembly, not the tag) is
+what marketplace `minAppVersion` bounds are judged against. `v*` is anchored so it does not match
+`addons-v*`; both are listed in the trigger, and `publish`'s `refs/tags/v*` condition already
+excludes the addon namespace.
+- `addons` — **`addons-v*` tags only**: verifies the tag matches `addons.manifest.json`'s `sdkVersion`, builds the
+  addon archives + `ADDONS.json`, uploads the archives to the release, commits the index to `main`, and
+  publishes `knockbox-cli` to npm via **trusted publishing (OIDC)** — which keeps the repo's
+  "no long-lived secrets beyond `GITHUB_TOKEN`" property. Also needs `id-token: write`.
 
 Deployment: the `games/` directory is mounted **read-only** from a stable host path
 **outside** the image, so it survives image updates (see `docs/HOSTING.md`). That read-only-ness is
@@ -60,14 +84,88 @@ that notices a dropped `.kbg` there.
   `ConnectionManager`, `WebSocketHandler`, `ServerLimits`, `TimeProvider`).
 - `KnockBox.Server.Tests` / `KnockBox.Contracts.Tests` — xUnit.
 
-Outside the .NET solution, two Node subprojects (each its own npm package, Vitest-tested):
-- `clients/phaser/` (`knockbox-phaser`) — networking client for Phaser. Ships `kb-core.js`
-  (pure protocol logic, same concept as `web/kb-core.js`), `knockbox-local.js` (server-less
+Outside the .NET solution, three Node subprojects (each its own npm package, Vitest-tested):
+- `web/` (`knockbox-web`, private) — the shell + the reference browser SDK. Not published; baked into
+  the server's publish output by a csproj `Content Include`.
+- `clients/phaser/` (`knockbox-phaser`, private) — networking client for Phaser. Ships `kb-core.js`
+  (pure protocol logic, same concept as `web/kb-protocol.js`), `knockbox-local.js` (server-less
   local peer), and `kb-authority.js` (host-authoritative helper).
-- `tools/pack-game/` (`knockbox-pack-game`) — engine-agnostic CLI (`knockbox-pack`) that packages a
-  game into a drop-in `<id>.kbg` file (`--dir` still emits the plain folder layout). `kbg.mjs` is the
-  dependency-free stored-ZIP writer + Brotli pipeline; its compress-or-store decision deliberately
-  mirrors `GameAssetPrecompressor.ShouldCompress`, so keep the two in sync.
+- `tools/pack-game/` (`knockbox-cli`, **the one published package**) — the game developer CLI. Two
+  subcommands: `knockbox pack` (engine-agnostic packager, the former `knockbox-pack`, which is kept as
+  an alias bin; `--dir` still emits the plain folder layout) and `knockbox addon` (see below).
+  `kbg.mjs` is the dependency-free stored-ZIP writer + Brotli pipeline; its compress-or-store decision
+  deliberately mirrors `GameAssetPrecompressor.ShouldCompress`, so keep the two in sync.
+
+Plus `clients/godot/addons/knockbox/` — a Godot 4 GDScript addon, no npm identity (a `plugin.cfg`
+instead). Its `clients/godot/` wrapper is a dev harness, not a sample game, and Godot is **not** in CI.
+
+### Addon distribution (`docs/ADDONS.md`)
+The client addons are **vendored into game repos** — unavoidably so for Godot, since GDScript compiles
+into the export — and used to be acquired by hand-copying, with nothing recording the version copied.
+They are now published like the games the marketplace serves, that mechanism pointed the other way.
+
+**`clients/addons.manifest.json` `sdkVersion` is the ONLY real version number in the repo.** Releasing
+edits that one line. Every other declaration holds the sentinel `0.0.0-dev` and is filled in by the
+build: `tools/build-addons.mjs` stamps the Godot `plugin.cfg` inside the archive (driven by the
+manifest's own `versionFiles`), CI stamps `tools/pack-game/package.json` before `npm publish`, and
+`Hosting/KnockBoxSdk.cs` **reads the manifest embedded into the assembly** by an `<EmbeddedResource>`
+(embedded, not copied to the publish output: no path to resolve and no file to lose; an unreadable one
+yields `Current == null`, which reports every game as `unknown` rather than mislabelling them all as
+`ahead` off a `0.0.0` fallback). `clients/phaser/` and `web/` `package.json` versions are not tracked at
+all — both are private and unpublished, so the number was pure ceremony.
+
+`AddonManifestTests` (built on `OriginPortBindingTests`' repo-file-consistency pattern, via the shared
+`RepoFile` helper) therefore asserts each in-repo declaration is **still the sentinel** rather than
+that it equals `sdkVersion`: an equality check still permits six real numbers that must be edited
+together, which is exactly the arrangement that had already drifted to three different values. The
+packer is the one thing that resolves the real version from a checkout (`resolveVersion()` falls back
+to the manifest when its own `package.json` reads the sentinel), so a locally built `.kbg` carries the
+same `packedBy` a released one would. The Godot updater **refuses to run** on the sentinel — that means
+it is looking at this source tree, where updating would overwrite the repo's own files.
+
+Compatibility with a server is `minAppVersion`/`maxAppVersion` vs `KnockBoxVersion` — *not* matching
+numbers — so an addon release doesn't force a server release.
+
+**`tools/build-addons.mjs`** (repo tooling, excluded from the npm package) builds one stored-ZIP per
+addon plus `.addons/ADDONS.json`. The index is **generated, never hand-edited**: its `sha256` values are
+the trust root, and a stale hash fails every install with a tampering error that isn't tampering. The
+index is committed (served from raw.githubusercontent); the `.zip`s are release assets and gitignored.
+Same trust model as `docs/MARKETPLACE.md` §3 — required `sha256`, **derived** URLs
+(`{base}/{repo}/releases/download/{tag}/{asset}`), `repo`/`tag`/`asset` pattern-checked before any
+request leaves the process. Version **pinning is served from the index's `versions` history, never a
+guessed URL**: a version the index doesn't publish has no verified hash.
+
+**Archive layout is PROJECT-relative** (`addons/knockbox/…` + `knockbox.json` at the root), which is
+what makes "unzip at your project root" a first-class install rather than a fallback — the same
+convention a Godot AssetLib zip uses. The archive ships the *same* `knockbox.json` the CLI writes,
+**byte-identical**; a test asserts it because nothing at runtime does. That is also why the record
+carries no `archiveSha256`: it can't be known when the release job writes the copy that lives inside
+the archive it would have to hash.
+
+**`add` and `update` take opposite defaults, and that asymmetry is the design.** `add` at the same
+version is a developer saying "make this pristine", so it overwrites a locally-modified file and names
+it — which makes it the *repair* path, with no separate `reset` verb. `update` changes to a different
+version, where silently discarding an edit is a surprise nobody asked for, so it refuses and points at
+`--force`. Both have their own tests or a later "consistency" refactor will collapse them. Pruning is
+scoped to the *recorded* file list, never a directory wipe: a developer's own script in
+`addons/knockbox/` was never ours to delete.
+
+**Godot updates itself** (`clients/godot/addons/knockbox/updater.gd`, two `add_tool_menu_item` actions
+mirroring `update`/`add`). Core-only — `HTTPRequest`, `HashingContext`, `ZIPReader`, `ConfigFile` — so a
+Godot developer needs no Node and no terminal, which matters because they're the audience worst served
+by copy-paste and least likely to have a JS toolchain. Inert until clicked (no timer, no autoload: a
+game project must not phone home while someone types), and `plugin.gd` guards for its absence so the
+file can simply be deleted. Note `--check-only --script` can't resolve `class_name` references without
+the editor's global class cache, which is why `test_authority.gd` fails that check standalone.
+
+**Games record what they were built with.** `GAME.json` gains optional `sdk` (`{ "godot": "1.0.0" }`),
+stamped by `knockbox pack` from the project's `knockbox.json` — read, never asked for on the command
+line, so it reports what was installed rather than what the author remembered. The author's file on
+disk is never modified; the stamp is generated into the package (which is why `plan()`'s `contents` map
+now accepts a `Buffer` as well as a source path). Never validated, like `Version`.
+`KnockBoxSdk.StatusOf` → `unknown`/`current`/`behind`/`ahead`; the portal badges only the two
+actionable ones, because a badge on nearly every card is not read. **`unknown` must stay distinct from
+`behind`** — most games carry no stamp, and flagging them all trains an operator to ignore the column.
 
 ### One `/ws` endpoint, two roles (the core idea)
 `/ws` is served on **both** the shell origin and the game origin. The **first frame** selects the role:
@@ -78,11 +176,215 @@ Outside the .NET solution, two Node subprojects (each its own npm package, Vites
   lobby-scoped ticket, then relays `Game{to, payload}` messages where `to` ∈
   `{"host","all","<playerId>"}`; the server stamps `from` and fans out. Handled by `RunDataAsync`.
 
-### Two origins
+### Three origins
 Shell origin (5114 dev) serves the shell UI + SDK; game origin (5115 dev, a subdomain in
 prod) serves `/games/{id}/…` builds. Games run in **cross-origin iframes** so untrusted game
 code cannot read the shell's identity token. `Hosting/OriginRouting.cs` resolves which origin
 a request is on; `Hosting/ContentPaths.cs` resolves the web/games/logs locations.
+
+Third: the **admin origin** (`AdminPort`, 5116 dev / 8082 image; `AdminHost`/`AdminOrigin` as a subdomain
+in prod), an operator dashboard served from `web/admin/` at that origin's **root**, claimed in a `MapWhen`
+branch ahead of the game and shell pipelines. Every `/admin*` path 404s on the two public origins. The API
+under `/admin/api/*` lives in `Hosting/AdminApi.cs` (`MapAdminApi`), not in `Program.cs`: one `WriteJson`
+helper, one `RequireSession` wrapper and a route table, so an endpoint's handler is only the part specific
+to it. Mutating routes additionally go through `WriteGuard` (JSON content type + `Sec-Fetch-Site`), which is
+defence in depth behind `SameSite=Strict`, not the primary control — the port is. Operator guide:
+`docs/ADMIN.md`.
+
+**Portal tabs** (six; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
+`admin-core.js` is the pure/tested half exactly as `kb-core.js` is to `shell.js`, and `admin.js` exports
+`bootstrap()` so it can be driven under jsdom). Only the **visible tab polls** — six panels each polling
+would multiply the request rate for five nobody is looking at, and the games tab can trigger a disk walk.
+- **Overview** — platform counters, the history graphs, `DeploymentDiagnostics` issues (repeated here because
+  the warning page only replaces the *shell's* home page), maintenance toggle, per-game relay + authority cost.
+- **Active Lobbies** — the directory, with single/bulk close, stale purge and per-member kick.
+- **Game Catalog** — availability, disk footprint, delete, rescan, lifecycle badges.
+- **Marketplace & Packages** — catalogs, install/update/rollback/uninstall, upload, the operations list.
+- **System Logs** — the live stream plus raw file download.
+- **Platform** — runtime limits & lobby caps, the marketplace update schedule, the player announcement,
+  banned room codes, webhook endpoints.
+
+There is **no "admin port active" indicator**, and the absence is deliberate: `#server-status-pill` ships
+`hidden` and is painted only by `showErrorStatus`. A pill reporting that the admin port is up, on a page
+that port just served, can never be read while it is false. (Its CSS needs `.status-pill[hidden]` for the
+same reason `.home-announcement[hidden]` does — see the launch-overlay note about `display: flex` beating
+the UA `[hidden]` rule.)
+
+**`POLL_MS.platform = 0`: the Platform tab is the only one that does not poll**, and `startPolling` treats a
+falsy interval as "no timer" rather than falling back to 5 s. It is a set of forms, not a view — a poll would
+re-render a field mid-edit and throw away what the operator was typing. It reads on entry, after each save,
+and on Refresh. A jsdom test asserts it arms no timer, beside the one asserting the others do.
+
+**The marketplace tab's poll rate is split, and that split is the design.** `POLL_MS.marketplace = 3000`
+hits **only** the in-memory job feed; the catalog — which reaches the network with a 30-second timeout — is
+read on tab entry, on Refresh, and when a job reaches a terminal status (which is what flips a card from
+"Update to 1.3.0" to "Up to date" the moment it's true). That is also why it is a fifth tab rather than
+part of Game Catalog: one panel means one timer, and 20 s (a disk walk) and 3 s (a progress bar) have no
+common answer. `web/__tests__/admin-marketplace.test.js` asserts exactly this.
+
+**Two jsdom traps that file documents**, both from vitest reusing one `window` per file: every
+previously-imported copy of `admin.js` still holds its `hashchange` listener, so assigning
+`location.hash` in `beforeEach` makes stale modules re-render and re-fetch into the fresh DOM (use
+`history.replaceState`); and their poll intervals keep firing against the next test's fetch stub unless
+`stopPolling()` — exported for exactly this — is called in `afterEach`.
+
+**Upload is `XMLHttpRequest`, not `fetch`**, and it is the only such path in the codebase. `fetch` has no
+upload-progress event, and a half-gigabyte upload with no progress reads as hung — so the operator clicks
+again and starts a second one. Two consequences: the 401 funnel `request()` owns had to be extracted into
+`handleUnauthorized()` so the XHR path shares it, and `WriteGuard` grew a media-kind parameter scoped to
+that single route (its content-type check is skipped when `ContentLength` is null, so the upload route
+requires `application/octet-stream` *positively* rather than on that technicality).
+
+**Runtime-editable limits are a live read, not a re-read.** `Networking/LimitsProvider.cs` holds the configured
+baseline plus the operator's overrides (`OperatorLimits`, persisted, every member nullable so the file records
+only what changed) and publishes the merged `ServerLimits` as one volatile reference. The seam that makes it
+matter is that `TokenBucket` and `IpConnectionGate` take a **delegate** rather than captured numbers, so an
+edit reaches sockets that are **already open** — the connections a flood arrives on are by definition already
+connected, which is what made a capture-at-construction design nearly useless as a control. Three knobs stay
+startup-only and say so in the portal: `HandshakeTimeout` and `DisconnectGrace` (the reaper's interval, and
+whether its timer exists at all, are derived from grace at startup) and both `AdminLoginAttemptsPerMinute`
+caps (they bound PBKDF2 CPU for an unauthenticated caller — a lock that opens from inside the room it protects
+is not a lock). The **lobby caps** (`MaxLobbies`, `MaxLobbiesPerGame`) are enforced in `HandleCreateLobby`,
+between the policy gate and `LeaveLobbiesExcept` — *not* behind `IPlatformPolicy`, because neither policy
+implementation knows anything about live lobbies while that method already holds the manager that does, and
+that ordering is what stops a refused player also losing the lobby they were in.
+
+**Banned room codes are globs, deliberately not regexes.** `Lobby/RoomCodeFilter.cs` compiles two operator
+lists — substring `words` and whole-code `patterns` (`?`/`*`) — and `LobbyManager` reads it per draw, so an
+edit applies to the next lobby. A blocked draw is **re-drawn without consuming one of the five placement
+attempts**: those exist for code collisions, and spending them on a blocklist would quietly raise the failure
+rate of starting a game. An operator-typed regex on the lobby-create path would be a DoS lever pointed at the
+thing every player needs, and buys nothing over a glob on four characters. The API refuses a list removing
+more than half the code space, counted **exactly** by walking all 32^4 codes on save — a starved generator
+surfaces to players as "could not create a lobby" with nothing to connect it to the cause. Spec §2.4's
+*reserved* codes were **dropped by decision**, not deferred (docs/ADMIN.md §9 records why).
+
+**Announcements are the second thing shaped like `MaintenanceMessage`.** `AnnouncementPostedMessage` /
+`AnnouncementClearedMessage` are additive server→client pushes (no protocol bump: the version gate only
+rejects clients *newer* than the server, and an old shell drops an unknown `type`). `IPlatformPolicy` gained
+`Announcement` so the relay passes a payload through without interpreting it and still knows nothing about
+settings files; `ConnectionManager.BroadcastToAllControl` is the only platform-wide fan-out in the server and
+iterates the registry directly rather than snapshotting every player. The banner is **also pushed right after
+`WelcomeMessage`**, which is what makes a late arrival see the same notice without the server keeping
+per-viewer state — and reuses the message type instead of adding a `WelcomeMessage` field the Phaser and Godot
+SDKs would have to mirror. Dismissal lives in `localStorage` keyed by the announcement **id**, so an edited
+notice (new id) returns for everyone who dismissed the old one.
+
+**The webhook loop guard is the load-bearing part of §4.2.** `Webhooks/WebhookLogSink.cs` turns error-level
+log events into deliveries; a failed delivery logs. Without excluding `WebhookDispatcher`'s own
+`SourceContext`, those two facts are a loop that grows one event per failure until the endpoint recovers —
+which it cannot, because the server is now busy posting to it. (The dispatcher also logs failures at Warning,
+so the exclusion is the second line, not the only one.) A `TokenBucket` caps alerts per minute and the count
+suppressed rides the next delivery. `WebhookQueue` is created **pre-`Build()`** like `AdminLogBuffer`, because
+the sink is constructed inside `UseSerilog` where DI does not exist yet while the dispatcher needs the settings
+store; it is bounded drop-oldest with a counter, the same policy a game socket's outbound queue uses. Delivery
+is **one attempt, no retry**, with the last result kept per endpoint — and the payload carries the same summary
+as both `content` (Discord) and `text` (Slack) plus structured fields, so one POST serves all three kinds of
+endpoint with no per-service formatting in the server. `PackageJobRegistry` grew a settable `OnFinished` hook
+(the `LobbyCloser.OnClosing` shape) so update outcomes reach it without the install engine knowing webhooks
+exist. The URL rule is `MarketplaceClient.IsAllowedUrl` — exposed, not copied.
+
+**Per-game CPU exists only for server-authority games, and is measured.** `Games/AuthorityMetrics.cs` counts
+calls, total time and the slowest call per game, instrumented at the **one** place in `ServerAuthority`'s drain
+loop where the module owns the thread — one measurement point rather than five around the individual
+`_runtime.Invoke` sites. A failed call still counts its time (it ran to the point of throwing). Every other
+game reports `--`, not `0.00s`: it executes nothing in this process, which is a different statement. Per-game
+*memory* is deliberately not reported, since it could only be inferred from engine count × cap.
+
+**`Admin/MetricHistory.cs` is the fourth cursor-polled feed** (after `AdminLogBuffer` and
+`PackageJobRegistry`): a bounded ring sampled by a timer in `Program.cs`, read with `?after=<seq>`. Sampled
+**server-side** on purpose — the portal already differences consecutive polls but holds one prior sample, so a
+tab switch, a reload or a second machine starts the picture from nothing, and an operator opens this page
+precisely when something has already gone wrong. `admin-core.js` derives the series (`seriesRate` omits a pair
+whose counter went backwards rather than drawing a false trough) and builds an inline-SVG sparkline path;
+there is no charting library, because the portal has no build step. Resource-threshold webhooks are
+edge-triggered from the same sampler, so a sustained breach alerts once rather than every 15 seconds.
+
+**Server counters are cumulative; rates are the client's job.** `RelayMetrics` and `Connection`'s
+frame/byte/drop counters only ever increase, and `system/status` reports `cpuSecondsTotal` rather than a
+percentage: a rate needs two samples, and producing one server-side would mean sleeping inside a request or
+keeping per-viewer state. `admin-core.js` `ratePerSecond` differences them, and returns **null** rather
+than a negative when a counter goes backwards — that means the server restarted, and drawing it as a spike
+would mislead at exactly the wrong moment.
+
+**Per-game relay cost is measured, because games are not server-side-free.** Every socket holds a bounded
+outbound `Channel` plus a writer task, and a `to:"all"` fan-out serializes once then sends per recipient.
+`Networking/RelayMetrics.cs` counts frames/bytes in and out per game (fan-out counted per recipient, from
+the actual send loop, so a member with no attached game socket costs nothing), and `Connection` counts
+frames the `DropOldest` policy discarded — which used to be visible only in a log line nobody watches.
+
+**Operator policy is the one persisted thing.** `Admin/AdminSettingsStore.cs` writes game availability
+(`Available`/`Disabled`/`Staged`), maintenance mode, runtime limit overrides, the room-code blocklist, the
+live announcement and the webhook endpoints to `AdminSettingsPath` (default: beside
+`AdminPasswordPath`, i.e. the persisted `/app/data` volume). Everything else here is deliberately ephemeral,
+but an admin who disables a game means it to stay disabled across the next image update. Reads are lock-free
+(a `volatile` immutable snapshot swapped atomically, the same discipline as `GameCatalog`) because the
+lobby-create path calls them; a change **takes effect in memory even when the write fails**, and the setter
+returns that as a warning rather than rejecting the change. The relay sees it through the narrow
+`Admin/IPlatformPolicy.cs` — `WebSocketHandler` has no business knowing about settings files, and
+`PlatformPolicy.OpenPlatform` keeps the flow tests free of one.
+
+**What policy does and doesn't touch:** it gates **creation and listing only**. Existing lobbies play on
+through both a disable and maintenance mode (spec §3.1), and join is deliberately ungated. `Staged` =
+hidden from the catalog but still startable, which is why `ListGamesMessage` grew an optional `Include`:
+the shell allowlists every launch against the catalog it was given, so a staged game reached via its
+`/?game=<id>` link has to come back in that list or the shell rejects its own `EnterGame` as unknown. A
+**disabled** game is never re-admitted by `Include` — that would only move the refusal to the create round
+trip, after the launch overlay was already up. Staged is **visibility, not access control**: there are no
+player accounts, so nothing can be authorized and the link is a weak secret at best.
+
+**Closing a live lobby has exactly one implementation.** `Lobby/LobbyCloser.cs` (detach the authority actor,
+remove the lobby, one `LobbyClosedMessage` fanned out, abort the game sockets) was extracted from
+`ServerAuthorityManager.HandleFatal`, which now calls it — two copies would drift, and whichever gained the
+next step would leave the other half-closing lobbies. Distinct from `CloseLobbyIfDark`, which broadcasts
+nothing because nobody is left to tell. The authority hook is a settable `OnClosing` rather than a ctor
+dependency (the manager needs the closer, so it can't also be an argument to it), but `HandleFatal` still
+stops its **own** actor first: a class must not depend on external wiring to reach its own invariant.
+
+**The live log view reads a ring buffer, not the log file.** `Admin/AdminLogBuffer.cs` is a hand-written
+bounded `ILogEventSink` (no `Serilog.Sinks.*` package — same AOT reasoning that rejected
+`ReadFrom.Configuration`), wired via `WriteTo.Sink` and constructed before `UseSerilog` since the host isn't
+built yet. Level and `SourceContext` stay structured, so filtering is exact instead of a guess at parsing
+rendered text; a monotonic sequence per event makes ordinary polling a stream (`?after=<seq>`), with no SSE
+and no second socket role. It renders with `MessageTemplateTextFormatter("{Message:lj}")` **on purpose** —
+Serilog's own `RenderMessage()` quotes string properties, so the portal and the log file would disagree
+about the same event.
+
+**Deleting a game is all-or-nothing, and usually impossible in production.** `Admin/AdminOperations.cs`
+probes every parent directory for writability *before* closing a single lobby, because the bad outcome isn't
+failure — it's removing the unpacked copy while leaving the `.kbg`, so the installer reinstalls the game and
+the operator watches a deletion undo itself after their lobbies were torn down for nothing. `games/` is
+mounted `:ro` in the shipped compose file and the server only ever reads it, so the API answers **409** (a
+deployment limit, not a fault) and the portal disables the button with the blocking path named. Disk usage
+counts the game folder **plus** its compressed cache **plus** its source `.kbg`; reporting only the first
+understates a large WASM game by roughly its own cache. A missing `web/admin` is reported through `DeploymentDiagnostics` **and** answered with an
+explanatory 503 at the origin, because the warning page only replaces the *shell* home page.
+Auth is one PBKDF2-hashed password (min 12 chars, file created mode `600`) in `AdminPasswordPath`
+(`Security/AdminAuthService.cs`) — **claim-on-first-use**: while no password is set, whoever reaches the
+origin sets it, which is why compose binds 8082 to loopback. Claiming writes with `FileMode.CreateNew`, so
+concurrent setups yield one winner and one 409 — a check-then-write let both "succeed" and left the loser
+holding a cookie signed under a key that no longer existed. The session cookie's HMAC key is derived from a
+per-process secret **plus a fingerprint of the stored hash**, so any change to that file revokes all
+sessions (a reset actually locks an intruder out); its `Secure` flag follows the request scheme **or** an
+`https://` `AdminOrigin`, since behind a TLS proxy without `ForwardedHeaders` the request here is plain
+HTTP. The file *is* the credential — write access to it is
+total control, and rollback is deliberately not defended against (it needs state the attacker doesn't
+control); filesystem permissions are the boundary. Password attempts are rate-limited **before** hashing —
+at 600k PBKDF2 iterations (~0.4s of a core) an unthrottled endpoint is an unauthenticated CPU-exhaustion
+lever, not just a guessing oracle — by **two** buckets: per IP
+(`AdminLoginAttemptsPerMinute`, `Networking/IpRateLimiter.cs`) for fair share, plus a server-wide one
+(`AdminLoginAttemptsPerMinuteGlobal`, `TokenBucket`) that bounds CPU regardless. The second exists because
+the first keys on an address `X-Forwarded-For` can invent unless `KnownProxies` names the proxy.
+
+**Port-binding trap (this shipped broken once):** `Program.cs` binds all three origins itself *only* when
+nothing else set ports. Any explicit `ASPNETCORE_URLS` / `ASPNETCORE_HTTP_PORTS` / `Kestrel:Endpoints`
+**replaces** that list instead of adding to it, and `GamesPort`/`AdminPort` only tell the *router* which
+port maps to which origin — they bind nothing. So every origin must be listed in `launchSettings.json`
+`applicationUrl`, the Dockerfile's `ASPNETCORE_HTTP_PORTS`, and any env you set, or it is routed but never
+listened on and answers `connection refused`. A startup check logs the address each origin actually bound
+and warns when the admin port isn't among them; `OriginPortBindingTests` asserts the repo's own files stay
+in sync. NOTE: `launchSettings.json` is parsed as **strict JSON** — a `//` comment there makes the whole
+profile silently fail to apply (falling back to Production + the built-in ports).
 
 ### Identity & tickets (ephemeral by design)
 `Security/TokenService.cs` issues HMAC-SHA256 signed tokens. The signing secret is **random
@@ -102,18 +404,35 @@ a warning on duplicates. Only `roots[0]` is watched/polled — the installer own
 triggers rediscovery itself. The folder name **must equal** the manifest `id`, and `entry` is
 path-traversal–checked to stay inside the game folder. **One** dictionary of `GameEntry(manifest,
 directory)` is swapped atomically — two parallel dictionaries could not be swapped together, letting a
-reader pair a pre-swap manifest with a post-swap path. `TryGetDirectory`/`GameDirectories` expose the
-resolved path (never put it on `GameManifest`, which goes over the wire). A games dir
+reader pair a pre-swap manifest with a post-swap path. `TryGetDirectory`/`GameLocations` expose the
+resolved path (never put it on `GameManifest`, which goes over the wire); `Count` reads the game count
+without `Games`' snapshot allocation. A games dir
 that is missing OR present-but-unreadable (e.g. a Docker mount the UID-1654 user can't read) does
 **not** crash startup: `Discover()` catches the access error and exposes `GameCatalog.ScanError`,
 which `Hosting/DeploymentDiagnostics.cs` surfaces (with other file-access problems found at
 bootstrap) by replacing the shell home page with `Hosting/DeploymentWarningPage.cs` — see the
 home-page warning middleware in `Program.cs` and `docs/HOSTING.md`.
 
-GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`,
+**A rescan that changed nothing logs nothing new.** Discovery re-runs on every file event, on the
+bind-mount poll and whenever `GamePackageInstaller` asks for another pass, so the overwhelming majority of
+scans find exactly what the last one found — and reporting the whole catalog each time buried the one pass
+that mattered, both in the log file and in `AdminLogBuffer`'s bounded ring, which is what an operator reads
+when something has gone wrong. `GameCatalog.PassLog` therefore **defers** the routine lines (`Discovered
+game …`, `Skipping game …`, `Game catalog ready …`) and picks their level at the end of the pass: as asked
+for when the pass changed something, `Debug` when its signature matches the last published one. Template and
+args are kept apart so the eventual call is still structured — the portal filters on level and
+`SourceContext`, and pre-rendering would hand it one opaque string. Exceptions and an unreadable games root
+are logged where they happen and never demoted; an unreadable primary root also **clears** the signature, so
+the pass that recovers reports the whole catalog rather than matching a pre-outage one and going quiet.
+`Discovered` still fires on every pass — only the logging is conditional, and a test says so, because the
+installer and the precompressor reconcile off that event.
+
+GAME.json fields: `id`, `name`, `entry` (entry HTML), `thumbnail`, `maxPlayers`, `version` (optional,
+never validated — the marketplace's installed-side version, see below),
 `crossOriginIsolated` (optional, for threaded engine exports), and `themeColor` /
 `themeTextColor` (optional CSS colors the shell tints the in-game header chrome with;
-shell-validated, so invalid values are ignored — no CSS injection).
+shell-validated, so invalid values are ignored — no CSS injection), and `sdk` (optional
+`{ "<addon>": "<version>" }`, stamped by `knockbox pack`, never validated — see Addon distribution).
 
 ### `.kbg` game packages
 A game can be installed as a single `.kbg` file instead of a folder: copying it into `games/` is the
@@ -134,11 +453,172 @@ is), and must be absent for two passes before its game is uninstalled (so delete
 drop a live game). `Reconcile()` returns `Pending` for both of those deferrals — the caller must
 rescan, or that work stalls until an unrelated file event arrives.
 
+A **missing or unreadable package root is skipped, not fatal to the pass.** The hazard the old
+whole-pass bail guarded against is real but narrow — an unreadable root is indistinguishable from every
+package in it having been deleted — so it is answered by treating games whose `PackageMarker` names that
+root as live (never uninstalled) while the healthy roots install and uninstall normally, and by reporting
+it through `InstallFailure` so it reaches the deployment-warning page. Bailing outright meant one bad root
+silently switched off `.kbg` hot-drop for the other one too.
+
 `Games/GamePackageReader.cs` treats packages as untrusted: full validation before any byte is written,
 manual entry iteration (**never** `ZipFile.ExtractToDirectory` — no caps, can't pre-validate, and on
 .NET 7+ it restores the entry's Unix file mode), strict path rules, and byte caps counted **while
 copying** because declared sizes are attacker-controlled. Tests: `GamePackageReaderTests` (validation),
 `GamePackageInstallerTests` (lifecycle), `PackageFixture` (builds deliberately malformed packages).
+
+### The official marketplace (`KnockBox.Server/Marketplace/`)
+Where admins get games from: a catalog index (`.plugins/CATALOG.json` in the separate
+`jcub1011/KnockBox-Games-Marketplace` repo) listing one entry per published game, each pointing at a
+`.kbg` on a GitHub release. `MarketplaceClient` is the **only outbound HTTP in the server** — a plain
+singleton `HttpClient` over a `SocketsHttpHandler` with `PooledConnectionLifetime`, deliberately not
+`IHttpClientFactory`, so no new package has to clear the AOT gate. Spec + trust model:
+`docs/MARKETPLACE.md`.
+
+**The install engine (`Games/PackageManager.cs`, `Games/PackageJobRegistry.cs`).** `DownloadAsync` still
+installs nothing — `PackageManager` places what it hands back, and the same `PlaceAsync` serves a
+download, an upload and a rollback, so none of them re-decides what "valid" means. Every path re-runs
+`GamePackageReader.Read`, **including rollback**: a file that has sat on disk for months is not more
+trustworthy than one off the network.
+
+Packages the portal installs land in **`GamesManagedRoot`** (default sibling `games-managed`), a writable
+*package* root the installer also scans — `games/` is `:ro` in production, so the portal cannot write
+there at all. Extraction still goes to `GamesUnpackedRoot`, so the catalog's root list and asset serving
+are unchanged, and `games/` still wins a contested id. Layout in `Games/ManagedPackageLayout.cs`. Unlike
+the two derived caches this root is **not regenerable**: a marketplace package can be re-fetched, an
+uploaded one exists nowhere else.
+
+`PlaceAsync`'s order is load-bearing: **copy** the current package to `.backups/` (a *move* would leave
+the id with no package, and a reconcile pass landing in that window starts the two-pass uninstall
+countdown on a healthy game), then one `File.Move(..., overwrite: true)`, then stamp the mtime **strictly
+past** the previous value — the installer keys freshness on `(mtime, length)`, so two same-length versions
+inside one filesystem tick would otherwise look identical and the second would never extract (a rollback
+is the likeliest way to hit that). `GamePackageInstaller.Adopt` then vouches for the file so it installs
+on the next pass rather than waiting out the two-pass settle check, which exists for copy-in and has no
+bearing on an atomic rename.
+
+**The overwriting rename is retried, and must never become delete-then-move.** `Hosting/AtomicFile.cs`
+wraps `File.Move(..., overwrite: true)` in a tiny bounded retry (4 attempts / ~50 ms ⇒ ~150 ms). On Windows
+that move is `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`, which needs delete access to the destination and so
+fails outright while *anything* holds a handle — a virus scanner or the search indexer opening the file
+microseconds after it was written is enough, and was: a marketplace download died with
+`UnauthorizedAccessException` once in ~50 full test runs, discarding a verified package the next attempt
+would have placed. Deleting first would trade that rare transient failure for a rare *permanent* one, which
+is the window the single rename exists to close. The budget is small because every caller is holding
+something — `AdminSettingsStore.Save` runs under `_writeGate` (a `System.Threading.Lock`, so the sync form
+there is forced, not preferred) and `PackageManager.Place` holds an install slot. A real ACL denial or
+read-only mount still fails, with the original exception, ~150 ms later. Four call sites use it:
+`MarketplaceClient.DownloadAsync` (async, and it passes the **caller's** token, not its download deadline —
+by then the transfer is verified, and `timeout.Token` would both abort a valid publish and mislabel it
+"downloading timed out"), `PackageManager.Place`, `AdminSettingsStore.Save`, and
+`GameAssetPrecompressor.SaveIndex`. The precompressor's two *per-file* moves deliberately do **not**:
+they're already caught per file and retried by the next reconcile pass, a finer granularity than this adds
+— but `SaveIndex` is caught per **game**, so losing it re-Brotlis the whole game at max effort.
+Tests are split for a reason: a real sharing violation is unreproducible on the Linux CI runners
+(`rename(2)` ignores open handles, and .NET's `FileShare.None` is an advisory `flock` that `rename` never
+consults), so `AtomicFile.Retry` takes an injected operation for the portable tests, and the Windows-only
+pair feeds a real `File.Move` through that same seam — releasing the handle from *inside* the operation, so
+ordering is guaranteed rather than raced.
+
+**Placing is not installing, and the lifecycle gate spans both.** `Place` only renames the `.kbg` and asks
+for a rescan; the extraction — and `SwapIntoPlace` moving the live directory aside — happens on a later
+installer pass. So `ApplyAsync` waits on `GamePackageInstaller.Installed` (a new event, raised only for a
+real extraction) before finishing the job and releasing `GameLifecycleGate`. Releasing it at the end of
+`Place` meant a force update closed every lobby, reported success, re-opened the game, and served a player
+who started a lobby in that window the **old** build — then 404s mid-session as it was swapped underneath
+them, which is the exact outcome force and drain exist to prevent. The wait is bounded
+(`PackageManager.ExtractionWait`) and times out into a job *warning* rather than holding the gate forever:
+those states are never persisted precisely so a game can't be left permanently unstartable. `PackageManager`
+subscribes in its own constructor rather than from `Program.cs` — its correctness depends on the event, and
+a class must not need external wiring to reach its own invariant. The install **slot** is taken *after*
+`WaitForLobbiesAsync`, not around it: a drain wait is open-ended, and holding the single slot across it left
+every unrelated install queued behind one draining game.
+
+**`_installSlots` is acquired in exactly two disjoint windows, and that is load-bearing.** `RunDownload`
+holds it across the download only and **releases before calling `ApplyAsync`**, which takes it again for the
+apply. Holding it across the call is a self-deadlock on the default `MaxConcurrentInstalls` of 1 — and it
+shipped that way: every marketplace install wedged in `Verifying` forever while the download had in fact
+succeeded, and since `Verifying` is `Cancellable` the job stayed cancellable, which is what made it look
+like anything but a deadlock. The leaked permit then queued every later install, upload, rollback and
+uninstall behind it until a restart. Uploads were unaffected (they never enter `RunDownload`), which is why
+"upload works, marketplace doesn't" was the reported shape. `PackageManagerTests` now drives a real
+marketplace install over `FakeHttpMessageHandler` and asserts `AvailableInstallSlots` returns to full after
+every job kind — a leaked permit does not fail a job, it hangs one, so nothing in the job feed would say so.
+
+**Jobs, not blocking requests** — a download plus extraction outlives any request and a drain is
+open-ended, so every operation answers `202` + `jobId` and the portal polls a cursor change feed. This is
+the **third** use of that house pattern (after `AdminLogBuffer`): still no SSE and no second socket role.
+A job is cancellable until `Applying` and refused after — a half-swapped game directory is the one outcome
+worth refusing to create, the same reasoning `DeleteGame` applies to a half-delete. Retention never evicts
+an active job, so the cap is deliberately soft.
+
+**Sources** (`Marketplace/MarketplaceSourceRegistry.cs`): one `MarketplaceClient` per source, since each
+holds exactly one catalog+ETag pair and so cannot be parameterised by URL; all share one `HttpClient`
+(`CreateHttpClient()` reads nothing source-specific — it used to take an options argument it never looked
+at). Per-source options are `global with { CatalogUrl, DownloadBaseUrl }`; the caps and timeouts stay
+shared because those are policy about *this server*. Registrations are validated with
+`MarketplaceClient.IsAllowedUrl` — the downloader's own rule, exposed rather than copied. One unreachable
+source is an error string, never a failed aggregate (`GameCatalog.ScanError` discipline).
+
+`Marketplace/MarketplaceProjection.cs` merges catalogs against installed state and is
+`PluginUpdateEvaluator`'s **first production caller**. It synthesizes `installedOnly` there rather than in
+the enum, because every `PluginUpdateStatus` is a statement about a catalog *entry* and that one is a
+statement about the absence of one.
+
+**Update policy** is per game and persisted (`manual`/`auto`/`drain`/`force`, recorded by *absence* when
+manual, like `Available`); `Admin/GameUpdateCoordinator.cs` is one pass of it. With nothing enrolled a pass
+**makes no outbound request at all**, so a default deployment doesn't quietly start phoning home.
+
+**When that pass runs is a wall-clock schedule, not an interval.** `Admin/UpdateSchedule.cs` is the
+persisted policy (`off`/`hourly`/`daily`/`weekly` + day + hour, **UTC**, default daily at 03:00, recorded by
+absence like `OperatorLimits`) and `Admin/UpdateScheduler.cs` owns a **one-shot timer re-armed after every
+fire** — a periodic timer can only say "every N since this process started", which drifts off the chosen
+hour on every restart and cannot express "Sundays at 3am" at all. Re-computing each time is also what lets
+`Reschedule()` apply a portal edit to *this* process; the timer used to be a local in `Program.cs` with no
+handle in DI, which is why it couldn't be. `NextDue` is **strictly after** the moment passed in — the
+scheduler re-arms from the instant it just fired, and an inclusive answer would hand back that same instant
+and spin. Out-of-range values go through `Normalize()` in `NextDue` and `Describe()` both, so a hand-edited
+hour of 99 cannot mean 23:00 to the timer and 03:00 to the portal. A pass also runs **~30 s after boot**
+(free when nothing is enrolled), and every due time carries up to 5 minutes of jitter because a fixed hour
+would otherwise sync a whole fleet onto one second. The portal form lives on the **Platform** tab, not
+Marketplace: it is a form, and Platform is the only tab that never polls (Marketplace re-reads its catalog
+whenever a job finishes, which would re-render it mid-edit).
+
+`Admin/GameLifecycleGate.cs` holds the transient `Draining`/`Updating` states and implements
+`IPlatformPolicy` by composing `AdminSettingsStore` and ANDing its own answer. They are **never
+persisted**: lobbies are in-memory, so after a restart every game has zero lobbies and a persisted drain
+would be stale by construction — a server killed mid-update would come back with a game permanently
+unlaunchable. `IPlatformPolicy` gained `UnavailableReason` so a draining game stays *listed* and refuses
+with something a player can act on; `WebSocketHandler` passes that string through exactly as it already
+does `MaintenanceMessage`, and still knows nothing about packages.
+
+**`GamePackageLocations.Find` replaced three copies of `Path.Combine(GamesRoot, id + ".kbg")`.** The
+installer accepts any `*.kbg` name and takes the id from the header inside, so that derivation was already
+wrong for a hand-named package: it reported `packageBacked: false`, left the bytes uncounted, and — worst —
+`DeleteGame` removed the unpacked folder while leaving the archive, so the installer put the game straight
+back. The marker inside the extracted folder (`Games/PackageMarker.cs`, 4-field; a 3-field legacy marker
+reads as `games`, which is exactly what it meant) is the authority.
+
+**The catalog's commit history is the trust root, not the release** — a release asset can be
+re-uploaded in place, so what the catalog commits to is a **`sha256`, which is required** (schema and
+server) and enforced on every download. URLs are **derived**
+(`{DownloadBaseUrl}/{repo}/releases/download/{tag}/{asset}`), never carried in the schema, so a
+tampered entry has nothing to point elsewhere; `repo`/`tag`/`asset` are pattern-checked *before* any
+request leaves the process. No GitHub API is used — deriving the URL dodges the 60/hr unauthenticated
+limit, at the cost of making a malformed `asset` a hard error (it named `GAME.json` once; the schema
+now requires `.kbg`). A download must also re-pass **the same `GamePackageReader.Read`** the installer
+uses, and match the entry's id *and* version — never a second, weaker copy of that validation.
+Catalog DTOs are all-nullable like `GamePackageHeader` (untrusted input must never throw on parse);
+checking splits three ways — `Parse` (is it a catalog?), `ValidateEntry` (is it safe to act on?),
+`PluginUpdateEvaluator` (is it meaningful?).
+
+`GameManifest.Version` (new, optional, never validated) is a game's self-declared build label and the
+installed side of the update check; `SemVer` in `PluginVersion.cs` implements real semver 2.0.0
+precedence because string comparison inverts both `0.9.0 < 0.10.0` and `1.0.0-rc.1 < 1.0.0`.
+`Incompatible` (min/maxAppVersion vs `Hosting/KnockBoxVersion.cs`, read off the assembly so csproj
+`<Version>` is the one source of truth) **outranks** `UpdateAvailable` — never offer an update that
+can't run; and an unparseable bound counts as incompatible, since a constraint we can't read isn't no
+constraint. `InstalledVersionUnknown` is deliberately distinct from `UpdateAvailable`: every
+hand-made game has no version, and nagging about all of them is noise.
 
 ### Serving game assets & pre-compression
 Game builds are served with stock `UseStaticFiles` (ETag + `must-revalidate`, so unchanged
@@ -146,8 +626,8 @@ assets — esp. the large `.wasm` — return `304`). To avoid re-compressing the
 on every cold request, `Games/GameAssetPrecompressor.cs` keeps a derived cache of max-effort
 (`CompressionLevel.SmallestSize`) `.br`/`.gz` variants under `GamesCompressedRoot`
 (default sibling `games-compressed/`, **writable, outside the read-only `games/` mount**).
-`GameAssetPrecompressor` is **root-agnostic** — `ReconcileAll` takes an id→directory map (from
-`GameCatalog.GameDirectories`), because a game's files may sit under either root. Both former uses of
+`GameAssetPrecompressor` is **root-agnostic** — `ReconcileAll` takes an id→manifest+directory map (from
+`GameCatalog.GameLocations`), because a game's files may sit under either root. Both former uses of
 `gamesRoot` had to change together: fixing the compression side alone would leave the prune side
 deleting every package-backed game's cache each pass and recompressing it at max effort.
 Reconciliation is driven by `GameCatalog.Discovered` plus a periodic timer
@@ -184,7 +664,11 @@ configurable and disabled with `0`.
 
 ### Server-authoritative mode (`Games/ServerAuthority*.cs`, `Games/*AuthorityRuntime*.cs`)
 Optional, per-game. A game opts in with `GAME.json` `serverAuthority: "authority.js"` (validated
-like `entry`; the game origin never serves the module — `Hosting/GameOriginAssetGate.cs` → 404).
+like `entry`; the game origin never serves the module — `Hosting/GameOriginAssetGate.cs` → 404). That gate
+compares **canonical** paths on both sides via `Hosting/GameAssetPath.cs` (the one parser for
+`/games/{id}/{relative}`, also used by the thumbnail allowlist, the COOP/COEP header hook and the
+pre-compressed negotiation): raw string equality denied `…/authority.js` but waved through
+`…//authority.js`, which `PhysicalFileProvider` then resolved to the very same file.
 On lobby creation `ServerAuthorityManager` loads the module into a per-lobby sandboxed **Jint**
 engine (`JsAuthorityRuntime` behind `IAuthorityRuntime`; `Date` deleted, no CLR, memory/timeout/
 statement/recursion budgets — AOT-clean via `TrimmerRootAssembly`) wrapped in a `ServerAuthority`
@@ -224,10 +708,21 @@ therefore resolves a game's folder through the catalog — `GameCatalog.TryGetDi
 all see both. The origin gate is path-based and so is unaffected by which root won; the installer
 skips seeding compressed variants of the never-served files.
 
-### Web SDK (`web/knockbox.js`)
-Games load `<script type="module" src="/knockbox.js">`. Key API: properties `playerId`,
+### Web SDK (`web/knockbox.js` + `web/kb-protocol.js`)
+Games load `<script type="module" src="/knockbox.js">`, which ES-imports `./kb-protocol.js` — so the
+game origin must serve **both** (it mounts the whole `web/` folder, and a CI smoke check asserts the
+sibling, since a 200 on the SDK alone proves nothing about its imports). `kb-protocol.js` is the
+game-facing protocol core — the 11 symbols a game needs — and `kb-core.js` **re-exports** all of them
+so `shell.js`/`admin*` import from it unchanged. The split exists because `kb-core.js` is the *shell's*
+module (favicons, colour math, launch-overlay geometry, play log, announcements) and `/knockbox.js`
+used to drag all ~21 KB of it into every game to reach 9 symbols; it is also what makes the `web` addon
+a real 2-file package. Add a game-facing helper to `kb-protocol.js`, a shell-only one to `kb-core.js` —
+`web/__tests__/client-parity.test.js` pins that export list and compares it against the Phaser and
+Godot ports (with a named allowlist for the Godot gaps, which fails if it goes stale either way).
+
+Key API: properties `playerId`,
 `players`, `isHost` (plus `authority`/`ownerId`/`isOwner` for server-authority mode, normalized via
-`kb-core.js` `normalizeReady`); callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
+`kb-protocol.js` `normalizeReady`); callbacks `onReady`, `onMessage`, `onPlayerJoined`, `onPlayerLeft`,
 `onPlayerDisconnected`, `onPlayerConnected` (the last two: a peer's tab dropped but is held for the
 reconnect grace window, then returned — they stay in `players` throughout), `onOwnerChanged`; send
 methods `sendToHost`, `sendToAll`, `sendTo(playerId, …)`, host-only `setLobbyOpen`,
@@ -237,9 +732,56 @@ as a `LogMessage` and written under the `KnockBox.GameLog` category), and `logPl
 forwards it to that player's **control** socket, where the shell persists the most-recent 50 in
 `localStorage` (`kb.playLog`) and renders them in the home-page Play Log).
 `web/shell.js` owns the control socket and lobby UI; `web/kb-core.js` holds pure, tested
-protocol helpers (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
-`partitionPlayLogMetadata`, `ordinal`). Close code **1008** is terminal (no reconnect); other
-closes back off exponentially.
+shell helpers plus the `kb-protocol.js` re-exports (reconnect/backoff, fragment parsing, roster reducers, Play Log: `appendPlayLog`,
+`partitionPlayLogMetadata`, `ordinal`; launch copy: `launchMessage`). Close code **1008** is
+terminal (no reconnect); other closes back off exponentially.
+
+**Launch overlay.** Clicking a game tile is covered by a "Starting {GameName}…" overlay
+(`#launch-overlay`) from the click until the game iframe's `load` event — two socket round trips
+plus, on a first play, a multi-megabyte asset download, all of which used to look like a frozen
+page. Determinate progress is deliberately *not* attempted: the iframe is cross-origin (no
+resource-timing) and `GameManifest` carries no asset sizes. It is raised in `createLobby`/
+`joinByCode` (name known synchronously from the catalog) and in `enterGame` (which is the *only*
+path on a rejoin — `tryRejoin` ignores its reply), and retired by the `load` handler,
+`showError`, `showLobbyView`, or a hard `LAUNCH_MAX_MS` ceiling so a missed event can't hide a
+running game. Two counters guard it: `launchSeq` drops a stale `load`, and `launchAbortSeq` makes a
+deliberate bail-out reject the in-flight reply (and leave the lobby the server made anyway).
+
+It is presented as a **continuity transition, not a card**: the clicked tile itself is flown from its
+grid rect to the centre (a FLIP — `launchFlipFrom`/`rotationFromMatrix` in `kb-core.js` do the math,
+`flyLaunchTile` sets one inline start transform and clears it after a forced reflow), straightening
+out of its `nth-child` rotation, while `#lobby-view` dissolves and the dot ticker rises. Nothing large
+arrives, so a warm launch reads as a lift rather than a flash. The destination size is derived from the
+source (1.25×, viewport-capped) — a *fixed* size is a shrink on a wide window, since the grid columns
+are elastic. Three consequences worth knowing before touching it:
+- **`z-index: 100`, above** `.game-header`'s `99` (which competes in the root stacking context). The
+  header must not slide in over the flying tile at a moment network timing decides, so the launch owns
+  the screen and `#launch-cancel` is the only way out of a stall.
+- **There is no scrim.** The overlay is transparent so `body::before/::after` keep running in phase —
+  a scrim of our own could not be phase-matched to the scrolling stripes. That means the game view has
+  to be revealed (it must be in the layout to download) but veiled: `#game-view.launch-veil`, plus
+  `body.in-game` withheld, both released as the overlay fades. `visibility`, never `display:none`,
+  which would entitle the iframe to defer loading.
+- **Nothing of the launch is ever drawn over a running game.** On the iframe's `load` —
+  `hideLaunchOverlay(true)`, the only caller that passes it — the tile *hands over*: `startGameMorph`
+  drops the overlay outright and in the same frame plants `#game-view` in the exact rect the tile had
+  reached (mid-flight or settled, rounded corners and all), then expands it to fullscreen like a video
+  (`LAUNCH_MORPH_MS`/`LAUNCH_MORPH_EASING`). That expand is a **Web Animations call, not a CSS
+  transition** — a transition has to be armed by writing a start value and clearing it, which made it
+  a hostage of style-recalc ordering and was seen sticking at the start matrix with `playState`
+  `running` and `transition-duration: 0s`, freezing the game at tile size. Its safety timer is held
+  outside `launchTimers` so ending the morph cancels it; a stray one strips the class off whatever
+  launch is running by then. The scale is deliberately
+  **non-uniform** — matching the tile's rect on both axes is what sells it, and a uniform scale would
+  start the game at nearly full height on a portrait phone. `body.in-game` is withheld until the morph
+  ends, because that's the first moment the game covers the screen and the background can swap
+  unseen. Every other ending (an error, a bail-out, the `LAUNCH_MAX_MS` ceiling, a launch that never
+  had a tile) takes the `LAUNCH_EXIT_MS` fade instead. Fading a loading screen away over a game that
+  has already arrived was tried and rejected as clunky — don't reintroduce it.
+- Both durations mirror `home.css`; change them together. `clearGameMorph` runs from `showLobbyView`
+  and `showLaunchOverlay` as well as on completion — a stranded inline transform on `#game-view`
+  breaks the next session. And `#lobby-view.is-launching` is cleared in two places on purpose: leave
+  it stuck and the home page renders at `opacity: 0`.
 
 ### Logging (server side)
 Serilog is the host logger (`builder.Host.UseSerilog` in `Program.cs`): console + a **daily**
@@ -254,13 +796,29 @@ setup carefully to keep the `aot` CI job green.
 
 All knobs use the `KnockBox:` prefix (env: `KnockBox__Key`, `__` for nesting). Full reference
 in `docs/INFRASTRUCTURE.md` §9. Frequently relevant: `GamesRoot`/`WebRoot`/`LogsRoot`,
-`GamesPort`/`GamesHost`/`GamesOrigin` (origin routing), `GamesPollSeconds` (hot-reload
+`GamesPort`/`GamesHost`/`GamesOrigin` and `AdminPort`/`AdminHost`/`AdminOrigin` (origin routing),
+`AdminPasswordPath`/`AdminSessionTtlHours`/`AdminSettingsPath` (admin portal; both paths must be writable
+and, in a container, on a persisted volume outside the image — the settings file is the only operator state
+that survives a restart), `AdminStaleLobbyMinutes`/`AdminLogBufferSize`/`AdminDiskUsageCacheSeconds`
+(dashboard behaviour; see `docs/ADMIN.md`), `GamesPollSeconds` (hot-reload
 fallback), `Precompress`/`GamesCompressedRoot`/`PrecompressGzip`/`PrecompressMinBytes`/`PrecompressReconcileSeconds`
-(pre-compressed game-asset cache), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
-(`.kbg` install; the root must be writable and outside `games/`), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
-`ForwardedHeaders`/`AllowedOrigins` (behind a reverse proxy),
+(pre-compressed game-asset cache; **`PrecompressGzip` defaults to `false`** — a `.kbg`'s Brotli blobs are
+copied verbatim for free, but a `.gz` has to be built here at max effort, and the ~3% of clients without
+Brotli still get gzip on the fly), `Packages`/`GamesUnpackedRoot`/`MaxPackageBytes`/`MaxPackageEntries`/`MaxPackageRatio`
+(`.kbg` install; the root must be writable and outside `games/`),
+`MaxLobbies`/`MaxLobbiesPerGame` (capacity caps; also editable at runtime from the portal and persisted),
+`MetricSampleSeconds`/`MetricHistoryPoints` (the dashboard's time series; `0` = off),
+`WebhooksEnabled`/`MaxWebhooks`/`WebhookTimeoutSeconds`/`WebhookErrorsPerMinute`/`WebhookMemoryThresholdMb`/`WebhookCpuPercentThreshold`
+(outbound webhooks; `Enabled=false` ⇒ no dispatcher and no HttpClient at all),
+`GamesManagedRoot`/`ManagedPackages`/`PackageBackupCount`/`MaxConcurrentInstalls`/`PackageJobRetention`
+(portal installs; the managed root must be writable, outside `games/`, and — unlike the caches — backed up),
+`MarketplaceUpdate{Cadence,HourUtc,DayOfWeek}`/`MarketplaceMaxSources` (the *starting* update schedule —
+the portal overrides it and persists — and extra catalogs),
+`Marketplace{Enabled,CatalogUrl,DownloadBaseUrl,MaxCatalogBytes,MaxDownloadBytes,CatalogTimeoutSeconds,DownloadTimeoutSeconds}`
+(official marketplace; `Enabled=false` ⇒ no outbound HttpClient at all), `LogRetentionDays` (daily log files kept under `LogsRoot`, default 31),
+`ForwardedHeaders`/`KnownProxies`/`AllowedOrigins` (behind a reverse proxy),
 `*TokenTtlHours`, `DisconnectGraceSeconds` (reconnect grace before a dropped member is removed,
 default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,
-`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`), and the server-authority knobs (`AuthorityEnabled`
+`MaxConnectionsPerIp`, `LobbyCreatesPerMinute`, `AdminLoginAttemptsPerMinute`/`…Global`), and the server-authority knobs (`AuthorityEnabled`
 master switch, `AuthorityMax{MemoryBytes,Statements,ScriptBytes,WordFileBytes,Lobbies}`,
 `AuthorityCallTimeoutMs`, `AuthorityRecursionLimit`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).

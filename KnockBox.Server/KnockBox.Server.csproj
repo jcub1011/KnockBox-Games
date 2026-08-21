@@ -11,6 +11,11 @@
     <DockerfileContext>..\</DockerfileContext>
     <RootNamespace>KnockBox.Server</RootNamespace>
     <AssemblyName>KnockBox.Server</AssemblyName>
+    <!-- The server's own version, and the ONLY place it is written. Hosting/KnockBoxVersion.cs reads
+         it back off the assembly at runtime; marketplace catalog entries declare minAppVersion /
+         maxAppVersion against it, so a game that needs a newer server is never offered to an older
+         one. Bump this when releasing. -->
+    <Version>1.0.0</Version>
     <PublishAot>True</PublishAot>
     <!-- GC: keep Server GC (best throughput for the WebSocket relay), but rein in its footprint.
          Server GC allocates a heap per logical CPU and retains memory aggressively, which on a
@@ -56,6 +61,14 @@
        games/ is deliberately NOT published — it is external content (volume / next to the exe). -->
   <ItemGroup>
     <Content Include="..\web\**" Exclude="..\web\node_modules\**;..\web\__tests__\**;..\web\package.json;..\web\package-lock.json" LinkBase="web" CopyToOutputDirectory="Never" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- The addon manifest is EMBEDDED, not copied, so Hosting/KnockBoxSdk.cs can read the one
+       authoritative sdkVersion without a second copy of it existing anywhere in this project. A
+       const here would be a number to hand-reconcile at release time; a file in the publish output
+       would be a number that can go missing in a deployment. Embedding is neither. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\clients\addons.manifest.json" LogicalName="KnockBox.Server.addons.manifest.json" />
   </ItemGroup>
 
   <!-- GC footprint knob (see the GC comment above). Written into runtimeconfig.json and embedded by

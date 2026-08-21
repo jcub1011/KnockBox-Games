@@ -10,8 +10,8 @@ namespace KnockBox.Server.Games;
 
 /// <summary>
 /// Owns the per-lobby authority actors (design §6). Deliberately depends only on
-/// <see cref="ConnectionManager"/> and <see cref="LobbyManager"/> — never on WebSocketHandler — so
-/// the fatal-teardown path has everything it needs with no dependency cycle.
+/// <see cref="ConnectionManager"/> and <see cref="LobbyCloser"/> — never on WebSocketHandler — so the
+/// fatal-teardown path has everything it needs with no dependency cycle.
 /// </summary>
 /// <param name="gameDirectory">
 /// Resolves a game id to the directory its files live in, or null when the game is unknown. A
@@ -23,12 +23,17 @@ public sealed class ServerAuthorityManager(
     Func<string, string?> gameDirectory,
     AuthorityOptions options,
     ConnectionManager connections,
-    LobbyManager lobbies,
+    LobbyCloser closer,
     TimeProvider time,
     IAuthorityWordService words,
     bool isDevelopment,
-    ILoggerFactory loggerFactory)
+    ILoggerFactory loggerFactory,
+    // Optional: per-game authority cost is a dashboard metric, not a dependency of running games — the same
+    // nullable-metric shape ServerAuthority itself takes, so the many tests that build a manager are unchanged.
+    AuthorityMetrics? metrics = null)
 {
+    private readonly AuthorityMetrics? _metrics = metrics;
+
     private static readonly IReadOnlyDictionary<string, IWordPool> NoWords =
         new Dictionary<string, IWordPool>(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ServerAuthority> _actors = new(StringComparer.OrdinalIgnoreCase);
@@ -114,7 +119,8 @@ public sealed class ServerAuthorityManager(
         }
 
         var actor = new ServerAuthority(lobby, runtime, options, connections, time,
-            _logger, _authorityLogger, relayContainedErrors: isDevelopment, onFatal: HandleFatal);
+            _logger, _authorityLogger, relayContainedErrors: isDevelopment, onFatal: HandleFatal,
+            metrics: _metrics);
         _actors[lobby.Id] = actor;
         if (_logger.IsEnabled(LogLevel.Information))
             _logger.LogInformation("Server authority started for lobby {LobbyId} (game {GameId})", lobby.Id, manifest.Id);
@@ -188,17 +194,14 @@ public sealed class ServerAuthorityManager(
     private void HandleFatal(ServerAuthority actor, string reason)
     {
         var lobby = actor.Lobby;
-        _actors.TryRemove(lobby.Id, out _);
-        lobbies.Remove(lobby.Id);
-
-        var closed = ConnectionManager.Serialize(new LobbyClosedMessage(lobby.Id, reason));
-        foreach (var p in lobby.Players)
-        {
-            connections.SendRawTo(p.Id, closed);       // control plane: the shell shows the reason
-            connections.GetGame(p.Id)?.Abort();        // the game itself is dead — cut its socket
-        }
-        actor.Stop();
-
+        // Drop our own actor first. LobbyCloser's OnClosing hook would also do this, but this class owns
+        // _actors and must not depend on that hook having been wired to reach its own invariant — Stop is
+        // idempotent, so the hook firing again immediately after is a no-op.
+        Stop(lobby.Id);
+        // The rest of the teardown lives in LobbyCloser, shared with the admin portal's manual close so
+        // the two can't drift. Pass the lobby rather than its id: a racing CloseLobbyIfDark may already
+        // have unregistered it, and members still connected must be told regardless.
+        closer.Close(lobby, reason);
         _logger.LogError("Lobby {LobbyId} (game {GameId}) closed: {Reason}", lobby.Id, lobby.GameId, reason);
     }
 }

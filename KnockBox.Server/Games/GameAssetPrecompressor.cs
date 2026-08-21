@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using KnockBox.Contracts;
+using KnockBox.Server.Hosting;
 
 namespace KnockBox.Server.Games;
 
@@ -36,6 +37,18 @@ public sealed class GameAssetPrecompressor(
     private bool _rerun;
     private IReadOnlyDictionary<string, GameCatalog.GameLocation> _latest =
         new Dictionary<string, GameCatalog.GameLocation>();
+
+    // Games seeded straight from a .kbg (id -> the extracted source dir) that the catalog has not
+    // published yet, guarded by _gate because seeding runs on the installer's task while a reconcile may
+    // be running on another.
+    //
+    // The installer extracts, seeds, and only THEN asks for a rediscovery, so for the debounce plus scan
+    // that follows, the id is absent from every catalog map — and PruneRemovedGames' rule is "absent from
+    // the catalog ⇒ delete the directory". A reconcile landing in that window (the periodic timer, or the
+    // sibling Discovered handler carrying the pre-install map) therefore deleted the seed it had just
+    // written, and the next pass re-paid the max-effort Brotli the seed exists to avoid. Entries are
+    // dropped as soon as the catalog publishes the id, so this protects only that window.
+    private readonly Dictionary<string, string> _seeded = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Reconciles the cache to <paramref name="games"/>, the catalog's id → manifest + directory map
@@ -84,6 +97,11 @@ public sealed class GameAssetPrecompressor(
     private void ReconcileOnce(IReadOnlyDictionary<string, GameCatalog.GameLocation> games)
     {
         var compressed = 0;
+        // A game the catalog now publishes is protected by the ordinary rules; it no longer needs its
+        // post-seed grace, so retire it rather than letting the map grow for the process lifetime.
+        lock (_gate)
+            foreach (var id in games.Keys) _seeded.Remove(id);
+
         var removed = PruneRemovedGames(games);
 
         foreach (var (id, location) in games)
@@ -119,10 +137,25 @@ public sealed class GameAssetPrecompressor(
         {
             var id = new DirectoryInfo(dir).Name;
             if (games.TryGetValue(id, out var location) && Directory.Exists(location.Directory)) continue;
+            if (IsAwaitingDiscovery(id)) continue; // just seeded from a package; the catalog hasn't caught up
             try { Directory.Delete(dir, recursive: true); removed++; }
             catch (Exception ex) { logger.LogWarning(ex, "Could not remove stale compressed dir {Dir}.", dir); }
         }
         return removed;
+    }
+
+    // True while a package-seeded game is still waiting for the catalog to publish it AND its extracted
+    // files are still on disk. The directory check is what keeps this from being a permanent exemption:
+    // once the game's files are gone the entry is dropped and the cache is prunable again.
+    private bool IsAwaitingDiscovery(string id)
+    {
+        lock (_gate)
+        {
+            if (!_seeded.TryGetValue(id, out var sourceDir)) return false;
+            if (Directory.Exists(sourceDir)) return true;
+            _seeded.Remove(id);
+            return false;
+        }
     }
 
     // (Re)compresses source files whose recorded (mtime, length) no longer matches — or whose produced
@@ -201,6 +234,10 @@ public sealed class GameAssetPrecompressor(
         var index = new Dictionary<string, IndexEntry>(StringComparer.Ordinal);
         var written = 0;
 
+        // Claim the post-seed grace BEFORE writing anything, so a reconcile that starts mid-seed can't
+        // delete what this call is still producing (see _seeded).
+        lock (_gate) _seeded[id] = sourceDir;
+
         foreach (var (relative, openBrotli) in entries)
         {
             try
@@ -214,7 +251,14 @@ public sealed class GameAssetPrecompressor(
                 {
                     // The packer judged this file not worth compressing. Record it as "tried, not
                     // beneficial" — the same state Compress() returning false produces — so later
-                    // passes don't keep re-attempting it.
+                    // passes don't keep re-attempting it. Producing that state means producing ALL of
+                    // it, including Compress()'s drop of any prior variant: an upgrade whose new build
+                    // stores this file raw would otherwise leave the OLD version's .br on disk, and
+                    // because a not-produced index row is skipped forever by CompressGameDir and is not
+                    // an orphan to PruneOrphanVariants, every br-accepting client would keep receiving
+                    // the previous version's bytes at the new version's URL.
+                    DeleteIfExists(Path.Combine(dir, relative + ".br"));
+                    DeleteIfExists(Path.Combine(dir, relative + ".gz"));
                     index[relative] = new IndexEntry(info.LastWriteTimeUtc.Ticks, info.Length, Produced: false);
                     continue;
                 }
@@ -378,7 +422,9 @@ public sealed class GameAssetPrecompressor(
         return set;
     }
 
-    private static bool IsExcluded(string relative, IReadOnlySet<string>? excluded) =>
+    // Internal so the .kbg installer can test its package-logical paths against the SAME set and the
+    // SAME normalization the reconcile pass uses, instead of carrying its own copy of the rule.
+    internal static bool IsExcluded(string relative, IReadOnlySet<string>? excluded) =>
         excluded is not null && excluded.Contains(NormalizeRelative(relative));
 
     // Per-game freshness record (one line per compressed source file). Lives inside games-compressed/<id>
@@ -427,7 +473,11 @@ public sealed class GameAssetPrecompressor(
             var tmp = path + ".tmp";
             File.WriteAllLines(tmp, index.Select(e =>
                 $"{e.Value.MtimeTicks}\t{e.Value.Length}\t{(e.Value.Produced ? 1 : 0)}\t{e.Key}"));
-            File.Move(tmp, path, overwrite: true);
+            // Retried, unlike the two per-file moves in this class: losing THIS one costs the whole
+            // game's freshness index, so the next pass re-compresses every asset at SmallestSize —
+            // the ~49s-per-large-asset bill the seed path exists to avoid. The catch below still means
+            // a genuine failure is a warning and nothing more.
+            AtomicFile.MoveWithRetry(tmp, path);
         }
         catch (Exception ex)
         {

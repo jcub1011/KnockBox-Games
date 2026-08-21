@@ -60,4 +60,51 @@ public sealed class ConnectionManager
 
     /// <summary>True if the player currently has an attached game (data-role) connection.</summary>
     public bool HasGameConnection(string playerId) => _gameByPlayer.ContainsKey(playerId);
+
+    /// <summary>
+    /// Sends one message to <b>every</b> connected control socket, and reports how many it reached.
+    /// Serializes once, like every other fan-out here.
+    /// </summary>
+    /// <remarks>
+    /// The only platform-wide fan-out in the server; everything else is scoped to a lobby. Two things
+    /// follow from that and are deliberate:
+    /// <list type="bullet">
+    /// <item>It iterates the dictionary directly rather than taking a <see cref="ControlConnections"/>
+    /// snapshot: an operator's announcement should not allocate an array of every player on the server. A
+    /// concurrent join or drop simply lands on one side of the enumeration, which for a banner is fine —
+    /// a player who connects during it gets the announcement on connect anyway.</item>
+    /// <item>Control sockets overflow with <see cref="OutboundOverflow.CloseOnFull"/>, so a frame sent to a
+    /// socket whose queue is already full tears that connection down. That is the intended policy for the
+    /// control plane (its events are precious), and it means this method can, in principle, disconnect a
+    /// wedged client. Acceptable — a client too backed up to receive a banner is not receiving lobby
+    /// events either.</item>
+    /// </list>
+    /// </remarks>
+    public int BroadcastToAllControl(IMessage message)
+    {
+        var bytes = Serialize(message);
+        var sent = 0;
+        foreach (var connection in _byPlayer.Values)
+        {
+            connection.Send(bytes);
+            sent++;
+        }
+        return sent;
+    }
+
+    // ── Observability (admin portal) ──────────────────────────────────────────
+    /// <summary>Live control (shell) sockets. Also the count of connected players, since a player
+    /// holds exactly one control socket. Cheap — no snapshot allocation.</summary>
+    public int ControlCount => _byPlayer.Count;
+
+    /// <summary>Live game (data-role) sockets — one per player currently inside a game.</summary>
+    public int GameCount => _gameByPlayer.Count;
+
+    /// <summary>Point-in-time snapshot of the live game sockets, for per-game relay accounting. The
+    /// dictionaries are the authority on which sockets exist, so aggregate over this rather than
+    /// keeping a parallel counter that could drift from it.</summary>
+    public IReadOnlyCollection<Connection> GameConnections() => [.. _gameByPlayer.Values];
+
+    /// <summary>Point-in-time snapshot of the live control sockets.</summary>
+    public IReadOnlyCollection<Connection> ControlConnections() => [.. _byPlayer.Values];
 }

@@ -69,6 +69,54 @@ public class GameOriginAuthorityDenyTests : IDisposable
         Assert.False(GameOriginAssetGate.IsDeniedAuthorityAsset("/games/sa/authority.js", catalog));
     }
 
+    // A raw string comparison denies "/games/sa/authority.js" and waves through every spelling below,
+    // each of which PhysicalFileProvider (via Path.GetFullPath) resolves to the very same file. The gate
+    // has to canonicalize exactly like whatever ends up opening the file.
+    [Theory]
+    [InlineData("/games/sa//authority.js")]        // doubled separator
+    [InlineData("/games/sa///authority.js")]
+    [InlineData("/games/sa/./authority.js")]       // "." segment
+    [InlineData("/games/sa/.//./authority.js")]
+    [InlineData("/games/sa/\\authority.js")]       // Windows treats '\' as a separator
+    [InlineData("/games/sa//authority.js.br")]     // …and the same for a stale precompressed variant
+    public void Denies_non_canonical_spellings_of_the_authority_module(string path)
+    {
+        var catalog = CatalogWith("sa", AuthorityGame, ("authority.js", "export function createAuthority(kb) {}"));
+        Assert.True(GameOriginAssetGate.IsDeniedAuthorityAsset(path, catalog));
+    }
+
+    [Theory]
+    [InlineData("/games/wg//words.txt")]
+    [InlineData("/games/wg/data//answers.txt")]
+    [InlineData("/games/wg/./data/./answers.txt")]
+    [InlineData("/games/wg//words.txt.br")]
+    public void Denies_non_canonical_spellings_of_a_word_file(string path)
+    {
+        Assert.True(GameOriginAssetGate.IsDeniedAuthorityAsset(path, WordCatalog()));
+    }
+
+    // The manifest side needs canonicalizing too: GameCatalog validates these by RESOLVING the path, so
+    // it happily accepts a game that declares "./authority.js" — which a raw comparison never matches.
+    [Theory]
+    [InlineData("./authority.js")]
+    [InlineData("server//authority.js")]
+    [InlineData("server\\authority.js")]
+    public void Denies_a_module_the_manifest_declared_non_canonically(string declared)
+    {
+        // The backslash case asserts SEPARATOR semantics, which only Windows has. On Linux a
+        // backslash is an ordinary filename character, so the manifest would name a file other than
+        // the one written below - a game the catalog skips outright, long before this gate is asked.
+        // Skipped rather than deleted: on Windows it really does check that a backslash-spelled
+        // manifest cannot serve the module.
+        if (declared.Contains('\\') && !OperatingSystem.IsWindows()) return;
+
+        var nested = declared.Replace('\\', '/').Replace("//", "/").TrimStart('.', '/');
+        var catalog = CatalogWith("sa",
+            $$"""{ "id": "sa", "name": "S", "entry": "index.html", "maxPlayers": 2, "serverAuthority": "{{declared.Replace("\\", "\\\\")}}" }""",
+            (nested, "export function createAuthority(kb) {}"));
+        Assert.True(GameOriginAssetGate.IsDeniedAuthorityAsset($"/games/sa/{nested}", catalog));
+    }
+
     [Theory]
     [InlineData("/games/sa/index.html")]      // ordinary assets serve
     [InlineData("/games/sa/game.js")]
@@ -76,6 +124,9 @@ public class GameOriginAuthorityDenyTests : IDisposable
     [InlineData("/games/other/authority.js")]  // unknown game — the static middleware 404s it anyway
     [InlineData("/knockbox.js")]               // not under /games/ at all
     [InlineData("/games/sa")]                  // no file segment
+    [InlineData("/games//authority.js")]        // empty id
+    [InlineData("/games/sa/../sa/authority.js")] // traversal: refused as unparseable, and the file
+                                                 // providers block it independently
     public void Allows_everything_else(string path)
     {
         var catalog = CatalogWith("sa", AuthorityGame, ("authority.js", "export function createAuthority(kb) {}"));

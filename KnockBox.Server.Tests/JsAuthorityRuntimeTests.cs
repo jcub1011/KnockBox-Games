@@ -171,6 +171,37 @@ public class JsAuthorityRuntimeTests : IDisposable
     }
 
     [Fact]
+    public void A_result_that_cannot_be_serialized_is_a_contained_module_error()
+    {
+        // The call itself succeeds; JSON.stringify semantics are what throw (a cyclic object here, a BigInt
+        // elsewhere). Serializing outside the classifying try/catch let that escape as an UNCLASSIFIED
+        // exception, which the actor treats as fatal — so one ordinary game-logic bug closed the lobby for
+        // everyone on its first occurrence instead of being dropped and retried up to five times.
+        var runtime = Load("""
+            export function createAuthority(kb) {
+              let state = { ok: true };
+              return {
+                init() {},
+                applyIntent(fromId, action) {
+                  if (action.kind !== 'cycle') return { ok: true };
+                  const patch = { board: [1, 2, 3] };
+                  patch.self = patch;              // a back-reference JSON cannot represent
+                  return patch;
+                },
+                snapshot() { return state; },
+              };
+            }
+            """);
+
+        Assert.Throws<AuthorityScriptException>(() =>
+            runtime.Invoke("applyIntent", "\"p1\"", """{"kind":"cycle"}"""));
+
+        // Contained: the engine is still consistent and the next invocation works.
+        Assert.Equal("""{"ok":true}""", runtime.Invoke("applyIntent", "\"p1\"", """{"kind":"fine"}"""));
+        Assert.Equal("""{"ok":true}""", runtime.Invoke("snapshot"));
+    }
+
+    [Fact]
     public void Infinite_loop_is_a_fatal_constraint_violation()
     {
         var runtime = Load("""

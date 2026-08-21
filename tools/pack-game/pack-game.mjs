@@ -36,11 +36,54 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_QUALITY, KbgError, packKbg, readKbg } from "./kbg.mjs";
 
 const toolDir = dirname(fileURLToPath(import.meta.url));
-// tools/pack-game/ → repo root → games/. The default target is this platform's games dir, so the
-// common dev loop (pack, then watch it hot-reload) stays a single command.
-export const defaultOut = resolve(toolDir, "..", "..", "games");
 
-const VERSION = "0.2.0";
+/**
+ * Where a .kbg lands with no --out.
+ *
+ * Inside a platform checkout this is that checkout's games/ dir, so the dev loop (pack, watch it
+ * hot-reload) stays one command. It used to be a blind `toolDir/../../games`, which was correct ONLY
+ * there: installed from npm, `node_modules/knockbox-cli/../..` is the GAME's repo, so a packer run
+ * with no --out quietly created a games/ folder in the developer's project and dropped the package
+ * in it — a working command with a wrong result, which is worse than an error.
+ *
+ * So: an explicit KNOCKBOX_GAMES_DIR wins, else the enclosing checkout's games/, else null and
+ * --out becomes required.
+ */
+export const defaultOut = resolveDefaultOut();
+
+function resolveDefaultOut() {
+  if (process.env.KNOCKBOX_GAMES_DIR) return resolve(process.env.KNOCKBOX_GAMES_DIR);
+  // The same marker (and the same walk) OriginPortBindingTests and ContentPaths use to find the repo.
+  for (let dir = toolDir; ;) {
+    if (existsSync(join(dir, "KnockBox-Games.slnx"))) return join(dir, "games");
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// This string is user-visible (--help, and the `packedBy` stamp inside every .kbg), so it is read,
+// never declared. Two sources, in order:
+//
+//   1. Our own package.json — the real version once published, since CI stamps it from the manifest
+//      at publish time and npm keeps that field meaningful thereafter.
+//   2. clients/addons.manifest.json, when 1 is still the dev sentinel and we are inside a checkout.
+//      That is the authoritative sdkVersion, so a locally-run packer stamps the same value a released
+//      one would rather than "0.0.0-dev".
+//
+// Neither is a number anyone edits by hand; there is exactly one of those, in the manifest.
+const VERSION = resolveVersion();
+
+function resolveVersion() {
+  const declared = JSON.parse(readFileSync(join(toolDir, "package.json"), "utf8")).version;
+  if (declared !== "0.0.0-dev") return declared;
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(toolDir, "..", "..", "clients", "addons.manifest.json"), "utf8"));
+    return manifest.sdkVersion ?? declared;
+  } catch {
+    return declared;   // published copy with no repo around it, or an unreadable manifest
+  }
+}
 
 // Max serverAuthority module size. Mirrors the server default
 // (AuthorityOptions.DefaultMaxScriptBytes / KnockBox:AuthorityMaxScriptBytes) — keep in sync.
@@ -126,6 +169,12 @@ export function validate(manifest, manifestPath, inDir) {
   }
   if (crossOriginIsolated !== undefined && typeof crossOriginIsolated !== "boolean") {
     throw new PackError("GAME.json: 'crossOriginIsolated' must be a boolean when present.");
+  }
+  // version (optional): the build label. Becomes KBG.json's `version` unless --version overrides it,
+  // and is what a marketplace compares an installed copy against, so it has to be a string — a bare
+  // number here would land in the header as a JSON number and fail to deserialize server-side.
+  if (manifest.version !== undefined && (typeof manifest.version !== "string" || manifest.version.trim() === "")) {
+    throw new PackError("GAME.json: 'version' must be a non-empty string when present (e.g. \"1.0.0\").");
   }
 
   // The entry must resolve to a file inside the built dir — never escape it (path traversal).
@@ -221,6 +270,29 @@ export function validate(manifest, manifestPath, inDir) {
   return thumbSrc;
 }
 
+/**
+ * Read `{ "<addon>": "<version>" }` out of the project's knockbox.json, or null when there isn't one.
+ *
+ * Deliberately forgiving: most games have no addon manifest (every hand-written one, and anything
+ * using the server-served /knockbox.js), and an unreadable file must not fail a pack that would
+ * otherwise have succeeded. The stamp is diagnostic — a missing one reports as "unknown" in the
+ * portal, which is a true statement, whereas a failed build over it would not be an improvement.
+ */
+function readInstalledSdk(projectDir) {
+  const path = join(projectDir, "knockbox.json");
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const out = {};
+    for (const [id, record] of Object.entries(parsed?.addons ?? {})) {
+      if (typeof record?.version === "string") out[id] = record.version;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Recursively list files under a directory as absolute paths. */
 function walk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -279,6 +351,17 @@ function plan(opts) {
   contents.set("GAME.json", manifestPath);
   if (thumbSrc) contents.set(manifest.thumbnail.split(sep).join("/"), thumbSrc);
 
+  // Stamp the installed addon versions into the shipped GAME.json. Read from the project's
+  // knockbox.json rather than asked for on the command line: the point is to record what was
+  // actually installed, and a flag would record what the author believed. A Buffer entry (rather
+  // than a path) so the file on disk is left alone — the author's GAME.json is theirs.
+  const sdk = opts.sdk === false ? null : readInstalledSdk(opts.cwd ? resolve(opts.cwd) : process.cwd());
+  if (sdk) {
+    manifest.sdk = sdk;
+    contents.set("GAME.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}
+`, "utf8"));
+  }
+
   return { manifest, manifestPath, inDir, contents };
 }
 
@@ -290,17 +373,23 @@ function emitFolder(p, opts) {
   if (opts.clean !== false) rmSync(target, { recursive: true, force: true });
   mkdirSync(target, { recursive: true });
 
-  for (const [logical, abs] of p.contents) {
+  for (const [logical, source] of p.contents) {
     const dest = join(target, logical);
     mkdirSync(dirname(dest), { recursive: true });
-    cpSync(abs, dest);
+    // A Buffer means the packer generated this entry (the SDK-stamped GAME.json) rather than copying
+    // a file the author wrote.
+    if (Buffer.isBuffer(source)) writeFileSync(dest, source);
+    else cpSync(source, dest);
   }
   return { target };
 }
 
 /** Assemble the single-file `.kbg` package (default output). */
 function emitKbg(p, opts) {
-  const entries = [...p.contents].map(([logical, abs]) => ({ path: logical, data: readFileSync(abs) }));
+  const entries = [...p.contents].map(([logical, source]) => ({
+    path: logical,
+    data: Buffer.isBuffer(source) ? source : readFileSync(source),
+  }));
 
   let built;
   try {
@@ -308,7 +397,12 @@ function emitKbg(p, opts) {
       entries,
       id: p.manifest.id,
       name: p.manifest.name,
-      version: opts.version,
+      // Default the header's build label to the manifest's own `version`. Two version strings that
+      // can silently disagree is a trap for anything reading the package — the marketplace compares
+      // the catalog's version (derived from GAME.json) against what the server has installed, so
+      // KBG.json claiming something else would make an up-to-date package look stale. An explicit
+      // --version still wins, for builds that want a label the manifest doesn't carry.
+      version: opts.version ?? p.manifest.version,
       packedBy: `knockbox-pack ${VERSION}`,
       packedAt: new Date().toISOString(),
       quality: opts.quality ?? DEFAULT_QUALITY,
@@ -340,7 +434,15 @@ function emitKbg(p, opts) {
  * --out it lands in this platform's games/ dir so the dev loop stays one command.
  */
 function resolveKbgPath(opts, id) {
-  if (!opts.out) return join(defaultOut, `${id}.kbg`);
+  if (!opts.out) {
+    if (!defaultOut) {
+      throw new PackError(
+        "--out is required here. The default output is the enclosing KnockBox checkout's games/ dir, " +
+        "and this is not running inside one. Pass --out <file.kbg|dir>, or set KNOCKBOX_GAMES_DIR to " +
+        "your server's games directory.");
+    }
+    return join(defaultOut, `${id}.kbg`);
+  }
   const out = resolve(opts.out);
   if (opts.out.endsWith("/") || opts.out.endsWith("\\") || (existsSync(out) && statSync(out).isDirectory())) {
     return join(out, `${id}.kbg`);
@@ -395,8 +497,10 @@ Options:
   --cwd <dir>         Working directory for --build (default: current directory).
   --thumbnail <file>  Thumbnail source override (output name stays manifest.thumbnail).
   --version <s>       Stamp a game version into the package (shown in server logs).
+                      Defaults to GAME.json's own "version" when it declares one.
   --quality <0-11>    Brotli quality (default ${DEFAULT_QUALITY} = max). Lower is much faster to pack.
   --no-clean          With --dir: do not wipe the target <id>/ folder first.
+  --no-sdk-stamp      Do not record the installed addon versions (from knockbox.json) in GAME.json.
   -h, --help          Show this help.`;
 
 /** Minimal flag parser: --key value, plus boolean flags. Zero dependencies. */
@@ -415,6 +519,7 @@ export function parseArgs(argv) {
       case "--version": opts.version = argv[++i]; break;
       case "--quality": opts.quality = Number(argv[++i]); break;
       case "--no-clean": opts.clean = false; break;
+      case "--no-sdk-stamp": opts.sdk = false; break;
       case "-h": case "--help": opts.help = true; break;
       default: throw new PackError(`unknown argument: ${a}`);
     }
@@ -426,9 +531,13 @@ const size = (n) => (n < 1024 ? `${n} B`
   : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB`
     : `${(n / 1048576).toFixed(2)} MiB`);
 
-async function cli() {
+/**
+ * Run the packer as a CLI. Takes argv so the unified `knockbox` entry point can dispatch
+ * `knockbox pack …` here rather than duplicating the reporting.
+ */
+export async function runPack(argv = process.argv.slice(2)) {
   try {
-    const opts = parseArgs(process.argv.slice(2));
+    const opts = parseArgs(argv);
     if (opts.help) { console.log(HELP); return; }
     const { target, manifest, stats } = await pack(opts);
     if (stats) {
@@ -449,7 +558,7 @@ async function cli() {
   }
 }
 
-// Run only when invoked directly, not when imported by tests.
+// Run only when invoked directly, not when imported by tests or by knockbox.mjs.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  cli();
+  runPack();
 }

@@ -200,10 +200,25 @@ public class GameAssetNegotiationTests : IDisposable
     public void A_traversal_attempt_cannot_reach_outside_the_cache_root()
     {
         // The file provider blocks it; assert the request is left untouched rather than rewritten.
-        File.WriteAllBytes(Path.Combine(Path.GetTempPath(), "kb-outside.br"), [9]);
-        var ctx = Request("/games/../../kb-outside", "br");
+        //
+        // The bait has to sit OUTSIDE the provider's root for the traversal to have anything to reach,
+        // which means the shared temp folder rather than this instance's own directory — so it carries a
+        // unique name and is removed afterwards. A fixed name here was a real race: two copies of the
+        // suite running at once (a CI matrix, a retry, a developer with two checkouts) collided on the
+        // one file, and whichever lost the write failed with "used by another process" — a failure with
+        // nothing to do with what the test is about. It also littered a file into temp on every run.
+        var bait = Path.Combine(Path.GetTempPath(), $"kb-outside-{Guid.NewGuid():N}.br");
+        File.WriteAllBytes(bait, [9]);
+        try
+        {
+            var ctx = Request($"/games/../../{Path.GetFileNameWithoutExtension(bait)}", "br");
 
-        Assert.False(Negotiate(ctx));
+            Assert.False(Negotiate(ctx));
+        }
+        finally
+        {
+            try { File.Delete(bait); } catch { /* best effort */ }
+        }
     }
 
     // ── The pure helper the above depends on ──────────────────────────────────────────────────────

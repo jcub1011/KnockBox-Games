@@ -12,13 +12,35 @@ everything from your connection. Just send and receive.
 
 ## Install
 
-1. Copy the `addons/knockbox/` folder into your Godot project (so you have
-   `res://addons/knockbox/`).
+1. **Project → AssetLib**, search **KnockBox**, Install. No terminal, nothing to install first.
+
+   Prefer a download? Grab `knockbox-godot-<version>.zip` from the
+   [releases page](https://github.com/jcub1011/KnockBox-Games/releases) and unzip it **at your project
+   root** — the archive is laid out project-relative, so `addons/knockbox/` and `knockbox.json` land
+   where they belong. With Node available, `npx knockbox addon add godot` does the same.
 2. **Project → Project Settings → Plugins** → enable **KnockBox**. This registers a
    `KnockBox` autoload singleton, available from any script.
 3. Export your game for **Web** and drop the build into the platform's `games/<your-id>/`
    next to a `GAME.json`. For a single-threaded export leave `"crossOriginIsolated": false`;
    set it `true` only for a threaded export (see Game Developer Guide §10).
+
+Commit `addons/knockbox/` **and** `knockbox.json` — the latter records which version you installed and
+the hash of every file, which is what makes updating and repairing possible.
+
+## Staying current
+
+Once the plugin is enabled, **Project → Tools** has two actions:
+
+- **KnockBox: check for addon updates** — offers a newer version if there is one. It names any file you
+  have edited and asks before overwriting it.
+- **KnockBox: reinstall addon (repair local edits)** — re-fetches the version you already have and
+  restores every file. The fix for "I changed something in here and now it's broken".
+
+Neither runs on a timer; nothing reaches the network until you click. Every download is verified
+against a `sha256` published in the addon index before a byte is written. If you would rather the
+addon never phoned home at all, delete `addons/knockbox/updater.gd` — everything else keeps working.
+
+See [`docs/ADDONS.md`](../../docs/ADDONS.md) for the index format, the trust model and the CLI.
 
 ## API
 

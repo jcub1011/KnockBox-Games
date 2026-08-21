@@ -62,6 +62,8 @@ namespace KnockBox.Contracts;
 [JsonDerivedType(typeof(GameOwnerChangedMessage), "GameOwnerChanged")]
 [JsonDerivedType(typeof(LogMessage), "Log")]
 [JsonDerivedType(typeof(PlayLogMessage), "PlayLog")]
+[JsonDerivedType(typeof(AnnouncementPostedMessage), "AnnouncementPosted")]
+[JsonDerivedType(typeof(AnnouncementClearedMessage), "AnnouncementCleared")]
 [JsonDerivedType(typeof(ErrorMessage), "Error")]
 public interface IMessage;
 
@@ -84,7 +86,14 @@ public sealed record WelcomeMessage(string PlayerId, string Token, string GameOr
 public sealed record SetNameMessage(string DisplayName) : IMessage;
 
 // ── Catalog (over WebSocket) ─────────────────────────────────────────────────
-public sealed record ListGamesMessage(string Cid) : IMessage;
+/// <param name="Include">
+/// One extra game id to include even though an operator has marked it "staged" (hidden from the
+/// catalog). Games disabled by an operator are never returned regardless. This exists because the shell
+/// allowlists every launch against the catalog it was given, so a staged game reached through its direct
+/// link has to arrive in that list or the shell rejects its own EnterGame as an unknown game. Optional
+/// and additive, so a pre-existing client that never sends it is unaffected.
+/// </param>
+public sealed record ListGamesMessage(string Cid, string? Include = null) : IMessage;
 public sealed record GameCatalogMessage(string Cid, IReadOnlyList<GameManifest> Games) : IMessage;
 
 // ── Lobby ops (cid-correlated request/response) ──────────────────────────────
@@ -200,6 +209,28 @@ public sealed record PlayLogMessage(
     string? GameId = null,
     DateTimeOffset? Timestamp = null,
     bool? IsHost = null) : IMessage;
+
+// ── Platform announcements (server → every control socket) ───────────────────
+// An operator's banner for players: "maintenance in 20 minutes", "Trivia Clash retires on the 15th".
+// Pushed to every connected shell socket the moment it is posted, and again to each shell as it
+// connects, so a player who arrives later sees the same notice without the server keeping per-viewer
+// state. Purely informational: the shell renders it and nothing about play changes — maintenance mode
+// is the control that actually stops new lobbies, and it is deliberately separate, because announcing
+// something is not the same act as doing it.
+//
+// Id is what a dismissal is remembered against, so a re-posted or edited announcement returns for
+// someone who dismissed the previous one. Severity is "info" or "warning" (the shell ignores anything
+// else rather than trusting a string into a class name). GameId scopes it to one game; the shell shows
+// it labelled with that game's name, since the notice matters most to the people who play it.
+public sealed record AnnouncementPostedMessage(
+    string Id,
+    string Text,
+    DateTimeOffset PostedAt,
+    string Severity = "info",
+    string? GameId = null) : IMessage;
+// The operator took the banner down. Carries the id so a shell that is showing a NEWER announcement
+// (posted between this one being taken down and the frame arriving) doesn't clear the wrong thing.
+public sealed record AnnouncementClearedMessage(string Id) : IMessage;
 
 // ── Errors / rejections ──────────────────────────────────────────────────────
 public sealed record ErrorMessage(string? Cid, string Reason) : IMessage;

@@ -77,6 +77,97 @@ export function installFakeWebSocket() {
   return () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
 }
 
+// Same trick for the admin portal's markup. It is a separate page served at the ADMIN origin's root, so
+// it has its own file and its own element ids — but the reason for loading the real thing is identical: a
+// hand-maintained fixture drifts, and admin.js is one long list of getElementById calls.
+const ADMIN_HTML = readFileSync(resolve(process.cwd(), 'admin/index.html'), 'utf8');
+
+export function loadAdminDom() {
+  document.documentElement.innerHTML = ADMIN_HTML
+    .replace(/^[\s\S]*?<html[^>]*>/i, '')
+    .replace(/<\/html>\s*$/i, '');
+}
+
+/**
+ * Installs a fake `fetch` that answers from a route table, and records what was asked for.
+ *
+ * The admin portal is the first part of this codebase to talk HTTP rather than WebSocket, so this is the
+ * suite's first fetch stub. Routes are matched by "METHOD /path" (query string ignored) with a `*` method
+ * wildcard; anything unrouted answers 404 rather than hanging, so a missing route fails a test loudly
+ * instead of timing out.
+ */
+export function installFakeFetch(routes = {}) {
+  const calls = [];
+  const fetchMock = vi.fn(async (url, init = {}) => {
+    const method = (init.method || 'GET').toUpperCase();
+    const path = String(url).split('?')[0];
+    calls.push({ method, url: String(url), path, body: init.body ? JSON.parse(init.body) : null, init });
+
+    const route = routes[`${method} ${path}`] ?? routes[`* ${path}`];
+    const resolved = typeof route === 'function' ? await route(calls[calls.length - 1]) : route;
+    const { status = 200, body = {} } = resolved ?? { status: 404, body: { success: false, error: 'no route' } };
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    };
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return { calls, fetchMock, routes };
+}
+
+/**
+ * Installs a fake XMLHttpRequest, and records what each instance was asked to send.
+ *
+ * The package upload is the one path in the portal that uses XHR rather than fetch, because fetch has no
+ * upload-progress event. Hand-rolled in the same style as FakeWebSocket rather than adding a dependency.
+ *
+ * Each instance exposes `_progress(loaded, total)`, `_respond(status, body)` and `_fail()` so a test can
+ * drive the transfer without a real network.
+ */
+export function installFakeXhr() {
+  const instances = [];
+
+  class FakeXhr {
+    constructor() {
+      this.headers = {};
+      this.upload = {};
+      this.status = 0;
+      this.responseText = '';
+      this.aborted = false;
+      instances.push(this);
+    }
+
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(name, value) { this.headers[name] = value; }
+    send(body) { this.body = body; }
+    abort() { this.aborted = true; this.onabort?.(); }
+
+    _progress(loaded, total) {
+      this.upload.onprogress?.({ lengthComputable: true, loaded, total });
+    }
+
+    _respond(status, body) {
+      this.status = status;
+      this.responseText = typeof body === 'string' ? body : JSON.stringify(body);
+      this.onload?.();
+    }
+
+    _fail() { this.onerror?.(); }
+  }
+
+  vi.stubGlobal('XMLHttpRequest', FakeXhr);
+  return { instances };
+}
+
+/** A File the upload path can carry, with a size a test can claim without allocating it. */
+export function makeKbgFile(name = 'demo.kbg', size = 2048) {
+  const file = new File([new Uint8Array(1)], name, { type: 'application/octet-stream' });
+  // jsdom computes size from the blob parts, so a "500 MB" file would otherwise mean allocating one.
+  Object.defineProperty(file, 'size', { value: size });
+  return file;
+}
+
 // navigator.clipboard.writeText spy that resolves (success) or rejects (failure) on demand.
 export function stubClipboard({ fail = false } = {}) {
   const writeText = fail
@@ -86,5 +177,21 @@ export function stubClipboard({ fail = false } = {}) {
   return writeText;
 }
 
-// Lets a microtask/await chain settle (request→reply resolution, themeHeader's awaited sampling).
-export const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * Lets a microtask/await chain settle (request→reply resolution, themeHeader's awaited sampling).
+ *
+ * Works under both clocks, which is what lets a whole describe block opt into fake timers without
+ * rewriting every helper that awaits one of these. A plain `setTimeout(0)` never fires once
+ * `vi.useFakeTimers()` has replaced the timer functions; the workaround used to be
+ * `useFakeTimers({ shouldAdvanceTime: true })`, a hybrid clock that also advances with real time — and
+ * that reintroduces precisely the wall-clock sensitivity fake timers exist to remove. The launch overlay
+ * arms real 300–420 ms timers (the morph and its safety net), so on a loaded machine one could fire
+ * between an event being dispatched and the assertion about it. That is why those tests failed roughly
+ * one run in four, only as part of the full suite, and never on their own.
+ *
+ * `advanceTimersByTimeAsync(0)` drains the queued zero-delay callbacks on the fake clock and yields to
+ * the microtask queue between them, so an await chain settles with no real time passing at all.
+ */
+export const tick = () => (vi.isFakeTimers()
+  ? vi.advanceTimersByTimeAsync(0)
+  : new Promise((resolve) => setTimeout(resolve, 0)));

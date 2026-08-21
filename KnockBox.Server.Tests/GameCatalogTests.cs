@@ -1,4 +1,5 @@
 using KnockBox.Server.Games;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -113,6 +114,42 @@ public class GameCatalogTests : IDisposable
         finally
         {
             // Restore access so Dispose can clean the directory up.
+            File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
+    public void An_unreadable_games_folder_keeps_the_previous_catalog_and_notifies_nobody()
+    {
+        if (OperatingSystem.IsWindows()) return; // POSIX permission bits only
+
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        var catalog = NewCatalog();
+        catalog.Discover();
+        Assert.Single(catalog.Games);
+
+        var notifications = 0;
+        catalog.Discovered += _ => Interlocked.Increment(ref notifications);
+
+        File.SetUnixFileMode(_root, UnixFileMode.None);
+        try
+        {
+            try { _ = Directory.EnumerateDirectories(_root).Any(); return; } // running as root: can't test
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* denied, as intended */ }
+
+            catalog.Discover();
+
+            // A failed scan is not an empty library. Every Discovered subscriber maintains derived state
+            // keyed on "which games exist" — the compressed cache, the word pools, the parsed authority
+            // modules — and each treats an absent id as "delete what you built for it". So a mount that
+            // blips for one pass must neither empty the catalog nor tell anyone it did, or the whole
+            // games-compressed tree is deleted and re-compressed at max effort when access returns.
+            Assert.Single(catalog.Games);
+            Assert.NotNull(catalog.ScanError);
+            Assert.Equal(0, notifications);
+        }
+        finally
+        {
             File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
     }
@@ -318,7 +355,7 @@ public class GameCatalogTests : IDisposable
         Assert.True(catalog.TryGetDirectory("ttt", out var dir));
         Assert.Equal(Path.Combine(_root, "ttt"), dir);
         Assert.False(catalog.TryGetDirectory("nope", out _));
-        Assert.Equal(dir, catalog.GameDirectories["ttt"]);
+        Assert.Equal(dir, catalog.GameLocations["ttt"].Directory);
     }
 
     // ── Multiple roots ────────────────────────────────────────────────────────────────────────────
@@ -355,7 +392,7 @@ public class GameCatalogTests : IDisposable
 
             Assert.True(catalog.TryGet("from-folder", out _));
             Assert.True(catalog.TryGet("from-package", out _));
-            Assert.Equal(Path.Combine(second, "from-package"), catalog.GameDirectories["from-package"]);
+            Assert.Equal(Path.Combine(second, "from-package"), catalog.GameLocations["from-package"].Directory);
         }
         finally { Directory.Delete(second, recursive: true); }
     }
@@ -408,7 +445,7 @@ public class GameCatalogTests : IDisposable
             Assert.Equal("Administrator's Folder", m.Name);
             // Crucially the DIRECTORY matches the winning manifest too: serving a mixture of one
             // folder's manifest and another's assets is the failure this ordering prevents.
-            Assert.Equal(Path.Combine(_root, "dup"), catalog.GameDirectories["dup"]);
+            Assert.Equal(Path.Combine(_root, "dup"), catalog.GameLocations["dup"].Directory);
             Assert.Single(catalog.Games);
         }
         finally { Directory.Delete(second, recursive: true); }
@@ -453,6 +490,92 @@ public class GameCatalogTests : IDisposable
     public void Requires_at_least_one_root()
     {
         Assert.Throws<ArgumentException>(() => new GameCatalog([], NullLogger<GameCatalog>.Instance));
+    }
+
+    // ── Rescan logging ────────────────────────────────────────────────────────
+    // Discovery re-runs on every file event under the games roots, on the bind-mount poll, and whenever
+    // the package installer asks for another pass. Reporting the whole catalog each time buried the one
+    // pass that mattered under dozens of identical ones — in the log file and in the portal's bounded
+    // log ring, which is what an operator reads when something has gone wrong.
+
+    [Fact]
+    public void A_rescan_that_found_nothing_new_says_nothing_new()
+    {
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        var log = new RecordingLogger<GameCatalog>();
+        using var catalog = new GameCatalog(_root, log);
+
+        catalog.Discover();
+        var afterFirst = log.Lines.Count;
+        catalog.Discover();
+        catalog.Discover();
+
+        // The first pass reports normally...
+        Assert.Contains(log.At(LogLevel.Information), m => m.Contains("Discovered game 'ttt'"));
+        Assert.Contains(log.At(LogLevel.Information), m => m.Contains("Game catalog ready: 1 game(s)"));
+        // ...and the two that follow it say the same things at Debug, so nothing is lost — it just stops
+        // competing with real events for the reader's attention.
+        Assert.Equal(afterFirst, log.At(LogLevel.Information).Count());
+        Assert.Equal(afterFirst * 2, log.At(LogLevel.Debug).Count());
+    }
+
+    [Fact]
+    public void A_rescan_that_found_a_change_reports_it_at_information()
+    {
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        var log = new RecordingLogger<GameCatalog>();
+        using var catalog = new GameCatalog(_root, log);
+        catalog.Discover();
+        catalog.Discover(); // quiet
+
+        WriteGame("second", """{ "id": "second", "name": "S", "entry": "index.html", "maxPlayers": 2 }""");
+        log.Lines.Clear();
+        catalog.Discover();
+
+        Assert.Contains(log.At(LogLevel.Information), m => m.Contains("Discovered game 'second'"));
+        Assert.Contains(log.At(LogLevel.Information), m => m.Contains("Game catalog ready: 2 game(s)"));
+    }
+
+    [Fact]
+    public void A_broken_game_is_warned_about_once_rather_than_on_every_pass()
+    {
+        // The complaint is worth making — and worth making again the moment anything about it changes —
+        // but a misconfiguration nobody has fixed yet does not become more true every twenty seconds.
+        WriteGame("broken", """{ "id": "broken", "name": "B", "entry": "index.html", "maxPlayers": 2 }""",
+            writeEntry: false);
+        var log = new RecordingLogger<GameCatalog>();
+        using var catalog = new GameCatalog(_root, log);
+
+        catalog.Discover();
+        catalog.Discover();
+        catalog.Discover();
+
+        Assert.Single(log.At(LogLevel.Warning), m => m.Contains("Skipping game 'broken'"));
+
+        // Fixing it is a change, so the pass that sees the fix is reported in full.
+        File.WriteAllText(Path.Combine(_root, "broken", "index.html"), "<html></html>");
+        log.Lines.Clear();
+        catalog.Discover();
+        Assert.Contains(log.At(LogLevel.Information), m => m.Contains("Discovered game 'broken'"));
+        Assert.Empty(log.At(LogLevel.Warning));
+    }
+
+    [Fact]
+    public void A_quiet_pass_still_notifies_its_subscribers()
+    {
+        // Only the LOGGING is conditional. The installer, the pre-compressor and the word-pool caches all
+        // reconcile off this event, and one of them going a pass without hearing from the catalog would
+        // be a real behaviour change hiding behind a logging one.
+        WriteGame("ttt", """{ "id": "ttt", "name": "T", "entry": "index.html", "maxPlayers": 2 }""");
+        using var catalog = new GameCatalog(_root, new RecordingLogger<GameCatalog>());
+        var raised = 0;
+        catalog.Discovered += _ => raised++;
+
+        catalog.Discover();
+        catalog.Discover();
+        catalog.Discover();
+
+        Assert.Equal(3, raised);
     }
 
     [Fact]

@@ -52,6 +52,7 @@ can be dropped into a server's games directory.
 {
   "id": "your-game-id",        // unique key; MUST match the folder name
   "name": "Your Game",         // shown in the lobby browser
+  "version": "1.0.0",          // optional; semver. Set it if you publish to the marketplace
   "entry": "index.html",       // the HTML file loaded in the iframe
   "thumbnail": "thumb.svg",    // optional; served from your folder
   "maxPlayers": 2,             // joins are rejected beyond this
@@ -63,6 +64,7 @@ can be dropped into a server's games directory.
 |---|---|---|
 | `id` | ✅ | Catalog key **and** URL segment. Your files are served at `/games/{id}/…`, so the folder name must equal `id`. |
 | `name` | ✅ | Display name. |
+| `version` | — | Your build's version, conventionally semver (`"1.2.3"`, `"1.2.3-beta.1"`). The platform never validates it and it never affects whether your game loads. It matters if you publish to the official marketplace: it is what an operator's server compares to decide whether their copy is out of date, and the catalog entry is generated from it. `knockbox-pack` copies it into the `.kbg` header too, so the two can't disagree. See [MARKETPLACE.md](./MARKETPLACE.md). |
 | `entry` | ✅ | HTML file the iframe loads, relative to your folder. |
 | `thumbnail` | — | Path (relative to your folder) to an image for the game card. |
 | `maxPlayers` | ✅ | The platform refuses joins past this count. |
@@ -685,10 +687,21 @@ INFRASTRUCTURE.md §8. **Single-threaded exports need none of this** — leave t
 
 ## 10b. Godot — use the KnockBox addon (recommended)
 
-For Godot, a maintained GDScript addon removes the boilerplate of the routes above. It is the
-**single source of truth** at `clients/godot/addons/knockbox/` (versioned with `web/knockbox.js`).
-Copy that folder into your project's `addons/`, enable the plugin, and **don't fork it** — fixes
-land there and you copy them forward. It has three layers; use as much as you want:
+For Godot, a maintained GDScript addon removes the boilerplate of the routes above.
+
+**Install it from inside the editor** — **Project → AssetLib**, search **KnockBox**, Install — then
+enable it under **Project → Project Settings → Plugins**. No terminal and nothing to install first.
+(Prefer a download? Grab `knockbox-godot-<version>.zip` from the
+[releases page](https://github.com/jcub1011/KnockBox-Games/releases) and unzip it at your project
+root. With Node available, `npx knockbox addon add godot` also works.)
+
+Once enabled, **Project → Tools** gains two actions: *check for addon updates*, and *reinstall addon*
+— which restores every file if you have edited one by accident. So **don't fork it**: fixes land
+upstream, and the updater brings them to you rather than you copying them forward. If you do need a
+local change, `knockbox addon check` will keep telling you about it, which is the point. Full details
+in [`docs/ADDONS.md`](ADDONS.md).
+
+It has three layers; use as much as you want:
 
 1. **`KnockBox` autoload** — the raw transport (a `WebSocketPeer` port of the JS SDK). Signals
    `session_ready(player_id, players, is_host)`, `message_received(from_id, payload)`,
@@ -776,6 +789,60 @@ and the host's own moves loop back through the same path. (For a non-authoritati
   `crossOriginIsolated`.
 - Set the export so the entry file is `index.html`, then drop the output plus a `GAME.json` into
   `games/your-id/`. The reference `DiceSimulator` project is a complete working example of this layout.
+
+---
+
+## 10c. Phaser — use the KnockBox client
+
+For [Phaser 3](https://phaser.io) there is a maintained client that speaks the same JSON protocol as
+the vanilla and Godot ones — so a Phaser game can even share a lobby with games built on those.
+
+**Install it:**
+
+```bash
+npx knockbox addon add phaser        # lands in addons/knockbox/, records the version
+```
+
+Nothing to install first: `npx` fetches the CLI on demand, and Node is already a prerequisite of any
+Phaser/Vite toolchain. (No Node? Unzip `knockbox-phaser-<version>.zip` from the
+[releases page](https://github.com/jcub1011/KnockBox-Games/releases) at your project root — same
+result.) Commit the installed files **and** `knockbox.json`: that file is what records the version,
+lets `knockbox addon check` verify the files are unmodified, and gets stamped into your `.kbg`.
+
+Four files land in `addons/knockbox/`, all UMD (browser global, `import`, CommonJS or AMD — **no build
+step required**), plus TypeScript definitions:
+
+| File | Purpose |
+| --- | --- |
+| `knockbox-plugin.js` | The Phaser **global plugin** — the main send/receive API. |
+| `kb-core.js` | Pure protocol helpers. No dependencies. |
+| `kb-authority.js` | Optional host-authoritative state-sync helper (§5). |
+| `knockbox-local.js` | Local testing with **no server** — multi-tab + automated loopback. |
+| `knockbox-phaser.d.ts` | TypeScript definitions for all of the above. |
+
+Register it as a **global plugin** with `start: true` and a `mapping`, so every scene reaches it as
+`this.<mapping>`:
+
+```js
+import KnockBoxPlugin from './addons/knockbox/knockbox-plugin.js';
+
+new Phaser.Game({
+  type: Phaser.AUTO,
+  scene: [MainScene],
+  plugins: {
+    global: [
+      { key: 'KnockBox', plugin: KnockBoxPlugin, start: true, mapping: 'knockbox' },
+    ],
+  },
+});
+```
+
+The plugin connects automatically on start: it reads the ticket + endpoint the shell put in the URL
+fragment, opens its own WebSocket, authenticates, then fires `ready`. Full API — signals, sending,
+`KBAuthority`, and the server-less local peer — is in
+[`clients/phaser/README.md`](../clients/phaser/README.md).
+
+Then package as usual (§9): `knockbox pack --in dist --manifest GAME.json --build "npm run build"`.
 
 ---
 

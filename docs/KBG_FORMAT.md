@@ -72,7 +72,7 @@ Required. UTF-8 JSON object, stored uncompressed.
 | `id` | ✅ | string | The game id. Must equal `GAME.json`'s `id`. Names the installed folder. |
 | `name` | ✅ | string | Display name. Should equal `GAME.json`'s `name`; informational only. |
 | `files` | ✅ | array | The authoritative content list. See below. |
-| `version` | — | string | Free-form build/version label for the *game*, e.g. `"1.4.0"`. Purely informational, but it is the only way an operator can tell which build is installed, so writers should set it. |
+| `version` | — | string | Build/version label for the *game*, e.g. `"1.4.0"`. Informational to the reader — nothing is rejected on it — but writers should set it, and `knockbox-pack` now defaults it to `GAME.json`'s own `version` so the header and the manifest cannot disagree. The **manifest's** copy is the one a marketplace compares against a catalog entry (see [MARKETPLACE.md](./MARKETPLACE.md)); this one is what shows up in server logs at install time. |
 | `packedBy` | — | string | Tool name and version that produced the file. |
 | `packedAt` | — | string | RFC 3339 / ISO 8601 UTC timestamp of packing. |
 
@@ -189,6 +189,35 @@ Because a `.kbg` stores those Brotli streams as separate per-file entries, the s
 straight into its serving cache at install time and skip the re-compression entirely. A solid
 archive (tar + Brotli/xz) compresses marginally better but produces one opaque stream, so it cannot
 be reused this way.
+
+### Why the server still extracts (`games-unpacked/`)
+
+The saving above is real but narrower than "the server never compresses", and it is worth being precise
+about, because the obvious next question is why a package is extracted at all rather than served from the
+archive. Six reasons, in rough order of how hard each is to work around:
+
+1. **Only part of a package is Brotli.** The packer stores `.png/.jpg/.webp/.mp3/.mp4/.woff2` and friends
+   as `identity` — usually the majority of a game's bytes. None of those has a compressed variant to
+   serve, by design.
+2. **Integrity is verified during extraction, once.** The declared size and SHA-256 of every file are
+   checked against the *decompressed* bytes as they are written, with the byte cap enforced while copying
+   because the declared sizes are attacker-controlled. Serving from the archive would move that work to
+   request time or drop it.
+3. **Every negotiation miss falls through to the raw file**, which is where the content type, `ETag`,
+   `Content-Length` and range support come from: identity clients, files under `PrecompressMinBytes`,
+   incompressible extensions, `Precompress=false`, and every thumbnail.
+4. **Some files are read as files, not served.** `GAME.json`, a `serverAuthority` module and the
+   `authorityWords` dictionaries are opened from disk (and cached by mtime and length) — and they are
+   deliberately excluded from the compressed cache, so a variant-only store would hold nothing for them.
+5. **Discovery is directory-shaped**: the catalog enumerates directories under each root and requires the
+   folder name to equal the manifest `id`.
+6. **`games/` is mounted read-only in production**, so nothing can be expanded in place. A separate
+   writable root is what makes hot-dropping a `.kbg` possible there at all.
+
+So `games-unpacked/` is not a staging area for re-compression: it is the filesystem the rest of the server
+assumes. What the format removes is the ~49-second-per-asset maximum-effort Brotli pass, which is the
+expensive part. (Gzip variants are the one thing still built locally, which is why they are off by
+default — see `KnockBox:PrecompressGzip` in [`INFRASTRUCTURE.md`](./INFRASTRUCTURE.md) §9.)
 
 ## Relationship to plain game folders
 

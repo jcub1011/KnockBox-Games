@@ -16,6 +16,10 @@
     --tile-cyan: #1EFFBC;
     --tile-yellow: #FFD166;
     --tile-pink: #FF0055;
+    /* Sampled from the hero ribbon art (yellow-vertical_loop_crop.webp) — its vivid tone, as opposed
+       to the flatter cream that covers most of the image. Kept distinct from --tile-yellow, which is
+       a shade more amber. */
+    --banner-yellow: #FEDE66;
     --ink: #f4ece4;
     --ink-soft: rgba(244, 236, 228, 0.65);
     --canvas-dark: #1f1820;
@@ -485,6 +489,14 @@ body.in-game::after {
     transition: transform 220ms cubic-bezier(.34, 1.56, .64, 1), filter 200ms ease;
 }
 
+/* A staged (unlisted) game, in the grid only because this tab arrived on its direct "?game=<id>" link.
+   Marked so whoever is testing it can tell it apart from the public tiles — the outline sits outside the
+   tile's own 5px black border, so it reads as an annotation rather than part of the artwork. */
+.game-tile.is-staged {
+    outline: 3px dashed var(--tile-yellow);
+    outline-offset: 5px;
+}
+
 .game-tile:nth-child(5n+1) { transform: rotate(-1deg); }
 .game-tile:nth-child(5n+2) { transform: rotate(0.4deg); }
 .game-tile:nth-child(5n+3) { transform: rotate(1deg); }
@@ -757,6 +769,59 @@ body.in-game::after {
     white-space: nowrap;
 }
 
+/* ── Operator announcement ───────────────────────────────────────────────────
+   Deliberately NOT a toast: an announcement has to still be on screen when the player looks up, so it
+   sits in the page flow above the hero, stays until dismissed, and takes pointer events (it has an x).
+   Card styling, not fixed-position, so it pushes the page down rather than covering the title. */
+.home-announcement {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 auto 14px;
+    /* The home container is a flex column, where a flex item shrinks to its content unless told otherwise —
+       so without this the banner is as narrow as its text and reads as a chip, not a notice. */
+    width: 100%;
+    max-width: 900px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 2px solid var(--canvas-card-border);
+    background: var(--canvas-card);
+    color: var(--ink);
+    font-family: var(--font-primary);
+    font-weight: 600;
+    font-size: 0.95rem;
+    box-shadow: var(--shadow-card-rest);
+}
+
+/* shell.js toggles the banner via the `hidden` attribute (and index.html ships it hidden), so the
+   display rule above has to be undone the same way the Play Log's is — otherwise `display: flex` beats
+   the UA `[hidden] { display: none }` and an empty bordered notice is drawn above the hero on every
+   load, announcement or not. */
+.home-announcement[hidden] { display: none; }
+
+/* The one severity that should catch an eye already looking elsewhere. */
+.home-announcement.severity-warning {
+    border-color: var(--banner-yellow);
+    background: rgba(254, 222, 102, 0.12);
+}
+
+.home-announcement-icon { font-size: 1.1rem; line-height: 1; }
+.home-announcement-text { flex: 1 1 auto; }
+
+.home-announcement-close {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.home-announcement-close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.08); }
+
 /* ── Error toast ─────────────────────────────────────────────────────────── */
 .home-error-toast {
     position: fixed;
@@ -952,8 +1017,6 @@ body.in-game::after {
     to   { opacity: 1; transform: translateY(0); }
 }
 
-#waiting { color: var(--ink-soft); font-size: clamp(0.9rem, 2.5vw, 1.15rem); padding: 16px; }
-
 #frame-host { flex: 1; display: flex; min-height: 0; }
 
 #frame-host iframe {
@@ -1082,6 +1145,194 @@ body.in-game::after {
 
 .rc-modal-copy.secondary:hover { filter: none; background: var(--accent-color); color: #fff; }
 
+/* ── Game launch overlay ─────────────────────────────────────────────────── */
+/* Covers the whole gap between clicking a tile and the game's document finishing: two socket round
+   trips, then a cold asset download that can run for seconds. Rather than dropping a card over the
+   page, the clicked tile IS the loading state — shell.js flies it from its grid rect to .launch-tile's
+   resting place while the home view dissolves. Nothing large arrives, so a launch that resolves in
+   150ms reads as a soft lift rather than a flash.
+   All durations here are mirrored by LAUNCH_*_MS in kb-core.js — change them together.
+   There is deliberately NO scrim: the overlay is transparent, so the atmospheric background keeps
+   running underneath, uninterrupted and in phase. "Everything except the background fades out" is
+   then literally what happens — #lobby-view dissolves, body::before/::after don't. A scrim of our own
+   could not be phase-matched to the scrolling stripes and would snap on the first frame.
+   z-index 100 puts it above .game-header (99, which competes in the ROOT stacking context since
+   neither #game-view nor .game-shell establishes one), so the header can't slide in over the flying
+   tile at a moment decided by network timing. The launch is a self-contained scene; #launch-cancel is
+   the way out of one that stalls. Still below .rc-modal (10000) and the toasts (20000). */
+.launch-overlay[hidden] { display: none; }
+
+.launch-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+/* With no scrim of its own, the overlay can't hide the game view behind it — and the game view has to
+   exist early, since that's what downloads the game. So it is revealed but veiled, and unveiled as the
+   overlay fades. visibility (not display) because a display:none subtree is entitled to defer loading;
+   a hidden one still fetches. */
+#game-view.launch-veil { visibility: hidden; }
+
+/* The good ending: rather than fading a loading screen away over a game that has already arrived, the
+   tile hands over to it — the game takes the rect the tile had reached, rounded corners and all, and
+   expands to fullscreen like a video.
+   The motion itself is a Web Animations call in shell.js (startGameMorph), NOT a transition here: a
+   transition has to be armed by writing a start value and clearing it, which raced style recalc and
+   was seen sticking at the start matrix, freezing the game at tile size. This class is only the state
+   marker, plus a compositor hint for the transform being animated. */
+#game-view.launch-morph {
+    will-change: transform;
+}
+
+.launch-stage {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 22px;
+    max-width: min(340px, calc(100vw - 32px));
+    text-align: center;
+}
+
+/* The tile, at rest in the centre. Keeps the grid tiles' own sticker language (5px black border,
+   16px radius) so the thing that lands is recognisably the thing that was clicked — but lifted, hence
+   the larger shadow. shell.js sets an inline start transform for one frame; this transition carries
+   it home. cubic-bezier(0.16, 1, 0.3, 1) is a pure ease-out: fast departure, no overshoot, because a
+   bounce here would still be moving when the game may already be ready. */
+.launch-tile {
+    /* The fallback size, used when there's no tile to fly from. A flight sets an inline width instead,
+       sized from the clicked tile so it always comes FORWARD — grid columns are elastic, and a fixed
+       destination is smaller than the source on a wide window, which reads as retreating. */
+    width: min(360px, calc(100vw - 32px), 67.5vh);
+    aspect-ratio: 3 / 2;
+    border: 5px solid #000;
+    border-radius: 16px;
+    background-color: #000;
+    box-shadow: var(--shadow-card-lift);
+    transition: transform 0.42s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.launch-tile[hidden] { display: none; }
+
+/* Holds the FLIP's first frame still: without it the inline start transform would animate INTO place
+   from wherever the tile last was, instead of being the place it starts from. */
+.launch-tile.no-transition { transition: none; }
+
+/* No source rect to fly from — join-by-code (the game is unknown until EnterGame), a rejoin, or a
+   reconnect. Same destination, arrived at in place. */
+.launch-tile.is-popping { animation: launch-pop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes launch-pop {
+    from { opacity: 0; transform: scale(0.92); }
+    to   { opacity: 1; transform: none; }
+}
+
+.launch-art {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+    border-radius: 11px;   /* 16px radius minus the 5px border, so the art follows the corner */
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+/* Rises into place under the tile, staggered behind it so the two moves read as one gesture rather
+   than a crowd. It lands before the tile does, so nothing is still travelling at the end. */
+.launch-status {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    animation: launch-rise 0.26s 0.14s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes launch-rise {
+    from { opacity: 0; transform: translateY(28px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* Three squares in KnockBox's own three: the wordmark's white, the hero ribbon's yellow, and the
+   accent pink off the join button and the section rules. Squares rather than a ring — a soft spinner
+   is off-language on a page built from hard-edged stickers. */
+.launch-dots { display: flex; gap: 8px; }
+
+.launch-dots span {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    animation: launch-dot 1s ease-in-out infinite;
+}
+
+.launch-dots span:nth-child(1) { background-color: #fff; }
+.launch-dots span:nth-child(2) { background-color: var(--banner-yellow); animation-delay: 0.12s; }
+.launch-dots span:nth-child(3) { background-color: var(--accent-color);  animation-delay: 0.24s; }
+
+@keyframes launch-dot {
+    0%, 60%, 100% { transform: translateY(0);    opacity: 0.45; }
+    30%           { transform: translateY(-6px); opacity: 1; }
+}
+
+/* The reduced-motion cue: same stagger, no travel. */
+@keyframes launch-dot-pulse {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 1; }
+}
+
+/* The exit is a continuation, not a reversal: the moment the game is ready it is unveiled underneath
+   and the overlay cross-fades away over it, rather than making a loaded game wait out an animation.
+   Deliberately nothing here touches .launch-tile — the flight is very often still running when this
+   lands, and any transform of our own would snap it to a keyframe's `from` before fading. Letting it
+   keep travelling as it dissolves is both smoother and impossible to get wrong. */
+.launch-overlay.is-leaving { animation: launch-out 0.22s ease-in forwards; }
+
+@keyframes launch-out { from { opacity: 1; } to { opacity: 0; } }
+
+.launch-title {
+    margin: 0;
+    font-family: var(--font-title);
+    font-size: clamp(1.05rem, 3.5vw, 1.35rem);
+    font-weight: 700;
+    color: var(--ink);
+    overflow-wrap: anywhere; /* a long game name must not blow the stage out */
+}
+
+.launch-hint { margin: 0; font-size: 0.9rem; color: var(--ink-soft); }
+
+.launch-hint[hidden], .launch-cancel[hidden] { display: none; }
+
+/* The home view dissolves as the tile leaves it — "everything but the background". The clicked tile
+   itself is hidden by shell.js so it doesn't double-image under the flying one. */
+#lobby-view.is-launching {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease-out;
+}
+
+/* The overlay covers the header, so this is the only way out of a launch that never finishes. */
+.launch-cancel {
+    min-height: 44px;
+    padding: 0 18px;
+    border-radius: 10px;
+    background: none;
+    border: 2px solid var(--accent-color);
+    cursor: pointer;
+    touch-action: manipulation;
+    color: var(--ink);
+    font-family: var(--font-primary);
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.launch-cancel:hover { background: var(--accent-color); color: #fff; }
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
     .home-main { grid-template-columns: 1fr; gap: 28px; max-width: 960px; }
@@ -1107,6 +1358,10 @@ body.in-game::after {
 /* Short viewports (landscape phones): trim the vertical padding so actions stay reachable. */
 @media (max-height: 600px) {
     .rc-modal-card { padding: 24px 32px; gap: 16px; }
+    /* The tile is the biggest thing on the launch stage — tighten around it, not the copy. Its own
+       height cap (67.5vh, and the flight's equivalent) already keeps it in frame. */
+    .launch-stage { gap: 14px; }
+    .launch-status { gap: 10px; }
 }
 
 @media (hover: none) {
@@ -1125,11 +1380,23 @@ body.in-game::after {
     .join-section,
     .hero-tagline,
     .game-header,
-    .game-body {
+    .game-body,
+    .launch-stage,
+    .launch-status,
+    .launch-tile.is-popping {
         animation: none;
         opacity: 1;
         transform: none;
     }
+    /* No flight and no rise — the launch scene simply appears, fully composed. shell.js still sets the
+       inline start transform, so the transition has to be killed here or the tile would jump. */
+    .launch-tile { transition: none; }
+    .launch-overlay.is-leaving { animation: none; opacity: 1; }
+    /* The expand-to-fullscreen is skipped in shell.js (startGameMorph bails on reduced motion), so the
+       game simply is fullscreen — nothing to disable here. */
+    /* Keep an activity cue — frozen dots read as "broken" — but as opacity only, no travel. */
+    .launch-dots span { animation: launch-dot-pulse 1.6s ease-in-out infinite; }
+    #lobby-view.is-launching { transition: none; }
     .join-card, .game-tile, .game-tile-surface { transition: none; }
     /* No hover lift/slide under reduced motion — keep only the (non-moving) shadow cue. */
     .game-tile:hover:not(:disabled) { transform: none; }

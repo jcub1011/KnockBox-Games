@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text.Json;
 using KnockBox.Contracts;
+using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
@@ -75,8 +76,8 @@ public class ServerAuthorityFlowTests : IDisposable
         var cfg = ConfigFactory.FromPairs(config);
         var limits = ServerLimits.FromConfiguration(cfg);
         var authorities = TestAuthorities.Manager(connections, lobbies, gamesRoot: _root, config: cfg);
-        var handler = new WebSocketHandler(connections, lobbies, catalog, authorities, tokens, limits,
-            TimeProvider.System, NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
+        var handler = new WebSocketHandler(connections, lobbies, catalog, authorities, tokens, new LimitsProvider(limits),
+            PlatformPolicy.OpenPlatform, new RelayMetrics(), TimeProvider.System, NullLoggerFactory.Instance, NullLogger<WebSocketHandler>.Instance);
         return (handler, connections, lobbies, authorities, tokens, catalog, gameId);
     }
 

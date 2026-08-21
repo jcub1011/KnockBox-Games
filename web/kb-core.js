@@ -1,19 +1,24 @@
 // KnockBox client core — pure, DOM/WebSocket-free helpers shared by the SDK (knockbox.js) and the
 // shell (shell.js). Kept side-effect-free so it can be unit-tested under Node/Vitest.
-
-// Wire-protocol version this SDK speaks, declared in the first frame of each role (Hello/Attach).
-// The server accepts anything up to its own version and terminally rejects anything newer, so a
-// copied-out SDK that outpaces an old server fails loudly instead of being silently misrouted.
-// Mirrors KnockBoxProtocol.Version in KnockBox.Contracts.
-export const PROTOCOL_VERSION = 1;
-
-// Server close code used for terminal rejections (WebSocketCloseStatus.PolicyViolation): an invalid
-// ticket or expired lobby membership. There is no point reconnecting — the credential won't work.
-export const TERMINAL_CLOSE_CODE = 1008;
-
-export function isTerminalClose(code) {
-  return code === TERMINAL_CLOSE_CODE;
-}
+//
+// The GAME-facing half now lives in kb-protocol.js and is RE-EXPORTED below, so every existing
+// importer of kb-core.js keeps working unchanged. The split exists because this module is the
+// SHELL's: favicons, colour math, the launch-overlay geometry, the play log and announcements all
+// live here, and `/knockbox.js` used to drag all ~21 KB of it into every game to reach 9 symbols.
+// Add a game-facing helper to kb-protocol.js; add a shell-only helper here.
+export {
+  PROTOCOL_VERSION,
+  TERMINAL_CLOSE_CODE,
+  isTerminalClose,
+  reconnectDelay,
+  parseLaunchParams,
+  defaultEndpoint,
+  LOG_LEVELS,
+  makeLogger,
+  normalizeReady,
+  rosterAdd,
+  rosterRemove,
+} from './kb-protocol.js';
 
 // Trailing-edge debounce: returns a wrapper that defers `fn` until `ms` have elapsed since the LAST
 // call, collapsing a burst into one invocation. Used to keep high-frequency input (e.g. typing a
@@ -28,12 +33,6 @@ export function debounce(fn, ms) {
   };
   debounced.cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
   return debounced;
-}
-
-// Capped exponential backoff for transient drops. attempt is 0-based: 1s, 2s, 4s, … up to `max`.
-export function reconnectDelay(attempt, base = 1000, max = 30000) {
-  const n = Math.max(0, attempt | 0);
-  return Math.min(max, base * 2 ** n);
 }
 
 // The shell picks one of these cat icons at random on each page load (ported from the legacy
@@ -53,14 +52,6 @@ export function pickRandomFavicon(favicons = FAVICONS, rand = Math.random) {
   return favicons[Math.floor(rand() * favicons.length)];
 }
 
-// The shell hands the game its credentials in the URL FRAGMENT (not the query string) so they are
-// never sent in a Referer header or written to server/proxy logs. Parses "#kbTicket=…&kbEndpoint=…".
-export function parseLaunchParams(hash) {
-  const raw = (hash || '').replace(/^#/, '');
-  const params = new URLSearchParams(raw);
-  return { ticket: params.get('kbTicket'), endpoint: params.get('kbEndpoint') };
-}
-
 // Reads the auto-join room code from a URL query string ("?join=ABCD") — the middle-click
 // "open a test player in a new tab" entry point. Returns the trimmed, upper-cased code, or null
 // when absent/blank. Pure, so it's unit-tested alongside the other protocol helpers.
@@ -70,9 +61,17 @@ export function parseJoinParam(search) {
   return trimmed || null;
 }
 
-// Default data-socket endpoint when the shell didn't supply one: this origin's /ws.
-export function defaultEndpoint(protocol, host) {
-  return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}/ws`;
+// A staged game's direct-launch link carries "?game=<id>". An operator marks a game "staged" to keep it
+// off the public grid, so the tile that would normally start it isn't rendered — this link is the way
+// in. It is VISIBILITY only, not access control: KnockBox has no player accounts, so there is nothing to
+// authorize against and anyone holding the link can use it.
+//
+// The id is shape-checked before it goes anywhere near a request or an iframe URL. Game ids are folder
+// names, so this is the same conservative alphabet the server accepts — a link can't smuggle a path
+// separator or a scheme through it.
+export function parseGameParam(search) {
+  const id = (new URLSearchParams(search || '').get('game') || '').trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) ? id : null;
 }
 
 // The ws(s):// endpoint for a game origin's /ws (http→ws, https→wss).
@@ -108,30 +107,6 @@ export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
   const base = `${safeOrigin}/games/${safeGameId}/${safeEntry}`;
   const frag = `kbTicket=${encodeURIComponent(ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
   return `${base}#${frag}`;
-}
-
-// Game → server logging. Maps the friendly, console-like method names the SDK exposes to the
-// Microsoft.Extensions.Logging.LogLevel NAMES the server's LogMessage expects on the wire (the
-// server parses them case-insensitively). info→Information and warn→Warning match console habits.
-export const LOG_LEVELS = {
-  trace: 'Trace',
-  debug: 'Debug',
-  info: 'Information',
-  warn: 'Warning',
-  error: 'Error',
-  critical: 'Critical',
-};
-
-// Builds a console-like logger object ({ trace, debug, info, warn, error, critical }) whose methods
-// each hand a { type:'Log', level, message } frame to the supplied transport. `sendFrame` is the
-// only client-specific bit, so this stays pure and the web and Phaser SDKs emit identical frames.
-export function makeLogger(sendFrame) {
-  const api = {};
-  for (const method in LOG_LEVELS) {
-    const level = LOG_LEVELS[method];
-    api[method] = (message) => sendFrame({ type: 'Log', level, message: String(message) });
-  }
-  return api;
 }
 
 // ── Header-theming helpers (pure color math) ──────────────────────────────────
@@ -199,34 +174,65 @@ export function buildJoinLink(origin, code) {
   return `${origin}/?join=${encodeURIComponent(code)}`;
 }
 
-// Normalize a Ready frame into the SDK's identity/authority fields, with old-server fallbacks.
-// `authority` says who runs the game's authoritative logic: 'host' (a member's browser — the
-// default) or 'server' (the game's authority module runs server-side; every client is a guest).
-// `ownerId` is the member holding the lobby powers (kick, open/close) — a separate concept from
-// the authority; gate owner UI on `isOwner`, never `isHost`. A pre-authority server omits both
-// fields: authority defaults to 'host', and the owner is derivable only when we ARE the host.
-export function normalizeReady(msg) {
-  const playerId = msg.playerId;
-  const isHost = !!msg.isHost;
-  const authority = msg.authority ?? 'host';
-  const ownerId = msg.ownerId ?? (isHost ? playerId : null);
+// ── Game launch overlay ─────────────────────────────────────────────────────────
+// How long a launch may run before we admit it's slow (escalate the copy and offer a way out), and
+// the hard ceiling after which the shell drops the overlay regardless — a missed iframe `load` must
+// never leave a game that actually started hidden behind it.
+export const LAUNCH_SLOW_MS = 8000;
+export const LAUNCH_MAX_MS = 45000;
+
+// How the launch ends. Nothing holds either exit back — making a game that has finished loading wait
+// out an animation reads as clunky. Both MIRROR durations in home.css; change them together.
+//
+// MORPH: the good ending. The tile is replaced by the game in the very rect it occupied, which then
+//   expands to fill the screen like a video going fullscreen. The overlay is gone from the first
+//   frame of it, so nothing of the launch is ever drawn over a running game.
+// EXIT:  the fallback fade, for an ending with no tile to hand over from (join-by-code before the
+//   game is named, a rejoin) or no game to hand over to (an error, a deliberate bail-out).
+export const LAUNCH_MORPH_MS = 300;
+export const LAUNCH_EXIT_MS = 220;
+
+// The morph's curve. Eased IN: the tile flight's ease-out suits a small object arriving somewhere, but
+// on a full-screen expand it spends most of its travel in the first few frames, which lands as a jolt.
+// This is at 4% / 10% / 36% by 40 / 60 / 100ms — a gentle start that still decelerates into the finish
+// rather than slamming against the viewport edge at peak speed. (A stronger ease-in overshoots the
+// other way: so little early movement that it reads as a hitch.)
+export const LAUNCH_MORPH_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
+
+// "Starting Tic Tac Toe…". The join-by-code path doesn't learn which game it is until EnterGame
+// arrives, so fall back to a generic label rather than rendering "Starting …" with a hole in it.
+export function launchMessage(gameName) {
+  const name = typeof gameName === 'string' ? gameName.trim() : '';
+  return name ? `Starting ${name}…` : 'Starting game…';
+}
+
+// FLIP: the transform that puts `dest` (the centred launch tile, at its final size) back on top of
+// `src` (the clicked grid tile). Applying it, then removing it, animates the one into the other.
+// Rects are {left, top, width, height} — DOMRects, or plain objects in tests.
+//
+// Returns null when either rect is degenerate: a tile scrolled out of view, a display:none ancestor,
+// or jsdom, where getBoundingClientRect is all zeros. That's a normal outcome, not an error — the
+// caller falls back to a centre pop-in, which is also the join-by-code and rejoin path.
+export function launchFlipFrom(src, dest) {
+  if (!src || !dest || !src.width || !src.height || !dest.width) return null;
   return {
-    playerId,
-    players: msg.players || [],
-    isHost,
-    authority,
-    ownerId,
-    isOwner: ownerId != null && ownerId === playerId,
+    dx: (src.left + src.width / 2) - (dest.left + dest.width / 2),
+    dy: (src.top + src.height / 2) - (dest.top + dest.height / 2),
+    scale: src.width / dest.width,
   };
 }
 
-// Roster reducers (immutable): add is idempotent by id; remove drops by id.
-export function rosterAdd(players, player) {
-  return players.some((p) => p.id === player.id) ? players : [...players, player];
-}
-
-export function rosterRemove(players, playerId) {
-  return players.filter((p) => p.id !== playerId);
+// Degrees of rotation in a CSSOM transform value ("none", "matrix(a, b, c, d, e, f)", or the 3d
+// form). The grid tiles each carry a ±1deg nth-child rotation; the flying tile starts at its source
+// tile's angle and settles to square, so picking a game up off the table straightens it. Anything
+// unparseable yields 0 — a missing flourish, never a broken transform.
+export function rotationFromMatrix(transform) {
+  const m = (transform || '').match(/matrix(3d)?\(([^)]+)\)/);
+  if (!m) return 0;
+  const n = m[2].split(',').map((v) => parseFloat(v));
+  // matrix(a,b,…) and matrix3d(a,b,…) both start with the first column of the 2D sub-matrix.
+  if (!Number.isFinite(n[0]) || !Number.isFinite(n[1])) return 0;
+  return Math.atan2(n[1], n[0]) * 180 / Math.PI;
 }
 
 // ── Play Log ────────────────────────────────────────────────────────────────────
@@ -274,4 +280,33 @@ export function ordinal(n) {
   const last = abs % 10;
   const suffix = abs >= 11 && abs <= 13 ? 'th' : last === 1 ? 'st' : last === 2 ? 'nd' : last === 3 ? 'rd' : 'th';
   return `${num}${suffix}`;
+}
+
+// ── Platform announcements (operator banner, §4.1) ────────────────────────────
+
+// The severities the banner knows how to draw. Anything else is treated as 'info' rather than being
+// used: the value ends up in a CSS class name, and a server (or a hand-edited settings file) is not a
+// reason to stop validating what goes into the DOM.
+export const ANNOUNCEMENT_SEVERITIES = ['info', 'warning'];
+
+export function announcementSeverity(value) {
+  return ANNOUNCEMENT_SEVERITIES.includes(String(value ?? '')) ? String(value) : 'info';
+}
+
+// Whether the banner should be shown, given the announcement and the id the player last dismissed.
+// Dismissal is per-announcement, not per-session: an operator who edits a notice gets a NEW id, so
+// everyone sees the new wording — which is the whole reason the id exists rather than a boolean.
+export function shouldShowAnnouncement(announcement, dismissedId) {
+  if (!announcement || !String(announcement.text ?? '').trim()) return false;
+  return String(announcement.id ?? '') !== String(dismissedId ?? '');
+}
+
+// The text to render. A game-scoped announcement is prefixed with that game's title, because on the
+// home page the notice is otherwise indistinguishable from a platform-wide one — "retiring on the
+// 15th" needs to say what is retiring. `gameName` is looked up by the caller; an unknown id falls back
+// to no prefix rather than showing a raw id to a player who has never seen one.
+export function announcementText(announcement, gameName) {
+  const text = String(announcement?.text ?? '').trim();
+  const name = String(gameName ?? '').trim();
+  return name ? `${name}: ${text}` : text;
 }

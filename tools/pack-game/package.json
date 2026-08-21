@@ -1,12 +1,32 @@
 {
-  "name": "knockbox-pack-game",
-  "version": "0.2.0",
-  "private": true,
+  "name": "knockbox-cli",
+  "version": "0.0.0-dev",
   "type": "module",
-  "description": "Engine-agnostic packer that builds a drop-in KnockBox .kbg game package.",
+  "description": "KnockBox game developer CLI: package a game into a drop-in .kbg, and install/verify the client addons.",
+  "keywords": ["knockbox", "html5-games", "multiplayer", "godot", "phaser", "gamedev"],
+  "license": "MIT",
+  "author": "Jacob McCormack",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jcub1011/KnockBox-Games.git",
+    "directory": "tools/pack-game"
+  },
+  "homepage": "https://github.com/jcub1011/KnockBox-Games/blob/main/docs/ADDONS.md",
+  "bugs": "https://github.com/jcub1011/KnockBox-Games/issues",
   "bin": {
+    "knockbox": "knockbox.mjs",
     "knockbox-pack": "pack-game.mjs"
   },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "knockbox.mjs",
+    "pack-game.mjs",
+    "addon.mjs",
+    "kbg.mjs",
+    "README.md"
+  ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"

@@ -29,10 +29,12 @@ internal static class GameAssetNegotiation
         HttpContext ctx, IFileProvider compressedFiles, IContentTypeProvider contentTypes, bool gzipEnabled)
     {
         if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method)) return false;
-        var path = ctx.Request.Path.Value;
-        if (string.IsNullOrEmpty(path)
-            || !path.StartsWith("/games/", StringComparison.OrdinalIgnoreCase)
-            || path.EndsWith('/')) return false; // directory request — no single variant to serve
+        // Parse to the CANONICAL id + relative path (no doubled separators, no "." segments) and rebuild
+        // the rewritten path from those parts. A directory request or a traversal attempt fails to parse
+        // and falls through untouched. Canonicalizing here also keeps this in step with
+        // GameOriginAssetGate: both must agree on which file a request names, or a variant could be
+        // served for a path the gate declined to recognize.
+        if (!GameAssetPath.TryParse(ctx.Request.Path.Value, out var id, out var relative)) return false;
 
         var encoding = GameAssetPrecompressor.NegotiateEncoding(ctx.Request.Headers.AcceptEncoding.ToString(), gzipEnabled);
         if (encoding is null) return false;
@@ -40,13 +42,14 @@ internal static class GameAssetNegotiation
         var ext = encoding == "br" ? ".br" : ".gz";
         // PhysicalFileProvider.GetFileInfo is traversal-safe (blocks "..", rooted paths); the subpath is
         // relative to the provider root, mirroring the "/games" RequestPath the static options use.
-        var variant = compressedFiles.GetFileInfo(path["/games".Length..] + ext);
+        var subpath = $"/{id}/{relative}";
+        var variant = compressedFiles.GetFileInfo(subpath + ext);
         if (!variant.Exists || variant.IsDirectory) return false;
 
         ctx.Items[EncodingItem] = encoding;
         ctx.Items[ContentTypeItem] =
-            contentTypes.TryGetContentType(path, out var contentType) ? contentType : "application/octet-stream";
-        ctx.Request.Path = path + ext;
+            contentTypes.TryGetContentType(relative, out var contentType) ? contentType : "application/octet-stream";
+        ctx.Request.Path = GameAssetPath.Root + subpath + ext;
         return true;
     }
 }

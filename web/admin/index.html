@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KnockBox — Admin Management Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Outfit:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header / Navigation Bar -->
+    <header class="admin-header">
+      <div class="header-brand">
+        <div class="brand-badge">ADMIN</div>
+        <span class="brand-title">KnockBox<span class="brand-accent">Portal</span></span>
+      </div>
+      <div class="header-actions">
+        <!-- Only ever rendered when something is wrong. An "Admin Port Active" pill could by
+             construction never be read while it was false: this page is served BY the admin port, so
+             the pill was green or the whole portal was absent. Hidden until showErrorStatus paints it. -->
+        <div class="status-pill" id="server-status-pill" hidden>
+          <span class="status-dot"></span>
+          <span id="server-status-text"></span>
+        </div>
+        <button id="logout-btn" class="btn btn-secondary hidden">Log Out</button>
+      </div>
+    </header>
+
+    <!-- Main Content Body -->
+    <main class="admin-container">
+
+      <!-- View 1: Password Setup (Unconfigured Mode) -->
+      <section id="setup-view" class="view-card hidden">
+        <div class="card-header">
+          <h2>Initialize Admin Password</h2>
+          <p>This server is unconfigured. Set an administrative password to secure this portal &mdash; until
+             you do, anyone who can reach this page can claim it. Minimum 12 characters.</p>
+        </div>
+        <form id="setup-form" class="auth-form">
+          <div class="form-group">
+            <label for="setup-password">Admin Password</label>
+            <!-- minlength must match AdminAuthService.MinPasswordLength, or the browser lets through a
+                 password the server then rejects. -->
+            <input type="password" id="setup-password" required placeholder="At least 12 characters" minlength="12" autocomplete="new-password" />
+          </div>
+          <div class="form-group">
+            <label for="confirm-password">Confirm Password</label>
+            <input type="password" id="confirm-password" required placeholder="Re-enter password" minlength="12" autocomplete="new-password" />
+          </div>
+          <div id="setup-error" class="error-banner hidden"></div>
+          <button type="submit" class="btn btn-primary">Save & Continue</button>
+        </form>
+        <div class="info-note">
+          <strong>Password Reset Note:</strong> In server environments, deleting the <code>admin.secret</code> file on disk resets authentication state back to setup mode.
+        </div>
+      </section>
+
+      <!-- View 2: Admin Login -->
+      <section id="login-view" class="view-card hidden">
+        <div class="card-header">
+          <h2>Admin Login</h2>
+          <p>Please enter your admin password to access portal diagnostics and controls.</p>
+        </div>
+        <form id="login-form" class="auth-form">
+          <div class="form-group">
+            <label for="login-password">Password</label>
+            <input type="password" id="login-password" required placeholder="Enter admin password" autocomplete="current-password" />
+          </div>
+          <div id="login-error" class="error-banner hidden"></div>
+          <button type="submit" class="btn btn-primary">Sign In</button>
+        </form>
+      </section>
+
+      <!-- View 3: Admin Dashboard (Authenticated) -->
+      <section id="dashboard-view" class="dashboard-grid hidden">
+        <!-- Sidebar Navigation (Tree View & Search) -->
+        <aside class="sidebar-nav" id="sidebar-nav" aria-label="Admin Navigation">
+          <div class="sidebar-sticky-top" id="sidebar-sticky-top">
+            <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
+              <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><path d="M15 9l-3 3 3 3"></path></svg>
+              <span class="sidebar-toggle-label">Collapse</span>
+            </button>
+
+            <!-- Settings Search Bar (Visual Studio style) -->
+            <div class="sidebar-search-container" id="settings-search-container">
+              <div class="sidebar-search-wrapper">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="text" id="settings-search-input" class="sidebar-search-input" placeholder="Search settings…" aria-label="Search settings" autocomplete="off" spellcheck="false" />
+                <button type="button" id="settings-search-clear" class="sidebar-search-clear hidden" aria-label="Clear search" title="Clear search">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tree View Navigation Wrapper with Scroll Indicators -->
+          <div class="sidebar-tree-wrapper" id="sidebar-tree-wrapper">
+            <button type="button" class="sidebar-scroll-btn scroll-up" id="sidebar-scroll-up" aria-label="Scroll sidebar up" title="Scroll up" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
+            </button>
+
+            <!-- Tree View Navigation -->
+            <nav class="sidebar-tree" id="sidebar-tree" aria-label="Settings Tree Navigation">
+              <!-- Group 1: Monitoring & Health -->
+              <div class="tree-group" data-group-id="monitoring">
+              <button type="button" class="tree-group-header" aria-expanded="true" data-group-toggle="monitoring" title="Monitoring & Health">
+                <svg class="tree-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
+                <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                <span class="tree-group-label">Monitoring & Health</span>
+              </button>
+              <div class="tree-group-children">
+                <a href="#setting-overview" class="tree-item active nav-item" data-setting-id="setting-overview" data-tab="overview" title="System Overview">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                  <span class="tree-item-label">System Overview</span>
+                </a>
+                <a href="#setting-history" class="tree-item nav-item" data-setting-id="setting-history" data-tab="overview" title="Recent History">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                  <span class="tree-item-label">Recent History</span>
+                </a>
+                <a href="#setting-cost" class="tree-item nav-item" data-setting-id="setting-cost" data-tab="overview" title="Per-Game Server Cost">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                  <span class="tree-item-label">Per-Game Server Cost</span>
+                </a>
+                <a href="#setting-lobbies" class="tree-item nav-item" data-setting-id="setting-lobbies" data-tab="lobbies" title="Active Lobbies">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                  <span class="tree-item-label">Active Lobbies</span>
+                  <span class="nav-count" id="nav-count-lobbies" hidden></span>
+                </a>
+                <a href="#setting-logs" class="tree-item nav-item" data-setting-id="setting-logs" data-tab="logs" title="System Logs">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                  <span class="tree-item-label">System Logs</span>
+                </a>
+              </div>
+            </div>
+
+            <!-- Group 2: Game Management -->
+            <div class="tree-group" data-group-id="games">
+              <button type="button" class="tree-group-header" aria-expanded="true" data-group-toggle="games" title="Game Management">
+                <svg class="tree-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
+                <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4m-2-2v4m10-2h.01m-3 0h.01"></path></svg>
+                <span class="tree-group-label">Game Management</span>
+              </button>
+              <div class="tree-group-children">
+                <a href="#setting-games" class="tree-item nav-item" data-setting-id="setting-games" data-tab="games" title="Game Catalog">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h4m-2-2v4m10-2h.01m-3 0h.01"></path></svg>
+                  <span class="tree-item-label">Game Catalog</span>
+                  <span class="nav-count" id="nav-count-games" hidden></span>
+                </a>
+                <a href="#setting-marketplace" class="tree-item nav-item" data-setting-id="setting-marketplace" data-tab="marketplace" title="Marketplace & Packages">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"></path><path d="M3 8h18l-1.5 11a2 2 0 0 1-2 1.75H6.5a2 2 0 0 1-2-1.75z"></path><path d="M9 12v4m6-4v4"></path></svg>
+                  <span class="tree-item-label">Marketplace & Packages</span>
+                  <span class="nav-count" id="nav-count-marketplace" hidden></span>
+                </a>
+              </div>
+            </div>
+
+            <!-- Group 3: Platform Policies & Security -->
+            <div class="tree-group" data-group-id="platform">
+              <button type="button" class="tree-group-header" aria-expanded="true" data-group-toggle="platform" title="Platform Policies & Security">
+                <svg class="tree-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
+                <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span class="tree-group-label">Platform & Security</span>
+              </button>
+              <div class="tree-group-children">
+                <a href="#setting-maintenance" class="tree-item nav-item" data-setting-id="setting-maintenance" data-tab="overview" title="Maintenance Mode">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                  <span class="tree-item-label">Maintenance Mode</span>
+                </a>
+                <a href="#setting-announcement" class="tree-item nav-item" data-setting-id="setting-announcement" data-tab="platform" title="Player Announcement">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+                  <span class="tree-item-label">Player Announcement</span>
+                </a>
+                <a href="#setting-limits" class="tree-item nav-item" data-setting-id="setting-limits" data-tab="platform" title="Limits & Capacity">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+                  <span class="tree-item-label">Limits & Capacity</span>
+                </a>
+                <a href="#setting-schedule" class="tree-item nav-item" data-setting-id="setting-schedule" data-tab="platform" title="Update Schedule">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                  <span class="tree-item-label">Update Schedule</span>
+                </a>
+                <a href="#setting-room-codes" class="tree-item nav-item" data-setting-id="setting-room-codes" data-tab="platform" title="Banned Room Codes">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="9" x2="20" y2="9"></line><line x1="4" y1="15" x2="20" y2="15"></line><line x1="10" y1="3" x2="8" y2="21"></line><line x1="16" y1="3" x2="14" y2="21"></line></svg>
+                  <span class="tree-item-label">Banned Room Codes</span>
+                </a>
+                <a href="#setting-webhooks" class="tree-item nav-item" data-setting-id="setting-webhooks" data-tab="platform" title="Webhooks & Alerts">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                  <span class="tree-item-label">Webhooks & Alerts</span>
+                </a>
+                <a href="#setting-startup-config" class="tree-item nav-item" data-setting-id="setting-startup-config" data-tab="platform" title="Startup Configuration">
+                  <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                  <span class="tree-item-label">Startup Configuration</span>
+                </a>
+              </div>
+            </div>
+          </nav>
+          <button type="button" class="sidebar-scroll-btn scroll-down" id="sidebar-scroll-down" aria-label="Scroll sidebar down" title="Scroll down" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
+        </div>
+      </aside>
+
+        <!-- Main Dashboard Panel: Unified Long Scrolling Feed -->
+        <div class="dashboard-panel settings-scroll-container" id="admin-content-scroll">
+          <div class="panel-header">
+            <h1 id="panel-title">Admin Management Portal</h1>
+            <span class="refresh-indicator" id="last-updated">Updating metrics...</span>
+          </div>
+
+          <!-- Empty search result banner -->
+          <div class="settings-search-empty hidden" id="settings-search-empty">
+            <div class="empty-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            </div>
+            <h3>No settings found</h3>
+            <p id="search-empty-msg">No settings match your search query.</p>
+            <button type="button" class="btn btn-secondary" id="search-empty-clear">Clear Search</button>
+          </div>
+
+          <!-- ═════════════════════════════════════════════════════════════════════
+               GROUP 1: MONITORING & HEALTH
+               ═════════════════════════════════════════════════════════════════════ -->
+          <section class="settings-group-section" id="group-monitoring" data-group-id="monitoring">
+            <div class="group-section-header">
+              <span class="group-section-badge">Group</span>
+              <h2>Monitoring &amp; Health</h2>
+            </div>
+
+            <!-- Setting: System Overview -->
+            <div class="setting-card tab-panel" id="setting-overview" data-setting-id="setting-overview" data-tab="overview">
+              <!-- Deployment problems from DeploymentDiagnostics -->
+              <div id="diagnostics-banner" class="diagnostics-banner hidden"></div>
+
+              <div class="metrics-grid">
+                <div class="metric-card">
+                  <div class="metric-label">Server Uptime</div>
+                  <div class="metric-value" id="metric-uptime">--</div>
+                  <div class="metric-sub">Process runtime</div>
+                </div>
+
+                <div class="metric-card">
+                  <div class="metric-label">Active Lobbies</div>
+                  <div class="metric-value" id="metric-lobbies">0</div>
+                  <div class="metric-sub" id="metric-lobbies-sub">Live game rooms</div>
+                </div>
+
+                <div class="metric-card">
+                  <div class="metric-label">Connected Players</div>
+                  <div class="metric-value" id="metric-players">0</div>
+                  <div class="metric-sub" id="metric-sockets">Game sockets: 0</div>
+                </div>
+
+                <div class="metric-card">
+                  <div class="metric-label">Registered Games</div>
+                  <div class="metric-value" id="metric-games">0</div>
+                  <div class="metric-sub">Installed catalog</div>
+                </div>
+
+                <div class="metric-card">
+                  <div class="metric-label">Memory Working Set</div>
+                  <div class="metric-value" id="metric-memory">-- MB</div>
+                  <div class="metric-sub" id="metric-heap">Managed heap: -- MB</div>
+                </div>
+
+                <div class="metric-card">
+                  <div class="metric-label">Process CPU</div>
+                  <div class="metric-value" id="metric-cpu">--</div>
+                  <div class="metric-sub" id="metric-cpu-sub">Across -- cores</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Setting: Recent History -->
+            <div class="setting-card panel-card" id="setting-history" data-setting-id="setting-history">
+              <div class="panel-card-header">
+                <h3>Recent History</h3>
+                <span class="badge badge-muted" id="history-badge">--</span>
+              </div>
+              <p class="panel-card-note" id="history-note"></p>
+              <div class="graph-grid" id="history-graphs"></div>
+            </div>
+
+            <!-- Setting: Per-Game Server Cost -->
+            <div class="setting-card panel-card" id="setting-cost" data-setting-id="setting-cost">
+              <div class="panel-card-header"><h3>Per-Game Server Cost</h3></div>
+              <p class="panel-card-note">
+                Games run in the player's browser, but relaying for them is not free: every socket holds a
+                queued outbound channel and a writer task, and a broadcast serializes once then sends once
+                per recipient. Totals are cumulative since the server started; rates are measured between
+                polls. Server-authority games additionally run their logic here.
+              </p>
+              <div class="table-scroll">
+                <table class="data-table" id="metrics-table">
+                  <thead>
+                    <tr>
+                      <th>Game</th><th>Lobbies</th><th>Players</th><th>Frames in</th>
+                      <th>Frames out</th><th>Fan-out</th><th>Sent</th><th>Rate</th><th>Dropped</th>
+                      <th title="Server-authority games only: a browser-side game runs no code here.">Authority CPU</th>
+                    </tr>
+                  </thead>
+                  <tbody id="metrics-body"></tbody>
+                </table>
+              </div>
+              <p class="empty-state" id="metrics-empty">No game traffic since the server started.</p>
+            </div>
+
+            <!-- Setting: Active Lobbies -->
+            <div class="setting-card panel-card tab-panel" id="setting-lobbies" data-setting-id="setting-lobbies" data-tab="lobbies">
+              <div class="panel-card-header">
+                <h3>Active Lobbies</h3>
+              </div>
+              <div class="filter-bar">
+                <input type="search" id="lobby-filter-game" class="text-input" placeholder="Filter by game" />
+                <input type="search" id="lobby-filter-code" class="text-input filter-narrow" placeholder="Room code" />
+                <select id="lobby-filter-status" class="text-input filter-narrow">
+                  <option value="">Any status</option>
+                  <option value="waiting">Waiting</option>
+                  <option value="in-game">In game</option>
+                  <option value="stale">Stale</option>
+                  <option value="empty">Empty</option>
+                </select>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary" id="purge-stale-btn">Purge Stale</button>
+                <button class="btn btn-danger" id="close-all-btn">Close All</button>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table" id="lobbies-table">
+                  <thead>
+                    <tr>
+                      <th>Code</th><th>Game</th><th>Players</th><th>Status</th>
+                      <th>Uptime</th><th>Idle</th><th>Members</th><th class="col-actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="lobbies-body"></tbody>
+                </table>
+              </div>
+              <p class="empty-state" id="lobbies-empty">No active lobbies.</p>
+              <p class="panel-card-note" id="lobbies-note"></p>
+            </div>
+
+            <!-- Setting: System Logs -->
+            <div class="setting-card panel-card tab-panel" id="setting-logs" data-setting-id="setting-logs" data-tab="logs">
+              <div class="panel-card-header">
+                <h3>System Logs</h3>
+              </div>
+              <div class="filter-bar">
+                <select id="log-filter-level" class="text-input filter-narrow">
+                  <option value="">All levels</option>
+                  <option value="Information">Info and above</option>
+                  <option value="Warning">Warnings and above</option>
+                  <option value="Error">Errors and above</option>
+                </select>
+                <input type="search" id="log-filter-category" class="text-input filter-narrow"
+                       placeholder="Subsystem (e.g. GameLog)" />
+                <input type="search" id="log-filter-q" class="text-input" placeholder="Search messages" />
+                <span class="filter-spacer"></span>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="log-follow" checked /> Follow
+                </label>
+                <button class="btn btn-secondary" id="log-files-btn">Download&hellip;</button>
+              </div>
+              <div class="log-stream" id="log-stream"></div>
+              <p class="empty-state" id="logs-empty">No log entries match.</p>
+              <p class="panel-card-note" id="logs-note"></p>
+            </div>
+          </section>
+
+          <!-- ═════════════════════════════════════════════════════════════════════
+               GROUP 2: GAME MANAGEMENT
+               ═════════════════════════════════════════════════════════════════════ -->
+          <section class="settings-group-section" id="group-games" data-group-id="games">
+            <div class="group-section-header">
+              <span class="group-section-badge">Group</span>
+              <h2>Game Management</h2>
+            </div>
+
+            <!-- Setting: Game Catalog -->
+            <div class="setting-card panel-card tab-panel" id="setting-games" data-setting-id="setting-games" data-tab="games">
+              <div class="panel-card-header">
+                <h3>Game Catalog</h3>
+              </div>
+              <div class="filter-bar">
+                <input type="search" id="game-filter-q" class="text-input" placeholder="Filter by name or id" />
+                <select id="game-filter-availability" class="text-input filter-narrow">
+                  <option value="">Any state</option>
+                  <option value="available">Available</option>
+                  <option value="disabled">Disabled</option>
+                  <option value="staged">Staged</option>
+                </select>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary" id="rescan-btn">Rescan Now</button>
+              </div>
+              <div id="games-list" class="games-list"></div>
+              <p class="empty-state" id="games-empty">No games discovered.</p>
+              <p class="panel-card-note" id="games-note"></p>
+            </div>
+
+            <!-- Setting: Marketplace & Packages -->
+            <div class="setting-card panel-card tab-panel" id="setting-marketplace" data-setting-id="setting-marketplace" data-tab="marketplace">
+              <div class="panel-card-header">
+                <h3>Marketplace &amp; Packages</h3>
+              </div>
+              <div class="panel-card hidden" id="mkt-disabled">
+                <div class="panel-card-header"><h4>Marketplace disabled</h4></div>
+                <p class="panel-card-note">
+                  <code>KnockBox:MarketplaceEnabled</code> is false, so this server makes no outbound
+                  requests and no catalog is fetched. Uploading a <code>.kbg</code>, rolling one back and
+                  uninstalling all still work.
+                </p>
+              </div>
+
+              <!-- In-flight and recently finished operations -->
+              <div class="panel-card hidden" id="mkt-jobs-card">
+                <div class="panel-card-header"><h4>Operations</h4></div>
+                <div id="mkt-jobs"></div>
+              </div>
+
+              <div class="filter-bar">
+                <input type="search" id="mkt-filter-q" class="text-input" placeholder="Filter by name, id or tag" />
+                <select id="mkt-filter-status" class="text-input filter-narrow">
+                  <option value="">Any status</option>
+                  <option value="updateAvailable">Update available</option>
+                  <option value="notInstalled">Not installed</option>
+                  <option value="installed">Installed</option>
+                  <option value="problem">Problems</option>
+                </select>
+                <select id="mkt-filter-source" class="text-input filter-narrow">
+                  <option value="">Any source</option>
+                </select>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary" id="mkt-upload-btn">Upload .kbg…</button>
+                <button class="btn btn-secondary" id="mkt-settings-btn">Sources…</button>
+                <button class="btn btn-secondary" id="mkt-refresh-btn">Refresh Catalog</button>
+              </div>
+              <div id="mkt-list" class="games-list"></div>
+              <p class="empty-state" id="mkt-empty">No games offered and none installed from a package.</p>
+              <p class="panel-card-note" id="mkt-note"></p>
+            </div>
+          </section>
+
+          <!-- ═════════════════════════════════════════════════════════════════════
+               GROUP 3: PLATFORM POLICIES & SECURITY
+               ═════════════════════════════════════════════════════════════════════ -->
+          <section class="settings-group-section" id="group-platform" data-group-id="platform">
+            <div class="group-section-header">
+              <span class="group-section-badge">Group</span>
+              <h2>Platform Policies &amp; Security</h2>
+            </div>
+
+            <!-- Setting: Maintenance Mode -->
+            <div class="setting-card panel-card" id="setting-maintenance" data-setting-id="setting-maintenance">
+              <div class="panel-card-header">
+                <h3>Maintenance Mode</h3>
+                <span class="badge" id="maintenance-badge">Off</span>
+              </div>
+              <p class="panel-card-note">
+                Blocks new lobbies across every game. Sessions already running are left alone and finish
+                normally &mdash; use it to drain the platform before a restart, not to stop it dead.
+              </p>
+              <div class="field-row">
+                <input type="text" id="maintenance-message" class="text-input"
+                       placeholder="Message shown to players (optional)" maxlength="200" />
+                <button class="btn btn-primary" id="maintenance-toggle">Turn On</button>
+              </div>
+            </div>
+
+            <!-- Setting: Player Announcement -->
+            <div class="setting-card panel-card" id="setting-announcement" data-setting-id="setting-announcement">
+              <div class="panel-card-header">
+                <h3>Player Announcement</h3>
+                <span class="badge" id="announce-badge">None</span>
+              </div>
+              <p class="panel-card-note">
+                One banner, shown on the player home page until they dismiss it or you clear it. Everyone
+                connected sees it immediately, and anyone arriving later gets it too. Purely informational
+                &mdash; it stops nothing; maintenance mode is the control that blocks new lobbies.
+              </p>
+              <div class="field-row">
+                <input type="text" id="announce-text" class="text-input" maxlength="200"
+                       placeholder="e.g. Scheduled maintenance in 20 minutes" />
+              </div>
+              <div class="field-row">
+                <select id="announce-severity" class="text-input filter-narrow">
+                  <option value="info">Information</option>
+                  <option value="warning">Warning</option>
+                </select>
+                <select id="announce-game" class="text-input filter-narrow">
+                  <option value="">All games</option>
+                </select>
+                <button class="btn btn-primary" id="announce-post">Post</button>
+                <button class="btn btn-secondary" id="announce-clear">Clear</button>
+              </div>
+              <p class="panel-card-note" id="announce-note"></p>
+            </div>
+
+            <!-- Setting: Limits & Caps -->
+            <div class="setting-card panel-card tab-panel" id="setting-limits" data-setting-id="setting-limits" data-tab="platform">
+              <div class="panel-card-header">
+                <h3>Limits &amp; Caps</h3>
+                <span class="badge" id="limits-badge" hidden>Overridden</span>
+              </div>
+              <p class="panel-card-note">
+                Abuse protection and capacity. A change applies immediately &mdash; including to sockets
+                that are already open &mdash; and is saved, so it survives a restart. Leave a field empty to
+                use its default; <strong>0</strong> is different, and disables that limit entirely. A lowered
+                cap never disconnects anyone: it refuses the next connection or lobby.
+              </p>
+              <div id="limits-fields"></div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="limits-save">Save Limits</button>
+                <button class="btn btn-secondary" id="limits-reset">Revert All to Defaults</button>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary btn-small" id="limits-refresh">Refresh</button>
+              </div>
+              <p class="panel-card-note" id="limits-note"></p>
+            </div>
+
+            <!-- Setting: Update Schedule -->
+            <div class="setting-card panel-card" id="setting-schedule" data-setting-id="setting-schedule">
+              <div class="panel-card-header">
+                <h3>Update Schedule</h3>
+                <span class="badge" id="schedule-badge" hidden>Overridden</span>
+              </div>
+              <p class="panel-card-note">
+                When this server checks its marketplaces for newer versions of the games you enrolled in
+                automatic updates (Marketplace tab). Times are <strong>UTC</strong>, so the schedule does
+                not move with a host's time zone or with daylight saving. A check also runs shortly after
+                every start; <strong>Refresh Catalog</strong> on the Marketplace tab checks right now
+                regardless of this.
+              </p>
+              <div class="field-row">
+                <select id="schedule-cadence" class="text-input filter-narrow">
+                  <option value="off">Never</option>
+                  <option value="hourly">Hourly</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+                <select id="schedule-day" class="text-input filter-narrow">
+                  <option value="sunday">Sunday</option>
+                  <option value="monday">Monday</option>
+                  <option value="tuesday">Tuesday</option>
+                  <option value="wednesday">Wednesday</option>
+                  <option value="thursday">Thursday</option>
+                  <option value="friday">Friday</option>
+                  <option value="saturday">Saturday</option>
+                </select>
+                <select id="schedule-hour" class="text-input"></select>
+              </div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="schedule-save">Save Schedule</button>
+                <button class="btn btn-secondary" id="schedule-reset">Revert to Default</button>
+                <span class="filter-spacer"></span>
+                <button class="btn btn-secondary btn-small" id="schedule-refresh">Refresh</button>
+              </div>
+              <p class="panel-card-note" id="schedule-note"></p>
+            </div>
+
+            <!-- Setting: Banned Room Codes -->
+            <div class="setting-card panel-card" id="setting-room-codes" data-setting-id="setting-room-codes">
+              <div class="panel-card-header">
+                <h3>Banned Room Codes</h3>
+                <span class="badge" id="codes-badge" hidden></span>
+              </div>
+              <p class="panel-card-note">
+                Codes the generator will never hand out. A <strong>word</strong> is blocked anywhere inside a
+                code (<code>XQ</code> blocks <code>XQ4B</code> and <code>7XQ2</code>); a
+                <strong>pattern</strong> matches a whole code, where <code>?</code> is one character and
+                <code>*</code> any run (<code>Q7*</code> blocks every code starting <code>Q7</code>). Codes
+                already in use are never revoked.
+              </p>
+              <div class="field-row">
+                <label class="limit-label" for="code-word">Blocked words</label>
+                <input type="text" id="code-word" class="text-input filter-narrow" maxlength="4"
+                       placeholder="Letters or digits" />
+                <button class="btn btn-secondary btn-small" id="code-word-add">Add</button>
+              </div>
+              <div class="chip-list" id="code-words"></div>
+              <div class="field-row">
+                <label class="limit-label" for="code-pattern">Blocked patterns</label>
+                <input type="text" id="code-pattern" class="text-input filter-narrow" maxlength="6"
+                       placeholder="e.g. Q7* or ?K??" />
+                <button class="btn btn-secondary btn-small" id="code-pattern-add">Add</button>
+              </div>
+              <div class="chip-list" id="code-patterns"></div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="codes-save">Save Blocklist</button>
+                <button class="btn btn-secondary" id="codes-clear">Clear All</button>
+              </div>
+              <p class="panel-card-note" id="codes-note"></p>
+            </div>
+
+            <!-- Setting: Webhooks -->
+            <div class="setting-card panel-card" id="setting-webhooks" data-setting-id="setting-webhooks">
+              <div class="panel-card-header">
+                <h3>Webhooks</h3>
+                <span class="badge badge-muted" id="hook-badge">0</span>
+              </div>
+              <p class="panel-card-note" id="hook-note"></p>
+              <div class="table-scroll">
+                <table class="data-table" id="hook-table">
+                  <thead>
+                    <tr><th>Endpoint</th><th>Events</th><th>Last delivery</th><th class="col-actions">Actions</th></tr>
+                  </thead>
+                  <tbody id="hook-body"></tbody>
+                </table>
+              </div>
+              <p class="empty-state" id="hook-empty">No endpoints registered, so nothing is sent anywhere.</p>
+              <div class="field-row">
+                <input type="text" id="hook-id" class="text-input filter-narrow" maxlength="32" placeholder="Id (e.g. ops)" />
+                <input type="text" id="hook-name" class="text-input filter-narrow" maxlength="60" placeholder="Name" />
+                <input type="url" id="hook-url" class="text-input" placeholder="https://hooks.example.com/…" />
+              </div>
+              <div class="field-row" id="hook-events"></div>
+              <div class="field-row">
+                <button class="btn btn-primary" id="hook-add">Save Endpoint</button>
+                <span class="limit-hint">
+                  Select no events to receive all of them. The URL must be https, or http on loopback.
+                  A Discord or Slack webhook URL works as-is.
+                </span>
+              </div>
+            </div>
+
+            <!-- Setting: Startup Configuration -->
+            <div class="setting-card panel-card" id="setting-startup-config" data-setting-id="setting-startup-config">
+              <div class="panel-card-header"><h3>Set in Configuration</h3></div>
+              <p class="panel-card-note">
+                These are deliberately not editable here. The reconnect and handshake windows are read when
+                the server starts (the reaper's own interval comes from the grace window), and the admin
+                login caps bound the CPU an unauthenticated caller can spend on password hashing &mdash; a
+                lock that opens from inside the room it protects is not a lock. Change them with
+                <code>KnockBox:*</code> configuration and restart.
+              </p>
+              <div class="table-scroll">
+                <table class="data-table" id="limits-startup-table">
+                  <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+                  <tbody id="limits-startup-body"></tbody>
+                </table>
+              </div>
+              <div class="info-card">
+                <h3>Network Port Isolation Active</h3>
+                <p>This administrative portal is executing on a dedicated network port. Admin APIs and portal static pages are strictly inaccessible over public player or game origin ports.</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Hidden legacy tab anchors to guarantee backward compatibility with existing tests/scripts -->
+          <div id="tab-overview" class="legacy-tab-anchor hidden"></div>
+          <div id="tab-platform" class="legacy-tab-anchor hidden"></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Confirmation dialog for destructive actions. One dialog reused by every caller, so the phrasing
+       and the focus/Escape handling can't drift between them. -->
+  <div class="modal-backdrop hidden" id="confirm-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <h3 id="confirm-title">Are you sure?</h3>
+      <p id="confirm-body"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="confirm-cancel">Cancel</button>
+        <button class="btn btn-danger" id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log-file download picker. -->
+  <div class="modal-backdrop hidden" id="files-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="files-title">
+      <h3 id="files-title">Download a log file</h3>
+      <p class="panel-card-note" id="files-note"></p>
+      <div id="files-list" class="files-list"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="files-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Package upload. Sends the raw .kbg bytes as application/octet-stream — see admin.js for why this
+       one path uses XMLHttpRequest rather than fetch. -->
+  <div class="modal-backdrop hidden" id="upload-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+      <h3 id="upload-title">Upload a game package</h3>
+      <p class="panel-card-note">
+        A <code>.kbg</code> package, as produced by <code>knockbox-pack</code>. It is validated exactly
+        like one downloaded from a marketplace — but nothing published its hash, so the bytes you supply
+        are the only thing vouching for it.
+      </p>
+      <div class="upload-drop" id="upload-drop" tabindex="0" role="button">
+        <span id="upload-name">Drop a .kbg here, or click to choose one</span>
+        <input type="file" id="upload-file" accept=".kbg" hidden />
+      </div>
+      <label class="checkbox-row">
+        <span>When a game is already running this package:</span>
+        <select id="upload-mode" class="text-input filter-narrow"></select>
+      </label>
+      <div class="progress-bar hidden" id="upload-progress"><div class="progress-fill" id="upload-progress-fill"></div></div>
+      <p class="form-error hidden" id="upload-error"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="upload-abort">Cancel upload</button>
+        <button class="btn btn-secondary" id="upload-close">Close</button>
+        <button class="btn btn-primary" id="upload-submit">Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Registered marketplaces. -->
+  <div class="modal-backdrop hidden" id="mkt-settings-backdrop">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="mkt-settings-title">
+      <h3 id="mkt-settings-title">Marketplace sources</h3>
+      <p class="panel-card-note" id="mkt-settings-note"></p>
+      <div id="mkt-sources" class="files-list"></div>
+      <h4 class="modal-subhead">Register another</h4>
+      <div class="source-form">
+        <input type="text" id="mkt-source-id" class="text-input filter-narrow" placeholder="id (e.g. staging)" />
+        <input type="text" id="mkt-source-name" class="text-input" placeholder="Display name" />
+        <input type="url" id="mkt-source-url" class="text-input" placeholder="https://…/CATALOG.json" />
+        <input type="url" id="mkt-source-download" class="text-input" placeholder="Download origin (https://github.com)" />
+        <button class="btn btn-secondary" id="mkt-source-add">Add</button>
+      </div>
+      <p class="form-error hidden" id="mkt-settings-error"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="mkt-settings-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-host" id="toast-host" aria-live="polite"></div>
+
+  <script type="module">import { bootstrap } from '/admin.js'; bootstrap();</script>
+</body>
+</html>

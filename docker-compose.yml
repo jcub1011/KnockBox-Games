@@ -8,8 +8,25 @@
 #   2. docker compose up -d --build
 #   3. Open http://localhost:8080 — copy .kbg game packages (or plain game folders) into your games
 #      dir; they install and hot-reload with no restart.
+#   4. Open http://localhost:8082 (from the host only) and set the admin password — see ADMIN PORTAL.
 #
-# TWO PERSISTENT DERIVED CACHES: the server writes two regenerable directories, both of which must
+# ADMIN PORTAL: a THIRD origin (container port 8082) serving the operator dashboard. It is published to
+# 127.0.0.1 only, because while no password is set the portal is UNCLAIMED and the first visitor to
+# reach it sets the password. So claim it right after the first `up`. The password hash lives in
+# admin.secret on the `knockbox-admin` volume (override with KNOCKBOX_ADMIN_DIR); delete it to reset the
+# password. To expose the portal beyond the host, put it behind your proxy with its own auth and set
+# KnockBox__AdminHost/AdminOrigin — do not simply widen the port mapping. See docs/HOSTING.md.
+#
+# INSTALLING GAMES FROM THE PORTAL: the Marketplace tab can install a game from a catalog or from a
+# .kbg you upload. Those packages land in /app/games-managed (the `knockbox-managed` volume), NOT in
+# your games dir — that mount is read-only, which is the whole reason a separate root exists. Budget
+# roughly 3x a game's size while one installs (download + extraction + the retained previous version).
+# Behind a reverse proxy, raise its request-body limit or large uploads fail before reaching the server
+# (nginx `client_max_body_size`; Cloudflare's free plan caps at 100 MB).
+#
+# TWO PERSISTENT DERIVED CACHES (plus the admin secret and the managed packages above): the server
+# writes two regenerable
+# directories, both of which must
 # stay OUTSIDE the read-only games mount. By default each lives in a named volume below, so both
 # SURVIVE image updates instead of being rebuilt every time:
 #   • games-compressed — .br/.gz asset variants built at max effort (the expensive part of a cold
@@ -23,7 +40,8 @@
 #
 # PORT-MAPPING FOOT-GUN: the server tells browsers to load games from its *internal* games port
 # (8081), so host:container mappings must stay 1:1 — or set KnockBox__GamesOrigin explicitly
-# (see the second-instance example below).
+# (see the second-instance example below). The admin port is exempt: nothing advertises it to a
+# browser, so you can remap 8082 freely on the host.
 services:
   knockbox:
     # To run a prebuilt image instead of building locally, comment out the `build:` block below and
@@ -36,6 +54,10 @@ services:
     ports:
       - "8080:8080"   # shell — players open this
       - "8081:8081"   # game origin — iframes + game data sockets
+      # Admin portal. Bound to LOOPBACK ONLY on purpose: while no password is set, whoever reaches this
+      # port first claims the portal (see ADMIN PORTAL below). Reach it at http://localhost:8082 from the
+      # host — over SSH use a tunnel (`ssh -L 8082:localhost:8082 host`) rather than publishing it.
+      - "127.0.0.1:8082:8082"
     # Cap container memory so .NET sizes its (Server) GC heaps and collects against the cgroup budget
     # instead of the host's full RAM — the main lever on "RSS climbs and stays high" as
     # server-authority Jint engines come and go. Tune to your host; raise if you run many concurrent
@@ -53,6 +75,16 @@ services:
       # set KNOCKBOX_UNPACKED_DIR=/path → a writable host bind mount. Persisting it avoids
       # re-extracting a large library every time the container is recreated.
       - ${KNOCKBOX_UNPACKED_DIR:-knockbox-unpacked}:/app/games-unpacked
+      # Packages the ADMIN PORTAL installed — from a marketplace, or uploaded — plus the previous
+      # versions it retains for rollback. UNLIKE the two caches above this is NOT freely regenerable: a
+      # marketplace game can be fetched again, but an UPLOADED one exists nowhere else. Back it up like
+      # /app/data. Never share it between instances: each server reconciles and prunes its own copy.
+      - ${KNOCKBOX_MANAGED_DIR:-knockbox-managed}:/app/games-managed
+      # Admin state: the password hash (admin.secret) plus operator policy (admin-settings.json — which
+      # games are disabled or staged, and whether maintenance mode is on). UNLIKE the two caches above this
+      # is NOT regenerable: lose it and the portal reverts to unclaimed AND every policy decision is
+      # forgotten, so a game you disabled starts serving players again. Keep this volume.
+      - ${KNOCKBOX_ADMIN_DIR:-knockbox-admin}:/app/data
       # Uncomment to keep logs on the host too:
       # - ${KNOCKBOX_LOGS_DIR:-./logs}:/app/logs
     environment:
@@ -70,6 +102,28 @@ services:
       # Lock /ws to your real origins in production:
       # KnockBox__AllowedOrigins__0: "https://play.example.com"
       # KnockBox__AllowedOrigins__1: "https://games.example.com"
+      # ── Admin portal ──────────────────────────────────────────────────────────
+      # Route the admin origin by subdomain instead of port 8082 (same single-port trick as GamesHost).
+      # Only do this behind a proxy you trust to set Host, WITH KnockBox__ForwardedHeaders=true: any
+      # request carrying this Host reaches the admin app, including one arriving on the public port.
+      # KnockBox__AdminHost: "admin.example.com"
+      # Or pin the admin origin explicitly:
+      # KnockBox__AdminOrigin: "https://admin.example.com"
+      # How long an admin session cookie lasts (default 8 hours; sessions also drop on restart):
+      # KnockBox__AdminSessionTtlHours: "8"
+      # ── Marketplace ───────────────────────────────────────────────────────────
+      # Air-gapped or locked-down: no catalog is fetched and the server holds no HttpClient at all.
+      # Uploading a .kbg through the portal, rolling one back and uninstalling all still work.
+      # KnockBox__MarketplaceEnabled: "false"
+      # When to check registered catalogs for updates to games you ENROLLED in automatic updates
+      # (nothing is enrolled by default, and with none enrolled no request is made). These set the
+      # STARTING schedule; the portal's Platform tab overrides it and persists to the admin volume.
+      # A check also runs shortly after every start. Times are UTC.
+      # KnockBox__MarketplaceUpdateCadence: "daily"     # off | hourly | daily | weekly
+      # KnockBox__MarketplaceUpdateHourUtc: "3"
+      # KnockBox__MarketplaceUpdateDayOfWeek: "sunday"  # weekly only
+      # Previous versions of each portal-installed package kept for one-click rollback. 0 = none:
+      # KnockBox__PackageBackupCount: "1"
     restart: unless-stopped
 
   # ── Second instance sharing the SAME games folder ─────────────────────────────
@@ -77,7 +131,9 @@ services:
   # Uncomment, give it its own ports, and pin GamesOrigin (host ports differ from the
   # container's internal 8081 here, so the dev fallback would advertise the wrong port).
   # Give it its OWN copies of BOTH writable caches — each is reconciled and pruned by its own
-  # server, and two instances writing one directory would race. Never share either.
+  # server, and two instances writing one directory would race. Never share either. The same goes for
+  # /app/data: each instance has its own admin password, so give it its own volume (sharing one would
+  # let either server's reset clobber the other's password).
   # knockbox-2:
   #   build:
   #     context: .
@@ -85,19 +141,31 @@ services:
   #   ports:
   #     - "8090:8080"
   #     - "8091:8081"
+  #     - "127.0.0.1:8092:8082"
   #   volumes:
   #     - ${KNOCKBOX_GAMES_DIR:-./games}:/games:ro
   #     - knockbox-compressed-2:/app/games-compressed
   #     - knockbox-unpacked-2:/app/games-unpacked
+  #     - knockbox-admin-2:/app/data
   #   environment:
   #     KnockBox__GamesPollSeconds: "5"
   #     KnockBox__GamesOrigin: "http://localhost:8091"
   #   restart: unless-stopped
 
-# Docker-managed named volumes for the two regenerable caches. They survive image updates and inherit
-# the container's non-root ownership automatically. Each is overridden by a host bind mount when its
-# KNOCKBOX_*_DIR variable is set (then the volume simply goes unused). Add knockbox-compressed-2 and
-# knockbox-unpacked-2 here if you enable the second instance above.
+# Docker-managed named volumes. They survive image updates and inherit the container's non-root
+# ownership automatically. Each is overridden by a host bind mount when its KNOCKBOX_*_DIR variable is
+# set (then the volume simply goes unused). Add knockbox-compressed-2, knockbox-unpacked-2 and
+# knockbox-admin-2 here if you enable the second instance above.
+#   • the first two are regenerable caches — losing one only costs rebuild time
+#   • knockbox-admin is NOT regenerable: it holds the admin password hash AND the operator policy
+#     (disabled/staged games, maintenance mode, registered marketplaces, update enrolments). Back it
+#     up, or be ready to re-claim the portal and re-apply your policy.
+#   • knockbox-managed is NOT regenerable either: it holds the .kbg packages the portal installed. A
+#     marketplace game can be re-downloaded; one an admin UPLOADED exists nowhere else. Back it up.
+#     NOTE: portal-installed games therefore do NOT live in your KNOCKBOX_GAMES_DIR — backing up that
+#     directory alone no longer captures your whole library.
 volumes:
   knockbox-compressed:
   knockbox-unpacked:
+  knockbox-managed:
+  knockbox-admin:

@@ -196,6 +196,19 @@ export interface KnockBoxLocalOptions {
   authority?: KBCreateAuthority | { createAuthority: KBCreateAuthority; config?: object } | string;
   /** The module's `config` export ({ perRecipient?, tickHz? }) when `authority` is a bare function. */
   authorityConfig?: { perRecipient?: boolean; tickHz?: number };
+  /**
+   * Word dictionaries backing the local `kb.words` stub, keyed by the dictionary key the module
+   * passes to `kb.words.*` (e.g. `'en'`). Mirrors the server's `authorityWords`. Each entry is an
+   * inline word array, an object with an explicit `words`/`list` + `caseInsensitive`, or a
+   * `file`/`url` fetched at start. When `authority` is a URL, the sibling `GAME.json`'s
+   * `authorityWords` is auto-discovered; explicit keys here win over discovered ones.
+   */
+  words?: Record<
+    string,
+    | string[]
+    | { words?: string[]; list?: string[]; caseInsensitive?: boolean }
+    | { file?: string; url?: string; caseInsensitive?: boolean }
+  >;
 }
 
 /**

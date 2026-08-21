@@ -83,6 +83,16 @@ The directory is mounted **read-only** (`:ro`) — the server never writes to it
 instances can safely share one game library. `docker-compose.yml` contains a commented-out second
 instance showing exactly that pattern.
 
+> **Games installed from the admin portal are NOT in this directory.** Because the mount is read-only,
+> anything the portal installs — from a marketplace or uploaded by hand — lands in
+> `KnockBox__GamesManagedRoot` (`/app/games-managed`, the `knockbox-managed` volume) instead. So backing
+> up `KNOCKBOX_GAMES_DIR` alone no longer captures your whole library. A marketplace game can always be
+> downloaded again; **an uploaded one exists nowhere else**, so treat that volume like `/app/data` and
+> back it up. Never share it between instances — each server reconciles and prunes its own copy.
+>
+> Budget roughly **3× a game's size** in that volume while an install runs: the download, the extracted
+> copy, and the previous version retained for rollback (`KnockBox__PackageBackupCount`, default 1).
+
 > **Pre-compressed asset cache.** With `KnockBox__Precompress` on (the default), the server writes a
 > `games-compressed/` cache of `.br`/`.gz` variants (built at max effort — the slow part of a cold
 > boot) — it lives at `KnockBox__GamesCompressedRoot` (`/app/games-compressed` in the image), which
@@ -145,6 +155,106 @@ environment:
   KnockBox__GamesOrigin: "http://your-host:8091"
 ```
 
+The **admin** port is exempt: nothing advertises it to a browser, so you can remap 8082 to any host port
+you like (keeping it bound to `127.0.0.1`).
+
+### The admin portal
+
+A **third** origin (container port **8082**, `5116` for the desktop exe) serves an operator dashboard: the
+platform's health, the live lobby directory, the game catalogue, and the server log. It is a separate origin
+so that no page a player can browse can reach it — every `/admin*` path returns 404 on the shell and games
+origins. What each tab does is documented in [ADMIN.md](./ADMIN.md); this section is about getting it
+reachable and keeping it locked.
+
+Two things about it are worth knowing before you rely on it:
+
+- **Operator policy persists, so it also outlives your attention.** Disabling a game, turning on maintenance
+  mode, capping lobbies, banning room codes, posting a player announcement or registering a webhook all write
+  to `admin-settings.json` next to the password file, and survive restarts and image updates. That is the
+  point — but it means a maintenance mode you forgot to turn off is still on after tomorrow's deploy, and so
+  is the "back at 09:00" banner from last Tuesday. The Overview and Platform tabs show both plainly.
+- **A webhook URL you register is a credential, stored in that file.** Anyone holding a Discord or Slack
+  webhook URL can post to that channel, so `admin-settings.json` deserves the same care as the password file:
+  it is already required to be on a persisted volume outside the image, and it should not be world-readable.
+  The server never logs the URL and the portal shows only its origin. Deliveries go out over HTTPS, or plain
+  HTTP only to loopback (which is what makes a local monitoring agent work).
+- **Deleting a game does not work on this deployment.** `games/` is mounted read-only below (`:ro`), which
+  is the recommendation, so the portal disables Delete and names the blocking path. Use **Disabled**
+  instead, or remove the file from the host directory and let hot-reload notice it has gone.
+
+**It is claim-on-first-use.** There are no accounts: until a password is set the portal is *unclaimed*,
+and the first person to open it sets the password. So:
+
+- **Do not publish the admin port.** `docker-compose.yml` maps it to `127.0.0.1:8082:8082` deliberately —
+  reachable from the host only. Reach a remote server over an SSH tunnel instead:
+  `ssh -L 8082:localhost:8082 you@server`, then open `http://localhost:8082`.
+- **Claim it right after the first `docker compose up`**, before anything else can.
+- If you do want it reachable over the network, put it behind your proxy with its own authentication and
+  set `KnockBox__AdminHost`/`KnockBox__AdminOrigin` — don't simply widen the port mapping.
+
+**Password rules.** Minimum 12 characters. Attempts are rate-limited to
+`KnockBox__AdminLoginAttemptsPerMinute` (default 10) per client IP **and**
+`KnockBox__AdminLoginAttemptsPerMinuteGlobal` (default 60) across all callers; a throttled attempt gets
+`429` with `Retry-After`. Those limits are doing more than stopping password guessing: each attempt
+deliberately costs a 600k-iteration PBKDF2 (~0.4 s of one core), so without them anyone who can reach the
+port could saturate your CPU with unauthenticated requests and starve the game relay. Behind a proxy, set
+`KnockBox__ForwardedHeaders: "true"` **and** `KnockBox__KnownProxies` (your proxy's IP or CIDR range) —
+otherwise every request either shares the proxy's single bucket, or, if the proxy passes a client-supplied
+`X-Forwarded-For` through, gets a fresh per-IP bucket per request. The global bucket is what holds either
+way.
+
+**Behind TLS.** Also set `KnockBox__ForwardedHeaders: "true"` (or an `https://`
+`KnockBox__AdminOrigin`) when a proxy terminates TLS in front of the portal. The request that reaches the
+server is plain HTTP, so without one of those the session cookie is issued without `Secure` and a browser
+will send the admin session token over plain `http://`. Startup logs a warning when the portal is
+host-routed and forwarded headers are off.
+
+**Where the password lives.** Hashed (PBKDF2-HMAC-SHA256, 600k iterations) into
+`KnockBox__AdminPasswordPath` — `/app/data/admin.secret` in the image, on the `knockbox-admin` volume
+(override with `KNOCKBOX_ADMIN_DIR`). Unlike the two asset caches this is **not** regenerable: lose it and
+the portal reverts to unclaimed. Keep the volume, and note that the path must be writable by UID `1654`
+if you bind-mount a host directory. The file is created mode `600` so another account on the box can't read
+the hash and attack it offline — if you bind-mount a host directory, don't loosen that.
+
+**Where operator policy lives.** Alongside it, in `KnockBox__AdminSettingsPath` —
+`/app/data/admin-settings.json` in the image, on the same volume for the same reason. It holds per-game
+availability and maintenance mode. It is **not** a secret (nothing in it is sensitive) but it *is* the one
+piece of state this server keeps across a restart, so back up the volume if your policy is non-trivial. It
+is indented and safe to hand-edit while the server is stopped; if it can't be read, the server boots with
+platform defaults and says so on the portal's Overview tab rather than failing.
+
+**To reset a forgotten password**, delete the secret file and reload the portal — it returns to setup mode:
+
+```bash
+docker compose exec knockbox rm -f /app/data/admin.secret
+```
+
+**To reset all policy** (re-enable every game, clear maintenance mode), delete the settings file and
+restart:
+
+```bash
+docker compose exec knockbox rm -f /app/data/admin-settings.json && docker compose restart knockbox
+```
+
+**Resetting also revokes every admin session immediately.** The session-cookie signing key is derived from
+a per-process secret *and* a fingerprint of the stored hash, so any change to that file invalidates
+outstanding cookies — resetting a password you believe is compromised really does lock the other party out,
+rather than leaving their session working until the next restart. A restart ends every session too, and
+`KnockBox__AdminSessionTtlHours` (default 8) bounds one otherwise.
+
+> **The secret file is the credential.** Anyone who can write it controls the portal — they can delete it
+> and claim a new password, or restore an old copy to bring an old password back. That is true of any
+> file-backed credential without external state (`/etc/shadow` included), and it is not something the
+> server can detect: a rollback check would need state the same attacker could roll back. **Filesystem
+> permissions on that path are the real security boundary**, so keep the volume owned by UID `1654` and
+> off any share other people can write. What the server does guarantee is that sessions follow the current
+> file exactly, so a swap never leaves both the old and new holders logged in.
+
+> `KnockBox__AdminHost` routes by `Host` header, exactly like `GamesHost`. Once it is set, **any** request
+> carrying that host reaches the admin app — including one arriving on the public port, where the `/admin*`
+> 404 gate no longer applies. Only set it behind a proxy you trust to set `Host`, together with
+> `KnockBox__ForwardedHeaders: "true"`.
+
 ### Behind a reverse proxy (TLS)
 
 Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-HTTP behind it:
@@ -156,6 +266,13 @@ Terminate TLS at your proxy (Caddy, nginx, Traefik) and run the container plain-
    (the server routes by `Host` header).
 3. Lock down origins: `KnockBox__AllowedOrigins__0/1` to your two public origins.
 4. Make sure the proxy allows WebSocket upgrade on `/ws`.
+5. Leave the **admin** port (8082) out of the proxy unless you are deliberately exposing the portal —
+   see [The admin portal](#the-admin-portal). Publishing it also makes the session cookie `Secure`
+   automatically, since the server sees the forwarded `https` scheme.
+6. If you *do* proxy the admin origin, **raise the request-body limit** or uploading a game package
+   fails before the server ever sees it. nginx defaults to 1 MB (`client_max_body_size 512m;`); Caddy
+   and Traefik have no default cap. Cloudflare's free plan caps uploads at **100 MB** and cannot be
+   raised — upload larger packages over a tunnel-free path, or install from a marketplace instead.
 
 ### Behind Cloudflare Tunnel (cloudflared)
 
@@ -305,19 +422,29 @@ win-x64/
 ├─ games/                # auto-created on first run — copy .kbg packages or game folders here
 ├─ games-compressed/     # auto-created — regenerable .br/.gz asset cache (rebuilt from games/)
 ├─ games-unpacked/       # auto-created — games extracted from .kbg packages (regenerable)
+├─ admin.secret          # created when you set an admin password — NOT regenerable; delete to reset
+├─ admin-settings.json   # operator policy (game availability, maintenance mode); delete to reset it
 └─ logs/                 # daily rolling logs
 ```
 
-- With no configuration the exe serves the shell at `http://localhost:5114` and the games origin at
-  `http://localhost:5115` — open `http://localhost:5114`. (Both origins must be served for games to
-  load; the exe binds both automatically when you haven't set ports yourself.)
-- To change the ports, set `ASPNETCORE_URLS` (e.g. `http://0.0.0.0:5114;http://0.0.0.0:5115`) together
-  with `KnockBox:GamesPort` so the games origin matches. (The Docker image instead uses
-  `ASPNETCORE_HTTP_PORTS="8080;8081"` — same effect, the newer port-only form.) Any explicit setting
-  takes over from the built-in default above.
-- For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow both ports through Windows
-  Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is derived from the
-  same host automatically.
+- With no configuration the exe serves the shell at `http://localhost:5114`, the games origin at
+  `http://localhost:5115`, and the admin portal at `http://localhost:5116` — open
+  `http://localhost:5114`. (The first two must both be served for games to load; the exe binds all
+  three automatically when you haven't set ports yourself.)
+- To change the ports, set `ASPNETCORE_URLS` — listing **every** origin, e.g.
+  `http://0.0.0.0:5114;http://0.0.0.0:5115;http://0.0.0.0:5116` — together with `KnockBox:GamesPort`
+  and `KnockBox:AdminPort` so those origins match. (The Docker image instead uses
+  `ASPNETCORE_HTTP_PORTS="8080;8081;8082"` — same effect, the newer port-only form.) **Any explicit
+  setting takes over from the built-in default above completely**: it replaces the port list rather
+  than adding to it, so an origin you leave out is never listened on and answers `connection refused`
+  — even though `GamesPort`/`AdminPort` still route it. Watch the startup log: it prints the address
+  each origin actually bound, and warns `Admin portal is UNREACHABLE …` when the admin port isn't
+  among them.
+- For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow the **shell and games** ports
+  through Windows Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is
+  derived from the same host automatically. Leave the **admin** port on `localhost` (don't add
+  `0.0.0.0:5116`, don't open it in the firewall) unless you have set an admin password already — see
+  [The admin portal](#the-admin-portal).
 - To store games (and/or the two derived caches) elsewhere — a data drive, a NAS share — set
   `KnockBox:GamesRoot`, `KnockBox:GamesCompressedRoot` and/or `KnockBox:GamesUnpackedRoot` to your
   paths. Three interchangeable
@@ -352,7 +479,15 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `MaxPackageBytes` / `MaxPackageEntries` / `MaxPackageRatio` | 512 MiB / `20000` / `200` | Ceilings that stop a malformed or malicious package filling the disk. Raise `MaxPackageBytes` only if you host a genuinely larger game; `0` disables a check. |
 | `GamesPollSeconds` | `0` (off; `10` in Docker) | Polling fallback for games hot-reload where file watching doesn't work (bind mounts). |
 | `GamesPort` / `GamesHost` / `GamesOrigin` | `5115` / — / — | How the separate game origin is addressed (port in dev, subdomain or explicit origin in prod). |
+| `AdminPort` / `AdminHost` / `AdminOrigin` | `5116` (`8082` Docker) / — / — | How the admin portal origin is addressed. Do **not** expose it publicly — see [The admin portal](#the-admin-portal). |
+| `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. |
+| `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
+| `AdminSettingsPath` | `admin-settings.json` next to the password file | Persisted operator policy: per-game availability and maintenance mode. Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to reset all policy. |
+| `AdminStaleLobbyMinutes` | `30` | Idle minutes before the portal calls a lobby stale (and "Purge Stale" collects it). `0` judges staleness only by "nobody in it is connected". |
+| `AdminLogBufferSize` | `2000` | Log events kept in memory for the portal's live log view. Older entries are only in the rolling files under `LogsRoot`. |
+| `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. `0` measures on every read. |
 | `ForwardedHeaders` | `false` | Trust `X-Forwarded-*` from a fronting reverse proxy. |
+| `KnownProxies` | `[]` (any forwarder) | Which addresses may set `X-Forwarded-*` — IPs and/or CIDR ranges. Set it whenever `ForwardedHeaders` is on: empty means a client can pick the IP your per-IP limits key on. |
 | `AllowedOrigins` | `[]` (allow all) | `/ws` Origin allowlist — set for production. |
 
 ### Abuse protection (public servers)
@@ -366,3 +501,19 @@ Defaults are sized for casual play; `0` disables any of them:
 | `GameMessagesPerSecond` / `GameMessagesBurst` | `30` / `60` | Per-connection in-game message rate; sustained violation closes the socket terminally (`1008`). |
 | `ControlMessagesPerSecond` / `ControlMessagesBurst` | `5` / `10` | Same, for shell/lobby traffic. |
 | `LobbyCreatesPerMinute` | `10` | Per-player lobby-creation rate (rejects the create, keeps the connection). |
+| `AdminLoginAttemptsPerMinute` | `10` | Per-IP admin password attempts (`429` + `Retry-After` over the limit). Guards CPU as much as the password: each attempt costs ~0.4 s of a core. Needs `ForwardedHeaders` + `KnownProxies` behind a proxy. |
+| `AdminLoginAttemptsPerMinuteGlobal` | `60` | The same cap across all callers — the CPU ceiling that holds even when the per-IP key is a header the caller wrote. |
+| `MaxLobbies` | `0` (unlimited) | Cap on simultaneous lobbies platform-wide. |
+| `MaxLobbiesPerGame` | `0` (unlimited) | Cap per game, so one popular title can't take every slot. |
+
+**Everything above except the handshake timeout and the two admin-login caps is editable at runtime** from the
+portal's Platform tab, which persists the change and applies it immediately — including to sockets that are
+already connected, which is the point: when you need to tighten a limit, the traffic you are tightening
+against is already there. The values here are what a fresh deployment starts from.
+
+Two more knobs worth setting deliberately on a public server:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `WebhooksEnabled` | `true` | Outbound alerts to Discord/Slack/a monitoring endpoint. `false` ⇒ the server holds no HTTP client for it and makes no outbound request at all. With it on but no endpoint registered, nothing leaves either. |
+| `MetricSampleSeconds` | `15` | How often the server samples counters for the dashboard's history graphs. `0` = off. A sample is a handful of numbers; `MetricHistoryPoints` (default 240) bounds the memory. |

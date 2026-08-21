@@ -125,10 +125,17 @@ public sealed class JsAuthorityRuntime(
         var args = new JsValue[jsonArgs.Length];
         for (var i = 0; i < jsonArgs.Length; i++) args[i] = _parser!.Parse(jsonArgs[i]);
 
-        JsValue result;
+        // Serialization is INSIDE the classifying try, not after it. JSON.stringify semantics throw a
+        // JavaScriptException of their own for a cyclic object or a BigInt, and a module returning a
+        // structure with a back-reference is an ordinary game-logic bug — exactly the contained,
+        // five-strikes case. Left outside, that throw reached the actor unclassified and closed the
+        // lobby for everyone on the very first occurrence.
         try
         {
-            result = engine.Call(fn, instance, args);
+            var result = engine.Call(fn, instance, args);
+            return result.IsNull() || result.IsUndefined()
+                ? "null"
+                : _serializer!.Serialize(result).AsString();
         }
         // Order matters: constraint types are more specific than the JintException base.
         catch (Exception ex) when (ex is MemoryLimitExceededException or StatementsCountOverflowException
@@ -144,9 +151,6 @@ public sealed class JsAuthorityRuntime(
         {
             throw new AuthorityConstraintException($"{export}: {ex.Message}", ex);
         }
-
-        if (result.IsNull() || result.IsUndefined()) return "null";
-        return _serializer!.Serialize(result).AsString();
     }
 
     public AuthorityEffects DrainEffects()

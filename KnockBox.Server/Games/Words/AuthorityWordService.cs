@@ -102,11 +102,28 @@ public sealed class AuthorityWordService(ILogger<AuthorityWordService> logger) :
                 _contentHashByPath.TryRemove(statKey, out _);
     }
 
-    // Decode the file (ASCII words; UTF-8 is a superset so BOM/non-ASCII survive to be skipped by
-    // WordPool.Build) and split into lines. Build trims each line and drops blanks, so trailing \r and
-    // whitespace are handled there.
+    // Decodes the file one line at a time (ASCII words; UTF-8 is a superset so BOM/non-ASCII survive to be
+    // skipped by WordPool.Build). Build trims each line and drops blanks, so trailing \r and whitespace are
+    // handled there.
+    //
+    // Lazily, rather than decoding the whole file and calling Split: AuthorityMaxWordFileBytes permits a
+    // multi-megabyte dictionary, and for a 4 MB / ~370k-word list that shortcut cost an 8 MB UTF-16 string
+    // plus a 370k-element array of references (large enough for the LOH) — tens of megabytes of transient
+    // garbage, spiking inside the request that creates the first lobby of a word game, all to build a
+    // structure whose entire purpose is a compact packed-ASCII representation. Yielding per line keeps the
+    // peak at one line.
     private static IEnumerable<string> SplitLines(byte[] data)
-        => Encoding.UTF8.GetString(data).Split('\n');
+    {
+        var start = 0;
+        while (start <= data.Length)
+        {
+            var newline = Array.IndexOf(data, (byte)'\n', start);
+            var end = newline < 0 ? data.Length : newline;
+            yield return Encoding.UTF8.GetString(data, start, end - start);
+            if (newline < 0) break;
+            start = newline + 1;
+        }
+    }
 
     // Game ids are matched case-insensitively everywhere (GameCatalog uses OrdinalIgnoreCase); the
     // dictionary key is the author's literal, matched exactly against what the module passes to
