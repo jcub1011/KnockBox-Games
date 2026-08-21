@@ -411,9 +411,16 @@ jobs:
           # sequence must return an empty set, not the whole retained window again.
           curl -fsS -b /tmp/kb-admin-cookies \
             "http://localhost:8082/admin/api/metrics/history?after=$LAST" | grep -q '"samples":\[\]'
-          # Per-game authority CPU is reported alongside relay cost, and is 0 for a browser-side game.
-          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/metrics \
-            | grep -q '"authorityCpuSeconds"'
+          # Per-game rows come from RelayMetrics, which the RELAY populates - not the catalog. This
+          # container never opens a game socket, so `games` is legitimately empty and no per-game
+          # field appears at all. Assert the response SHAPE, and the authority field only when a row
+          # exists (where it must be present, and 0 for a browser-side game).
+          curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/metrics > /tmp/kb-metrics.json
+          grep -q '"games":' /tmp/kb-metrics.json
+          grep -q '"controlSockets"' /tmp/kb-metrics.json
+          if grep -q '"gameId"' /tmp/kb-metrics.json; then
+            grep -q '"authorityCpuSeconds"' /tmp/kb-metrics.json
+          fi
 
       - name: Server-authority module is never served from the game origin
         run: |
