@@ -32,6 +32,9 @@ games-unpacked
 logs
 docs
 clients
+# ...except the addon manifest, which KnockBoxSdk embeds into the assembly, so `dotnet publish`
+# needs it inside the image build. The rest of clients/ is addon SOURCE the server never serves.
+!clients/addons.manifest.json
 KnockBox.Server.Tests
 KnockBox.Contracts.Tests
 !**/.gitignore
