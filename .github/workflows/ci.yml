@@ -544,7 +544,7 @@ jobs:
           cp /tmp/packaged.kbg /tmp/kb-catalog/ci/fixture/releases/download/v1.2.3/tampered-demo.kbg
           cat > /tmp/kb-catalog/CATALOG.json <<JSON
           {
-            "schemaVersion": "1.0",
+            "schemaVersion": "1.0.0",
             "name": "CI fixture catalog",
             "revision": 1,
             "plugins": [
