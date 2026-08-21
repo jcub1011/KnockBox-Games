@@ -43,8 +43,8 @@ Addon options:
   --download-base <url>  Release download host (default: ${DEFAULT_DOWNLOAD_BASE}).
   --app-version <v>      Server version to judge min/maxAppVersion against, for check.
   --offline              check only: skip the index, just verify local files.
-  --keep-modified        add only: leave locally-edited files alone instead of restoring them.
-  --force                update only: overwrite locally-edited files.
+  --keep-modified        add/update: leave locally-edited files alone instead of overwriting them.
+  --force                update only: proceed even though local edits would be overwritten.
   -h, --help             Show this help.
 
 Docs: docs/ADDONS.md`;
@@ -80,8 +80,10 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /** Report what an install/reinstall/update actually did to the working tree. */
 function reportWrite(result) {
   if (result.written.length) console.log(`  installed ${plural(result.written.length, "file")}`);
+  if (result.updated.length) console.log(`  updated   ${plural(result.updated.length, "file")}`);
   // Named individually, never just counted: this is a developer's edit being discarded, and they are
-  // entitled to know which file it was even when they asked for it.
+  // entitled to know which file it was even when they asked for it. Files that merely changed between
+  // versions are counted above instead — calling those "discarded" would cry wolf on every update.
   for (const f of result.restored) console.log(`  restored  ${f} (local changes discarded)`);
   for (const f of result.skipped) console.log(`  kept      ${f} (locally modified, --keep-modified)`);
   for (const f of result.pruned) console.log(`  removed   ${f} (not in this version)`);
@@ -108,11 +110,30 @@ async function runAddon(argv) {
     }
 
     case "update": {
-      if (!id) throw new AddonError("`addon update` needs an addon id, e.g. `knockbox addon update godot`.");
-      const result = await update(id, { ...opts, version: opts.to ?? opts.version });
-      if (result.upToDate) { console.log(`✓ ${result.id} is already ${result.version}`); return; }
-      console.log(`✓ ${result.id} ${result.previousVersion} -> ${result.version}`);
-      reportWrite(result);
+      // No id updates everything installed — the command someone actually types when they mean "get
+      // me current". A per-addon try/catch rather than letting the first refusal abort the run: one
+      // addon with a local edit must not silently leave the others un-updated, which would be a
+      // half-done update reported as a single failure.
+      const ids = id ? [id] : list(opts).addons.map((a) => a.id);
+      if (!ids.length) {
+        console.log(`no addons recorded in ${MANIFEST_NAME} — install one with \`knockbox addon add godot\`.`);
+        return;
+      }
+
+      let refused = false;
+      for (const target of ids) {
+        try {
+          const result = await update(target, { ...opts, version: opts.to ?? opts.version });
+          if (result.upToDate) { console.log(`✓ ${result.id} is already ${result.version}`); continue; }
+          console.log(`✓ ${result.id} ${result.previousVersion} -> ${result.version}`);
+          reportWrite(result);
+        } catch (err) {
+          if (!(err instanceof AddonError)) throw err;
+          console.error(`✗ ${target}: ${err.message}`);
+          refused = true;
+        }
+      }
+      if (refused) process.exitCode = 1;
       return;
     }
 

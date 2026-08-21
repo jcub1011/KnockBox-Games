@@ -404,24 +404,38 @@ export function readArchive(buffer, { expectedSha256 } = {}) {
  * when it wasn't.
  */
 export function extractInto(projectDir, files, { previous, keepModified = false } = {}) {
-  const written = [];
-  const restored = [];
+  // What the last install PUT there, per file. Comparing against this — rather than against the
+  // incoming bytes — is what separates "you edited this" from "this file simply changed between
+  // versions". Comparing on-disk to incoming conflates them, and during an update that mislabels
+  // every legitimately-changed file as a discarded local edit, which is alarming and false.
+  const recorded = previous?.files ?? {};
+
+  const written = [];    // newly created
+  const updated = [];    // replaced, and we had put the previous contents there ourselves
+  const restored = [];   // replaced, and the previous contents were NOT ours — a local edit is lost
   const skipped = [];
 
   for (const name of [...files.keys()].sort()) {
     const full = join(projectDir, name);
     const data = files.get(name);
     const existed = existsSync(full);
-    const differs = existed && sha256(readFileSync(full)) !== sha256(data);
+    const onDisk = existed ? sha256(readFileSync(full)) : null;
 
-    if (differs && keepModified) {
+    // A file we have no record of counts as locally modified: without a recorded hash there is
+    // nothing proving we are the ones who put it there, so overwriting it is worth reporting.
+    const locallyModified = existed && onDisk !== recorded[name];
+
+    if (locallyModified && keepModified) {
       skipped.push(name);
       continue;
     }
+    if (existed && onDisk === sha256(data)) continue;   // already exactly right; leave the mtime alone
+
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, data);
-    if (differs) restored.push(name);
-    else if (!existed) written.push(name);
+    if (!existed) written.push(name);
+    else if (locallyModified) restored.push(name);
+    else updated.push(name);
   }
 
   // Prune only what a PREVIOUS install recorded and this version no longer ships. Scoped to the
@@ -436,7 +450,7 @@ export function extractInto(projectDir, files, { previous, keepModified = false 
     pruned.push(name);
   }
 
-  return { written, restored, skipped, pruned };
+  return { written, updated, restored, skipped, pruned };
 }
 
 // ── Commands ───────────────────────────────────────────────────────────────────
@@ -509,10 +523,14 @@ export async function update(id, opts = {}) {
 
   if (entry.version === previous.version && opts.force !== true) {
     return { id, version: entry.version, previousVersion: previous.version, upToDate: true,
-      written: [], restored: [], skipped: [], pruned: [] };
+      written: [], updated: [], restored: [], skipped: [], pruned: [] };
   }
 
-  const result = extractInto(projectDir, files, { previous, keepModified: false });
+  // `--force --keep-modified` together are not a contradiction: force gets you past the refusal
+  // above, keep-modified then spares the specific files you have edited. That is the deliberate
+  // "I maintain a fork of one file" case. The record still stores the PUBLISHED hashes, so `check`
+  // keeps reporting those files as MODIFIED — which is the honest description of that state.
+  const result = extractInto(projectDir, files, { previous, keepModified: opts.keepModified === true });
   manifest.addons[id] = buildRecord({
     version: entry.version,
     files,

@@ -6,7 +6,7 @@
 // the kind of thing a later refactor "tidies" into consistency, so both directions are pinned.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -250,6 +250,66 @@ describe("update", () => {
     const result = await update("fake", { dir, ...v2.opts, force: true });
     expect(result.version).toBe("2.0.0");
     expect(read(`${INSTALL_TO}/kb_core.gd`)).toBe("# core v2\n");
+  });
+
+  it("calls a file that changed between versions 'updated', not a discarded local edit", async () => {
+    // The distinction is the difference between an accurate report and one that cries wolf: during an
+    // update most files legitimately differ, and labelling those "local changes discarded" would train
+    // the reader to ignore the line that actually matters.
+    const v1 = publish({ version: "1.0.0", files: { [`${INSTALL_TO}/kb_core.gd`]: "# v1\n" } });
+    await add("fake", { dir, ...v1.opts });
+
+    const v2 = publish({ version: "2.0.0", files: { [`${INSTALL_TO}/kb_core.gd`]: "# v2\n" } });
+    const result = await update("fake", { dir, ...v2.opts });
+
+    expect(result.updated).toEqual([`${INSTALL_TO}/kb_core.gd`]);
+    expect(result.restored).toEqual([]);
+  });
+
+  it("still calls a genuine local edit discarded, under --force", async () => {
+    const v1 = publish({ version: "1.0.0", files: { [`${INSTALL_TO}/kb_core.gd`]: "# v1\n" } });
+    await add("fake", { dir, ...v1.opts });
+    writeFileSync(join(dir, `${INSTALL_TO}/kb_core.gd`), "# mine\n");
+
+    const v2 = publish({ version: "2.0.0", files: { [`${INSTALL_TO}/kb_core.gd`]: "# v2\n" } });
+    const result = await update("fake", { dir, ...v2.opts, force: true });
+
+    expect(result.restored).toEqual([`${INSTALL_TO}/kb_core.gd`]);
+    expect(result.updated).toEqual([]);
+  });
+
+  it("leaves an already-correct file untouched rather than rewriting it", async () => {
+    const p = publish();
+    await add("fake", { dir, ...p.opts });
+    const before = statSync(join(dir, `${INSTALL_TO}/kb_core.gd`)).mtimeMs;
+    const again = await add("fake", { dir, ...p.opts });
+    expect(again.written).toEqual([]);
+    expect(again.updated).toEqual([]);
+    expect(statSync(join(dir, `${INSTALL_TO}/kb_core.gd`)).mtimeMs).toBe(before);
+  });
+
+  it("--force --keep-modified updates everything except the files you edited", async () => {
+    // The fork-maintainer case: get the new version, but keep my one patched file. The record still
+    // stores the PUBLISHED hash, so `check` keeps flagging it — which is the truth about that file.
+    const v1 = publish({ version: "1.0.0", files: {
+      [`${INSTALL_TO}/kb_core.gd`]: "# v1\n", [`${INSTALL_TO}/other.gd`]: "# other v1\n",
+    } });
+    await add("fake", { dir, ...v1.opts });
+    writeFileSync(join(dir, `${INSTALL_TO}/kb_core.gd`), "# my fork\n");
+
+    const v2 = publish({ version: "2.0.0", files: {
+      [`${INSTALL_TO}/kb_core.gd`]: "# v2\n", [`${INSTALL_TO}/other.gd`]: "# other v2\n",
+    } });
+    const result = await update("fake", { dir, ...v2.opts, force: true, keepModified: true });
+
+    expect(result.skipped).toEqual([`${INSTALL_TO}/kb_core.gd`]);
+    expect(result.updated).toEqual([`${INSTALL_TO}/other.gd`]);
+    expect(read(`${INSTALL_TO}/kb_core.gd`)).toBe("# my fork\n");
+    expect(read(`${INSTALL_TO}/other.gd`)).toBe("# other v2\n");
+    expect(manifest().addons.fake.version).toBe("2.0.0");
+
+    const report = await check({ dir, index: v2.index });
+    expect(report.addons[0].modified).toEqual([`${INSTALL_TO}/kb_core.gd`]);
   });
 
   it("refuses to update something that was never installed", async () => {

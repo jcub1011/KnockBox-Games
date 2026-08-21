@@ -76,13 +76,13 @@ exactly as if you had used the CLI. A test asserts that equality, because nothin
 | Command | Does |
 | --- | --- |
 | `add <id> [--version <v>]` | Install, or **reinstall to repair** — see below. |
-| `update <id> [--to <v>]` | Move to another version. |
+| `update [id] [--to <v>]` | Move to another version. No id updates every addon installed. |
 | `check [--app-version <v>]` | Verify the installed files and report available updates. Changes nothing. |
 | `list` | What's installed, from `knockbox.json`. |
 | `remove <id>` | Uninstall, removing exactly the files that were installed. |
 
 Options: `--dir <dir>` (project directory), `--index <url|path>`, `--download-base <url>`,
-`--offline` (check only), `--keep-modified` (add only), `--force` (update only).
+`--offline` (check only), `--keep-modified` (add/update), `--force` (update only).
 
 ### Repair: `add` restores, `check` diagnoses
 
@@ -113,7 +113,12 @@ update is not a failure** and does not affect the exit code.
 - **`add`** at the same version is you saying "make this pristine". Overwriting is the whole request,
   so it overwrites and reports. `--keep-modified` opts out.
 - **`update`** moves to a *different* version, where silently discarding your edit is a surprise you
-  did not ask for. It refuses, names the file, and points at `--force`.
+  did not ask for. It refuses, names the file, and points at `--force`. Updating several addons at
+  once, one refusal does not block the others — the command reports it and exits non-zero.
+
+`--force --keep-modified` together are not a contradiction: force gets past the refusal, keep-modified
+then spares the specific files you have edited. That is the deliberate "I maintain a fork of one file"
+case, and `check` goes on reporting those files as MODIFIED, which is the truth about them.
 
 The Godot in-editor actions mirror this split for the same reason.
 

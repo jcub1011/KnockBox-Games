@@ -7,9 +7,163 @@ npx knockbox pack  --in dist --manifest GAME.json   # package a game into a .kbg
 npx knockbox addon add godot                        # install / update / verify a client addon
 ```
 
-`knockbox addon` is documented in [`docs/ADDONS.md`](../../docs/ADDONS.md); the rest of this file is
-the packer. `knockbox-pack` remains as an alias for the packer, and bare flags with no subcommand
-still run it, so every existing `knockbox-pack --in …` invocation keeps working.
+`knockbox-pack` remains as an alias for the packer, and bare flags with no subcommand still run it,
+so every existing `knockbox-pack --in …` invocation keeps working. The full addon reference — index
+format, trust model, engine-specific install — is [`docs/ADDONS.md`](../../docs/ADDONS.md).
+
+## addon — keeping the client libraries current
+
+The **addons** are the client libraries your game embeds: the Godot 4 GDScript addon (`godot`), the
+Phaser 3 client (`phaser`), and the vanilla JS SDK (`web`). They are *vendored* — they live in your
+repo and ship inside your build — so unlike a server-side dependency they do not update themselves.
+This is the loop for keeping them current.
+
+> Plain HTML5 games usually need none of this: the platform serves the SDK at `/knockbox.js`, so you
+> are always on the server's own version. The `web` addon is for vendoring a pinned copy instead
+> (offline development, or an engine export that would rather bundle than depend on the platform).
+
+### Install
+
+```sh
+npx knockbox addon add godot        # or phaser, or web
+```
+
+Two things land in your project, and **both belong in version control**:
+
+```
+addons/knockbox/…      the addon's files
+knockbox.json         which version you installed, plus a sha256 per file
+```
+
+`knockbox.json` is what makes everything below possible: it is how `check` knows whether a file has
+been altered, how repair knows what to put back, and what `knockbox pack` reads to stamp the SDK
+version into your `.kbg`.
+
+### The update loop
+
+```sh
+npx knockbox addon check            # anything to do?
+npx knockbox addon update           # do it (no id = every addon installed)
+# rebuild + repack your game so the new client code actually ships
+```
+
+`check` changes nothing and is safe to run anywhere, including CI:
+
+```
+  godot    1.0.0      update available: 1.1.0
+  web      1.0.0      update available: 1.1.0
+```
+
+It exits non-zero for a **broken or incompatible** install, but **zero** when an update is merely
+available — a newer version existing is not a build failure, and a check that failed on it could not
+be left in CI.
+
+`update` moves each addon to the newest published version:
+
+```
+✓ godot 1.0.0 -> 1.1.0
+  updated   1 file
+✓ web 1.0.0 -> 1.1.0
+```
+
+`updated` counts files that changed between the two versions. Files you edited yourself are reported
+separately and by name — see below.
+
+**Updating the addon does not update your build.** The addon's code is compiled into your Godot
+export or bundled by Vite, so after updating you have to rebuild and repack (`knockbox pack`) for
+players to get it. Nothing enforces that; the SDK stamp in the packaged `GAME.json` is what lets an
+operator notice a game still running on an old client.
+
+### When you have edited an addon file
+
+`update` refuses rather than silently discarding the change, and names the file:
+
+```
+✗ godot: refusing to update 'godot': these files differ from the installed 1.0.0 and the change
+  would be lost:
+  addons/knockbox/kb_net.gd
+Re-run with --force to discard them, or `knockbox addon add godot` to restore 1.0.0 first.
+✓ web 1.0.0 -> 1.1.0
+```
+
+Note the other addon still updated. One addon with a local edit does not block the rest; the command
+exits non-zero so you cannot miss it.
+
+From there you have three options:
+
+| You want to | Run |
+| --- | --- |
+| Throw the edit away and update | `npx knockbox addon update godot --force` |
+| Throw the edit away, stay on this version | `npx knockbox addon add godot` |
+| Keep the edit and update everything else | `npx knockbox addon update godot --force --keep-modified`† |
+
+† `--keep-modified` leaves altered files untouched, which means you are now maintaining a fork of
+those files. `check` will keep reporting them, deliberately.
+
+The two commands take **opposite defaults**, and it is worth knowing why:
+
+- **`add`** at the version you already have means "make this pristine" — overwriting is the entire
+  request, so it overwrites and tells you what it replaced. That is also why there is no separate
+  `reset` command.
+- **`update`** changes to a *different* version, where losing your edit is a surprise you did not ask
+  for — so it stops and makes you say `--force`.
+
+### Repairing a broken install
+
+`check` diagnoses, `add` repairs:
+
+```
+$ npx knockbox addon check
+  godot    1.0.0      NEEDS REPAIR
+    MODIFIED addons/knockbox/kb_core.gd
+    MISSING  addons/knockbox/kb_net.gd
+
+repair with `knockbox addon add <id>` — it reinstalls the recorded version.
+
+$ npx knockbox addon add godot
+✓ reinstalled godot 1.0.0
+  installed 1 file
+  restored  addons/knockbox/kb_core.gd (local changes discarded)
+```
+
+Repair only touches files recorded in `knockbox.json`. Your own scripts living in
+`addons/knockbox/` are never removed, and neither is the directory holding them.
+
+### Pinning and rollback
+
+```sh
+npx knockbox addon add godot --version 1.0.0     # install a specific version
+npx knockbox addon update godot --to 1.0.0       # move back to one
+```
+
+Older versions are served from the published index's history, never from a guessed URL — so a pinned
+version is one with a verified `sha256` behind it. A version the index does not publish is refused
+rather than fetched unverified.
+
+### Godot, without a terminal
+
+Godot developers do not need this CLI at all. Install from **Project → AssetLib**, then use
+**Project → Tools**:
+
+- **KnockBox: check for addon updates** — the `update` equivalent, including the refusal on an edited
+  file.
+- **KnockBox: reinstall addon** — the `add` repair equivalent.
+
+Same index, same `sha256` verification, same `knockbox.json`. The two paths are interchangeable: a
+project set up in the editor can be updated by the CLI later, and vice versa.
+
+### Command reference
+
+| Command | Does |
+| --- | --- |
+| `addon add <id> [--version <v>]` | Install, or reinstall to repair. |
+| `addon update [id] [--to <v>]` | Update; no id updates everything installed. |
+| `addon check [--app-version <v>]` | Verify files, report updates. Changes nothing. |
+| `addon list` | What is installed, from `knockbox.json`. |
+| `addon remove <id>` | Uninstall exactly the files that were installed. |
+
+Options: `--dir <dir>`, `--index <url|path>`, `--download-base <url>`, `--offline` (check),
+`--keep-modified` (add), `--force` (update).
 
 ## pack — the game packer
 
@@ -159,6 +313,97 @@ never ships.
 > Keep this in sync with the server: if the `GameManifest` contract or `GameCatalog` rules change,
 > update the validation in `pack-game.mjs` too. The compress-or-store decision in `kbg.mjs`
 > likewise mirrors `GameAssetPrecompressor.ShouldCompress`.
+
+## Releasing a new addon version (maintainers)
+
+For anyone shipping the addons and this CLI — not needed to *use* either.
+
+### One version number
+
+`clients/addons.manifest.json` `sdkVersion` is the only real version number in the repo. It covers
+all three addons **and** this CLI, and releasing means editing that one line. Everything else holds
+the sentinel `0.0.0-dev` and is filled in by the build:
+
+| Declaration | Filled in by |
+| --- | --- |
+| Godot `plugin.cfg` | `tools/build-addons.mjs`, into the release archive |
+| `tools/pack-game/package.json` | CI, just before `npm publish` |
+| `KnockBoxSdk` (the server) | reads the manifest, embedded into the assembly at build time |
+| `clients/phaser/`, `web/` `package.json` | nothing — both are private and unpublished |
+
+`AddonManifestTests` asserts each in-repo declaration is **still the sentinel**, rather than that it
+equals `sdkVersion`. That is the point: checking equality still leaves several real numbers that have
+to be edited together, which is the arrangement that had already drifted three ways. A stale version
+now cannot exist, because nothing committed claims one.
+
+### The release
+
+```sh
+# 1. Make the addon change.
+$EDITOR clients/godot/addons/knockbox/kb_net.gd      # or clients/phaser/..., or web/...
+
+# 2. Bump the version. One file, one line.
+$EDITOR clients/addons.manifest.json                 # "sdkVersion": "1.1.0"
+
+# 3. Verify.
+dotnet test KnockBox-Games.slnx --nologo             # version consistency + client parity
+cd tools/pack-game && npm test
+
+# 4. Optional: build the archives and inspect them (CI does this on every PR anyway).
+node tools/build-addons.mjs
+
+# 5. Merge to main, then tag that commit.
+git tag addons-v1.1.0 && git push origin addons-v1.1.0
+```
+
+**Merge before tagging.** The `addons` CI job checks out `main`, not the tagged commit, so the bump
+has to be on `main` or its tag-vs-manifest guard reads a stale value and fails the release.
+
+### Two tag namespaces
+
+| Tag | Releases | Version it names |
+| --- | --- | --- |
+| `v1.2.3` | the container image | `KnockBox.Server.csproj` `<Version>` |
+| `addons-v1.2.3` | addon archives, `ADDONS.json`, this npm package | `addons.manifest.json` `sdkVersion` |
+
+They are separate because the two version numbers are independent, and a tag has to name exactly one
+of them. Sharing `v*` broke both directions: a server-only release failed the addon job's guard for no
+real reason, and an addon-only release published an image *labelled* with a version its own assembly
+did not report.
+
+### What CI does on an `addons-v*` tag
+
+1. Verifies the tag matches `sdkVersion`.
+2. Builds one archive per addon, stamping the real version in, and generates `ADDONS.json` — whose
+   `sha256` values are the trust root every install verifies against, which is why the index is
+   generated and never hand-edited.
+3. Uploads the archives to the GitHub release (creating it if it does not exist yet).
+4. Commits the regenerated index to `main`. Previous versions are retained in the index's history, so
+   `--version <old>` stays installable.
+5. Publishes this package to npm.
+
+### How it reaches users
+
+| Path | When they get it |
+| --- | --- |
+| `npx knockbox addon update` | immediately — npx resolves the latest CLI, and the index is live on `main` |
+| Godot **Project → Tools → check for addon updates** | immediately — reads the same index |
+| Godot **AssetLib** | after you resubmit there (manual, with a review round) |
+
+The index is the live channel; AssetLib is only the first-install channel for Godot. An existing
+Godot project gets the update from the in-editor check without waiting on a resubmission.
+
+### npm publishing
+
+Publishing uses **trusted publishing (OIDC)** — there is no npm token in this repo. Two consequences:
+
+- The trusted publisher matches on the workflow **filename**, so renaming `.github/workflows/ci.yml`
+  silently breaks publishing until the publisher config on npmjs.com is updated to match.
+- It needs npm ≥ 11.5.1 and Node ≥ 22.14.0. The job upgrades npm before publishing, because a
+  too-old npm fails with an *auth* error rather than a version error — which reads as a broken
+  publisher and sends you debugging the wrong thing.
+
+Provenance attestations are generated automatically; no `--provenance` flag is needed.
 
 ## Tests
 
