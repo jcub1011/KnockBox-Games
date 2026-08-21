@@ -84,6 +84,12 @@ COPY KnockBox.Contracts/ KnockBox.Contracts/
 COPY KnockBox.Server/ KnockBox.Server/
 # web/ must be present before publish — the csproj bakes it into the output as content.
 COPY web/ web/
+# The addon manifest is EMBEDDED into the assembly (Hosting/KnockBoxSdk.cs reads the one authoritative
+# sdkVersion from it), so it has to exist in the build context too. Only the one file: the rest of
+# clients/ is the addon SOURCE, which the server never serves and must not bloat the image.
+# The `aot` CI job publishes from a full checkout and so cannot catch this — Docker's selective COPY is
+# the only place a missing build input shows up.
+COPY clients/addons.manifest.json clients/
 # AOT publish needs an explicit RID; it produces a native apphost, so UseAppHost stays on (the old
 # framework-dependent flag is gone). Output is the self-contained native binary + the baked web/.
 RUN dotnet publish KnockBox.Server/KnockBox.Server.csproj -c $BUILD_CONFIGURATION -r linux-x64 -o /app/publish

@@ -19,7 +19,11 @@ public class PackageMarkerTests : IDisposable
     [Fact]
     public void Round_trips_stamp_source_and_root()
     {
-        PackageMarker.Write(_dir, @"C:\somewhere\alpha-chain-v2.kbg", PackageMarker.ManagedRoot, (12345L, 678L));
+        // A platform-native absolute path, not a hard-coded Windows one: Path.GetFileName (which is
+        // what Write uses) does not treat a backslash as a separator on Linux, so the literal
+        // @"C:\somewhere\..." this used to pass made the ENTIRE string the "file name" on the CI runner.
+        var elsewhere = Path.Combine(Path.GetTempPath(), "somewhere", "alpha-chain-v2.kbg");
+        PackageMarker.Write(_dir, elsewhere, PackageMarker.ManagedRoot, (12345L, 678L));
 
         var marker = PackageMarker.TryRead(_dir);
 
