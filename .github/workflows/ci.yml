@@ -478,6 +478,11 @@ jobs:
           mkdir -p /tmp/pkgsrc && cp -r games/tictactoe/. /tmp/pkgsrc/
           sed -i 's/"id": *"tictactoe"/"id": "packaged-demo"/' /tmp/pkgsrc/GAME.json
           grep -q '"packaged-demo"' /tmp/pkgsrc/GAME.json  # fail loudly if the manifest shape changed
+          # The marketplace validates the downloaded package's GAME.json `version` against the catalog
+          # entry (MARKETPLACE.md 3, check 5). The packer's --version stamps the KBG HEADER, not the
+          # manifest, so the manifest needs it too or the install is refused as a version mismatch.
+          jq '.version = "1.2.3"' /tmp/pkgsrc/GAME.json > /tmp/pkgsrc/GAME.json.tmp
+          mv /tmp/pkgsrc/GAME.json.tmp /tmp/pkgsrc/GAME.json
           # --quality 4 keeps CI fast; the format is identical either way.
           node tools/pack-game/pack-game.mjs \
             --in /tmp/pkgsrc --manifest /tmp/pkgsrc/GAME.json \
