@@ -580,11 +580,18 @@ jobs:
             ]
           }
           JSON
+          # nginx:alpine IGNORES NGINX_PORT: its shipped default.conf statically listens on 80, and the
+          # envsubst entrypoint only templates /etc/nginx/templates/*.template. The sidecar was therefore
+          # never on 9000 - every consumer got connection-refused while this step still reported success.
+          printf 'server { listen 9000; root /usr/share/nginx/html; }\n' > /tmp/kb-catalog.conf
           docker run -d --name kb-catalog --network container:kb \
             -v /tmp/kb-catalog:/usr/share/nginx/html:ro \
-            -e NGINX_PORT=9000 nginx:alpine
+            -v /tmp/kb-catalog.conf:/etc/nginx/conf.d/default.conf:ro \
+            nginx:alpine
+          # Fatal on timeout. A readiness loop that gives up quietly is exactly what hid the above.
           for i in $(seq 1 30); do
             docker exec kb-catalog curl -fsS http://127.0.0.1:9000/CATALOG.json >/dev/null 2>&1 && break
+            [ "$i" = 30 ] && { echo "catalog sidecar never answered on 127.0.0.1:9000"; docker logs kb-catalog; exit 1; }
             sleep 1
           done
 
