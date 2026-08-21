@@ -15,8 +15,8 @@
         "repo": "jcub1011/KnockBox-Games",
         "tag": "addons-v1.0.0",
         "asset": "knockbox-godot-1.0.0.zip",
-        "sha256": "921cf40ebf3bbcc938a0e01b67edb235dbd9858898164564d3cba5dda135ec9b",
-        "size": 64638
+        "sha256": "7383a14ead484dcb9dd61fe94150fd66d7e82e2bd8884f01a7bcfa686333242b",
+        "size": 63854
       },
       "versions": {
         "1.1.0": {
@@ -43,8 +43,8 @@
         "repo": "jcub1011/KnockBox-Games",
         "tag": "addons-v1.0.0",
         "asset": "knockbox-phaser-1.0.0.zip",
-        "sha256": "9faaadfc1172780aad6fc02e1b5bd353929db3b7006b5c4e0c26bc3230491fe7",
-        "size": 118410
+        "sha256": "9ffd7b16258d549fbbefee765ac69a601d617558dc78239bf71e4c23116ffc57",
+        "size": 116959
       },
       "versions": {
         "1.1.0": {
@@ -71,8 +71,8 @@
         "repo": "jcub1011/KnockBox-Games",
         "tag": "addons-v1.0.0",
         "asset": "knockbox-web-1.0.0.zip",
-        "sha256": "8cab2f7b8a745728ce788b6d12a4b4832adf7c4a1e0a6dd004f8c64e54dc86ac",
-        "size": 18669
+        "sha256": "918b2839e5152dce6b6fca4f0716e022d6da5adfeecce0c58e6d499b76fd5721",
+        "size": 18648
       },
       "versions": {
         "1.1.0": {

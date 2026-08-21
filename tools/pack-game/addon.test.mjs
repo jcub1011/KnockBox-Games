@@ -12,7 +12,8 @@ import { dirname, join } from "node:path";
 
 import {
   AddonError, MANIFEST_NAME, add, buildAddonArchive, buildRecord, check, downloadUrl,
-  incompatibility, inspectInstall, list, parseIndex, readArchive, remove, selectRelease, sha256,
+  contentHash, incompatibility, inspectInstall, list, normalizeText, parseIndex, readArchive, remove,
+  selectRelease, sha256,
   update, validateEntry,
 } from "./addon.mjs";
 import { writeStoredZip } from "./kbg.mjs";
@@ -533,7 +534,9 @@ describe("the archive is a complete install on its own", () => {
       }
       const record = JSON.parse(files.get(MANIFEST_NAME).toString("utf8")).addons[id];
       expect(record.version).toBe(declared.sdkVersion);
-      expect(record.files[`${addon.installTo}/LICENSE`]).toBe(sha256(Buffer.from(readFileSync(join(repoRoot, "LICENSE")))));
+      // contentHash, not sha256: the record is line-ending-insensitive on purpose, and this repo's
+      // LICENSE is CRLF in a Windows working tree while its committed blob is LF.
+      expect(record.files[`${addon.installTo}/LICENSE`]).toBe(contentHash(readFileSync(join(repoRoot, "LICENSE"))));
     }
   });
 
@@ -564,6 +567,71 @@ describe("the archive is a complete install on its own", () => {
 
     const report = await check({ dir, index });
     expect(report.addons[0]).toMatchObject({ id: "godot", clean: true, updateAvailable: false });
+  });
+});
+
+// ── Line endings ──────────────────────────────────────────────────────────────
+
+describe("line endings are not treated as edits", () => {
+  // The failure this prevents is not hypothetical. A git checkout picks line endings from the
+  // CONSUMER's platform and config (`core.autocrlf` on Windows, `* text=auto` in .gitattributes), so
+  // one commit is legitimately CRLF in one working tree and LF in another. With raw byte hashes,
+  // `check` reported every file MODIFIED on any machine other than the one that built the archive,
+  // and `add` "repaired" it by flipping line endings back — forever.
+  it("hashes content independent of CRLF vs LF", () => {
+    expect(contentHash(Buffer.from("a\r\nb\r\n"))).toBe(contentHash(Buffer.from("a\nb\n")));
+    // The raw hash still differs — that distinction is what the archive's own sha256 relies on.
+    expect(sha256(Buffer.from("a\r\nb\r\n"))).not.toBe(sha256(Buffer.from("a\nb\n")));
+  });
+
+  it("never rewrites bytes that contain a NUL (binary)", () => {
+    const binary = Buffer.from([0x41, 0x0d, 0x0a, 0x00, 0x42]);
+    expect(normalizeText(binary)).toEqual(binary);
+  });
+
+  it("reports a CRLF checkout of an unmodified install as clean", async () => {
+    const p = publish();
+    await add("fake", { dir, ...p.opts });
+
+    // Simulate what git does to a text file on a Windows checkout.
+    const target = join(dir, `${INSTALL_TO}/kb_core.gd`);
+    writeFileSync(target, readFileSync(target, "utf8").replaceAll("\n", "\r\n"));
+
+    const report = await check({ dir, index: p.index });
+    expect(report.addons[0].modified).toEqual([]);
+    expect(report.addons[0].clean).toBe(true);
+  });
+
+  it("does not rewrite a CRLF file on reinstall", async () => {
+    const p = publish();
+    await add("fake", { dir, ...p.opts });
+    const target = join(dir, `${INSTALL_TO}/kb_core.gd`);
+    writeFileSync(target, readFileSync(target, "utf8").replaceAll("\n", "\r\n"));
+    const crlf = readFileSync(target);
+
+    const result = await add("fake", { dir, ...p.opts });
+    expect(result.restored).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(readFileSync(target)).toEqual(crlf);   // left exactly as the consumer's git wrote it
+  });
+
+  it("still catches a real edit in a CRLF working tree", async () => {
+    const p = publish();
+    await add("fake", { dir, ...p.opts });
+    const target = join(dir, `${INSTALL_TO}/kb_core.gd`);
+    writeFileSync(target, "# my edit\r\nand more\r\n");
+
+    const report = await check({ dir, index: p.index });
+    expect(report.addons[0].modified).toEqual([`${INSTALL_TO}/kb_core.gd`]);
+  });
+
+  it("builds byte-identical archives from CRLF and LF sources", () => {
+    // Reproducibility of the published sha256: it must not depend on which machine ran the release.
+    const lf = archiveOf({ [`${INSTALL_TO}/a.gd`]: "x\ny\n" });
+    const crlfFiles = readArchive(archiveOf({ [`${INSTALL_TO}/a.gd`]: "x\r\ny\r\n" }));
+    const normalized = new Map([...crlfFiles].map(([k, v]) => [k, normalizeText(v)]));
+    const rebuilt = writeStoredZip([...normalized].map(([name, data]) => ({ name, data })));
+    expect(sha256(rebuilt)).toBe(sha256(lf));
   });
 });
 

@@ -80,6 +80,36 @@ export function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
+/**
+ * CRLF -> LF for text, untouched for binary (detected the way git does it: a NUL byte means binary).
+ *
+ * Every addon file is source text, and a git checkout decides its line endings from the CONSUMER's
+ * platform and config — `core.autocrlf` on Windows, or a `.gitattributes` `* text=auto`, both of which
+ * are normal. So the same commit legitimately exists as CRLF in one working tree and LF in another.
+ */
+export function normalizeText(buffer) {
+  if (buffer.includes(0)) return buffer;                       // binary: never rewrite bytes
+  const text = buffer.toString("utf8");
+  return text.includes("\r\n") ? Buffer.from(text.replaceAll("\r\n", "\n"), "utf8") : buffer;
+}
+
+/**
+ * The hash used for the per-file RECORD and for every "has this been edited?" comparison.
+ *
+ * Line-ending-insensitive, and that is load-bearing rather than lax. A raw byte hash would report a
+ * whole addon as MODIFIED the moment it was checked out on a platform other than the one that built
+ * the archive — which is the normal case, not an edge case: this very repo has 53 CRLF files in its
+ * Windows working tree whose committed blobs are LF, and a game repo with `* text=auto` gets CRLF on
+ * Windows and LF on Linux CI from the same commit. `check` would have cried wolf on every file, and
+ * `add` would have "repaired" it by churning line endings back and forth forever.
+ *
+ * Distinct from the ARCHIVE hash in the index, which stays a raw byte hash: that one attests to a
+ * download, where the bytes are exactly what is being verified.
+ */
+export function contentHash(buffer) {
+  return sha256(normalizeText(buffer));
+}
+
 /** Stable JSON with a trailing newline, so re-writing an unchanged manifest is a no-op in git. */
 function stringify(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
@@ -300,7 +330,7 @@ export function readProjectManifest(projectDir) {
  */
 export function buildRecord({ version, files, minAppVersion, maxAppVersion }) {
   const paths = {};
-  for (const name of [...files.keys()].sort()) paths[name] = sha256(files.get(name));
+  for (const name of [...files.keys()].sort()) paths[name] = contentHash(files.get(name));
   return {
     version,
     ...(minAppVersion ? { minAppVersion } : {}),
@@ -343,7 +373,7 @@ export function inspectInstall(projectDir, record) {
       files.push({ path: name, status: "MISSING" });
       continue;
     }
-    const actual = sha256(readFileSync(full));
+    const actual = contentHash(readFileSync(full));
     files.push({ path: name, status: actual === expected ? "ok" : "MODIFIED", actual, expected });
   }
   return {
@@ -419,7 +449,7 @@ export function extractInto(projectDir, files, { previous, keepModified = false 
     const full = join(projectDir, name);
     const data = files.get(name);
     const existed = existsSync(full);
-    const onDisk = existed ? sha256(readFileSync(full)) : null;
+    const onDisk = existed ? contentHash(readFileSync(full)) : null;
 
     // A file we have no record of counts as locally modified: without a recorded hash there is
     // nothing proving we are the ones who put it there, so overwriting it is worth reporting.
@@ -429,7 +459,7 @@ export function extractInto(projectDir, files, { previous, keepModified = false 
       skipped.push(name);
       continue;
     }
-    if (existed && onDisk === sha256(data)) continue;   // already exactly right; leave the mtime alone
+    if (existed && onDisk === contentHash(data)) continue;   // already right; leave the file (and its EOLs) alone
 
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, data);
@@ -730,12 +760,16 @@ export function buildAddonArchive({ repoRoot, id, addon, sdkVersion, minAppVersi
   for (const name of [...sources.keys()].sort()) {
     const source = sources.get(name);
     const repoRelative = relative(repoRoot, source).split(sep).join("/");
-    const bytes = readFileSync(source);
+    // Normalized going in, so an archive built on Windows is byte-identical to one built on Linux CI.
+    // Without this the published sha256 — the trust root — depends on which machine ran the release.
+    const bytes = normalizeText(readFileSync(source));
     files.set(name, versionFiles.has(repoRelative) ? stampVersion(name, bytes, sdkVersion) : bytes);
   }
   // Every addon carries its terms. A copied-out folder used to carry none, since the only LICENSE
   // in the repo was at the root and nobody copies the root.
-  if (license) files.set(`${installTo}/LICENSE`, Buffer.from(license, "utf8"));
+  // normalizeText here too: the license arrives as a string read from disk, so it bypasses the
+  // per-file normalization above and would otherwise be the one CRLF entry in an otherwise LF archive.
+  if (license) files.set(`${installTo}/LICENSE`, normalizeText(Buffer.from(license, "utf8")));
 
   const record = buildRecord({ version: sdkVersion, files, minAppVersion, maxAppVersion });
 
