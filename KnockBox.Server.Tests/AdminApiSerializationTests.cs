@@ -67,10 +67,11 @@ public class AdminApiSerializationTests
             PackageBacked: true, PackageRoot: "managed",
             DiskBytes: 10, DirectoryBytes: 4, CompressedBytes: 3, PackageBytes: 2, BackupBytes: 1,
             ActiveLobbies: 0, ActivePlayers: 0, Deletable: true, DeleteBlockedReason: null,
-            Lifecycle: "ready", UpdatePolicy: "manual", PendingJobId: null);
+            Lifecycle: "ready", UpdatePolicy: "manual", PendingJobId: null,
+            Sdk: new Dictionary<string, string> { ["godot"] = "1.0.0" }, SdkStatus: "current");
         var response = new AdminGamesResponse(
             [summary], "/games", "/games-unpacked", null, "2026-01-01T00:00:00.0000000Z", 0, 0,
-            "/games-managed", 0);
+            "/games-managed", 0, ServerSdkVersion: "1.0.0");
 
         var json = JsonSerializer.Serialize(response, KnockBoxProtocolContext.Default.AdminGamesResponse);
         var back = JsonSerializer.Deserialize(json, KnockBoxProtocolContext.Default.AdminGamesResponse);
@@ -78,6 +79,10 @@ public class AdminApiSerializationTests
         Assert.NotNull(back);
         Assert.Equal("managed", back.Games[0].PackageRoot);
         Assert.Equal(1, back.Games[0].BackupBytes);
+        // The SDK stamp is a dictionary, so it exercises a different source-generated converter than
+        // the scalar fields above — worth round-tripping rather than assuming.
+        Assert.Equal("1.0.0", back.Games[0].Sdk?["godot"]);
+        Assert.Equal("current", back.Games[0].SdkStatus);
         Assert.Equal("/games-managed", back.ManagedRoot);
         // camelCase on the wire, per the context's naming policy.
         Assert.Contains("\"packageRoot\":", json, StringComparison.Ordinal);

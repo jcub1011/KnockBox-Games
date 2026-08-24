@@ -134,14 +134,6 @@ public class OriginPortBindingTests
     /// trick ContentPaths uses. Returns null when there is no checkout to read (so the test no-ops rather
     /// than failing somewhere the deployment files legitimately aren't present).
     /// </summary>
-    private static string? ReadRepoFile(string relativePath)
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            if (!File.Exists(Path.Combine(dir.FullName, "KnockBox-Games.slnx"))) continue;
-            var full = Path.Combine(dir.FullName, relativePath);
-            return File.Exists(full) ? File.ReadAllText(full) : null;
-        }
-        return null;
-    }
+    // Shared with AddonManifestTests, the other test that asserts repo files agree with each other.
+    private static string? ReadRepoFile(string relativePath) => RepoFile.Read(relativePath);
 }

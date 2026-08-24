@@ -13,7 +13,7 @@ import {
   checkCodeEntry, checkWebhook, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
   filterSettings, formatBytes, formatClock, formatCount, formatDuration, formatVersion,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples,
+  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, sdkBadge,
   noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
   sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions,
@@ -895,6 +895,15 @@ function gameCard(game) {
     authority.className = 'badge badge-muted';
     authority.textContent = 'server authority';
     header.appendChild(authority);
+  }
+  // Only the actionable states get a badge — see sdkBadge. A game with no stamp shows nothing.
+  const sdk = sdkBadge(game, gameData?.serverSdkVersion);
+  if (sdk) {
+    const badge = document.createElement('span');
+    badge.className = sdk.className;
+    badge.textContent = sdk.label;
+    badge.title = sdk.title;
+    header.appendChild(badge);
   }
   const state = document.createElement('span');
   state.className = `badge badge-${game.availability === 'available' ? 'ok' : 'warning'}`;

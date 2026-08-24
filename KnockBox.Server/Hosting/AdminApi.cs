@@ -515,7 +515,9 @@ internal static class AdminApi
                 blocked,
                 Camel(options.Lifecycle.StateOf(manifest.Id).ToString()),
                 Camel(options.Settings.GetUpdatePolicy(manifest.Id).ToString()),
-                options.Packages.Jobs.ActiveFor(manifest.Id)?.JobId));
+                options.Packages.Jobs.ActiveFor(manifest.Id)?.JobId,
+                manifest.Sdk,
+                KnockBoxSdk.StatusOf(manifest.Sdk)));
         }
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
@@ -529,7 +531,8 @@ internal static class AdminApi
             disk.CompressedCacheBytes,
             disk.LogsBytes,
             options.Paths.GamesManagedRoot,
-            disk.ManagedRootBytes));
+            disk.ManagedRootBytes,
+            KnockBoxSdk.VersionString));
     }
 
     // A cheap, read-only guess at whether the files could be removed: it checks the directories that

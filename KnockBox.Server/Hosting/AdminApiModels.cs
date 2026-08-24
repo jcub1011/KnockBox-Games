@@ -208,7 +208,17 @@ public sealed record AdminGameSummary(
     string? DeleteBlockedReason,
     string Lifecycle,
     string UpdatePolicy,
-    string? PendingJobId
+    string? PendingJobId,
+    /// <summary>
+    /// The client addon versions this build declared, from GAME.json's optional <c>sdk</c> map.
+    /// Null for the many games that carry no stamp — see <see cref="SdkStatus"/>.
+    /// </summary>
+    IReadOnlyDictionary<string, string>? Sdk,
+    /// <summary>
+    /// <c>unknown</c> / <c>current</c> / <c>behind</c> / <c>ahead</c>, from KnockBoxSdk.StatusOf.
+    /// Derived here rather than in the portal so one rule serves the UI and any future webhook.
+    /// </summary>
+    string SdkStatus
 );
 
 public sealed record AdminGamesResponse(
@@ -220,7 +230,9 @@ public sealed record AdminGamesResponse(
     long CompressedCacheBytes,
     long LogsBytes,
     string ManagedRoot,
-    long ManagedRootBytes
+    long ManagedRootBytes,
+    /// <summary>The SDK version this server shipped with — the yardstick each row's status is judged against.</summary>
+    string ServerSdkVersion
 );
 
 // ── Logs ─────────────────────────────────────────────────────────────────────

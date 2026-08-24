@@ -511,6 +511,43 @@ export function lifecycleClass(value) {
   }
 }
 
+/**
+ * The Game Catalog's SDK badge: { label, className, title } or null when nothing should be shown.
+ *
+ * `unknown` renders NOTHING on purpose. Most games on a typical server carry no SDK stamp — every
+ * hand-written one, and every package built before the stamp existed — so a badge for it would sit on
+ * nearly every card and say only "this is normal". `current` is silent for the same reason: a badge
+ * that is almost always present is not read.
+ *
+ * That leaves the two cases an operator can act on, which is what makes them worth a badge at all.
+ */
+export function sdkBadge(game, serverSdkVersion) {
+  const status = String(game?.sdkStatus ?? 'unknown').toLowerCase();
+  const stamped = Object.entries(game?.sdk ?? {})
+    .map(([id, version]) => `${id} ${version}`)
+    .sort()
+    .join(', ');
+
+  switch (status) {
+    case 'behind':
+      return {
+        label: 'SDK outdated',
+        className: 'badge badge-warning',
+        title: `Built against ${stamped || 'an older SDK'}; this server ships ${serverSdkVersion}. `
+          + 'Rebuild the game with `knockbox addon update` to pick up client fixes.',
+      };
+    case 'ahead':
+      return {
+        label: 'SDK newer',
+        className: 'badge badge-muted',
+        title: `Built against ${stamped}; this server ships ${serverSdkVersion}. `
+          + 'It will still run — the wire protocol is versioned separately — but this server is the older side.',
+      };
+    default:
+      return null;
+  }
+}
+
 /** True when the engine is mid-swap, so availability and delete must be held. */
 export function isBusyLifecycle(value) {
   const name = String(value ?? 'ready').toLowerCase();

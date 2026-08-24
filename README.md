@@ -10,6 +10,9 @@ and message routing, while games own all logic and state.
 - **Server managers:** copy a `.kbg` game package (or a plain game folder) into `games/`; it installs
   itself and appears within seconds, with no restart.
 - **Game developers:** see [`docs/GAME_DEVELOPER_GUIDE.md`](docs/GAME_DEVELOPER_GUIDE.md).
+  For the client libraries — installing, updating and pinning them — see
+  [`docs/ADDONS.md`](docs/ADDONS.md) (`npx knockbox addon add godot|phaser|web`, or the Godot
+  Asset Library, or a plain unzip).
 - **Architecture:** see [`docs/INFRASTRUCTURE.md`](docs/INFRASTRUCTURE.md).
 
 Run locally: `dotnet run --project KnockBox.Server --launch-profile http` (shell at

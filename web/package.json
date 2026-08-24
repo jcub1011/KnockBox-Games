@@ -1,6 +1,6 @@
 {
   "name": "knockbox-web",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "private": true,
   "type": "module",
   "description": "KnockBox platform shell + game SDK (browser). Vitest tests cover the pure client logic (kb-core.js, Node env) and the shell + SDK orchestration (shell.js, knockbox.js, under jsdom).",

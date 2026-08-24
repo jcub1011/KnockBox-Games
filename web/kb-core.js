@@ -1,19 +1,24 @@
 // KnockBox client core — pure, DOM/WebSocket-free helpers shared by the SDK (knockbox.js) and the
 // shell (shell.js). Kept side-effect-free so it can be unit-tested under Node/Vitest.
-
-// Wire-protocol version this SDK speaks, declared in the first frame of each role (Hello/Attach).
-// The server accepts anything up to its own version and terminally rejects anything newer, so a
-// copied-out SDK that outpaces an old server fails loudly instead of being silently misrouted.
-// Mirrors KnockBoxProtocol.Version in KnockBox.Contracts.
-export const PROTOCOL_VERSION = 1;
-
-// Server close code used for terminal rejections (WebSocketCloseStatus.PolicyViolation): an invalid
-// ticket or expired lobby membership. There is no point reconnecting — the credential won't work.
-export const TERMINAL_CLOSE_CODE = 1008;
-
-export function isTerminalClose(code) {
-  return code === TERMINAL_CLOSE_CODE;
-}
+//
+// The GAME-facing half now lives in kb-protocol.js and is RE-EXPORTED below, so every existing
+// importer of kb-core.js keeps working unchanged. The split exists because this module is the
+// SHELL's: favicons, colour math, the launch-overlay geometry, the play log and announcements all
+// live here, and `/knockbox.js` used to drag all ~21 KB of it into every game to reach 9 symbols.
+// Add a game-facing helper to kb-protocol.js; add a shell-only helper here.
+export {
+  PROTOCOL_VERSION,
+  TERMINAL_CLOSE_CODE,
+  isTerminalClose,
+  reconnectDelay,
+  parseLaunchParams,
+  defaultEndpoint,
+  LOG_LEVELS,
+  makeLogger,
+  normalizeReady,
+  rosterAdd,
+  rosterRemove,
+} from './kb-protocol.js';
 
 // Trailing-edge debounce: returns a wrapper that defers `fn` until `ms` have elapsed since the LAST
 // call, collapsing a burst into one invocation. Used to keep high-frequency input (e.g. typing a
@@ -28,12 +33,6 @@ export function debounce(fn, ms) {
   };
   debounced.cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
   return debounced;
-}
-
-// Capped exponential backoff for transient drops. attempt is 0-based: 1s, 2s, 4s, … up to `max`.
-export function reconnectDelay(attempt, base = 1000, max = 30000) {
-  const n = Math.max(0, attempt | 0);
-  return Math.min(max, base * 2 ** n);
 }
 
 // The shell picks one of these cat icons at random on each page load (ported from the legacy
@@ -51,14 +50,6 @@ export const FAVICONS = [
 export function pickRandomFavicon(favicons = FAVICONS, rand = Math.random) {
   if (!favicons || favicons.length === 0) return null;
   return favicons[Math.floor(rand() * favicons.length)];
-}
-
-// The shell hands the game its credentials in the URL FRAGMENT (not the query string) so they are
-// never sent in a Referer header or written to server/proxy logs. Parses "#kbTicket=…&kbEndpoint=…".
-export function parseLaunchParams(hash) {
-  const raw = (hash || '').replace(/^#/, '');
-  const params = new URLSearchParams(raw);
-  return { ticket: params.get('kbTicket'), endpoint: params.get('kbEndpoint') };
 }
 
 // Reads the auto-join room code from a URL query string ("?join=ABCD") — the middle-click
@@ -81,11 +72,6 @@ export function parseJoinParam(search) {
 export function parseGameParam(search) {
   const id = (new URLSearchParams(search || '').get('game') || '').trim();
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) ? id : null;
-}
-
-// Default data-socket endpoint when the shell didn't supply one: this origin's /ws.
-export function defaultEndpoint(protocol, host) {
-  return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}/ws`;
 }
 
 // The ws(s):// endpoint for a game origin's /ws (http→ws, https→wss).
@@ -121,30 +107,6 @@ export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
   const base = `${safeOrigin}/games/${safeGameId}/${safeEntry}`;
   const frag = `kbTicket=${encodeURIComponent(ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
   return `${base}#${frag}`;
-}
-
-// Game → server logging. Maps the friendly, console-like method names the SDK exposes to the
-// Microsoft.Extensions.Logging.LogLevel NAMES the server's LogMessage expects on the wire (the
-// server parses them case-insensitively). info→Information and warn→Warning match console habits.
-export const LOG_LEVELS = {
-  trace: 'Trace',
-  debug: 'Debug',
-  info: 'Information',
-  warn: 'Warning',
-  error: 'Error',
-  critical: 'Critical',
-};
-
-// Builds a console-like logger object ({ trace, debug, info, warn, error, critical }) whose methods
-// each hand a { type:'Log', level, message } frame to the supplied transport. `sendFrame` is the
-// only client-specific bit, so this stays pure and the web and Phaser SDKs emit identical frames.
-export function makeLogger(sendFrame) {
-  const api = {};
-  for (const method in LOG_LEVELS) {
-    const level = LOG_LEVELS[method];
-    api[method] = (message) => sendFrame({ type: 'Log', level, message: String(message) });
-  }
-  return api;
 }
 
 // ── Header-theming helpers (pure color math) ──────────────────────────────────
@@ -210,36 +172,6 @@ export function parseRgbComponents(normalized) {
 // lobby (see shell.js's "?join=" handling). Carries only the public room code — no identity token.
 export function buildJoinLink(origin, code) {
   return `${origin}/?join=${encodeURIComponent(code)}`;
-}
-
-// Normalize a Ready frame into the SDK's identity/authority fields, with old-server fallbacks.
-// `authority` says who runs the game's authoritative logic: 'host' (a member's browser — the
-// default) or 'server' (the game's authority module runs server-side; every client is a guest).
-// `ownerId` is the member holding the lobby powers (kick, open/close) — a separate concept from
-// the authority; gate owner UI on `isOwner`, never `isHost`. A pre-authority server omits both
-// fields: authority defaults to 'host', and the owner is derivable only when we ARE the host.
-export function normalizeReady(msg) {
-  const playerId = msg.playerId;
-  const isHost = !!msg.isHost;
-  const authority = msg.authority ?? 'host';
-  const ownerId = msg.ownerId ?? (isHost ? playerId : null);
-  return {
-    playerId,
-    players: msg.players || [],
-    isHost,
-    authority,
-    ownerId,
-    isOwner: ownerId != null && ownerId === playerId,
-  };
-}
-
-// Roster reducers (immutable): add is idempotent by id; remove drops by id.
-export function rosterAdd(players, player) {
-  return players.some((p) => p.id === player.id) ? players : [...players, player];
-}
-
-export function rosterRemove(players, playerId) {
-  return players.filter((p) => p.id !== playerId);
 }
 
 // ── Game launch overlay ─────────────────────────────────────────────────────────
