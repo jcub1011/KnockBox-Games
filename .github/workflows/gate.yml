@@ -32,6 +32,13 @@ on:
           instead of rebuilding them. Off by default — PRs should not pay the artifact round trip.
         type: boolean
         default: false
+      image_version:
+        description: >-
+          Value for org.opencontainers.image.version on the built image. A release knows its real
+          version; this workflow only ever sees a ref name, which on a release run is `main`. Empty
+          falls back to the ref name, which is what :develop wants.
+        type: string
+        default: ''
 
 # Least-privilege, and unlike a normal workflow this is a ceiling the callers rely on: `release.yml`
 # grants its gate job `contents: read` and nothing more, so a job added here that needs to WRITE
@@ -157,6 +164,17 @@ jobs:
       # (A RELEASE does better than that: it pushes the tar exported below, so the bytes users pull
       # are the tested bytes, not a reconstruction of them.) `load` puts the image in the local
       # daemon so the `docker run` smoke test below can use the `knockbox:ci` tag.
+      #
+      # The OCI labels have to be applied HERE, not by whoever pushes: a release pushes the exported
+      # tar of this exact image, and re-labelling it afterwards would rewrite the image config and
+      # change its digest — so the bytes users pull would no longer be the bytes that were tested.
+      # `org.opencontainers.image.source` is the one that links the GHCR package back to this repo
+      # (which is what gives the package page a source link and lets it inherit the repo's README and
+      # visibility); `.revision` is what makes `docker inspect` name the commit. They were lost for
+      # released images when the suite moved here — the old `v*` publish path passed
+      # docker/metadata-action's labels, and :develop in ci.yml still does, so only stable releases
+      # regressed, which is the harder case to notice. Labels live in the image config rather than the
+      # layers, so the gha cache still hits.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
@@ -164,6 +182,10 @@ jobs:
           file: KnockBox.Server/Dockerfile
           load: true
           tags: knockbox:ci
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.image_version || github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

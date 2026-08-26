@@ -55,11 +55,26 @@ concurrency:
 permissions:
   contents: read
 
+# Workflow level, because TWO jobs need it and they must not disagree: `release` pushes to it, and
+# `assets-deploy` pins the release bundle's compose file at it. When the bundle derived its ref from
+# a hardcoded default instead, a fork or an owner rename produced a bundle naming an image the
+# release never pushed. Lowercased at each use — GHCR rejects an uppercase path.
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/knockbox-games
+
 jobs:
   # ── Gate: what version is this, and is it allowed? ──────────────────────────────────────────────────
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
+    # READ-ONLY in practice, and the grant is here for exactly one reason: the Releases API lists
+    # DRAFT releases only to a token with PUSH access. Under the workflow's `contents: read` the
+    # draft check below silently returns nothing, reports the version as unclaimed, and lets
+    # `gh release create` make a SECOND draft on the same tag — which `gh release upload` and
+    # `gh release edit` then resolve by tag NAME, so the wrong one can be published. Nothing in this
+    # job writes; `release` is still the only job that mutates anything.
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -116,7 +131,8 @@ jobs:
       # THREE things can already claim this version, and each is invisible to the other checks:
       #   • the git tag;
       #   • a published release;
-      #   • a DRAFT release — which does not create a git ref, so neither check above sees it.
+      #   • a DRAFT release — which does not create a git ref, so neither check above sees it, and
+      #     which needs this job's `contents: write` to be visible AT ALL (see the note on it above).
       # Verification only. The deletion is deferred to the `release` job: deleting here and then
       # failing the test suite would leave you with less than you started with, which is the opposite
       # of what OverwriteExisting is for.
@@ -150,6 +166,12 @@ jobs:
       # newer minor silently moved :latest backwards. Answer the question instead: is this version
       # actually the highest one released?
       #
+      # TWO questions, not one. `:latest` asks "is this the highest version anywhere?"; `:MAJOR.MINOR`
+      # asks "is this the highest version IN ITS OWN LINE?" — and pinning `:1.2` is the documented way
+      # (docs/HOSTING.md) to track a minor line and still get patches. Answering both with one variable
+      # meant a back-ported 1.2.4 cut after 1.3.0 left `:1.2` pinned at 1.2.3 forever, which is the one
+      # case the minor tag exists for. `:latest` correctly stays put there; `:1.2` must still move.
+      #
       # `sort -V` is exactly right here BECAUSE prereleases are excluded up front — it does not
       # implement semver prerelease precedence, and comparing plain X.Y.Z is all it is asked to do.
       - name: Should this move :latest and :MAJOR.MINOR?
@@ -161,16 +183,31 @@ jobs:
           released="$(git tag -l 'v*' | sed -e 's/^v//' -e '/-/d' | sort -V)"
           highest="$(printf '%s\n%s\n' "$released" "$VERSION" | grep -v '^$' | sort -V | tail -1)"
 
+          # Versions in this version's own MAJOR.MINOR line. An awk PREFIX match rather than a regex,
+          # so the dots in `1.2.` need no escaping — and `1.2.` cannot prefix `1.20.0`.
+          line="${VERSION%.*}"
+          in_line="$(printf '%s\n' "$released" | awk -v p="$line." 'index($0, p) == 1')"
+          highest_in_line="$(printf '%s\n%s\n' "$in_line" "$VERSION" | grep -v '^$' | sort -V | tail -1)"
+
           latest=false
           minor=false
           if [ "$PRERELEASE" = "true" ]; then
-            reason="prerelease — a prerelease must never be what :latest resolves to"
-          elif [ "$highest" != "$VERSION" ]; then
-            reason="$highest is already released, so this is a back-port"
+            # Neither tag may resolve to a prerelease: `:latest` for the obvious reason, and `:MAJOR.MINOR`
+            # because someone pinned to a line asked for that line's stable patches, not its release
+            # candidates.
+            # (`$line` is not meaningful for a prerelease — `${VERSION%.*}` of `1.3.0-rc.1` is
+            # `1.3.0-rc` — which is another reason this branch never publishes a :MAJOR.MINOR tag.)
+            reason="prerelease — neither :latest nor :MAJOR.MINOR may resolve to one"
           else
-            latest=true
-            minor=true
-            reason="highest released version"
+            if [ "$highest_in_line" = "$VERSION" ]; then
+              minor=true
+            fi
+            if [ "$highest" = "$VERSION" ]; then
+              latest=true
+              reason="highest released version"
+            else
+              reason="$highest is already released, so this is a back-port; :$line still moves if this is the newest in its line"
+            fi
           fi
 
           {
@@ -197,6 +234,9 @@ jobs:
     uses: ./.github/workflows/gate.yml
     with:
       export_image: true
+      # So the image carries org.opencontainers.image.version = the real release version. The called
+      # workflow can only see `github.ref_name`, which on a release run is `main`.
+      image_version: ${{ needs.preflight.outputs.version }}
 
   # ── Gate: the downloadable assets ──────────────────────────────────────────────────────────────────
   # All three run before anything is pushed, so a broken asset cancels the release rather than
@@ -283,17 +323,28 @@ jobs:
       # tools/compose-release.mjs. ci.yml's docker job runs the same transform on every PR, so a
       # compose edit that breaks it has already failed by the time a release runs.
       - name: Assemble the bundle
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           mkdir -p bundle
+          # --image, not the script's default: that default is a hardcoded `ghcr.io/jcub1011/...`,
+          # while `release` pushes to `github.repository_owner`'s namespace. They agree only for this
+          # repo, and the assertion below could not tell them apart while it wildcarded the path.
+          image="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
           node tools/compose-release.mjs \
-            --version "${{ needs.preflight.outputs.version }}" \
+            --version "$VERSION" \
+            --image "$image" \
             --out bundle/docker-compose.yml
           cp .env.example bundle/.env.example
           cp KnockBox.Server/appsettings.json bundle/appsettings.json
-          grep -q 'image: ghcr.io/.*:${{ needs.preflight.outputs.version }}' bundle/docker-compose.yml
+          # -F: the literal ref, so a wrong owner fails here instead of shipping. The old assertion
+          # wildcarded the path (`ghcr.io/.*:$VERSION`) and so passed for any owner at all.
+          grep -qF "image: $image:$VERSION" bundle/docker-compose.yml
           ! grep -Eq '^\s+build:' bundle/docker-compose.yml
-          (cd bundle && zip -q -r \
-            "$RUNNER_TEMP/knockbox-${{ needs.preflight.outputs.version }}-docker.zip" .)
+          # The bundled appsettings.json must actually be mounted over the image's baked copy, or a
+          # user edits it, restarts, and nothing changes with no signal why.
+          grep -q 'appsettings.json:/app/appsettings.json:ro' bundle/docker-compose.yml
+          (cd bundle && zip -q -r "$RUNNER_TEMP/knockbox-$VERSION-docker.zip" .)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -315,7 +366,6 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.preflight.outputs.tag }}
       VERSION: ${{ needs.preflight.outputs.version }}
-      IMAGE: ghcr.io/${{ github.repository_owner }}/knockbox-games
     steps:
       - uses: actions/checkout@v5
 
@@ -407,8 +457,14 @@ jobs:
       # re-pushable, while a published release whose `docker pull` line 404s is neither. Overwriting an
       # existing GHCR tag is allowed and simply leaves the old manifest untagged.
       - name: Push the image
+        id: push
         if: '!inputs.DryRun'
         run: |
+          # Set BEFORE the first push, not after the loop: the failure step reads this to decide
+          # whether to name possibly-orphaned tags, and a push that dies on the second of three tags
+          # has already made the first one live. Recording it only on success would stay silent in
+          # exactly the case the warning exists for.
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
           for tag in ${{ steps.plan.outputs.tags }}; do
             docker tag knockbox:ci "$tag"
             docker push "$tag"
@@ -418,6 +474,7 @@ jobs:
       # what keeps a half-uploaded release from ever being a release, and what makes the tag appear at
       # the same instant the release does.
       - name: Create the draft release
+        id: draft
         if: '!inputs.DryRun'
         run: |
           notes="$(printf '%s\n' \
@@ -444,6 +501,8 @@ jobs:
             args+=(--prerelease)
           fi
           gh release create "$TAG" "${args[@]}"
+          # The failure step deletes ONLY when this is set — see the comment on it.
+          echo "created=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload the assets
         if: '!inputs.DryRun'
@@ -458,19 +517,53 @@ jobs:
       # cannot be (deleting a GHCR version needs `packages: delete` and a version id, and getting that
       # wrong deletes the wrong image), so they are NAMED instead — an orphan you know about is a
       # re-run away from being correct, one you don't is a mystery.
+      #
+      # EVERY action below is guarded on this run having created the thing it removes. `failure()`
+      # fires for the non-mutating steps too — Collect the assets, Load the smoke-tested image, Plan
+      # the image tags all run before the first mutation — and an unguarded `gh release delete "$TAG"`
+      # there deletes whatever already held the tag. Under OverwriteExisting that is the release the
+      # operator still has, and destroying it while shipping nothing is precisely the "left with less
+      # than you started with" outcome preflight defers its own deletion to avoid.
       - name: Clean up a failed release
         if: failure() && !inputs.DryRun
         run: |
-          gh release delete "$TAG" --yes 2>/dev/null && echo "removed the draft $TAG" || true
+          if [ "${{ steps.draft.outputs.created }}" = "true" ]; then
+            gh release delete "$TAG" --yes 2>/dev/null && echo "removed the release $TAG" || true
+            # A draft holds no git ref, so usually there is nothing here — but if `Publish` flipped the
+            # draft and THEN reported failure (a transient error on a request the server accepted), the
+            # release and its tag both exist. Leaving the tag behind makes the next attempt fail
+            # preflight's `git-tag` claim and demand OverwriteExisting, the one input documented as
+            # destructive, to recover from a run that shipped nothing. Deleted separately rather than
+            # with `--cleanup-tag` for the same reason `Remove the release being replaced` does it: the
+            # tag's existence is an independent fact from the release's.
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              git push origin ":refs/tags/$TAG"
+              echo "deleted tag $TAG"
+            fi
+          fi
+
           {
             echo "### :x: Release failed"
             echo
-            echo "The draft release was removed. These image tags may already be pushed to GHCR and"
-            echo "were NOT rolled back — re-running this workflow overwrites them:"
-            echo
-            echo '```'
-            for tag in ${{ steps.plan.outputs.tags }}; do echo "$tag"; done
-            echo '```'
+            if [ "${{ steps.draft.outputs.created }}" = "true" ]; then
+              echo "The release draft this run created was removed, along with its tag if one had been"
+              echo "created."
+            else
+              echo "Nothing was created, so nothing was removed. Any existing release or tag for"
+              echo "\`$TAG\` is untouched."
+            fi
+            if [ "${{ steps.push.outputs.pushed }}" = "true" ]; then
+              echo
+              echo "These image tags may already be pushed to GHCR and were NOT rolled back —"
+              echo "re-running this workflow overwrites them:"
+              echo
+              echo '```'
+              for tag in ${{ steps.plan.outputs.tags }}; do echo "$tag"; done
+              echo '```'
+            else
+              echo
+              echo "No image was pushed."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary

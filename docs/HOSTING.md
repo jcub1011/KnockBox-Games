@@ -50,7 +50,7 @@ carrying three downloads, if you would rather not clone this repo:
 
 | Asset | What it is |
 |---|---|
-| `knockbox-<version>-docker.zip` | A `docker-compose.yml` already **pinned to that version**, plus `.env.example` and `appsettings.json`. Unzip into an empty directory and `docker compose up -d` — no checkout, no build. |
+| `knockbox-<version>-docker.zip` | A `docker-compose.yml` already **pinned to that version**, plus `.env.example` and `appsettings.json`. Unzip into an empty directory and `docker compose up -d` — no checkout, no build. That compose file mounts the bundled `appsettings.json` read-only over the image's baked copy, so any `KnockBox:` knob in §3 can be set by editing it and restarting; a `KnockBox__*` environment variable still wins over it. Keep the file next to the compose file — Docker creates a *directory* in its place if it is missing, and the container then fails to start. |
 | `knockbox-<version>-win-x64.zip` | The Windows desktop build, prebuilt. See §2. |
 | `knockbox-<version>-linux-x64.tar.gz` | The same server for a Linux host without Docker. |
 

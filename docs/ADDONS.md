@@ -273,11 +273,18 @@ git tag addons-v1.1.0 && git push origin addons-v1.1.0
 Step 4 says *merge first* for a reason: the `addons` job checks out `main`, not the tagged commit, so
 the bump has to be on `main` or the tag-vs-manifest guard reads a stale value.
 
+**Editing `minAppVersion` (or `maxAppVersion`) requires a release of its own.** Those bounds reach
+users only through `.addons/ADDONS.json`, which is regenerated and committed by an `addons-v*` tag and
+by nothing else — so a manifest edit that lands without one leaves the *published* index still
+advertising the old bound, and every `knockbox addon add` judged against it. Bump `sdkVersion` in the
+same commit and cut the tag. `AddonManifestTests` fails a checkout where the index and the manifest
+claim the same `sdkVersion` but disagree about `minAppVersion`, which is exactly that state.
+
 ### Two tag namespaces
 
 | Tag | Releases | Version it names |
 | --- | --- | --- |
-| `v1.2.3` | the container image | `KnockBox.Server.csproj` `<Version>` |
+| `v1.2.3` | the container image, plus the three downloadable release assets | `KnockBox.Server.csproj` `<Version>` |
 | `addons-v1.2.3` | addon archives, `ADDONS.json`, the npm CLI | `addons.manifest.json` `sdkVersion` |
 
 They are separate because the two version numbers are independent, and a tag has to name exactly one
@@ -287,9 +294,12 @@ an image *labelled* with a version its own assembly did not report, because imag
 git tag while `KnockBoxVersion` comes from the assembly — and that value is what marketplace
 `minAppVersion` bounds are compared against.
 
-`v*` is an anchored glob, so it does not match `addons-v*`; both are listed in the workflow trigger.
-The `publish` job needs no exclusion — its condition is `refs/tags/v*`, which an `addons-v*` ref
-doesn't match, so an addon release leaves the image alone.
+Only `addons-v*` is a push trigger. `v*` deliberately is **not** listed in `ci.yml` — a platform
+release is cut by the manual `release.yml`, which derives its tag from the csproj rather than reading
+one you typed, and a hand-pushed `v*` would be a second path to the same artifact that bypassed every
+guard that workflow adds. `ReleaseWorkflowTests` asserts it stays absent. The `publish` job needs no
+exclusion either: its condition is `refs/heads/main`, which no tag ref matches, so an addon release
+leaves the image alone.
 
 The `addons` CI job (`addons-v*` tags only, gated on every test job) verifies the tag matches the manifest, builds
 one archive per addon, generates the index, uploads the archives to the release, commits the index to

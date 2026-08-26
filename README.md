@@ -65,6 +65,8 @@ Every stable release also ships prebuilt on its
 
 - **`knockbox-<version>-docker.zip`** — the compose file above, already pinned to that version, plus
   `.env.example` and `appsettings.json`. Unzip into an empty directory and `docker compose up -d`.
+  The compose file mounts that `appsettings.json` over the image's own copy, so editing a `KnockBox:`
+  knob there and restarting applies (a `KnockBox__*` environment variable still overrides it).
 - **`knockbox-<version>-win-x64.zip`** — a self-contained Windows exe. No Docker, no .NET install:
   unzip and run `KnockBox.Server.exe`.
 - **`knockbox-<version>-linux-x64.tar.gz`** — the same, for a Linux host without Docker.
