@@ -57,6 +57,15 @@ ENV KnockBox__GamesRoot=/games \
     KnockBox__AdminPort=8082 \
     KnockBox__AdminPasswordPath=/app/data/admin.secret \
     ASPNETCORE_HTTP_PORTS="8080;8081;8082"
+# Set EXPLICITLY rather than inherited from the base image, because the startup check that warns
+# "this directory is inside the container and the next image update will destroy it" is gated on it
+# (see Hosting/StatePersistence.cs). The .NET base images do set it, but relying on that makes the
+# whole warning disappear silently if a future base image stops — and the other signal, /.dockerenv,
+# does not exist under Kubernetes or containerd, which is exactly where a missing volume is most
+# likely and least visible. A base-image change quietly deleting a persistence safeguard is not
+# hypothetical: that is how this project's predecessor lost the chown that made its data volume
+# writable. DockerPersistenceTests asserts this line stays here.
+ENV DOTNET_RUNNING_IN_CONTAINER=true
 # GC footprint: the GC mode and the ConserveMemory knob are baked into the binary at publish (see
 # KnockBox.Server.csproj) and honored under Native AOT, so nothing is needed here by default. Server
 # GC + DATAS (heap-count adaptation, on by default) does the footprint work; the main lever is a

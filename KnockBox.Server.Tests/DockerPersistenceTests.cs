@@ -117,6 +117,27 @@ public class DockerPersistenceTests
             "be trusted. See StatePersistence for the full reasoning.");
     }
 
+    /// <summary>
+    /// The image must declare the container marker itself. The whole not-persisted warning is gated on
+    /// it, and the alternative signal (<c>/.dockerenv</c>) does not exist under Kubernetes or
+    /// containerd — where an unmounted state directory is both most likely and least visible. Inherited
+    /// from the base image this would be a safeguard a future base-image bump could switch off in
+    /// silence, which is precisely how the predecessor lost the chown that made its data volume
+    /// writable: a memory optimization changed the base and took a persistence guarantee with it.
+    /// </summary>
+    [Fact]
+    public void The_image_declares_that_it_is_a_container()
+    {
+        var dockerfile = ReadRepoFile(Path.Combine("KnockBox.Server", "Dockerfile"));
+        if (dockerfile is null) return;
+
+        Assert.True(
+            Regex.IsMatch(dockerfile, @"DOTNET_RUNNING_IN_CONTAINER\s*=\s*""?true""?", RegexOptions.IgnoreCase),
+            "The Dockerfile does not set DOTNET_RUNNING_IN_CONTAINER=true. StatePersistence gates the " +
+            "not-persisted warning on it, so without it that warning never fires on Kubernetes or " +
+            "containerd — and nothing else reports the problem.");
+    }
+
     // ── The compose file ───────────────────────────────────────────────────────────────────────────
 
     [Theory]

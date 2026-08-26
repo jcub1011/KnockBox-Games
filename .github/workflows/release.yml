@@ -478,6 +478,17 @@ jobs:
         if: '!inputs.DryRun'
         run: |
           notes="$(printf '%s\n' \
+            "## Updating an existing install" \
+            "" \
+            "Update the image and keep your mounts. Your games, admin password and operator policy live outside the image and survive an update, provided each one IS a mount. In the directory you already deploy from:" \
+            "" \
+            '```' \
+            'docker compose pull' \
+            'docker compose up -d' \
+            '```' \
+            "" \
+            "Do not upgrade by unzipping a bundle into a NEW directory — that used to start against empty volumes. If you deploy by hand (docker run, TrueNAS, Kubernetes), check your container logs for a \"not persisted\" warning: the server now names any state directory the next update would destroy. Full procedure, the one-time volume-name migration and what to back up: [docs/HOSTING.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/HOSTING.md#updating-knockbox)." \
+            "" \
             "## Install" \
             "" \
             "**Docker** (recommended) — see [docs/HOSTING.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/HOSTING.md):" \

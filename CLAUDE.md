@@ -192,6 +192,47 @@ writable mounts. On bind mounts, file-watch events don't propagate, so the image
 `KnockBox__GamesPollSeconds=10` as a polling fallback for hot-reload — which is also the only signal
 that notices a dropped `.kbg` there.
 
+### Surviving an image update (`docs/HOSTING.md` → "Updating KnockBox")
+
+**Updating an image destroys the container, so state is kept exactly by what is mounted — and this is
+the one requirement most installations depend on.** The predecessor project lost operator settings and
+games on every TrueNAS Custom App update, and the post-mortem is worth keeping because two of its three
+causes are shaped like ordinary improvements. It believed `VOLUME ["/app/data"]` guaranteed persistence:
+it does not — an unmounted `VOLUME` becomes an *anonymous* volume, which Compose usually carries across
+a recreate but `docker run` replaces per container and Kubernetes ignores outright, so it works just
+often enough to be trusted. **This image therefore declares no `VOLUME`, deliberately**, and
+`DockerPersistenceTests` fails if one appears. Then a memory optimization switched to a chiseled base
+and, because a chiseled image has no shell, deleted the `mkdir -p … && chown $APP_UID` line — leaving
+root-owned mounts an unprivileged process could not write, while the portal still reported saves as
+succeeding. (Ours *does* surface that: `AdminSettingsStore.Save` returns "active now but could not be
+saved", and `admin.js` toasts it.) Third, and unrelated to Docker: a commit renamed every browser
+`localStorage` key with no migration, orphaning per-game saved settings. The `kb.*` keys are a small
+flat set with no migration helper — **renaming one orphans it**, and so does changing
+`GamesOrigin`/`GamesHost`, which moves every game to a new origin.
+
+`Hosting/StatePersistence.cs` is the answer to all of that: pure mount-point parsing over
+`/proc/self/mountinfo` (string ops only, so the `aot` gate stays green), reporting through
+`DeploymentDiagnostics` from the bootstrap block in `Program.cs` — **before** the issue-logging loop, or
+the warning never reaches the startup log, which is the only place a container operator looks. Gated on
+`InContainer()`, since on a normal host "nearest mount is `/`" is the ordinary case; the Dockerfile sets
+`DOTNET_RUNNING_IN_CONTAINER=true` **explicitly** rather than inheriting it, because `/.dockerenv` does
+not exist under Kubernetes or containerd and a base-image bump must not be able to switch the safeguard
+off in silence — which is exactly how the chown was lost. Only the **non-regenerable** roots warn
+(admin state, `GamesManagedRoot`, `GamesRoot`); the two caches and the logs do not, because a warning
+that fires on everything trains an operator to skim past the one that matters.
+
+Two more pieces, both about copies rather than the canonical file. `docker-compose.yml` pins a top-level
+`name: knockbox` **and** each volume's own `name:` — without them Compose prefixes volumes with the
+*directory name*, so upgrading by unzipping a release bundle into a new folder silently starts against
+four new empty volumes. And the repo compose file was already correct while every published copy of it
+(`README.md`'s quick start, the Cloudflare Tunnel block, the TrueNAS paragraph) omitted `/app/data` and
+`/app/games-managed` — operators paste the copies, so `DockerPersistenceTests` asserts that **every
+fenced block in the docs that mounts `/games` also mounts both**. The gate's `docker` job proves the
+real thing: it mounts actual volumes (previously only `/games`, which made every `docker exec … test -f
+/app/data/…` assertion a statement about the container's own writable layer), then **`docker rm -f`s the
+container and starts a new one on the same volumes** — a `restart` would pass regardless of mounts and
+is the bug, not the test. A second, volume-less container asserts the warning fires.
+
 ## Architecture
 
 ### Projects
