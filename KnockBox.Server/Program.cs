@@ -118,6 +118,58 @@ foreach (var (dir, label) in writableDirs)
             $"'{dir}' is not writable by the server ({writeError}). In Docker the container runs as UID 1654, so chown the mounted folder to that user.");
 }
 
+// Will the state we write still be here after the next image update? In a container, anything not
+// covered by a mount lives in the container's own writable layer, and replacing the container is
+// exactly what updating an image does. Nothing about that failure is visible at runtime — the server
+// runs perfectly against the empty replacement — so it has to be announced, or it is discovered when
+// an operator finds the portal asking to be claimed again and the games they disabled serving players.
+// This project's predecessor lost operator state on every TrueNAS Custom App update for exactly this
+// reason. See StatePersistence for why a Dockerfile VOLUME is the wrong fix.
+//
+// Only the roots that CANNOT be rebuilt are reported. games-compressed, games-unpacked and logs are
+// derived or disposable, and warning about all six would train an operator to skim past the one line
+// that matters — the same reason the portal badges only actionable game states.
+//
+// Reported HERE, in bootstrap, rather than next to the other admin diagnostics further down: the
+// issue-logging loop below runs before those, so a warning registered later would never reach the
+// startup log — which is the one place an operator setting up a container actually looks.
+var containerMounts = StatePersistence.InContainer() ? StatePersistence.CurrentMountPoints() : null;
+if (containerMounts is not null)
+{
+    // Resolved through the services' own static helpers so this can never disagree with where the
+    // files are actually written.
+    var adminSecretPath = AdminAuthService.ResolveSecretPath(builder.Configuration);
+    var adminSettingsPath = AdminSettingsStore.ResolveFilePath(builder.Configuration, adminSecretPath);
+
+    List<(string Path, string Title, string Lost)> persistentState =
+    [
+        (Path.GetDirectoryName(adminSecretPath) ?? adminSecretPath, "Admin state is not persisted",
+            $"the admin password ('{adminSecretPath}') and every saved operator policy decision " +
+            $"('{adminSettingsPath}') — disabled and staged games, maintenance mode, runtime limit " +
+            "overrides, banned room codes, the announcement, registered marketplaces and webhooks"),
+    ];
+    if (managedPackagesEnabled)
+        persistentState.Add((gamesManagedRoot, "Installed packages are not persisted",
+            "every game the admin portal installed. A marketplace package can be downloaded again; " +
+            "one that was UPLOADED exists nowhere else"));
+    // The games mount is the operator's own library. Warned about even when empty: the failure is
+    // that anything dropped in later is lost, and by the time games are there the update has run.
+    persistentState.Add((gamesRoot, "Games folder is not persisted",
+        "every game in it, including any .kbg package copied in later"));
+
+    foreach (var (path, title, lost) in persistentState)
+    {
+        if (!StatePersistence.IsEphemeral(containerMounts, path)) continue;
+        // Non-blocking: the platform serves players correctly today, and blanking a working site over
+        // a future loss would be its own outage. The startup log and the portal's Overview tab are the
+        // channels here, the same two every other non-blocking issue uses.
+        diagnostics.Report(title,
+            $"'{path}' is inside the container, so the next image update will DESTROY {lost}. " +
+            "Mount a named volume or a host directory there — see docs/HOSTING.md, 'Updating KnockBox'. " +
+            "A host directory must be writable by UID 1654.");
+    }
+}
+
 // Persist logs to a file that rolls once per day (knockbox-YYYYMMDD.log) while still echoing to the
 // console for dev. Daily files are retained for KnockBox:LogRetentionDays days (default 31); because
 // we roll once per day, the retained-file count equals the retained-day count. All existing
@@ -391,11 +443,17 @@ builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = Compre
 
 var app = builder.Build();
 
-// The resolved roots are the first thing an admin needs when "my games don't show up".
+// The resolved roots are the first thing an admin needs when "my games don't show up" — and the
+// second thing they need when state vanished on an image update, which is why games-managed and the
+// admin files are here too. All eight, not the five this once logged: a root missing from this line is
+// a root whose mount an operator has to infer.
 app.Logger.LogInformation(
     "Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} " +
-    "(precompress: {Precompress}), games-unpacked: {GamesUnpackedRoot} (packages: {Packages})",
-    webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled, gamesUnpackedRoot, packagesEnabled);
+    "(precompress: {Precompress}), games-unpacked: {GamesUnpackedRoot} (packages: {Packages}), " +
+    "games-managed: {GamesManagedRoot} (managed: {ManagedPackages}), admin state: {AdminStateRoot}",
+    webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled, gamesUnpackedRoot, packagesEnabled,
+    gamesManagedRoot, managedPackagesEnabled,
+    Path.GetDirectoryName(AdminAuthService.ResolveSecretPath(builder.Configuration)));
 
 // Where the admin portal actually is — read from Kestrel's BOUND addresses, not from configuration.
 // Announcing a configured-but-unbound URL is exactly how the portal came to answer "connection refused"

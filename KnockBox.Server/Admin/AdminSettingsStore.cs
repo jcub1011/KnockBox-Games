@@ -41,12 +41,22 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     {
         _logger = logger;
 
-        var configured = config["KnockBox:AdminSettingsPath"];
-        FilePath = !string.IsNullOrWhiteSpace(configured)
-            ? Path.GetFullPath(configured)
-            : Path.Combine(Path.GetDirectoryName(auth.SecretFilePath) ?? AppContext.BaseDirectory, DefaultFileName);
+        FilePath = ResolveFilePath(config, auth.SecretFilePath);
 
         _state = Load();
+    }
+
+    /// <summary>
+    /// Where the settings file lives, resolved the same way whether or not the store has been
+    /// constructed yet. Static for the same reason as <see cref="AdminAuthService.ResolveSecretPath"/>:
+    /// bootstrap checks whether this file is on persisted storage before DI exists.
+    /// </summary>
+    public static string ResolveFilePath(IConfiguration config, string secretFilePath)
+    {
+        var configured = config["KnockBox:AdminSettingsPath"];
+        return !string.IsNullOrWhiteSpace(configured)
+            ? Path.GetFullPath(configured)
+            : Path.Combine(Path.GetDirectoryName(secretFilePath) ?? AppContext.BaseDirectory, DefaultFileName);
     }
 
     /// <summary>Where the settings file lives. Surfaced so an error message can name it.</summary>

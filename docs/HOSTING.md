@@ -74,9 +74,23 @@ services:
 
 > **TrueNAS** (or any OCI host): point a Custom App at `ghcr.io/jcub1011/knockbox-games:latest`
 > (or `:develop`). Once the package is public (see the one-time step above), no registry
-> credentials are needed. Mount your games
-> directory read-only at `/games` and a writable cache at `/app/games-compressed`, and map ports
-> `8080`/`8081` 1:1 (or pin `KnockBox__GamesOrigin`) — same as the compose setup below.
+> credentials are needed. Map ports `8080`/`8081` 1:1 (or pin `KnockBox__GamesOrigin`) and mount your
+> games directory read-only at `/games`, plus **all four** writable paths — same as the compose setup
+> below:
+>
+> | Mount | Regenerable? |
+> |---|---|
+> | `/app/data` | **No** — admin password hash + every operator policy decision |
+> | `/app/games-managed` | **No** — packages installed from a marketplace or uploaded by hand |
+> | `/app/games-compressed` | Yes — losing it only costs a re-compression |
+> | `/app/games-unpacked` | Yes — re-extracted from the packages |
+>
+> This matters more here than under plain Compose: **TrueNAS Custom Apps, Kubernetes, Portainer and
+> ECS all recreate the container on every image update**, so a writable path that is not an explicit
+> mount is discarded each time you update — and the server keeps running perfectly against the empty
+> replacement, so nothing tells you until someone notices the portal is asking to be claimed again.
+> From KnockBox 0.1.0 the server does say so: it logs a `not persisted` warning at startup and lists
+> it on the portal's Overview tab. Check `docker logs` after your first start.
 
 ### Use a stable games directory
 
@@ -331,9 +345,15 @@ services:
       KnockBox__AllowedOrigins__0: "https://play.example.com"     # your SHELL hostname (with https://, no trailing slash)
       KnockBox__AllowedOrigins__1: "https://games.example.com"    # your GAMES hostname (with https://, no trailing slash)
       KnockBox__GamesPollSeconds: "10"
+    # EVERY writable path here must be a mount. Anything not listed lives inside the container and is
+    # DESTROYED on the next `docker compose pull` - including, if you omit it, the admin password and
+    # every policy decision you have made.
     volumes:
       - /srv/knockbox/games:/games:ro                 # your game folders (read-only)
+      - /srv/knockbox/data:/app/data                  # admin password + ALL operator policy - back up
+      - /srv/knockbox/games-managed:/app/games-managed # packages installed/uploaded via the portal - back up
       - /srv/knockbox/games-compressed:/app/games-compressed
+      - /srv/knockbox/games-unpacked:/app/games-unpacked
       - /srv/knockbox/logs:/app/logs
     restart: unless-stopped
 
@@ -345,9 +365,11 @@ services:
     restart: unless-stopped
 ```
 
-Create the host folders first and make them owned by UID `1654` (see the permissions notes earlier
-in this section). Common slip-ups: `GamesHost` must **exactly** equal your games hostname, and the
-two `AllowedOrigins` must have **no trailing slash**.
+Create the host folders first and `chown -R 1654` the four writable ones (`data`, `games-managed`,
+`games-compressed`, `games-unpacked`) — see the permissions notes earlier in this section. Common
+slip-ups: `GamesHost` must **exactly** equal your games hostname, and the two `AllowedOrigins` must
+have **no trailing slash**. To reach the admin portal in this setup, give it its own hostname with
+`KnockBox__AdminHost` (see “The admin portal” above) — there is no published port to tunnel to.
 
 #### 4. Point both hostnames at KnockBox
 
@@ -376,6 +398,132 @@ your browser's developer tools:
 
 If the home page shows a configuration warning instead of the lobby, it's almost always folder
 permissions — see "The home page shows a configuration warning" below.
+
+### Updating KnockBox
+
+**The whole rule: update the image, keep the mounts.** Nothing KnockBox persists lives in the image —
+but anything you did *not* mount lives in the *container*, and updating an image replaces the
+container. So an update is safe exactly when every writable path is a mount, and destructive exactly
+when one is not.
+
+With the shipped `docker-compose.yml`, in the directory that already holds your `docker-compose.yml`
+and `.env`:
+
+```bash
+docker compose pull        # fetch the new image
+docker compose up -d       # recreate the container against the SAME volumes
+```
+
+That is the whole procedure. Lobbies and player sessions are in memory and drop on restart by design
+(identities are anonymous and per-tab); everything else is on a volume and comes back.
+
+> **Do not "upgrade" by unzipping a release bundle into a new directory.** Compose used to derive its
+> project name from the folder the file sits in and prefix every volume with it, so a new folder meant
+> a new, empty set of volumes — the portal reverting to unclaimed and your installed games gone. The
+> compose file now pins `name: knockbox` and pins each volume's own `name:`, which makes the folder
+> irrelevant. If you are coming from a compose file **without** those keys, see the migration below.
+
+#### One-time volume migration (only if you deployed before the pinned names)
+
+Check what you have. Volumes named `knockbox-admin` need nothing; ones named
+`<folder>_knockbox-admin` are the old scheme:
+
+```bash
+docker volume ls | grep knockbox
+```
+
+Either keep using the old names by naming the old project explicitly —
+
+```bash
+docker compose -p <old-folder-name> up -d
+```
+
+— or move the data across once, with the stack stopped. For each of the four
+(`admin`, `managed`, `unpacked`, `compressed`; the last two are caches and can simply be skipped):
+
+```bash
+docker compose down
+docker volume create knockbox-admin
+docker run --rm -v <old-folder-name>_knockbox-admin:/from -v knockbox-admin:/to \
+  alpine sh -c 'cd /from && cp -a . /to'
+docker compose up -d
+```
+
+Verify before deleting anything old: open the portal and confirm your password still works and your
+disabled games are still disabled.
+
+#### If you are not using our compose file
+
+A hand-written `docker run`, a TrueNAS Custom App, a Kubernetes manifest or a Portainer stack must
+mount all five paths itself. **The server now tells you when you have missed one**: it logs a warning
+at startup and lists it on the portal's **Overview** tab. Check it after your first start —
+
+```bash
+docker logs knockbox 2>&1 | grep "not persisted"
+```
+
+— and expect no output. A line there names the directory and what the next update would destroy.
+
+Note there is deliberately **no `VOLUME` directive** in the image, which would seem to make this
+safe automatically. It does not: an unmounted `VOLUME` becomes an *anonymous* volume, which Compose
+usually carries across a recreate but `docker run` replaces per container and Kubernetes ignores
+entirely. It works just often enough to be trusted, and then quietly does not — which is how
+KnockBox's predecessor lost operator state on every TrueNAS Custom App update. A warning that is
+correct everywhere beats a directive that is correct in one place.
+
+#### Updating from a release bundle
+
+The bundle's `docker-compose.yml` is pinned to its version, so upgrading means taking the new
+compose file and keeping your own files. Unzip the new bundle somewhere else, then copy **only**
+`docker-compose.yml` over your existing one:
+
+```bash
+unzip knockbox-<new-version>-docker.zip -d /tmp/kb-new
+cp /tmp/kb-new/docker-compose.yml ./docker-compose.yml
+docker compose pull && docker compose up -d
+```
+
+Do **not** copy the bundle's `appsettings.json` or `.env.example` over yours — those are yours now,
+and the bundle ships stock copies that would overwrite every knob you set. If you want a new
+release's `appsettings.json` defaults, diff them in rather than replacing the file.
+
+#### What to back up
+
+| Path in the container | Default volume | Lose it and… |
+|---|---|---|
+| `/app/data` | `knockbox-admin` | the portal reverts to **unclaimed** and every policy decision is forgotten — disabled games serve players again, limit overrides, banned room codes, the announcement, registered marketplaces, update enrolments and webhook endpoints all go |
+| `/app/games-managed` | `knockbox-managed` | every game installed from the portal. A marketplace game can be downloaded again; **an uploaded one exists nowhere else** |
+| your games directory | `KNOCKBOX_GAMES_DIR` | your hand-installed game library |
+
+`/app/games-compressed` and `/app/games-unpacked` need no backup — they are rebuilt from the games
+and packages above. Losing them costs a slow first boot, nothing more.
+
+```bash
+# The two that matter, with the stack stopped.
+docker run --rm -v knockbox-admin:/data -v "$PWD":/backup \
+  alpine tar czf /backup/knockbox-admin.tar.gz -C /data .
+docker run --rm -v knockbox-managed:/data -v "$PWD":/backup \
+  alpine tar czf /backup/knockbox-managed.tar.gz -C /data .
+```
+
+#### Rolling back
+
+Pin the previous version and recreate — there are no schema migrations and no database, so an older
+image reads the same `admin-settings.json` a newer one wrote. Unknown fields are ignored rather than
+rejected, so a setting introduced by the newer version is simply inert on the older one.
+
+> **`docker compose down -v` deletes your volumes.** It is the one command in normal use that
+> destroys everything in the table above. Plain `docker compose down` (no `-v`) stops the stack and
+> keeps the data.
+
+#### Browser-side state
+
+A little state lives in the player's browser rather than on the server, keyed by **origin**: the
+display name and Play Log in `localStorage`, the identity token in per-tab `sessionStorage`. Nothing
+here needs backing up, but two things will orphan it — changing `KnockBox__GamesOrigin` /
+`GamesHost`, which moves every game to a new origin and abandons whatever it stored there, and
+renaming a `kb.*` storage key in a KnockBox release. Worth knowing before you move hostnames: players
+will look like first-time visitors.
 
 ### Hot-reload on Docker Desktop
 
@@ -491,13 +639,14 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `GamesCompressedRoot` | `/app/games-compressed` (Docker) | Where the pre-compressed cache lives. Must be **writable** and outside the read-only `games/` mount. Mount a volume / host path here to persist it across updates (see above). |
 | `Packages` | `true` | Install `.kbg` game packages copied into the games dir. `false` ⇒ only plain game folders are supported. |
 | `GamesUnpackedRoot` | `/app/games-unpacked` (Docker) | Where games extracted from `.kbg` packages live. Must be **writable** and outside the read-only `games/` mount. Mount a volume / host path here to avoid re-extracting the library on every update (see above). |
+| `GamesManagedRoot` | `/app/games-managed` (Docker) | Where the `.kbg` packages the ADMIN PORTAL installed live — marketplace downloads, uploads, and the previous versions kept for rollback. Must be **writable** and outside the read-only `games/` mount. Unlike the two caches above it is **not regenerable**: an uploaded package exists nowhere else, so in Docker it must be on a persisted volume and it should be backed up. See “Updating KnockBox”. |
 | `MaxPackageBytes` / `MaxPackageEntries` / `MaxPackageRatio` | 512 MiB / `20000` / `200` | Ceilings that stop a malformed or malicious package filling the disk. Raise `MaxPackageBytes` only if you host a genuinely larger game; `0` disables a check. |
 | `GamesPollSeconds` | `0` (off; `10` in Docker) | Polling fallback for games hot-reload where file watching doesn't work (bind mounts). |
 | `GamesPort` / `GamesHost` / `GamesOrigin` | `5115` / — / — | How the separate game origin is addressed (port in dev, subdomain or explicit origin in prod). |
 | `AdminPort` / `AdminHost` / `AdminOrigin` | `5116` (`8082` Docker) / — / — | How the admin portal origin is addressed. Do **not** expose it publicly — see [The admin portal](#the-admin-portal). |
-| `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. |
+| `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. **Back this up** — see “Updating KnockBox”. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
-| `AdminSettingsPath` | `admin-settings.json` next to the password file | Persisted operator policy: per-game availability and maintenance mode. Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to reset all policy. |
+| `AdminSettingsPath` | `admin-settings.json` next to the password file | Persisted operator policy: per-game availability and maintenance mode. Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to reset all policy. **Back this up** — see “Updating KnockBox”. |
 | `AdminStaleLobbyMinutes` | `30` | Idle minutes before the portal calls a lobby stale (and "Purge Stale" collects it). `0` judges staleness only by "nobody in it is connected". |
 | `AdminLogBufferSize` | `2000` | Log events kept in memory for the portal's live log view. Older entries are only in the rolling files under `LogsRoot`. |
 | `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. `0` measures on every read. |

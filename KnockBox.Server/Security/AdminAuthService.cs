@@ -65,13 +65,31 @@ public sealed class AdminAuthService
         _clock = clock;
         _logger = logger;
         
-        var configuredPath = config["KnockBox:AdminPasswordPath"];
-        _secretFilePath = !string.IsNullOrWhiteSpace(configuredPath)
-            ? Path.GetFullPath(configuredPath)
-            : Path.Combine(AppContext.BaseDirectory, "admin.secret");
+        _secretFilePath = ResolveSecretPath(config);
 
         var sessionHours = config.GetValue("KnockBox:AdminSessionTtlHours", 8.0);
         _sessionTtl = TimeSpan.FromHours(sessionHours);
+    }
+
+    /// <summary>
+    /// Where the password hash lives, resolved the same way whether or not the service has been
+    /// constructed yet. Static because bootstrap needs the answer BEFORE the DI container exists, to
+    /// check whether the directory is actually persisted (see <c>StatePersistence</c>) while the
+    /// diagnostics it reports into can still reach the startup log. Exposed rather than copied — a
+    /// second implementation of this fallback would eventually disagree with this one about where the
+    /// password is, and the symptom would be a warning naming a file nothing reads.
+    /// </summary>
+    /// <remarks>
+    /// A configured RELATIVE path resolves against the process working directory, not the content
+    /// root — unlike the six <c>ContentPaths</c> roots. Prefer an absolute path; the container sets
+    /// one.
+    /// </remarks>
+    public static string ResolveSecretPath(IConfiguration config)
+    {
+        var configuredPath = config["KnockBox:AdminPasswordPath"];
+        return !string.IsNullOrWhiteSpace(configuredPath)
+            ? Path.GetFullPath(configuredPath)
+            : Path.Combine(AppContext.BaseDirectory, "admin.secret");
     }
 
     /// <summary>

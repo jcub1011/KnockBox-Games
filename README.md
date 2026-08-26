@@ -31,6 +31,13 @@ services:
     ports:
       - "8080:8080"   # shell — players open this
       - "8081:8081"   # game origin — keep host:container 1:1 (see note below)
+      # Admin portal. LOOPBACK ONLY: until a password is set, the first visitor to reach it claims
+      # the portal. Open http://localhost:8082 right after the first start. See docs/HOSTING.md.
+      - "127.0.0.1:8082:8082"
+    # EVERY writable path below must be a mount, or it lives inside the container and is DESTROYED
+    # the next time you update the image. The first two are caches you would only have to rebuild;
+    # the last two are not regenerable - they are your admin password, all of your operator policy,
+    # and the game packages the portal installed. Back those two up.
     volumes:
       - type: bind                       # your game library (read-only)
         source: /srv/knockbox/games
@@ -42,6 +49,12 @@ services:
       - type: bind                       # games unpacked from .kbg; also owned by UID 1654
         source: /srv/knockbox/games-unpacked
         target: /app/games-unpacked
+      - type: bind                       # REQUIRED: admin password + all operator policy
+        source: /srv/knockbox/data
+        target: /app/data
+      - type: bind                       # REQUIRED: packages the portal installed or you uploaded
+        source: /srv/knockbox/games-managed
+        target: /app/games-managed
       # - type: bind                     # optional: persist logs
       #   source: /srv/knockbox/logs
       #   target: /app/logs
@@ -56,7 +69,11 @@ internal game port `8081` to browsers); if you must change them, pin `KnockBox__
 **On TrueNAS SCALE:** keep the long-form mounts above — the short `:ro` form gets rewritten by
 the app engine into an invalid spec. Put `source:` paths under your pool (`/mnt/<pool>/...`),
 create those directories first (the host root is read-only, so Docker can't auto-create them),
-and `chown -R 1654` the writable `games-compressed` and `games-unpacked` dirs.
+and `chown -R 1654` **every** writable dir — `games-compressed`, `games-unpacked`, `data` and
+`games-managed`. Get this right the first time: TrueNAS Custom Apps **recreate the container on
+every image update**, so any of those four that is not an explicit mount is discarded each time you
+update — and losing `data` means the portal reverts to unclaimed and every policy decision is
+forgotten. See [docs/HOSTING.md](docs/HOSTING.md) → “Updating KnockBox”.
 
 ### Or download it
 

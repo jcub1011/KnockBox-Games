@@ -42,6 +42,15 @@
 # (8081), so host:container mappings must stay 1:1 — or set KnockBox__GamesOrigin explicitly
 # (see the second-instance example below). The admin port is exempt: nothing advertises it to a
 # browser, so you can remap 8082 freely on the host.
+# PROJECT NAME is pinned so the four named volumes below do not depend on the DIRECTORY this file
+# sits in. Without it Compose derives the project from the folder name and prefixes every volume with
+# it, so unzipping a newer release bundle into a NEW directory silently creates a NEW, EMPTY set of
+# volumes: the portal reverts to unclaimed, every policy decision is forgotten and portal-installed
+# games disappear. That is an image update that resets your settings, which is the one thing this
+# deployment must never do. Upgrading in place (`docker compose pull && docker compose up -d`) was
+# always fine; this makes upgrading from a fresh unzip fine too. Running TWO KnockBox stacks on one
+# host now needs a distinct name here as well as its own volumes - see the second instance below.
+name: knockbox
 services:
   knockbox:
     # To run a prebuilt image instead of building locally, comment out the `build:` block below and
@@ -155,7 +164,15 @@ services:
 # Docker-managed named volumes. They survive image updates and inherit the container's non-root
 # ownership automatically. Each is overridden by a host bind mount when its KNOCKBOX_*_DIR variable is
 # set (then the volume simply goes unused). Add knockbox-compressed-2, knockbox-unpacked-2 and
-# knockbox-admin-2 here if you enable the second instance above.
+# knockbox-admin-2 here if you enable the second instance above - each with its own `name:`, and give
+# that stack its own project `name:` too.
+#
+# Each declares an explicit `name:` so the volume is called exactly that, with no project prefix - the
+# same reason the project `name:` is pinned above: what a volume is called must not depend on where
+# this file was unzipped. UPGRADING AN EXISTING INSTALL: volumes created before this change are named
+# `<folder>_knockbox-admin` and are NOT the same volumes, so a plain `up -d` would come up empty.
+# docs/HOSTING.md -> "Updating KnockBox" has the one-time migration; the short version is to keep the
+# old names with `docker compose -p <old-folder-name> up -d`, or copy each volume across once.
 #   • the first two are regenerable caches — losing one only costs rebuild time
 #   • knockbox-admin is NOT regenerable: it holds the admin password hash AND the operator policy
 #     (disabled/staged games, maintenance mode, registered marketplaces, update enrolments). Back it
@@ -166,6 +183,10 @@ services:
 #     directory alone no longer captures your whole library.
 volumes:
   knockbox-compressed:
+    name: knockbox-compressed
   knockbox-unpacked:
+    name: knockbox-unpacked
   knockbox-managed:
+    name: knockbox-managed
   knockbox-admin:
+    name: knockbox-admin

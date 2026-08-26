@@ -189,12 +189,43 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # An unmounted container must SAY it is unmounted, before anything else runs. This is the whole
+      # defence for deployments we never see — a hand-written `docker run`, a TrueNAS Custom App, a k8s
+      # manifest with no PVC — where nothing in this repo gets a chance to be correct on the operator's
+      # behalf. A throwaway container with no volumes, so its own state genuinely is ephemeral.
+      - name: A container with no volumes warns that its state will not survive an update
+        run: |
+          mkdir -p /tmp/kb-nomount
+          docker run -d --name kb-ephemeral -v /tmp/kb-nomount:/games:ro knockbox:ci
+          for i in $(seq 1 30); do
+            docker logs kb-ephemeral 2>&1 | grep -q "Content roots" && break
+            sleep 1
+          done
+          # Named individually: each is a different loss with a different remedy, and a single generic
+          # "check your mounts" line is the kind of warning an operator learns to scroll past.
+          docker logs kb-ephemeral 2>&1 | grep -q "Admin state is not persisted"
+          docker logs kb-ephemeral 2>&1 | grep -q "Installed packages are not persisted"
+          # The games mount IS provided here, so that one must stay quiet — a check that fires on
+          # everything is worth nothing, and this is the assertion that pins the difference.
+          ! docker logs kb-ephemeral 2>&1 | grep -q "Games folder is not persisted"
+          docker rm -f kb-ephemeral
+
       - name: Start container with an empty mounted games dir
         run: |
           mkdir -p /tmp/kb-games
+          # Real Docker volumes for every writable root, because "does this survive an image update?" is
+          # the one question the assertions further down claim to answer and previously could not: with
+          # nothing mounted, `docker exec kb test -f /app/data/admin-settings.json` proves only that the
+          # file reached the container's own writable layer, which is exactly what an update destroys.
+          # The recreate step at the end of this job is what turns those into real assertions.
+          for v in kb-data kb-managed kb-unpacked kb-compressed; do docker volume create "$v" >/dev/null; done
           docker run -d --name kb \
             -p 8080:8080 -p 8081:8081 -p 8082:8082 \
             -v /tmp/kb-games:/games:ro \
+            -v kb-data:/app/data \
+            -v kb-managed:/app/games-managed \
+            -v kb-unpacked:/app/games-unpacked \
+            -v kb-compressed:/app/games-compressed \
             -e KnockBox__GamesPollSeconds=2 \
             -e KnockBox__MarketplaceCatalogUrl=http://127.0.0.1:9000/CATALOG.json \
             -e KnockBox__MarketplaceDownloadBaseUrl=http://127.0.0.1:9000 \
@@ -904,6 +935,108 @@ jobs:
           ! curl -fsS http://localhost:8080/games/tictactoe/index.html >/dev/null
           ! curl -fsS http://localhost:8080/games/tictactoe/GAME.json >/dev/null
 
+      # ── The assertion this whole job exists for ────────────────────────────────────────────────────
+      #
+      # Updating a Docker image means DESTROYING the container and making a new one from the new image.
+      # Every "it must have been PERSISTED" check above writes through to /app/data and then reads it
+      # back inside the SAME container, which cannot distinguish a volume from the container's own
+      # writable layer — so before this step the whole suite was green on a deployment that lost the
+      # admin password and every policy decision on each update. That is not a hypothetical: this
+      # project's predecessor shipped exactly that, and the losses were only noticed weeks later when an
+      # operator found the portal asking to be claimed again.
+      #
+      # So: destroy the container, make a new one from the same image with the same volumes, and require
+      # the state to still be there. Deliberately `docker rm -f` and not `docker restart` — a restart
+      # keeps the writable layer and would pass no matter how the mounts were configured, which is the
+      # bug rather than the test.
+      #
+      # The state is created here rather than inherited from the steps above. Those set values and then
+      # revert them (each pinning its own round trip), so by this point admin-settings.json is nearly
+      # empty; and an assertion that silently depends on an unrelated step's leftovers stops meaning
+      # anything the moment that step is edited.
+      - name: State written before the container is replaced survives being replaced
+        run: |
+          set -euo pipefail
+
+          # 1. Write one of each KIND of persisted state, so a mount that is present but ignored fails
+          #    here too. Availability lives in the games map, the limit override in its own object, the
+          #    banned code in a third — three different write paths into the one file.
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"state":"disabled"}' \
+            http://localhost:8082/admin/api/games/tictactoe/availability | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"maxLobbiesPerGame":7}' http://localhost:8082/admin/api/limits | grep -q '"success":true'
+          curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"words":["upgradeprobe"]}' \
+            http://localhost:8082/admin/api/room-codes | grep -q '"success":true'
+          # And a package that exists NOWHERE else: an uploaded one cannot be re-downloaded, so losing
+          # /app/games-managed loses it outright. Installed by the upload step above.
+          docker exec kb test -f /app/games-managed/uploaded-demo.kbg
+
+          # A mounted deployment must ALSO stay quiet about persistence — the counterpart to the
+          # unmounted container's warning near the top of this job. If this fires, the check is reading
+          # mounts wrongly and every operator gets a warning they cannot act on.
+          ! docker logs kb 2>&1 | grep -q "is not persisted"
+
+          # 2. The update. The catalog sidecar shares kb's network namespace, so it goes first — nothing
+          #    below needs it, and leaving it attached to a dead namespace only produces a confusing
+          #    error somewhere else.
+          docker rm -f kb-catalog || true
+          docker rm -f kb
+          docker run -d --name kb \
+            -p 8080:8080 -p 8081:8081 -p 8082:8082 \
+            -v /tmp/kb-games:/games:ro \
+            -v kb-data:/app/data \
+            -v kb-managed:/app/games-managed \
+            -v kb-unpacked:/app/games-unpacked \
+            -v kb-compressed:/app/games-compressed \
+            -e KnockBox__GamesPollSeconds=2 \
+            -e KnockBox__MetricSampleSeconds=2 \
+            -e KnockBox__MarketplaceCatalogUrl=http://127.0.0.1:9000/CATALOG.json \
+            -e KnockBox__MarketplaceDownloadBaseUrl=http://127.0.0.1:9000 \
+            knockbox:ci
+          for i in $(seq 1 45); do
+            curl -fsS http://localhost:8082/admin/api/auth/status >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          # 3. The portal is still CLAIMED. This is the one an operator notices first, and the one the
+          #    predecessor failed: an empty /app/data means the next visitor sets the password.
+          curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"configured":true'
+          # The ORIGINAL password still authenticates, which is the real proof — `configured:true` alone
+          # would also be satisfied by some other hash arriving in that file.
+          curl -fsS -c /tmp/kb-admin-cookies-2 -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"ci-admin-password"}' \
+            http://localhost:8082/admin/api/auth/login | grep -q '"success":true'
+
+          # 4. Policy survived AND was re-applied, not merely present on disk. A file that loads into
+          #    nothing is the same outage as a file that vanished.
+          curl -fsS -b /tmp/kb-admin-cookies-2 http://localhost:8082/admin/api/games \
+            | grep -q '"availability":"disabled"'
+          curl -fsS -b /tmp/kb-admin-cookies-2 http://localhost:8082/admin/api/limits \
+            | grep -q '"maxLobbiesPerGame":7'
+          curl -fsS -b /tmp/kb-admin-cookies-2 http://localhost:8082/admin/api/room-codes \
+            | grep -q 'upgradeprobe'
+
+          # 5. The uploaded package survived and its game is served again — the package root and the
+          #    extraction both came back.
+          docker exec kb test -f /app/games-managed/uploaded-demo.kbg
+          for i in $(seq 1 45); do
+            curl -fsS http://localhost:8081/games/uploaded-demo/index.html >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8081/games/uploaded-demo/index.html >/dev/null
+
+          # 6. Leave the probe state behind: tictactoe re-enabled and the limits/room-code overrides
+          #    dropped, so the log assertions after this see an ordinary server.
+          curl -fsS -b /tmp/kb-admin-cookies-2 -X POST -H 'Content-Type: application/json' \
+            -d '{"state":"available"}' \
+            http://localhost:8082/admin/api/games/tictactoe/availability >/dev/null
+          curl -fsS -b /tmp/kb-admin-cookies-2 -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/limits >/dev/null
+          curl -fsS -b /tmp/kb-admin-cookies-2 -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://localhost:8082/admin/api/room-codes >/dev/null
+
       - name: Startup logs are sane (no blank-site error, roots resolved, admin origin bound)
         run: |
           docker logs kb 2>&1 | grep -q "Content roots"
@@ -941,4 +1074,8 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: docker rm -f kb kb-catalog || true
+        run: |
+          docker rm -f kb kb-catalog kb-ephemeral || true
+          # The volumes outlive the containers by design - that is the property under test - so they
+          # have to be removed explicitly, and only after the containers holding them are gone.
+          docker volume rm kb-data kb-managed kb-unpacked kb-compressed || true
