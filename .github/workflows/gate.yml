@@ -177,6 +177,14 @@ jobs:
       # layers, so the gha cache still hits.
       - name: Build image
         uses: docker/build-push-action@v6
+        # This action uploads a `*.dockerbuild` build record as a workflow artifact by default. Nothing
+        # in this repo reads it, and release.yml pays for it: its download step used to fetch every
+        # artifact in the run, so a flake on this one failed a release whose every gate had passed.
+        # That step now names what it wants, which is the real fix - this just stops producing the
+        # thing, saving an upload on every PR too. Set it back to true if you need buildx build
+        # records to debug a build.
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: KnockBox.Server/Dockerfile

@@ -369,9 +369,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # PATTERN, not everything. Without it this downloads every artifact in the run - which includes
+      # the `*.dockerbuild` build record that docker/build-push-action uploads on its own, and which
+      # nothing here consumes. That is a failure mode for free: a flake downloading an artifact the
+      # release neither produces nor wants fails this job AFTER every gate has passed, inverting the
+      # whole "if any build fails, upload nothing" property into "anything unrelated can sink a good
+      # release". It happened on the first DryRun that ever reached this step. `Collect the assets`
+      # below is exposed the same way: it counts `*.zip` under incoming/ and asserts exactly 3, so a
+      # stray artifact carrying a zip would break that too.
+      #
+      # merge-multiple stays at its default of false, so each artifact still lands in
+      # incoming/<name>/ and the two steps below keep their paths.
       - uses: actions/download-artifact@v4
         with:
           path: incoming
+          pattern: "{asset-*,container-image}"
 
       - name: Collect the assets
         run: |
