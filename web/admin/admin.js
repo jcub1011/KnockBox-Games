@@ -16,7 +16,7 @@ import {
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, sdkBadge,
   noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
-  sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptions,
+  sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
@@ -32,6 +32,10 @@ const JOB_VIEW_LIMIT = 50;
 let pollTimer = null;
 let activeSettingId = 'setting-overview';
 let activeTab = 'overview';
+// The tab enterTab last ran for, so a scroll that ends where it started re-fetches nothing.
+let enteredTab = null;
+// Pending scroll-settle timer. Cancelled by an actual tab entry, and by stopScrollSettle().
+let settleTimer = null;
 let scrollObserver = null;
 
 
@@ -349,11 +353,9 @@ export function selectSetting(settingKey, { replaceHash = true, scroll = false }
     }
   }
 
-  if (activeTab === 'logs') { logCursor = 0; logEntries = []; }
-  if (activeTab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
-
-  refreshActiveTab();
-  startPolling();
+  // The operator picked this, so it happens now and unconditionally — a second click on a setting in
+  // the tab you are already on is a refresh, and should behave like one.
+  enterTab(activeTab, { force: true });
 }
 
 export function selectTab(tab, { replaceHash = true } = {}) {
@@ -494,15 +496,49 @@ export function updateScrollspy() {
           history.replaceState(null, '', `#${hash}`);
         }
 
-        if (activeTab !== prevTab) {
-          if (activeTab === 'logs') { logCursor = 0; logEntries = []; }
-          if (activeTab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
-          refreshActiveTab();
-          startPolling();
-        }
+        if (activeTab !== prevTab) enterTabWhenSettled(activeTab);
       }
     }
   }
+}
+
+/**
+ * Arriving on a tab: reset the cursor feeds it streams, take its one-off read, and arm its poll.
+ *
+ * One definition, because the two ways of arriving used to carry a copy each — and the copies did the
+ * same expensive things for very different reasons. Clicking a setting is a decision; scrolling past one
+ * is not, and `updateScrollspy` fires on every scroll event from three sources, so a single sidebar
+ * click (which smooth-scrolls through everything in between) ran this for each tab on the way. That
+ * meant repeatedly emptying the log buffer and calling `refreshCatalog`, which reaches the network with
+ * a 30-second timeout and is the one read documented as never being on the poll path.
+ */
+function enterTab(tab, { force = false } = {}) {
+  // A click supersedes whatever the scroll it caused was about to conclude.
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+  if (!force && tab === enteredTab) return;
+  enteredTab = tab;
+  if (tab === 'logs') { logCursor = 0; logEntries = []; }
+  if (tab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
+  refreshActiveTab();
+  startPolling();
+}
+
+/** How long the scroll must settle before a tab it passed through counts as one you arrived on. */
+const TAB_SETTLE_MS = 250;
+
+/**
+ * The scroll path's version: nothing happens until the scrolling stops. Polling is stopped up front
+ * rather than left running, because between here and the settle the timer belongs to a tab that is no
+ * longer on screen.
+ */
+function enterTabWhenSettled(tab) {
+  stopPolling();
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    // The tab may have moved on again while this was pending; only the one still on screen wins.
+    if (activeTab === tab) enterTab(tab);
+  }, TAB_SETTLE_MS);
 }
 
 const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000, platform: 0 };
@@ -516,6 +552,16 @@ function startPolling() {
 export function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
+}
+
+/**
+ * Cancels a pending scroll settle. Exported for the jsdom tests, which reuse one window per file: a
+ * settle armed by the previous test would otherwise fire against the next one's fetch stub — the same
+ * trap stopPolling() exists for, one tick further out.
+ */
+export function stopScrollSettle() {
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = null;
 }
 
 async function refreshActiveTab() {
@@ -1212,9 +1258,17 @@ async function refreshJobs() {
   const data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
   if (!data) return;
 
+  // A sequence that went BACKWARDS means the server restarted: the registry is in-memory, so it begins
+  // again at 1. Without this, every real job that follows sorts below the stale rows we are still
+  // holding and is sliced away at JOB_VIEW_LIMIT, while the cursor — only ever clamped upward — asks
+  // for everything after a sequence the new process will not reach for a long time. The log feed
+  // already handles exactly this; the job feed is the same shape and did not.
+  const lastSequence = Number(data.lastSequence) || 0;
+  if (lastSequence < jobCursor) { jobs = []; jobCursor = 0; }
+
   const before = new Set(jobs.filter((j) => j.terminal).map((j) => j.jobId));
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
-  jobCursor = Number(data.lastSequence) || jobCursor;
+  jobCursor = lastSequence || jobCursor;
 
   // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
   // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
@@ -1341,7 +1395,9 @@ function marketplaceCard(entry) {
   version.className = 'text-input filter-narrow mkt-version';
   for (const option of versionOptions(entry)) {
     const opt = document.createElement('option');
-    opt.value = option.version ?? '';
+    // Kind AND version: the version alone is not unique once a backup of the installed version exists,
+    // and versionAction resolved the collision to whichever came first — see versionOptionValue.
+    opt.value = versionOptionValue(option);
     opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
     version.appendChild(opt);
   }
@@ -1376,7 +1432,9 @@ function marketplaceCard(entry) {
     action.className = `btn btn-small mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
     action.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
     action.title = decided.blockedReason || '';
-    action.onclick = () => runPackageAction(entry, decided, version.value, mode.value);
+    // decided.version, not version.value: the select's value carries the kind too, and what the rollback
+    // route wants is the version versionAction actually resolved.
+    action.onclick = () => runPackageAction(entry, decided, mode.value);
   };
   version.onchange = refresh;
   refresh();
@@ -1433,8 +1491,9 @@ function marketplaceCard(entry) {
   return card;
 }
 
-async function runPackageAction(entry, decided, version, mode) {
+async function runPackageAction(entry, decided, mode) {
   const name = entry.name || entry.id;
+  const version = decided.version;
   if (decided.kind === 'rollback') {
     if (!await confirmAction(
       `Roll ${name} back from ${formatVersion(entry.installedVersion)} to ${formatVersion(version)}? `
@@ -1445,11 +1504,19 @@ async function runPackageAction(entry, decided, version, mode) {
     return;
   }
 
-  if (decided.incompatible || decided.label === 'Install Anyways') {
+  if (decided.incompatible) {
     const runningDesc = entry.activeLobbies > 0 ? ` ${describeMode(mode, entry.activeLobbies)}` : '';
     const reasonText = entry.reason ? ` (${entry.reason})` : '';
+    // An update REPLACES a version that is presumably working, which the old wording never said — it read
+    // identically whether this was a first install or an overwrite of a running game. And the server
+    // stages the result either way, so say that here rather than letting it arrive as a surprise.
+    const replaces = decided.kind === 'update'
+      ? ` This replaces the installed ${formatVersion(entry.installedVersion)}.`
+      : '';
     if (!await confirmAction(
-      `Install ${name}? This game is unsupported on this server${reasonText} and may not work.${runningDesc}`,
+      `Install ${name} ${formatVersion(version)}? This game is unsupported on this server${reasonText} `
+      + `and may not work.${replaces} It will be staged — hidden from players until you set it to `
+      + `Available.${runningDesc}`,
       'Install Anyways')) return;
 
     if (await postJson(`/admin/api/marketplace/install/${encodeURIComponent(entry.id)}`,
@@ -2178,8 +2245,15 @@ async function clearRoomCodes() {
   if (!await confirmAction(
     'Remove every blocked word and pattern? The generator will be able to produce any code again.',
     'Clear All')) return;
-  codesDraft = { words: [], patterns: [] };
-  await saveRoomCodes();
+
+  // POST the empty list, and only adopt it as the draft once the server took it. Emptying the draft
+  // first left a rejected clear showing every chip on screen (saveRoomCodes only re-renders on success)
+  // over a draft that was already empty — so the operator's next Save deleted the whole blocklist
+  // without asking, which is precisely what they had just been told did not happen.
+  if (await postJson('/admin/api/room-codes', { words: [], patterns: [] })) {
+    codesDraft = { words: [], patterns: [] };
+    refreshPlatform();
+  }
 }
 
 async function revertLimits() {
@@ -2427,7 +2501,13 @@ async function onLoginSubmit(e) {
 
 async function onLogout() {
   try {
-    await fetch('/admin/api/auth/logout', { method: 'POST' });
+    // The JSON content type is sent for the same reason postJson always sends it: the server's write
+    // guard requires it on the auth routes outright, so a plain bodyless POST is refused with 415.
+    await fetch('/admin/api/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
   } catch (err) {
     console.error('Logout error:', err);
   }

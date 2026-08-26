@@ -19,13 +19,22 @@ namespace KnockBox.Server.Webhooks;
 /// <param name="MemoryThresholdMb">Working set that counts as a breach, or 0 to not watch memory.</param>
 /// <param name="CpuPercentThreshold">Process CPU (percent of one core-equivalent) that counts as a breach,
 /// or 0 to not watch CPU.</param>
+/// <param name="AllowPrivateTargets">
+/// Deliver to loopback, link-local and private addresses as well as public ones. Off by default: the
+/// endpoints this feature exists for are third-party chat services on the public internet, whereas an
+/// operator-chosen URL that reaches inward is an SSRF primitive — the portal's test button awaits the
+/// delivery and reports the upstream status, which turns it into a scanner for a network the caller
+/// cannot otherwise reach. Turn it on for a monitoring agent on the same host or LAN. See
+/// <see cref="PrivateAddressGuard"/>.
+/// </param>
 public sealed record WebhookOptions(
     bool Enabled,
     int MaxEndpoints,
     TimeSpan Timeout,
     int ErrorsPerMinute,
     int MemoryThresholdMb,
-    int CpuPercentThreshold)
+    int CpuPercentThreshold,
+    bool AllowPrivateTargets)
 {
     public static WebhookOptions FromConfiguration(IConfiguration config) => new(
         config.GetValue("KnockBox:WebhooksEnabled", true),
@@ -37,5 +46,6 @@ public sealed record WebhookOptions(
         // Both off by default: a threshold that fits one host is noise on another, and an alert nobody
         // configured is an alert nobody trusts.
         config.GetValue("KnockBox:WebhookMemoryThresholdMb", 0),
-        config.GetValue("KnockBox:WebhookCpuPercentThreshold", 0));
+        config.GetValue("KnockBox:WebhookCpuPercentThreshold", 0),
+        config.GetValue("KnockBox:WebhookAllowPrivateTargets", false));
 }

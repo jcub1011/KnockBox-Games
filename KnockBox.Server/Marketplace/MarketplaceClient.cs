@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -104,11 +105,19 @@ public sealed partial class MarketplaceClient
     /// dependency list, which matters here — every package has to clear the Native AOT gate.
     /// </remarks>
     /// <remarks>
-    /// Takes no options on purpose: nothing here is source-specific. That is what makes ONE client
-    /// shareable across every registered marketplace, with each <see cref="MarketplaceClient"/> holding
-    /// only its own URL pair and cached catalog.
+    /// Takes no SOURCE options on purpose: nothing about a marketplace source belongs here. That is what
+    /// makes ONE client shareable across every registered marketplace, with each
+    /// <see cref="MarketplaceClient"/> holding only its own URL pair and cached catalog.
     /// </remarks>
-    public static HttpClient CreateHttpClient()
+    /// <param name="denyAddress">
+    /// An optional destination filter applied at CONNECT time, used by the webhook client (which has its
+    /// own instance) to refuse private and loopback addresses — see
+    /// <see cref="Webhooks.PrivateAddressGuard"/>. It has to run here rather than on the URL because the
+    /// two ways past an address rule, a rebinding DNS answer and a redirect, both come back through this
+    /// callback. The marketplace passes nothing: its own rule deliberately permits loopback http so a
+    /// test or an offline mirror can serve a catalog.
+    /// </param>
+    public static HttpClient CreateHttpClient(Func<IPAddress, bool>? denyAddress = null)
     {
         var handler = new SocketsHttpHandler
         {
@@ -120,6 +129,8 @@ public sealed partial class MarketplaceClient
             MaxAutomaticRedirections = 5,
         };
 
+        if (denyAddress is not null) handler.ConnectCallback = Connector(denyAddress);
+
         // No HttpClient.Timeout: it applies to the whole request INCLUDING the response body, so a
         // large package on a slow link would abort mid-download. Per-call CancellationTokens carry
         // the timeouts instead (see CatalogTimeout / DownloadTimeout).
@@ -127,6 +138,43 @@ public sealed partial class MarketplaceClient
         client.DefaultRequestHeaders.UserAgent.ParseAdd($"KnockBox/{Hosting.KnockBoxVersion.Current}");
         return client;
     }
+
+    /// <summary>
+    /// A connect callback that resolves the host itself, drops every denied address, and dials the first
+    /// one left — refusing outright when that leaves nothing.
+    /// </summary>
+    /// <remarks>
+    /// Filtering the resolved set rather than checking the first answer matters: a host that publishes
+    /// both a public and a loopback record must not become reachable by luck of ordering. The refusal is
+    /// an <see cref="HttpRequestException"/> because that is what the callers already catch and surface
+    /// verbatim to the operator, so the reason survives to the portal instead of becoming "no response".
+    /// </remarks>
+    private static Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>> Connector(
+        Func<IPAddress, bool> denyAddress) =>
+        async (context, cancellationToken) =>
+        {
+            var host = context.DnsEndPoint.Host;
+            var resolved = IPAddress.TryParse(host, out var literal)
+                ? [literal]
+                : await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
+
+            var allowed = Array.FindAll(resolved, a => !denyAddress(a));
+            if (allowed.Length == 0)
+                throw new HttpRequestException(Webhooks.PrivateAddressGuard.Refusal(host));
+
+            var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(allowed, context.DnsEndPoint.Port, cancellationToken)
+                    .ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        };
 
     /// <summary>
     /// Fetches the catalog index, or returns the cached copy when the origin reports it unchanged.

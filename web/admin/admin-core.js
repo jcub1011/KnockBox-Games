@@ -570,7 +570,7 @@ export const PLUGIN_STATUS = [
   { value: 'updateAvailable', label: 'Update available', badge: 'badge-warning', hint: 'A newer version is published.' },
   { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered — usually a hand-built package.' },
   { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version, so there is nothing to compare. Common for hand-made games.' },
-  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version does not run on this server version. Never offered as an update.' },
+  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version. It is never installed automatically, and installing it by hand stages it rather than publishing it to players.' },
   { value: 'unusable', label: 'Unusable', badge: 'badge-danger', hint: 'The catalog entry is malformed and cannot be acted on.' },
   { value: 'installedOnly', label: 'Installed', badge: 'badge-ok', hint: 'Installed here, but no registered marketplace offers it.' },
 ];
@@ -672,6 +672,18 @@ export function jobProgress(job) {
  * One control serves both version targeting and rollback, because rolling back IS targeting an older
  * version you already hold. Two separate controls would be two ways to say the same thing.
  */
+/**
+ * The value an option is identified by. A version alone is NOT unique — a retained backup of the
+ * installed version has the same one — and matching on it picked whichever came first in the list,
+ * which is the newest available. Selecting "1.0.0 — backup" therefore resolved to the installed entry,
+ * rendered "Reinstall", and installed 2.0.0: no danger styling, no rollback confirmation, and the
+ * opposite of what was asked for. Kind and version together are unique by construction, because that
+ * pair is exactly what versionOptions deduplicates on.
+ */
+export function versionOptionValue(option) {
+  return `${option?.kind ?? ''}:${option?.version ?? ''}`;
+}
+
 export function versionOptions(entry) {
   const options = [];
   const seen = new Set();
@@ -721,40 +733,43 @@ export function versionAction(entry, selected, installBlocked = null) {
   }
 
   const options = versionOptions(entry);
-  const target = options.find((o) => (o.version ?? '') === String(selected ?? ''))
+  const target = options.find((o) => versionOptionValue(o) === String(selected ?? ''))
     ?? options[0]
     ?? { version: entry.availableVersion ?? null, kind: 'available' };
+  // Every branch reports the version it resolved, so the caller never has to re-derive it from the
+  // select — which is what made the rollback POST and the button's own decision two separate answers.
+  const at = (action) => ({ ...action, version: target.version ?? null, targetKind: target.kind });
 
   if (!entry.installed) {
     if (entry.status === 'incompatible') {
-      return { kind: 'install', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true };
+      return at({ kind: 'install', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true });
     }
-    return { kind: 'install', label: 'Install', danger: false, blockedReason: null };
+    return at({ kind: 'install', label: 'Install', danger: false, blockedReason: null });
   }
   if (target.kind === 'backup') {
     // Danger styling because it replaces what is running with older bytes — the one action here an
     // operator can regret.
-    return { kind: 'rollback', label: 'Roll back', danger: true, blockedReason: null };
+    return at({ kind: 'rollback', label: 'Roll back', danger: true, blockedReason: null });
   }
   if (target.kind === 'installed' || (target.version ?? '') === (entry.installedVersion ?? '')) {
     // A reinstall re-fetches from the source that offers the game — and `installedOnly` means no enabled
     // source offers it (an upload, or an entry that was withdrawn). The install route resolves the id out
     // of the fetched catalogs, so the button could only ever produce a 404. Say why instead.
     if (entry.status === 'installedOnly') {
-      return {
+      return at({
         kind: 'none',
         label: 'Reinstall',
         danger: false,
         blockedReason: 'No enabled marketplace offers this game, so there is nothing to reinstall from. '
           + 'Upload the package again to replace it.',
-      };
+      });
     }
-    return { kind: 'reinstall', label: 'Reinstall', danger: false, blockedReason: null };
+    return at({ kind: 'reinstall', label: 'Reinstall', danger: false, blockedReason: null });
   }
   if (entry.status === 'incompatible') {
-    return { kind: 'update', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true };
+    return at({ kind: 'update', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true });
   }
-  return { kind: 'update', label: 'Update', danger: false, blockedReason: null };
+  return at({ kind: 'update', label: 'Update', danger: false, blockedReason: null });
 }
 
 /** How an update is allowed to treat lobbies that are running right now. */

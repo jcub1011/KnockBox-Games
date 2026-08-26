@@ -194,7 +194,7 @@ public sealed class PackageManager
             return "Package installation is disabled (KnockBox:Packages=false).";
         if (!Directory.Exists(paths.GamesManagedRoot))
             return $"The managed package folder '{paths.GamesManagedRoot}' does not exist.";
-        return DirectoryWritable(paths.GamesManagedRoot)
+        return DirectoryProbe.WhyNotWritable(paths.GamesManagedRoot) is null
             ? null
             : $"The managed package folder '{paths.GamesManagedRoot}' is not writable by the server " +
               "(in Docker the container runs as UID 1654).";
@@ -908,21 +908,6 @@ public sealed class PackageManager
         // Never a stack trace: this string is shown to an operator in the portal.
         _ => "An unexpected error occurred; see the server log.",
     };
-
-    private static bool DirectoryWritable(string directory)
-    {
-        var probe = Path.Combine(directory, $".kb-write-probe-{Guid.NewGuid():N}");
-        try
-        {
-            using (File.Create(probe)) { }
-            File.Delete(probe);
-            return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
 
     /// <summary>Clears staging leftovers from an interrupted upload or download.</summary>
     public void SweepStaging()

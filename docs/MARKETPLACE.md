@@ -167,7 +167,11 @@ Two rules worth knowing:
 
 - **`Incompatible` outranks `UpdateAvailable`.** An update that could not run is never offered. Both
   bounds are inclusive, and a bound that cannot be *parsed* also counts as incompatible — a
-  constraint we cannot read must not be treated as no constraint.
+  constraint we cannot read must not be treated as no constraint. An operator can still install one
+  by hand ("Install Anyways"), and the server then marks the game **staged** rather than available:
+  `GameManifest` carries no version bounds, so once the package is extracted nothing server-side can
+  tell it was force-installed, and without staging a player could start a lobby against a build this
+  server was told it cannot run.
 - **`InstalledVersionUnknown` is not `UpdateAvailable`.** Every hand-made game on a server has no
   version; reporting them all as out of date would make the list noise instead of signal.
 

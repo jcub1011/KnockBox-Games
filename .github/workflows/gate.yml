@@ -310,6 +310,12 @@ jobs:
           # first hurried password (this is claim-on-first-use) could be trivially weak.
           [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
             -d '{"password":"short"}' http://localhost:8082/admin/api/auth/setup)" = "400" ]
+          # A cross-site HTML form with enctype="text/plain" posts a body that parses as valid JSON, and
+          # setup needs no cookie (claim-on-first-use) — so without a content-type check a page the operator
+          # merely visits could claim the portal through their own browser, from INSIDE the loopback binding
+          # that is supposed to be the boundary. 415, and the portal must still be unclaimed afterwards.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: text/plain' \
+            -d '{"password":"csrf-claimed-password"}' http://localhost:8082/admin/api/auth/setup)" = "415" ]
           curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"configured":false'
           # The claim-on-first-use setup path, plus the session cookie it issues. Also pins that the
           # password lands on the /app/data volume rather than the root-owned image dir: if that write
@@ -331,6 +337,12 @@ jobs:
             -d '{"password":"wrong-password"}' http://localhost:8082/admin/api/auth/login)" = "401" ]
           curl -fsS -b /tmp/kb-admin-cookies http://localhost:8082/admin/api/system/status \
             | grep -q '"uptime"'
+          # Transfer-Encoding: chunked carries no Content-Length. Reading that as "no body" made every
+          # mutation route substitute its all-defaulted record — for this one, closing EVERY lobby on the
+          # server and reporting success. Must be refused on the content type, not silently defaulted.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/kb-admin-cookies -X POST \
+            -H 'Content-Type: text/plain' -H 'Transfer-Encoding: chunked' -d '{"gameId":"tictactoe"}' \
+            http://localhost:8082/admin/api/lobbies/close)" = "415" ]
 
       - name: Admin password attempts are rate-limited
         run: |

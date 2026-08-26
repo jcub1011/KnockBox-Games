@@ -70,6 +70,38 @@ public sealed class DiskUsageReporter(
         public long TotalGameBytes => Games.Sum(g => g.TotalBytes);
     }
 
+    // Keyed by full path. Small and bounded by the number of roots — the portal only ever asks about the
+    // parents of game directories and packages, which are the three or four configured roots.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset At, string? Blocked)>
+        _writability = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Null when the server can create and delete files in <paramref name="directory"/>, else why it
+    /// can't — cached on the same cadence as the disk figures, and for a sharper reason than they are.
+    /// </summary>
+    /// <remarks>
+    /// The answer is reached by WRITING a file there (see <see cref="DirectoryProbe"/>), and the games
+    /// root is watched: uncached, the catalog tab's 20-second poll probed once per game per poll, each
+    /// probe raised a change event, and every event scheduled a rediscovery — a rescan loop the portal
+    /// inflicted on itself simply by being open. It is also advisory: <c>AdminOperations.DeleteGame</c>
+    /// re-probes for real before it removes anything, so a minute-stale "you could delete this" costs an
+    /// error message, never a bad delete.
+    /// </remarks>
+    public string? WhyNotWritable(string directory)
+    {
+        var now = clock.GetUtcNow();
+        if (_cacheDuration > TimeSpan.Zero
+            && _writability.TryGetValue(directory, out var cached)
+            && now - cached.At < _cacheDuration)
+        {
+            return cached.Blocked;
+        }
+
+        var blocked = DirectoryProbe.WhyNotWritable(directory);
+        _writability[directory] = (now, blocked);
+        return blocked;
+    }
+
     /// <summary>
     /// The latest measurement, computing one synchronously if none exists yet and scheduling a
     /// background refresh when the cached one has gone stale.

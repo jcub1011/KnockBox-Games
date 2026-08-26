@@ -356,7 +356,19 @@ branch ahead of the game and shell pipelines. Every `/admin*` path 404s on the t
 under `/admin/api/*` lives in `Hosting/AdminApi.cs` (`MapAdminApi`), not in `Program.cs`: one `WriteJson`
 helper, one `RequireSession` wrapper and a route table, so an endpoint's handler is only the part specific
 to it. Mutating routes additionally go through `WriteGuard` (JSON content type + `Sec-Fetch-Site`), which is
-defence in depth behind `SameSite=Strict`, not the primary control — the port is. Operator guide:
+defence in depth behind `SameSite=Strict`, not the primary control — the port is. **Except on the three
+auth routes, where it is the only control there is**, and where it was missing: they were mapped bare and
+`ReadPassword` checked no content type, so an HTML form with `enctype="text/plain"` posts a body that
+`AdminPasswordRequest` parses — a simple request, no preflight, and `auth/setup` needs no cookie because
+it is claim-on-first-use. A page the operator merely visited could therefore claim an unclaimed portal
+**from inside the loopback binding**, permanently (there is no overwrite path). They now take
+`MediaKind.JsonRequired`, which demands the type outright rather than only when `ContentLength` says a
+body exists — because `Transfer-Encoding: chunked` declares no length, and reading that absence as "no
+body" let a cross-site post through on a technicality *and* made `ReadJson` discard it, so every handler
+substituted its all-defaulted record (for `lobbies/close`: close every lobby on the server, answered
+`success: true`). The decision is a pure `WriteGuardRefusal`, kept free of `HttpContext` for the reason
+`OriginRouting` is — composing the route table needs thirty-odd dependencies, so otherwise the rule would
+be pinned only by the Docker job. Operator guide:
 `docs/ADMIN.md`.
 
 **Portal tabs** (six; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
@@ -450,7 +462,15 @@ is **one attempt, no retry**, with the last result kept per endpoint — and the
 as both `content` (Discord) and `text` (Slack) plus structured fields, so one POST serves all three kinds of
 endpoint with no per-service formatting in the server. `PackageJobRegistry` grew a settable `OnFinished` hook
 (the `LobbyCloser.OnClosing` shape) so update outcomes reach it without the install engine knowing webhooks
-exist. The URL rule is `MarketplaceClient.IsAllowedUrl` — exposed, not copied.
+exist. The URL rule is `MarketplaceClient.IsAllowedUrl` — exposed, not copied — plus, since `TestWebhook`
+awaits the delivery and returns the upstream status, a **destination** rule the marketplace does not
+share: `Webhooks/PrivateAddressGuard.cs` refuses loopback/link-local/private targets (default on,
+`KnockBox:WebhookAllowPrivateTargets` lifts it) so an admin session cannot use the test button as a port
+scanner for the network this host sits in. It is enforced in a `SocketsHttpHandler.ConnectCallback` on
+the address actually dialled, never on the URL string: rebinding DNS and redirects both come back
+through the callback and would walk past a string check. Only the webhook client gets it — they already
+hold separate `HttpClient` instances, and the marketplace's own rule deliberately permits a loopback
+`http` mirror.
 
 **Per-game CPU exists only for server-authority games, and is measured.** `Games/AuthorityMetrics.cs` counts
 calls, total time and the slowest call per game, instrumented at the **one** place in `ServerAuthority`'s drain
@@ -785,7 +805,12 @@ precedence because string comparison inverts both `0.9.0 < 0.10.0` and `1.0.0-rc
 `Incompatible` (min/maxAppVersion vs `Hosting/KnockBoxVersion.cs`, read off the assembly so csproj
 `<Version>` is the one source of truth) **outranks** `UpdateAvailable` — never offer an update that
 can't run; and an unparseable bound counts as incompatible, since a constraint we can't read isn't no
-constraint. `InstalledVersionUnknown` is deliberately distinct from `UpdateAvailable`: every
+constraint. An operator may still force one through ("Install Anyways"), and `InstallFromMarketplace`
+then sets `GameAvailability.Staged` **before** starting the job: `GameManifest` carries no version
+bounds, so nothing server-side can tell an extracted game was force-installed, and staged is the one
+state that lets the operator try it without a player being able to start a lobby against it. Set at
+request time rather than on completion because availability is keyed by id and persisted — so there is
+no window in which the new game is listed. `InstalledVersionUnknown` is deliberately distinct from `UpdateAvailable`: every
 hand-made game has no version, and nagging about all of them is noise.
 
 ### Serving game assets & pre-compression

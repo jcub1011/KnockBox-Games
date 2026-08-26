@@ -427,15 +427,10 @@ public sealed class ServerAuthority
 
         if (effects.SetOwner is { } target)
         {
-            if (_lobby.TrySetHost(target))
+            // The reassign-and-announce sequence lives in LobbyOwnership: the admin kick performs the
+            // same move when it removes the owner, and two copies of it would drift.
+            if (LobbyOwnership.Reassign(_lobby, _connections, target))
             {
-                var control = ConnectionManager.Serialize(new OwnerChangedMessage(_lobby.Id, target));
-                var data = ConnectionManager.Serialize(new GameOwnerChangedMessage(target));
-                foreach (var p in _lobby.Players)
-                {
-                    _connections.SendRawTo(p.Id, control);
-                    _connections.SendRawToGame(p.Id, data);
-                }
                 if (_logger.IsEnabled(LogLevel.Information))
                     _logger.LogInformation("Lobby {LobbyId} owner reassigned to {OwnerId} by its authority module", _lobby.Id, target);
             }

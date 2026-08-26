@@ -622,8 +622,9 @@
               <div class="field-row">
                 <button class="btn btn-primary" id="hook-add">Save Endpoint</button>
                 <span class="limit-hint">
-                  Select no events to receive all of them. The URL must be https, or http on loopback.
-                  A Discord or Slack webhook URL works as-is.
+                  Select no events to receive all of them. A Discord or Slack webhook URL works as-is.
+                  Deliveries only reach <strong>public</strong> addresses &mdash; an endpoint on this host
+                  or your LAN needs <code>KnockBox:WebhookAllowPrivateTargets</code>.
                 </span>
               </div>
             </div>

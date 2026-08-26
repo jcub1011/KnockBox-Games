@@ -140,7 +140,7 @@ public sealed class AdminOperations(
         // probed. Doing this first is what makes the operation all-or-nothing.
         foreach (var target in targets)
         {
-            if (ProbeParentWritable(target) is not { } why) continue;
+            if (DirectoryProbe.WhyParentNotWritable(target) is not { } why) continue;
             logger.LogWarning("Refusing to delete game {GameId}: {Reason}", id, why);
             return new DeleteResult(false,
                 $"'{id}' can't be deleted: {why} In production the games folder is mounted read-only, so " +
@@ -185,26 +185,6 @@ public sealed class AdminOperations(
         return new DeleteResult(true, null, lobbiesClosed, removed);
     }
 
-    /// <summary>Null when the entry's parent directory is writable, else why it isn't.</summary>
-    private static string? ProbeParentWritable(string target)
-    {
-        var parent = Path.GetDirectoryName(Path.GetFullPath(target));
-        if (string.IsNullOrEmpty(parent)) return $"'{target}' has no parent directory.";
-
-        var probe = Path.Combine(parent, $".kb-delete-probe-{Guid.NewGuid():N}");
-        try
-        {
-            // Create-then-delete rather than inspecting permissions: on a read-only bind mount the
-            // permission bits can look perfectly writable and the write still fails.
-            using (File.Create(probe)) { }
-            File.Delete(probe);
-            return null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return $"'{parent}' is not writable by the server ({ex.Message}).";
-        }
-    }
 
     // Same containment test the bootstrap overlap check uses: compare canonical paths with a trailing
     // separator, so "games2" is never treated as living under "games".

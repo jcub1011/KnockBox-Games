@@ -363,7 +363,11 @@ if (webhookQueue is not null)
 {
     builder.Services.AddSingleton(webhookQueue);
     builder.Services.AddSingleton(webhookSink!);
-    var webhookHttp = MarketplaceClient.CreateHttpClient();
+    // The one client in the server with a destination filter. The marketplace's own instance keeps none:
+    // its rule deliberately permits loopback http so a test or an offline mirror can serve a catalog, and
+    // its URLs are derived from configuration rather than chosen through the portal.
+    var webhookHttp = MarketplaceClient.CreateHttpClient(
+        webhookOptions.AllowPrivateTargets ? null : PrivateAddressGuard.IsBlocked);
     builder.Services.AddSingleton(sp => new WebhookDispatcher(
         webhookQueue, sp.GetRequiredService<AdminSettingsStore>(), webhookHttp, webhookOptions,
         sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<WebhookDispatcher>>()));

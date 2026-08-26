@@ -1,5 +1,6 @@
 using System.Text.Json;
 using KnockBox.Contracts;
+using KnockBox.Server.Hosting;
 using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Games;
@@ -443,11 +444,22 @@ public sealed class GameCatalog : IDisposable
             EnableRaisingEvents = true,
         };
 
-        void onChange(object _, FileSystemEventArgs __) => ScheduleRescan();
+        // The portal write-probes this root to answer "could Delete work here?", which creates and
+        // deletes a file in it — an event indistinguishable from a game being dropped in. With the games
+        // tab open that is a rescan every poll, forever, for a file that was never a game. The probe
+        // names itself so this can tell the difference (see DirectoryProbe).
+        void onChange(object _, FileSystemEventArgs e)
+        {
+            if (!DirectoryProbe.IsProbeFile(Path.GetFileName(e.Name))) ScheduleRescan();
+        }
         _watcher.Created += onChange;
         _watcher.Changed += onChange;
         _watcher.Deleted += onChange;
-        _watcher.Renamed += (_, _) => ScheduleRescan();
+        _watcher.Renamed += (_, e) =>
+        {
+            if (!DirectoryProbe.IsProbeFile(Path.GetFileName(e.Name))
+                || !DirectoryProbe.IsProbeFile(Path.GetFileName(e.OldName))) ScheduleRescan();
+        };
         // On buffer overflow the OS drops events and the watcher stops raising them; without this,
         // hot-reload would silently die. Log it and force a rescan so we recover the current state.
         _watcher.Error += (_, e) =>

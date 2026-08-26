@@ -49,7 +49,10 @@ public class WebhookDispatcherTests : IDisposable
 
     private static WebhookOptions Options(int errorsPerMinute = 6) => new(
         Enabled: true, MaxEndpoints: 8, Timeout: TimeSpan.FromSeconds(10),
-        ErrorsPerMinute: errorsPerMinute, MemoryThresholdMb: 0, CpuPercentThreshold: 0);
+        ErrorsPerMinute: errorsPerMinute, MemoryThresholdMb: 0, CpuPercentThreshold: 0,
+        // These tests drive a fake handler, so no address is ever dialled and the guard cannot apply —
+        // true here keeps that explicit rather than implying the default was chosen.
+        AllowPrivateTargets: true);
 
     private (WebhookDispatcher Dispatcher, WebhookQueue Queue, AdminSettingsStore Store) Build(
         int errorsPerMinute = 6)

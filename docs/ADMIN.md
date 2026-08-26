@@ -189,7 +189,7 @@ file copied into `games/` by hand.
 | **Update available** | A newer version is published. |
 | **Ahead of catalog** | The installed version is newer than the offered one — usually a hand-built package. |
 | **Version unknown** | The game declares no version, so there is nothing to compare. Normal for hand-made games, and deliberately distinct from "update available" so every one of them isn't nagging you. |
-| **Incompatible** | The offered version does not run on this server version. Never offered as an update — an update that can't run is worse than none. |
+| **Incompatible** | The offered version declares it does not run on this server version. Never offered *automatically* — an update that can't run is worse than none — but you can still install it by hand; see below. |
 | **Unusable** | The catalog entry is malformed and can't be acted on. |
 | **Installed** | Installed here, but no registered marketplace offers it — an upload, or an entry that was withdrawn. |
 
@@ -201,6 +201,15 @@ to **Install**, **Update**, **Reinstall** or **Roll back** to match.
 
 Every path — a download, an upload, and a rollback — is validated by the same reader. A retained package
 that has sat on disk for months is re-checked exactly like one off the network: age is not trust.
+
+**Install Anyways.** A game marked *Incompatible* declares, through its `minAppVersion`/`maxAppVersion`
+bounds, that it does not run on this server version. It is never installed automatically and never offered
+as an update, but the button lets you install it anyway — bounds are the author's claim about versions
+they had not seen, and they are sometimes simply out of date. The install is then **staged**: the game is
+hidden from the player-facing list but startable from its own `/?game=<id>` link, so you can confirm it
+works before anyone meets it. Set it to **Available** on the Game Catalog tab once you have. Note this
+applies to an *update* too: staging hides the version currently running while the incompatible one
+installs, which is the honest reading of replacing a working game with one that may not load.
 
 ### What an update does to games in progress
 
@@ -398,7 +407,17 @@ Outbound HTTP POSTs on platform events, to Discord, Slack, or any endpoint that 
 - **Select no events and the endpoint receives all of them** — a registered endpoint that silently receives
   nothing is the worse of the two possible surprises.
 - The URL must be **https**, or **http on loopback** (for a local monitoring agent). That is the same rule
-  the package downloader applies to a marketplace URL.
+  the package downloader applies to a marketplace URL — but the loopback half needs
+  `WebhookAllowPrivateTargets` as well, for the reason in the next point.
+- **Deliveries only reach public addresses.** Loopback, link-local, and private ranges (RFC1918,
+  carrier-grade NAT, IPv6 unique-local) are refused, including the cloud metadata endpoint at
+  `169.254.169.254`. The check runs when the connection is made, on the address actually dialled, so a
+  hostname that resolves inward — or a redirect to one — is refused too. This is why: whoever holds an
+  admin session chooses these URLs, and **Test** reports the upstream status back, which without the rule
+  turns this form into a scanner for a network the caller cannot otherwise reach, and a blind POST at
+  anything on it. If your notifier really does live on the same host or LAN, set
+  `KnockBox:WebhookAllowPrivateTargets=true`; a literal private IP is refused when you save it, and a
+  hostname when the first delivery is attempted.
 - **One attempt per event, no retries.** The last result per endpoint is shown instead, so a dead endpoint is
   visible without turning one failed delivery into several at the worst possible moment.
 - **Error alerts are capped** (`WebhookErrorsPerMinute`, default 6/min) and the next delivery carries a count
@@ -549,6 +568,7 @@ Outbound webhooks (§6):
 | `WebhookErrorsPerMinute` | `6` | Error-log events turned into deliveries; `0` sends none (off, **not** unlimited). The next alert reports what was suppressed. |
 | `WebhookMemoryThresholdMb` | `0` (off) | Working set that counts as a breach. |
 | `WebhookCpuPercentThreshold` | `0` (off) | Process CPU (percent of one core-equivalent) that counts as a breach. |
+| `WebhookAllowPrivateTargets` | `false` | Deliver to loopback/link-local/private addresses too. Off because the endpoints this exists for are public chat services, and **Test** reporting the upstream status makes an inward URL an SSRF probe. |
 
 Package management and the marketplace (§4):
 

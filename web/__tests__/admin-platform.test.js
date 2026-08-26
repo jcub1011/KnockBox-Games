@@ -356,6 +356,34 @@ describe('banned room codes', () => {
     expect(fake.calls.some((c) => c.method === 'POST')).toBe(false);
   });
 
+  it('keeps the blocklist when the server refuses to clear it', async () => {
+    // The draft used to be emptied BEFORE the POST, and saveRoomCodes only re-renders on success — so a
+    // rejected clear left every chip on screen over an empty draft, and the operator's next Save deleted
+    // the whole blocklist without asking. Which is the outcome they had just been told did not happen.
+    await openPlatform({
+      'GET /admin/api/room-codes': { body: codes({ words: ['XQ'], patterns: ['Q7*'] }) },
+      '* /admin/api/room-codes': { status: 500, body: { success: false, error: 'Could not save.' } },
+    });
+
+    el('codes-clear').click();
+    await tick();
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    expect(el('toast-host').textContent).toContain('Could not save.');
+    expect(chips('code-words')).toEqual(['XQ']);
+    expect(chips('code-patterns')).toEqual(['Q7*']);
+
+    // The draft still holds them too, which is the half the screen could not show: saving now must send
+    // the blocklist back, not an empty one.
+    const postsBefore = fake.calls.filter((c) => c.method === 'POST').length;
+    el('codes-save').click();
+    await tick();
+    const post = fake.calls.filter((c) => c.method === 'POST')[postsBefore];
+    expect(post.body).toEqual({ words: ['XQ'], patterns: ['Q7*'] });
+  });
+
   it('surfaces the server refusing a blocklist that removes too much', async () => {
     await openPlatform({
       '* /admin/api/room-codes': {

@@ -124,8 +124,10 @@ beforeEach(() => {
 
 afterEach(() => {
   // Each case imports a fresh copy of admin.js, so the previous one's poll interval would otherwise
-  // keep firing against THIS case's fetch stub — recording requests it never made.
+  // keep firing against THIS case's fetch stub — recording requests it never made. The scroll-settle
+  // timeout is the same trap one tick further out.
   admin?.stopPolling();
+  admin?.stopScrollSettle();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -324,7 +326,7 @@ describe('marketplace actions', () => {
 
     expect(action.textContent).toBe('Update');
 
-    version.value = '1.1.0';
+    version.value = 'backup:1.1.0';
     version.dispatchEvent(new Event('change'));
 
     // One control serves both version targeting and rollback, because rolling back IS targeting an
@@ -337,7 +339,7 @@ describe('marketplace actions', () => {
     fake = await openMarketplace();
     const wordRush = card('word-rush');
     const version = wordRush.querySelector('.mkt-version');
-    version.value = '1.1.0';
+    version.value = 'backup:1.1.0';
     version.dispatchEvent(new Event('change'));
 
     wordRush.querySelector('.mkt-action').click();
@@ -646,5 +648,70 @@ describe('games tab lifecycle', () => {
     jump.click();
     expect(el('mkt-filter-q').value).toBe('word-rush');
     expect(window.location.hash).toBe('#marketplace');
+  });
+});
+
+describe('scrolling is not arriving', () => {
+  it('does not fetch the catalog just because a scroll passed the marketplace section', async () => {
+    // updateScrollspy is bound to three scroll sources and used to run the tab-change side effects
+    // inline, so one sidebar click — which smooth-scrolls through every section on the way — wiped the
+    // log buffer and called refreshCatalog for each tab it crossed. The catalog read reaches the
+    // network with a 30-second timeout and is documented as never being on the poll path.
+    fake = installFakeFetch(routes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    const catalogCalls = () => fake.calls.filter((c) => c.path === '/admin/api/marketplace/catalog').length;
+    const before = catalogCalls();
+
+    // Only the marketplace card is above the activation line, which is what "scrolled onto it" looks
+    // like to updateScrollspy. Every other card is pushed below.
+    for (const cardEl of document.querySelectorAll('.setting-card')) {
+      const onScreen = cardEl.id === 'setting-marketplace';
+      cardEl.getBoundingClientRect = () => ({ top: onScreen ? 10 : 9000, bottom: 9100, height: 100 });
+    }
+    window.dispatchEvent(new Event('scroll'));
+    await tick();
+
+    // The cheap half still happened — the sidebar and the panel title follow the scroll immediately.
+    expect(el('panel-title').textContent).toBe('Marketplace & Packages');
+    // The expensive half did not.
+    expect(catalogCalls()).toBe(before);
+  });
+});
+
+describe('the job feed survives a server restart', () => {
+  it('drops stale rows when the sequence goes backwards', async () => {
+    // The registry is in-memory, so a restart begins again at 1. Holding the old rows meant every real
+    // job that followed sorted below them and was sliced away at the view limit, while the cursor —
+    // only ever clamped upward — asked for everything after a sequence the new process would not
+    // reach for a long time. The log feed already handled this; the job feed did not.
+    // Driven through the POLL, not a tab re-entry: entering a tab resets the feed anyway, so a test
+    // that switches tabs would pass with the bug still in place.
+    vi.useFakeTimers();
+    const oldJob = {
+      ...runningJob, jobId: 'old', sequence: 900, status: 'succeeded', terminal: true,
+      gameId: 'word-rush', gameName: 'Word Rush', phase: 'Updated to 1.3.0.', cancellable: false,
+    };
+    fake = installFakeFetch(routes({
+      'GET /admin/api/packages/jobs': { body: { jobs: [oldJob], lastSequence: 900, active: 0, retained: 1 } },
+    }));
+    await importAdmin();
+    admin.bootstrap();
+    await vi.advanceTimersByTimeAsync(1);
+    admin.selectTab('marketplace');
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(el('mkt-jobs').textContent).toContain('Word Rush');
+
+    // The restart: the same route now answers from sequence 1 again.
+    fake.routes['GET /admin/api/packages/jobs'] =
+      { body: { jobs: [{ ...runningJob, jobId: 'fresh', sequence: 1 }], lastSequence: 1, active: 1, retained: 1 } };
+    await vi.advanceTimersByTimeAsync(3500);
+
+    expect(el('mkt-jobs').textContent).toContain('Alpha Chain');
+    expect(el('mkt-jobs').textContent).not.toContain('Word Rush');
   });
 });

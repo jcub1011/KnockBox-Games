@@ -574,29 +574,50 @@ describe('versionAction', () => {
   };
 
   it('installs a game that is not installed', () => {
-    const action = versionAction({ installed: false, availableVersion: '1.0.0', backups: [] }, '1.0.0');
+    const action = versionAction({ installed: false, availableVersion: '1.0.0', backups: [] }, 'available:1.0.0');
     expect(action).toMatchObject({ kind: 'install', label: 'Install', danger: false });
   });
 
   it('updates when a newer version is selected', () => {
-    expect(versionAction(installed, '1.3.0')).toMatchObject({ kind: 'update', label: 'Update' });
+    expect(versionAction(installed, 'available:1.3.0')).toMatchObject({ kind: 'update', label: 'Update' });
   });
 
   it('reinstalls when the running version is selected', () => {
-    expect(versionAction(installed, '1.2.0')).toMatchObject({ kind: 'reinstall', label: 'Reinstall' });
+    expect(versionAction(installed, 'installed:1.2.0')).toMatchObject({ kind: 'reinstall', label: 'Reinstall' });
   });
 
   it('rolls back to a retained version, and says so dangerously', () => {
-    const action = versionAction(installed, '1.1.0');
+    const action = versionAction(installed, 'backup:1.1.0');
     expect(action.kind).toBe('rollback');
     expect(action.label).toBe('Roll back');
     // The one action here an operator can regret: it replaces what is running with older bytes.
     expect(action.danger).toBe(true);
   });
 
+  it('distinguishes a backup from the installed copy at the SAME version', () => {
+    // The collision that made selecting a backup install the newest version instead: the option value
+    // used to be the version alone, and both entries carry 1.2.0. Matching resolved to whichever came
+    // first — available, ordered ahead of both — so the button read "Reinstall" and POSTed the install
+    // route, which installs 1.3.0. No danger styling, no rollback confirmation.
+    const withSameVersionBackup = { ...installed, backups: [{ version: '1.2.0' }] };
+    expect(versionAction(withSameVersionBackup, 'backup:1.2.0')).toMatchObject({
+      kind: 'rollback', label: 'Roll back', danger: true, version: '1.2.0',
+    });
+    expect(versionAction(withSameVersionBackup, 'installed:1.2.0')).toMatchObject({
+      kind: 'reinstall', label: 'Reinstall', version: '1.2.0',
+    });
+  });
+
+  it('reports the version it resolved, so the caller never re-derives it', () => {
+    // The rollback POST takes a bare version while the select carries kind:version — one answer, given
+    // by the same call that decided the action, is what stops those two disagreeing.
+    expect(versionAction(installed, 'backup:1.1.0').version).toBe('1.1.0');
+    expect(versionAction(installed, 'available:1.3.0').version).toBe('1.3.0');
+  });
+
   it('offers "Install Anyways" for an incompatible entry, styled dangerously', () => {
     const uninstalledAction = versionAction(
-      { installed: false, availableVersion: '1.0.0', status: 'incompatible', reason: 'needs server 2.0.0', backups: [] }, '1.0.0');
+      { installed: false, availableVersion: '1.0.0', status: 'incompatible', reason: 'needs server 2.0.0', backups: [] }, 'available:1.0.0');
     expect(uninstalledAction).toMatchObject({ kind: 'install', label: 'Install Anyways', danger: true, blockedReason: null });
 
     const installedAction = versionAction(

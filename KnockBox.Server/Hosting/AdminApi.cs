@@ -1,3 +1,4 @@
+﻿using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using KnockBox.Contracts;
@@ -100,9 +101,17 @@ internal static class AdminApi
         admin.UseEndpoints(routes =>
         {
             routes.MapGet("/admin/api/auth/status", ctx => AuthStatus(ctx, options));
-            routes.MapPost("/admin/api/auth/setup", ctx => Setup(ctx, options));
-            routes.MapPost("/admin/api/auth/login", ctx => Login(ctx, options));
-            routes.MapPost("/admin/api/auth/logout", ctx => Logout(ctx, options));
+            // JsonRequired, not Json: all three ALWAYS carry a body, so the content type is demanded
+            // outright. Without that, an HTML form with enctype="text/plain" posts a body that parses as
+            // valid JSON, and setup needs no cookie (it is claim-on-first-use) — so a page the operator
+            // merely visits could claim an unclaimed portal through their own browser, from outside the
+            // loopback binding that is supposed to be the boundary. See WriteGuard.
+            routes.MapPost("/admin/api/auth/setup",
+                WriteGuard(ctx => Setup(ctx, options), MediaKind.JsonRequired));
+            routes.MapPost("/admin/api/auth/login",
+                WriteGuard(ctx => Login(ctx, options), MediaKind.JsonRequired));
+            routes.MapPost("/admin/api/auth/logout",
+                WriteGuard(ctx => Logout(ctx, options), MediaKind.JsonRequired));
 
             // ── Reads ──
             routes.MapGet("/admin/api/system/status",
@@ -538,34 +547,23 @@ internal static class AdminApi
     // A cheap, read-only guess at whether the files could be removed: it checks the directories that
     // would have to be written to. AdminOperations.DeleteGame probes them for real before touching
     // anything, so this only decides whether the portal offers the button.
+    //
+    // Read through DiskUsageReporter's cache rather than probed here: the probe answers by WRITING a
+    // file, this runs once per game on every poll of the catalog tab, and the games root is watched — so
+    // probing directly meant an open tab scheduling a catalog rediscovery every poll, forever. Being a
+    // minute stale is free, because the delete itself re-probes before removing anything.
     private static string? DeleteBlockedReason(
         Options options, string directory, GamePackageLocations.PackageLocation? package)
     {
         var parent = Path.GetDirectoryName(Path.GetFullPath(directory));
-        if (parent is not null && !DirectoryWritable(parent))
+        if (parent is not null && options.Disk.WhyNotWritable(parent) is not null)
             return $"'{parent}' is not writable by the server (in production the games folder is mounted read-only).";
         // The package's OWN root, not always games/: a portal-installed package sits in the managed root,
         // which is writable by design — which is what makes deleting those games work in production.
         if (package is { } source && Path.GetDirectoryName(source.Path) is { } packageDir
-            && !DirectoryWritable(packageDir))
+            && options.Disk.WhyNotWritable(packageDir) is not null)
             return $"the source package in '{packageDir}' can't be removed, so the game would reinstall itself.";
         return null;
-    }
-
-    private static bool DirectoryWritable(string directory)
-    {
-        if (!Directory.Exists(directory)) return false;
-        var probe = Path.Combine(directory, $".kb-write-probe-{Guid.NewGuid():N}");
-        try
-        {
-            using (File.Create(probe)) { }
-            File.Delete(probe);
-            return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
     }
 
     private static Task Logs(HttpContext ctx, Options options)
@@ -768,15 +766,21 @@ internal static class AdminApi
         // Kestrel's default 30 MB body cap would reject a large game long before MaxPackageBytes had
         // anything to say about it. Raised for THIS endpoint only — no other route has any business
         // accepting a body this size.
+        //
+        // Both uses honour GamePackageLimits' convention that a non-positive value disables that
+        // individual check — the same `> 0` PackageManager.ReceiveAsync applies, and for the same reason
+        // it had to: MaxPackageBytes=0 is documented as "no limit", but read literally here it set a
+        // 4096-byte Kestrel cap and refused every upload with a message about a 0-byte limit.
+        var maxBytes = options.PackageLimits.MaxBytes;
         if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodySize)
-            bodySize.MaxRequestBodySize = options.PackageLimits.MaxBytes + 4096;
+            bodySize.MaxRequestBodySize = maxBytes > 0 ? maxBytes + 4096 : null;
 
         // Rejected in one round trip when the client is honest about the size. The real enforcement is
         // still the byte count while streaming, because Content-Length is the client's claim.
-        if (ctx.Request.ContentLength > options.PackageLimits.MaxBytes)
+        if (maxBytes > 0 && ctx.Request.ContentLength > maxBytes)
         {
             await Refuse(ctx, StatusCodes.Status413PayloadTooLarge,
-                $"The package exceeds the {options.PackageLimits.MaxBytes:N0}-byte limit " +
+                $"The package exceeds the {maxBytes:N0}-byte limit " +
                 "(KnockBox:MaxPackageBytes).");
             return;
         }
@@ -1020,6 +1024,32 @@ internal static class AdminApi
             return;
         }
 
+        // "Install anyways" is the operator overriding a min/maxAppVersion bound, and the override has to
+        // stop at the point where PLAYERS would meet the result. GameManifest carries no version bounds,
+        // so once the package is extracted nothing server-side can tell it was force-installed — the game
+        // would simply be Available, and a player could start a lobby against a build this server was
+        // told it cannot run. Staged is exactly the state for that: hidden from the catalog, still
+        // startable by direct link, so the operator can try it without putting it in front of anyone.
+        //
+        // Set BEFORE the job starts, because availability is keyed by id and persisted, so it does not
+        // need the install to have finished — and there is no window in which the extracted game is
+        // listed. For an update this also hides the working current version while the incompatible one
+        // installs, which is the honest reading of "you are replacing it with something that may not run".
+        var incompatible = PluginUpdateEvaluator.Evaluate(
+            plugin, options.Catalog.GameLocations, KnockBoxVersion.Current)
+            .Status == PluginUpdateStatus.Incompatible;
+        string? staged = null;
+        if (incompatible)
+        {
+            options.Settings.SetAvailability(plugin.Id!, GameAvailability.Staged);
+            staged = $"'{plugin.Id}' declares it needs a different KnockBox version, so it has been staged — " +
+                     "hidden from the game list, but startable from its own link. Set it to Available once you " +
+                     "have confirmed it runs.";
+            options.Logger.LogWarning(
+                "Admin force-installed incompatible '{GameId}' {Version}; staging it so players cannot start it.",
+                plugin.Id, plugin.Version ?? "(no version)");
+        }
+
         var start = options.Packages.StartMarketplaceInstall(client, plugin, ParseMode(body.Mode));
         if (!start.Started)
         {
@@ -1030,7 +1060,7 @@ internal static class AdminApi
         options.Logger.LogInformation("Admin started a marketplace install of '{GameId}' {Version}.",
             start.Job!.GameId, plugin.Version ?? "(no version)");
         await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminJobResponse,
-            new AdminJobResponse(true, JobId: start.Job.JobId, Detail: start.Job.Phase),
+            new AdminJobResponse(true, JobId: start.Job.JobId, Detail: staged ?? start.Job.Phase),
             StatusCodes.Status202Accepted);
     }
 
@@ -1239,6 +1269,35 @@ internal static class AdminApi
         }
 
         var playerId = body.PlayerId.Trim();
+
+        // The host kick REFUSES to remove the owner (WebSocketHandler.HandleKickPlayer), because
+        // Lobby.Kick drops a member without touching HostId — leaving the id of a non-member holding the
+        // lobby powers. Nobody then passes `PlayerId == HostId && Contains(PlayerId)`, so SetLobbyOpen and
+        // the in-game kick are dead for everyone, and a to:"host" relay finds no game connection and fans
+        // out to nobody: the game freezes until the lobby goes dark. An operator, unlike a host, has no
+        // other way to remove that person — so this hands the powers on rather than refusing.
+        string? promoted = null;
+        if (string.Equals(playerId, lobby.HostId, StringComparison.Ordinal))
+        {
+            promoted = LobbyOwnership.NextOwner(lobby, options.Connections, playerId);
+            if (promoted is null)
+            {
+                // Nobody to hand the lobby to, and nobody it could still be running for. Close it rather
+                // than kick into an empty room — and say so, because "kicked" and "the session ended" are
+                // different outcomes to report.
+                options.Closer.Close(lobby.Id, "An administrator closed this lobby.");
+                options.Logger.LogWarning(
+                    "Admin kicked host {PlayerId} from lobby {LobbyId}; nobody else was connected, so the lobby was closed.",
+                    playerId, lobby.Id);
+                await WriteAction(ctx, new AdminActionResponse(true, Affected: 1,
+                    Detail: $"'{playerId}' held lobby '{lobby.Id}' and nobody else was connected, so it was closed."));
+                return;
+            }
+
+            // Before the kick, so the lobby is never observably ownerless.
+            LobbyOwnership.Reassign(lobby, options.Connections, promoted);
+        }
+
         if (!lobby.Kick(playerId))
         {
             // Kick records the bar even for a non-member, so this is "they had already gone" rather than a
@@ -1260,8 +1319,15 @@ internal static class AdminApi
         }
         options.Connections.GetGame(playerId)?.Abort();
 
+        // The roster post the host kick makes (WebSocketHandler's PostAuthorityRoster). Without it the
+        // module keeps a player the lobby has dropped: if it was their turn it waits forever on an intent
+        // that can no longer arrive, with no error and nothing in the log tying it to the kick.
+        if (lobby.IsServerAuthority && options.Authorities?.TryGet(lobby.Id, out var authority) == true)
+            authority.PostPlayerLeft(playerId);
+
         options.Logger.LogWarning("Admin kicked {PlayerId} from lobby {LobbyId}.", playerId, lobby.Id);
-        await WriteAction(ctx, new AdminActionResponse(true, Affected: 1));
+        await WriteAction(ctx, new AdminActionResponse(true, Affected: 1,
+            Detail: promoted is null ? null : $"'{promoted}' now holds lobby '{lobby.Id}'."));
     }
 
     private static Task Rescan(HttpContext ctx, Options options)
@@ -1306,6 +1372,33 @@ internal static class AdminApi
     private static async Task DeleteGame(HttpContext ctx, Options options)
     {
         var id = ctx.GetRouteValue("id") as string ?? "";
+
+        // The same two refusals Uninstall makes, for the same reason: DeleteGame removes the unpacked
+        // directory, the package and the backups, and an install pass is meanwhile moving exactly those
+        // things. Losing that race half-deletes a game the installer is mid-way through putting back —
+        // the one outcome an all-or-nothing operation exists to prevent. Uninstall reached this check by
+        // being a job; a direct delete has to make it itself.
+        if (options.Catalog.GameLocations.TryGetValue(id, out var location))
+        {
+            var gameId = location.Manifest.Id;
+            if (options.Packages.Jobs.ActiveFor(gameId) is { } running)
+            {
+                await Refuse(ctx, StatusCodes.Status409Conflict,
+                    $"'{gameId}' has a {Camel(running.Kind.ToString())} in progress ({running.Phase}). " +
+                    "Wait for it to finish, or cancel it, then delete.");
+                return;
+            }
+
+            // Draining/Updating are held by an apply that has passed the point of cancellation, so they
+            // are a "not yet", not a "never" — and they are never persisted, so this cannot wedge.
+            if (options.Lifecycle.StateOf(gameId) is var state && state != GameLifecycle.Idle)
+            {
+                await Refuse(ctx, StatusCodes.Status409Conflict,
+                    $"'{gameId}' is {Camel(state.ToString())} — an update is in flight. Wait for it to finish, then delete.");
+                return;
+            }
+        }
+
         var result = options.Operations.DeleteGame(id);
         if (!result.Success)
         {
@@ -1786,9 +1879,28 @@ internal static class AdminApi
         if (!WebhookDispatcher.IsAllowedUrl(url))
         {
             // The downloader's own rule, exposed rather than copied — so a URL that registers can never be
-            // one the sender would then refuse.
+            // one the sender would then refuse. The loopback half of it is only reachable once the
+            // address guard is lifted, and saying so here is what stops the two rules contradicting each
+            // other: this message inviting a loopback URL that the next check then refuses.
             await Refuse(ctx, StatusCodes.Status400BadRequest,
-                "The URL must be https, or http on loopback (for a local monitoring agent).");
+                options.WebhookOptions.AllowPrivateTargets
+                    ? "The URL must be https, or http on loopback (for a local monitoring agent)."
+                    : "The URL must be https. An http loopback endpoint (a local monitoring agent) also "
+                      + $"needs {PrivateAddressGuard.Knob}=true.");
+            return;
+        }
+
+        // A literal address can be judged now, which is worth doing purely so the operator learns the rule
+        // while they are typing the URL rather than from a delivery failure later. It is NOT the boundary:
+        // a hostname is only resolved at connect time, and that is where the guard actually runs — see
+        // MarketplaceClient's connect callback. So this rejects the obvious case and lets everything else
+        // through to be judged against the address finally dialled.
+        if (!options.WebhookOptions.AllowPrivateTargets
+            && Uri.TryCreate(url, UriKind.Absolute, out var target)
+            && IPAddress.TryParse(target.Host.Trim('[', ']'), out var literal)
+            && PrivateAddressGuard.IsBlocked(literal))
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, PrivateAddressGuard.Refusal(target.Host));
             return;
         }
 
@@ -1888,55 +2000,92 @@ internal static class AdminApi
             ? handler(ctx)
             : Refuse(ctx, StatusCodes.Status401Unauthorized, "Unauthorized.");
 
-    /// <summary>
-    /// Wraps a mutating handler so it only runs for a request that plausibly came from the portal itself.
-    /// </summary>
-    /// <remarks>
-    /// The session cookie is <c>SameSite=Strict</c>, which already means it never rides a cross-site
-    /// request, and the origin is not meant to be publicly reachable at all — so this is defence in depth
-    /// rather than the primary control. What it adds is cheap: a JSON content type (so a plain HTML form
-    /// post, the one shape <c>SameSite</c> historically leaked on, can't reach these), and a rejection of
-    /// any <c>Sec-Fetch-Site</c> that says cross-site. Requests without the header (curl, the CI smoke
-    /// test) are allowed through, because a header a client may simply omit cannot be a security boundary
-    /// and pretending otherwise would only break operator tooling.
-    /// </remarks>
-    /// <summary>What body a mutation route accepts. All but one take JSON.</summary>
-    private enum MediaKind
+    /// <summary>What body a mutation route accepts. Most take optional JSON.</summary>
+    internal enum MediaKind
     {
         /// <summary>No body, or <c>application/json</c>.</summary>
         Json,
+
+        /// <summary>A body is mandatory and must be <c>application/json</c> — the auth routes.</summary>
+        JsonRequired,
 
         /// <summary>Raw <c>.kbg</c> bytes — the package upload route, and only that one.</summary>
         Package,
     }
 
+    /// <summary>
+    /// Wraps a mutating handler so it only runs for a request that plausibly came from the portal itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>The session cookie is <c>SameSite=Strict</c>, which already means it never rides a cross-site
+    /// request, and the origin is not meant to be publicly reachable at all — so this is defence in depth
+    /// rather than the primary control. What it adds is cheap: a JSON content type (so a plain HTML form
+    /// post, the one shape <c>SameSite</c> historically leaked on, can't reach these), and a rejection of
+    /// any <c>Sec-Fetch-Site</c> that says cross-site. Requests without the header (curl, the CI smoke
+    /// test) are allowed through, because a header a client may simply omit cannot be a security boundary
+    /// and pretending otherwise would only break operator tooling.</para>
+    /// <para>Which makes the CONTENT TYPE the load-bearing half, and it is checked against a body that
+    /// might exist rather than one that declares its length: <c>Transfer-Encoding: chunked</c> carries no
+    /// <c>Content-Length</c>, and reading the absent length as "no body" waved a cross-site form post
+    /// straight through on that technicality. The three auth routes take <see cref="MediaKind.JsonRequired"/>
+    /// because they have no no-arguments case at all.</para>
+    /// </remarks>
     private static RequestDelegate WriteGuard(RequestDelegate handler, MediaKind media = MediaKind.Json) => ctx =>
     {
-        var site = ctx.Request.Headers["Sec-Fetch-Site"].ToString();
-        if (site.Length > 0 && !site.Equals("same-origin", StringComparison.OrdinalIgnoreCase))
-            return Refuse(ctx, StatusCodes.Status403Forbidden, "Cross-site admin requests are refused.");
+        var refusal = WriteGuardRefusal(media, ctx.Request.ContentType, ctx.Request.ContentLength,
+                                        ctx.Request.Headers["Sec-Fetch-Site"].ToString());
+        return refusal is { } r ? Refuse(ctx, r.Status, r.Error) : handler(ctx);
+    };
 
-        var contentType = ctx.Request.ContentType;
+    /// <summary>
+    /// The guard's decision, as a pure function of the three request facts it reads: null to run the
+    /// handler, else the status and message to refuse with.
+    /// </summary>
+    /// <remarks>
+    /// Split out of <see cref="WriteGuard"/> and kept free of <c>HttpContext</c> for the reason
+    /// <see cref="OriginRouting"/> is: it is a security decision, and one that has already been wrong in a
+    /// way nothing but a real request would have shown. Composing the whole route table to exercise it
+    /// needs thirty-odd dependencies, so the rule would otherwise be pinned only by the Docker job — the
+    /// slowest and last thing to run.
+    /// </remarks>
+    internal static (int Status, string Error)? WriteGuardRefusal(
+        MediaKind media, string? contentType, long? contentLength, string? secFetchSite)
+    {
+        // A header a client may simply omit cannot be a security boundary, and pretending otherwise would
+        // only break operator tooling (curl, the CI smoke test) — so an ABSENT value passes and a value
+        // that says cross-site does not.
+        if (!string.IsNullOrEmpty(secFetchSite)
+            && !secFetchSite.Equals("same-origin", StringComparison.OrdinalIgnoreCase))
+        {
+            return (StatusCodes.Status403Forbidden, "Cross-site admin requests are refused.");
+        }
+
         return media switch
         {
             // An empty body is fine — several of these actions take no arguments — but a body that IS
-            // present must be JSON.
-            MediaKind.Json when ctx.Request.ContentLength is > 0 && !Has(contentType, "application/json")
-                => Refuse(ctx, StatusCodes.Status415UnsupportedMediaType, "Send application/json."),
+            // present must be JSON. A body-less POST reports Content-Length: 0, so a NULL length here
+            // means chunked, i.e. a body whose size simply wasn't declared: it must clear the same bar.
+            MediaKind.Json when contentLength is null or > 0 && !Has(contentType, "application/json")
+                => (StatusCodes.Status415UnsupportedMediaType, "Send application/json."),
+
+            // The auth routes: the body is not optional, so the type is required outright — the same
+            // reasoning as Package below, and for a sharper reason (see the routes' own comment).
+            MediaKind.JsonRequired when !Has(contentType, "application/json")
+                => (StatusCodes.Status415UnsupportedMediaType, "Send application/json."),
 
             // An upload ALWAYS has a body, so the type is required outright rather than only when
             // ContentLength says so — a chunked request has no ContentLength at all, and the JSON rule
             // above would wave it straight through on that technicality.
             MediaKind.Package when !Has(contentType, "application/octet-stream")
-                => Refuse(ctx, StatusCodes.Status415UnsupportedMediaType,
+                => (StatusCodes.Status415UnsupportedMediaType,
                     "Send the .kbg bytes as application/octet-stream."),
 
-            _ => handler(ctx),
+            _ => null,
         };
 
         static bool Has(string? contentType, string expected) =>
             contentType is not null && contentType.Contains(expected, StringComparison.OrdinalIgnoreCase);
-    };
+    }
 
     /// <summary>
     /// Deserializes a request body, or null when it is absent, empty or unparseable. Every request record
@@ -1945,7 +2094,11 @@ internal static class AdminApi
     /// </summary>
     private static async Task<T?> ReadJson<T>(HttpContext ctx, JsonTypeInfo<T> typeInfo) where T : class
     {
-        if (ctx.Request.ContentLength is null or 0) return null;
+        // `is 0`, NOT `is null or 0`. A chunked request declares no length, and treating that as "no body"
+        // discarded one silently — every handler then substituted its all-defaulted record, which for
+        // CloseLobbies means closing EVERY lobby on the server and reporting success. An empty stream still
+        // throws JsonException below and still yields null, so "no body ⇒ no arguments" is unchanged.
+        if (ctx.Request.ContentLength is 0) return null;
         try { return await JsonSerializer.DeserializeAsync(ctx.Request.Body, typeInfo, ctx.RequestAborted); }
         catch (JsonException) { return null; }
     }
