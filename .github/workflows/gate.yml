@@ -961,13 +961,14 @@ jobs:
           # 1. Write one of each KIND of persisted state, so a mount that is present but ignored fails
           #    here too. Availability lives in the games map, the limit override in its own object, the
           #    banned code in a third — three different write paths into the one file.
+          echo "--- writing the probe state ---"
           curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
             -d '{"state":"disabled"}' \
             http://localhost:8082/admin/api/games/tictactoe/availability | grep -q '"success":true'
           curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
             -d '{"maxLobbiesPerGame":7}' http://localhost:8082/admin/api/limits | grep -q '"success":true'
           curl -fsS -b /tmp/kb-admin-cookies -X POST -H 'Content-Type: application/json' \
-            -d '{"words":["upgradeprobe"]}' \
+            -d '{"words":["XQ"]}' \
             http://localhost:8082/admin/api/room-codes | grep -q '"success":true'
           # And a package that exists NOWHERE else: an uploaded one cannot be re-downloaded, so losing
           # /app/games-managed loses it outright. Installed by the upload step above.
@@ -981,6 +982,7 @@ jobs:
           # 2. The update. The catalog sidecar shares kb's network namespace, so it goes first — nothing
           #    below needs it, and leaving it attached to a dead namespace only produces a confusing
           #    error somewhere else.
+          echo "--- replacing the container (this is the image update) ---"
           docker rm -f kb-catalog || true
           docker rm -f kb
           docker run -d --name kb \
@@ -1002,6 +1004,7 @@ jobs:
 
           # 3. The portal is still CLAIMED. This is the one an operator notices first, and the one the
           #    predecessor failed: an empty /app/data means the next visitor sets the password.
+          echo "--- asserting the state survived ---"
           curl -fsS http://localhost:8082/admin/api/auth/status | grep -q '"configured":true'
           # The ORIGINAL password still authenticates, which is the real proof — `configured:true` alone
           # would also be satisfied by some other hash arriving in that file.
@@ -1016,7 +1019,8 @@ jobs:
           curl -fsS -b /tmp/kb-admin-cookies-2 http://localhost:8082/admin/api/limits \
             | grep -q '"maxLobbiesPerGame":7'
           curl -fsS -b /tmp/kb-admin-cookies-2 http://localhost:8082/admin/api/room-codes \
-            | grep -q 'upgradeprobe'
+            | grep -q '"XQ"'
+          docker exec kb grep -q '"XQ"' /app/data/admin-settings.json
 
           # 5. The uploaded package survived and its game is served again — the package root and the
           #    extraction both came back.
