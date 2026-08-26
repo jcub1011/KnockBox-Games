@@ -1445,6 +1445,18 @@ async function runPackageAction(entry, decided, version, mode) {
     return;
   }
 
+  if (decided.incompatible || decided.label === 'Install Anyways') {
+    const runningDesc = entry.activeLobbies > 0 ? ` ${describeMode(mode, entry.activeLobbies)}` : '';
+    const reasonText = entry.reason ? ` (${entry.reason})` : '';
+    if (!await confirmAction(
+      `Install ${name}? This game is unsupported on this server${reasonText} and may not work.${runningDesc}`,
+      'Install Anyways')) return;
+
+    if (await postJson(`/admin/api/marketplace/install/${encodeURIComponent(entry.id)}`,
+      { sourceId: entry.sourceId || null, mode })) refreshJobs();
+    return;
+  }
+
   if (entry.activeLobbies > 0 && !await confirmAction(
     `${decided.label} ${name}? ${describeMode(mode, entry.activeLobbies)}`, decided.label)) return;
 

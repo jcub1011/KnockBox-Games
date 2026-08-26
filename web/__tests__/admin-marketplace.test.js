@@ -238,6 +238,84 @@ describe('marketplace actions', () => {
     expect(post.body.sourceId).toBe('official');
   });
 
+  it('offers "Install Anyways" for incompatible games with a confirmation warning that it is unsupported', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/catalog': {
+        body: {
+          ...CATALOG,
+          entries: [
+            {
+              id: 'future-game', name: 'Future Game', description: 'Requires newer server',
+              author: 'FutureDev', tags: ['arcade'], availableVersion: '3.0.0',
+              installedVersion: null, status: 'incompatible', reason: 'needs server 3.0.0',
+              sizeBytes: 1_000_000, publishedAt: null, minAppVersion: '3.0.0', maxAppVersion: null,
+              sourceId: 'official', sourceName: 'Official KnockBox marketplace', shadowedBy: null,
+              managed: false, installed: false, activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
+              backups: [],
+            },
+          ],
+        },
+      },
+      '* /admin/api/marketplace/install/future-game': { status: 202, body: { success: true, jobId: 'j10', detail: 'Downloading.' } },
+    });
+
+    const futureGame = card('future-game');
+    const action = futureGame.querySelector('.mkt-action');
+    expect(action.textContent).toBe('Install Anyways');
+    expect(action.classList.contains('btn-danger')).toBe(true);
+    expect(action.disabled).toBe(false);
+
+    action.click();
+    await tick();
+
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-body').textContent).toContain('Future Game');
+    expect(el('confirm-body').textContent).toContain('unsupported');
+    expect(el('confirm-body').textContent).toContain('may not work');
+    expect(el('confirm-body').textContent).toContain('needs server 3.0.0');
+    expect(el('confirm-ok').textContent).toBe('Install Anyways');
+
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.path === '/admin/api/marketplace/install/future-game');
+    expect(post).toBeTruthy();
+    expect(post.body.sourceId).toBe('official');
+  });
+
+  it('cancels "Install Anyways" without posting a request', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/catalog': {
+        body: {
+          ...CATALOG,
+          entries: [
+            {
+              id: 'future-game', name: 'Future Game', description: 'Requires newer server',
+              author: 'FutureDev', tags: ['arcade'], availableVersion: '3.0.0',
+              installedVersion: null, status: 'incompatible', reason: 'needs server 3.0.0',
+              sizeBytes: 1_000_000, publishedAt: null, minAppVersion: '3.0.0', maxAppVersion: null,
+              sourceId: 'official', sourceName: 'Official KnockBox marketplace', shadowedBy: null,
+              managed: false, installed: false, activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
+              backups: [],
+            },
+          ],
+        },
+      },
+    });
+
+    const futureGame = card('future-game');
+    futureGame.querySelector('.mkt-action').click();
+    await tick();
+
+    el('confirm-cancel').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.path === '/admin/api/marketplace/install/future-game');
+    expect(post).toBeUndefined();
+  });
+
   it('turns the action into a rollback when an older retained version is selected', async () => {
     await openMarketplace();
     const wordRush = card('word-rush');

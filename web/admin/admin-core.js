@@ -703,16 +703,21 @@ export function versionOptions(entry) {
 export function versionAction(entry, selected, installBlocked = null) {
   if (!entry) return { kind: 'none', label: 'Install', danger: false, blockedReason: 'Nothing selected.' };
 
-  if (entry.status === 'incompatible' || entry.status === 'unusable') {
+  if (entry.status === 'unusable') {
     return {
       kind: 'none',
-      label: entry.status === 'incompatible' ? 'Incompatible' : 'Unusable',
+      label: 'Unusable',
       danger: false,
       blockedReason: entry.reason || pluginStatusHint(entry.status),
     };
   }
   if (installBlocked) {
-    return { kind: 'none', label: 'Install', danger: false, blockedReason: installBlocked };
+    return {
+      kind: 'none',
+      label: entry.status === 'incompatible' ? 'Install Anyways' : 'Install',
+      danger: false,
+      blockedReason: installBlocked,
+    };
   }
 
   const options = versionOptions(entry);
@@ -721,6 +726,9 @@ export function versionAction(entry, selected, installBlocked = null) {
     ?? { version: entry.availableVersion ?? null, kind: 'available' };
 
   if (!entry.installed) {
+    if (entry.status === 'incompatible') {
+      return { kind: 'install', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true };
+    }
     return { kind: 'install', label: 'Install', danger: false, blockedReason: null };
   }
   if (target.kind === 'backup') {
@@ -742,6 +750,9 @@ export function versionAction(entry, selected, installBlocked = null) {
       };
     }
     return { kind: 'reinstall', label: 'Reinstall', danger: false, blockedReason: null };
+  }
+  if (entry.status === 'incompatible') {
+    return { kind: 'update', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true };
   }
   return { kind: 'update', label: 'Update', danger: false, blockedReason: null };
 }

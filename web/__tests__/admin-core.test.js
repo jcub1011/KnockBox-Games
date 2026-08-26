@@ -594,12 +594,23 @@ describe('versionAction', () => {
     expect(action.danger).toBe(true);
   });
 
-  it('refuses an incompatible entry and explains why', () => {
-    const action = versionAction(
+  it('offers "Install Anyways" for an incompatible entry, styled dangerously', () => {
+    const uninstalledAction = versionAction(
+      { installed: false, availableVersion: '1.0.0', status: 'incompatible', reason: 'needs server 2.0.0', backups: [] }, '1.0.0');
+    expect(uninstalledAction).toMatchObject({ kind: 'install', label: 'Install Anyways', danger: true, blockedReason: null });
+
+    const installedAction = versionAction(
       { ...installed, status: 'incompatible', reason: 'needs server 2.0.0' }, '1.3.0');
+    expect(installedAction).toMatchObject({ kind: 'update', label: 'Install Anyways', danger: true, blockedReason: null });
+  });
+
+  it('refuses an unusable entry and explains why', () => {
+    const action = versionAction(
+      { ...installed, status: 'unusable', reason: 'malformed catalog entry' }, '1.3.0');
 
     expect(action.kind).toBe('none');
-    expect(action.blockedReason).toBe('needs server 2.0.0');
+    expect(action.label).toBe('Unusable');
+    expect(action.blockedReason).toBe('malformed catalog entry');
   });
 
   it('refuses when the deployment cannot install at all', () => {
