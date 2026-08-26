@@ -42,8 +42,17 @@ Two tags are published:
 
 | Tag | Channel | Built from |
 |---|---|---|
-| `:latest` | **Stable release** — run this in production. | A git release tag (`v1.2.3`). Versioned tags (`:1.2.3`, `:1.2`) are published alongside it if you want to pin. `:latest` tracks the most recently pushed `v*` tag, so release in increasing version order. |
+| `:latest` | **Stable release** — run this in production. | A release (`v1.2.3`), cut by hand from the release workflow. Versioned tags (`:1.2.3`, `:1.2`) are published alongside it if you want to pin. `:latest` only ever moves *forward*: a prerelease or a back-ported patch publishes its version tags without touching it. |
 | `:develop` | **Pre-release test build** — run an unstable build (e.g. to verify a deployment before promoting it to stable). | Every push to `main`. |
+
+Every stable release also has a [GitHub release](https://github.com/jcub1011/KnockBox-Games/releases)
+carrying three downloads, if you would rather not clone this repo:
+
+| Asset | What it is |
+|---|---|
+| `knockbox-<version>-docker.zip` | A `docker-compose.yml` already **pinned to that version**, plus `.env.example` and `appsettings.json`. Unzip into an empty directory and `docker compose up -d` — no checkout, no build. |
+| `knockbox-<version>-win-x64.zip` | The Windows desktop build, prebuilt. See §2. |
+| `knockbox-<version>-linux-x64.tar.gz` | The same server for a Linux host without Docker. |
 
 Published images are `linux/amd64` only (the server is a Native AOT `linux-x64` build) — they
 will not run on ARM hosts.
@@ -403,8 +412,14 @@ override POSIX mode).
 
 ## 2. Desktop app (no Docker, no .NET install)
 
-Publish a self-contained build (a Native AOT compile — needs the MSVC C++ build tools, i.e. Visual
-Studio's "Desktop development with C++" workload):
+**Download it** — `knockbox-<version>-win-x64.zip` from the
+[latest release](https://github.com/jcub1011/KnockBox-Games/releases/latest). Unzip anywhere and run
+`KnockBox.Server.exe`. That is the whole procedure; nothing below is needed unless you are building
+from source. (A `knockbox-<version>-linux-x64.tar.gz` is published alongside it for a Linux host
+without Docker — same layout, same configuration, no `chmod` needed.)
+
+To build it yourself instead, publish a self-contained build. This is a Native AOT compile, so it
+needs the MSVC C++ build tools — Visual Studio's "Desktop development with C++" workload:
 
 ```bash
 dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop
@@ -412,7 +427,7 @@ dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop
 ```
 
 `KnockBox.Server.exe` is a native binary (no managed runtime alongside it). Copy that folder anywhere
-and run it. Layout (the publish folder is `win-x64/`):
+and run it. Layout (the publish folder is `win-x64/`, and the release zip's contents are the same):
 
 ```
 win-x64/

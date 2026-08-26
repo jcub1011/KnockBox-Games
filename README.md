@@ -58,6 +58,17 @@ the app engine into an invalid spec. Put `source:` paths under your pool (`/mnt/
 create those directories first (the host root is read-only, so Docker can't auto-create them),
 and `chown -R 1654` the writable `games-compressed` and `games-unpacked` dirs.
 
+### Or download it
+
+Every stable release also ships prebuilt on its
+[GitHub release](https://github.com/jcub1011/KnockBox-Games/releases/latest):
+
+- **`knockbox-<version>-docker.zip`** — the compose file above, already pinned to that version, plus
+  `.env.example` and `appsettings.json`. Unzip into an empty directory and `docker compose up -d`.
+- **`knockbox-<version>-win-x64.zip`** — a self-contained Windows exe. No Docker, no .NET install:
+  unzip and run `KnockBox.Server.exe`.
+- **`knockbox-<version>-linux-x64.tar.gz`** — the same, for a Linux host without Docker.
+
 See [`docs/HOSTING.md`](docs/HOSTING.md) for the full guide (TrueNAS, reverse proxy / TLS,
 persistent caches, the `.env` quick start) and the repo's [`docker-compose.yml`](docker-compose.yml)
 for a build-from-source setup.

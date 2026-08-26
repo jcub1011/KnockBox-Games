@@ -1,0 +1,505 @@
+name: Release
+
+# Platform release. Manual only, and there is no push trigger by design — cutting a release should be
+# a decision, not a side effect of landing a commit. (ci.yml owns the `:develop` channel from main and
+# the `addons-v*` namespace; it no longer triggers on `v*` at all, so this is the ONLY path to a
+# versioned image or a GitHub Release.)
+#
+# ── The version is not an input ──────────────────────────────────────────────────────────────────────
+# It is read from KnockBox.Server.csproj <Version>, which is the single source of truth:
+# Hosting/KnockBoxVersion.cs reads it back off the built assembly, and marketplace minAppVersion /
+# maxAppVersion bounds are judged against THAT, not against a tag. A hand-typed version could disagree
+# with the assembly, which is the exact failure the addons-v* namespace split was created to fix.
+#
+# Deriving it also turns "I forgot to bump the version" into a hard stop rather than a bad release: the
+# tag for an un-bumped csproj already exists, and preflight refuses a reused tag.
+#
+# ── All-or-nothing ───────────────────────────────────────────────────────────────────────────────────
+# Every build, test and asset lives in a gate job; every mutation lives in `release`, which `needs:`
+# all of them. A `needs:` dependency that fails OR is skipped skips the dependent job, so a failure
+# anywhere means nothing was pushed — no `if:` gymnastics required.
+#
+# True atomicity across GHCR and the Releases API does not exist (two services, no shared
+# transaction). What the ordering in `release` buys instead:
+#   • the image push goes FIRST — a stray image tag nobody has been told about is harmless and
+#     idempotently re-pushable, whereas a published release advertising an unpullable image is not;
+#   • the release is created as a DRAFT, assets uploaded, and only then flipped to published, so a
+#     partial upload never becomes visible and watchers get exactly one notification;
+#   • a draft holds no git ref, so the tag itself appears at that same instant.
+# The residual window is "image pushed, release failed", which the failure step names explicitly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      OverwriteExisting:
+        description: >-
+          Replace an existing release/tag for this version. Destroys the old release's asset download
+          counts and breaks any bookmarked releases/download URL; force-moves the git tag. For "the
+          release I cut 90 seconds ago is wrong and nobody has it yet" — not for a release people have.
+        type: boolean
+        default: false
+      DryRun:
+        description: >-
+          Run every gate and skip every mutation. The only way to exercise this workflow — including
+          the Windows AOT publish — without publishing anything.
+        type: boolean
+        default: false
+
+# One release at a time, and never abort one mid-flight: the window between the image push and the
+# release being published is the only place this workflow can leave a mess, and cancelling into it is
+# the way to do that on purpose.
+concurrency:
+  group: platform-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Gate: what version is this, and is it allowed? ──────────────────────────────────────────────────
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      latest: ${{ steps.tags.outputs.latest }}
+      minor: ${{ steps.tags.outputs.minor }}
+    steps:
+      # fetch-depth: 0 — the :latest monotonicity check below compares against every existing v* tag,
+      # and a shallow clone has none of them.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      # `:latest` must never point at unmerged code. One line to relax if you ever need to release
+      # from a branch — but then drop `latest`/`major.minor` from the tag list too.
+      - name: Release from main only
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::releases are cut from main; this run is on $GITHUB_REF."
+            exit 1
+          fi
+
+      - name: Read the version from the csproj
+        id: v
+        run: |
+          # -getProperty runs a real MSBuild evaluation rather than grepping the XML, so an imported
+          # Directory.Build.props or a conditioned override is seen exactly as the compiler sees it.
+          version="$(dotnet msbuild KnockBox.Server/KnockBox.Server.csproj -getProperty:Version | tr -d '[:space:]')"
+          if [ -z "$version" ]; then
+            echo "::error::KnockBox.Server.csproj has no <Version>."
+            exit 1
+          fi
+          # Strict semver 2.0.0, no leading `v`, no build metadata — the same shape SemVer
+          # (KnockBox.Server/Marketplace/PluginVersion.cs) parses, because the marketplace compares
+          # minAppVersion against this number and a version it cannot parse counts as incompatible.
+          # ReleaseWorkflowTests asserts the committed value parses, so this should never be the first
+          # place a malformed version is noticed.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::<Version> is '$version', which is not a plain semver X.Y.Z[-prerelease]."
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "sha=$GITHUB_SHA"
+            case "$version" in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac
+          } >> "$GITHUB_OUTPUT"
+          echo "releasing v$version from $GITHUB_SHA"
+
+      # THREE things can already claim this version, and each is invisible to the other checks:
+      #   • the git tag;
+      #   • a published release;
+      #   • a DRAFT release — which does not create a git ref, so neither check above sees it.
+      # Verification only. The deletion is deferred to the `release` job: deleting here and then
+      # failing the test suite would leave you with less than you started with, which is the opposite
+      # of what OverwriteExisting is for.
+      - name: Version is not already released
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          claims=""
+          git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 && claims="$claims git-tag"
+          gh release view "$TAG" >/dev/null 2>&1 && claims="$claims published-release"
+          if gh release list --limit 100 --json tagName,isDraft \
+               --jq '.[] | select(.isDraft and .tagName == env.TAG) | .tagName' | grep -q .; then
+            claims="$claims draft-release"
+          fi
+
+          if [ -z "$claims" ]; then
+            echo "$TAG is unclaimed."
+            exit 0
+          fi
+
+          if [ "${{ inputs.OverwriteExisting }}" = "true" ]; then
+            echo "::warning::$TAG already exists ($claims) and will be REPLACED. Download counts on the old release are lost and any bookmarked releases/download/$TAG/... URL breaks."
+            exit 0
+          fi
+
+          echo "::error::$TAG already exists ($claims). Bump <Version> in KnockBox.Server/KnockBox.Server.csproj and merge that, or re-run with OverwriteExisting to replace it."
+          exit 1
+
+      # `latest=auto` in docker/metadata-action only ever saw the current ref, so a patch cut after a
+      # newer minor silently moved :latest backwards. Answer the question instead: is this version
+      # actually the highest one released?
+      #
+      # `sort -V` is exactly right here BECAUSE prereleases are excluded up front — it does not
+      # implement semver prerelease precedence, and comparing plain X.Y.Z is all it is asked to do.
+      - name: Should this move :latest and :MAJOR.MINOR?
+        id: tags
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          PRERELEASE: ${{ steps.v.outputs.prerelease }}
+        run: |
+          released="$(git tag -l 'v*' | sed -e 's/^v//' -e '/-/d' | sort -V)"
+          highest="$(printf '%s\n%s\n' "$released" "$VERSION" | grep -v '^$' | sort -V | tail -1)"
+
+          latest=false
+          minor=false
+          if [ "$PRERELEASE" = "true" ]; then
+            reason="prerelease — a prerelease must never be what :latest resolves to"
+          elif [ "$highest" != "$VERSION" ]; then
+            reason="$highest is already released, so this is a back-port"
+          else
+            latest=true
+            minor=true
+            reason="highest released version"
+          fi
+
+          {
+            echo "latest=$latest"
+            echo "minor=$minor"
+          } >> "$GITHUB_OUTPUT"
+          echo "latest=$latest minor=$minor ($reason)"
+
+  # ── Gate: the full CI suite, against the exact commit being released ────────────────────────────────
+  # export_image makes the docker job save the image it smoke-tested, so `release` pushes those bytes
+  # rather than rebuilding them from cache.
+  # gate.yml, NOT ci.yml. The suite is the same one `ci.yml` runs on every push — one definition, so a
+  # release cannot be verified by a second, drifting copy of it.
+  #
+  # Calling the *suite* rather than ci.yml is what keeps this job at `contents: read`. A called
+  # workflow's jobs cannot request more GITHUB_TOKEN permission than the calling job holds, and that
+  # is a workflow VALIDATION error — it fires even for jobs that will be skipped. Calling ci.yml would
+  # therefore have forced this job to grant `contents`/`packages`/`id-token` write to satisfy its
+  # `publish` and `addons` jobs, which never run during a release. gate.yml contains no publishing
+  # job, so there is nothing to grant. Inherits the workflow-level `contents: read`.
+  gate:
+    name: Gate
+    needs: preflight
+    uses: ./.github/workflows/gate.yml
+    with:
+      export_image: true
+
+  # ── Gate: the downloadable assets ──────────────────────────────────────────────────────────────────
+  # All three run before anything is pushed, so a broken asset cancels the release rather than
+  # producing one with a hole in it.
+  assets-windows:
+    name: Asset — Windows desktop
+    needs: preflight
+    # The AOT link step needs the MSVC toolchain, which the windows runner image ships (it is why
+    # docs/HOSTING.md tells a developer to install the C++ workload). This is the least-exercised part
+    # of the release, which is precisely why it belongs in the gate.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      # The publish profile owns the whole layout — self-contained native exe, web/ and
+      # appsettings.json as loose files beside it, games/ and logs/ created on first run. Do not
+      # re-specify -r/-c here; the profile sets them and a conflicting flag silently wins.
+      - name: Publish the desktop build
+        run: dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop
+
+      # Zip, not tar: the payload is Windows, and the executable bit is meaningless there.
+      - name: Zip it
+        shell: pwsh
+        run: |
+          # Checked before the zip, not after: an archive is easier to produce than a working build,
+          # and a zip with no exe in it would sail through every later step.
+          if (-not (Test-Path KnockBox.Server/bin/publish/win-x64/KnockBox.Server.exe)) {
+            throw "KnockBox.Server.exe is missing from the publish output"
+          }
+          $out = "$env:RUNNER_TEMP/knockbox-${{ needs.preflight.outputs.version }}-win-x64.zip"
+          Compress-Archive -Path KnockBox.Server/bin/publish/win-x64/* -DestinationPath $out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-win-x64
+          path: ${{ runner.temp }}/knockbox-*-win-x64.zip
+          retention-days: 1
+
+  assets-linux:
+    name: Asset — Linux x64
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      # Same toolchain the `aot` CI job installs: Native AOT compiles to a native object and links it
+      # via clang against zlib, and the SDK ships neither.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+
+      - name: Publish the linux-x64 build
+        run: dotnet publish KnockBox.Server -r linux-x64 -c Release -o publish/linux-x64
+
+      # tar, not zip: zip does not carry the executable bit, and a downloaded server that needs
+      # `chmod +x` before it will start is a support question nobody should have to ask.
+      - name: Tar it
+        run: |
+          test -x publish/linux-x64/KnockBox.Server
+          tar -C publish/linux-x64 -czf \
+            "$RUNNER_TEMP/knockbox-${{ needs.preflight.outputs.version }}-linux-x64.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-linux-x64
+          path: ${{ runner.temp }}/knockbox-*-linux-x64.tar.gz
+          retention-days: 1
+
+  assets-deploy:
+    name: Asset — Docker bundle
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # A compose bundle for someone with no checkout: the repo's compose file with its `build:`
+      # stanza rewritten to a pinned `image:`. Generated, not a second committed copy — see
+      # tools/compose-release.mjs. ci.yml's docker job runs the same transform on every PR, so a
+      # compose edit that breaks it has already failed by the time a release runs.
+      - name: Assemble the bundle
+        run: |
+          mkdir -p bundle
+          node tools/compose-release.mjs \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --out bundle/docker-compose.yml
+          cp .env.example bundle/.env.example
+          cp KnockBox.Server/appsettings.json bundle/appsettings.json
+          grep -q 'image: ghcr.io/.*:${{ needs.preflight.outputs.version }}' bundle/docker-compose.yml
+          ! grep -Eq '^\s+build:' bundle/docker-compose.yml
+          (cd bundle && zip -q -r \
+            "$RUNNER_TEMP/knockbox-${{ needs.preflight.outputs.version }}-docker.zip" .)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-docker
+          path: ${{ runner.temp }}/knockbox-*-docker.zip
+          retention-days: 1
+
+  # ── Every mutation, and nothing else ───────────────────────────────────────────────────────────────
+  release:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    # THE all-or-nothing guarantee: a needed job that fails or is skipped skips this one, and this is
+    # the only job that writes anything anywhere.
+    needs: [preflight, gate, assets-windows, assets-linux, assets-deploy]
+    permissions:
+      contents: write   # create the release + its tag
+      packages: write   # push to GHCR with the built-in GITHUB_TOKEN — no extra secrets
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/knockbox-games
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      - name: Collect the assets
+        run: |
+          mkdir -p assets
+          find incoming -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} assets/ \;
+          ls -l assets
+          # Three assets, named for this exact version. A missing or misnamed one here means an asset
+          # job changed its output path, and shipping two of three is worse than shipping none.
+          test "$(find assets -type f | wc -l)" -eq 3
+          test -f "assets/knockbox-$VERSION-win-x64.zip"
+          test -f "assets/knockbox-$VERSION-linux-x64.tar.gz"
+          test -f "assets/knockbox-$VERSION-docker.zip"
+
+      - name: Load the smoke-tested image
+        run: |
+          docker load -i incoming/container-image/knockbox-image.tar
+          docker image inspect knockbox:ci >/dev/null
+
+      - name: Plan the image tags
+        id: plan
+        run: |
+          # Lowercase: GHCR rejects an uppercase path, and the repo owner is `jcub1011` but the repo
+          # name is mixed case — which is why the image name is spelled out rather than derived from
+          # github.repository.
+          image="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          tags="$image:$VERSION"
+          if [ "${{ needs.preflight.outputs.minor }}" = "true" ]; then
+            tags="$tags $image:${VERSION%.*}"
+          fi
+          if [ "${{ needs.preflight.outputs.latest }}" = "true" ]; then
+            tags="$tags $image:latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "will push: $tags"
+
+      # Not a `stop` — every step below carries its own `!inputs.DryRun`, so a new mutating step that
+      # forgets the guard runs on a dry run. Keep the guard on the step, not on a gate before it.
+      - name: Dry run — report what would have happened
+        if: inputs.DryRun
+        run: |
+          {
+            echo "### Dry run — nothing was published"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Tag | \`$TAG\` |"
+            echo "| Commit | \`${{ needs.preflight.outputs.sha }}\` |"
+            echo "| Image tags it would push | \`${{ steps.plan.outputs.tags }}\` |"
+            echo "| Assets | $(cd assets && ls | tr '\n' ' ') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── From here on, everything mutates. Order is load-bearing; see the header. ──
+
+      # First mutation of the run, and only reachable with every gate green.
+      - name: Remove the release being replaced
+        if: inputs.OverwriteExisting && !inputs.DryRun
+        run: |
+          # Release first, tag second, each checked independently — the same three claims preflight
+          # checks, and they do not imply one another. `gh release view` finds a DRAFT as readily as a
+          # published release, and a draft has no tag, so `--cleanup-tag` is deliberately not used:
+          # it would be asked to delete a ref that was never created. Deleting the tag separately
+          # covers all three cases (published, draft, bare tag) with no special-casing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+            echo "deleted release $TAG"
+          fi
+          # The old tag must go regardless: `gh release create` will not move an existing tag, so
+          # leaving it behind would point the new release at whatever commit the old one named.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git push origin ":refs/tags/$TAG"
+            echo "deleted tag $TAG"
+          fi
+
+      - uses: docker/login-action@v3
+        if: '!inputs.DryRun'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Before the release, not after: a stray image tag nobody has been pointed at is harmless and
+      # re-pushable, while a published release whose `docker pull` line 404s is neither. Overwriting an
+      # existing GHCR tag is allowed and simply leaves the old manifest untagged.
+      - name: Push the image
+        if: '!inputs.DryRun'
+        run: |
+          for tag in ${{ steps.plan.outputs.tags }}; do
+            docker tag knockbox:ci "$tag"
+            docker push "$tag"
+          done
+
+      # A DRAFT holds no git ref, so nothing is visible and no tag exists until the final step. That is
+      # what keeps a half-uploaded release from ever being a release, and what makes the tag appear at
+      # the same instant the release does.
+      - name: Create the draft release
+        if: '!inputs.DryRun'
+        run: |
+          notes="$(printf '%s\n' \
+            "## Install" \
+            "" \
+            "**Docker** (recommended) — see [docs/HOSTING.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/HOSTING.md):" \
+            "" \
+            '```' \
+            "docker pull ${IMAGE}:${VERSION}" \
+            '```' \
+            "" \
+            "Or download \`knockbox-${VERSION}-docker.zip\` below — a \`docker-compose.yml\` already pinned to this version, plus \`.env.example\` and \`appsettings.json\`. No checkout needed." \
+            "" \
+            "**Windows desktop** — \`knockbox-${VERSION}-win-x64.zip\`. A self-contained native exe; unzip anywhere and run \`KnockBox.Server.exe\`. No .NET install required." \
+            "" \
+            "**Linux x64** — \`knockbox-${VERSION}-linux-x64.tar.gz\`. Same, for a Linux host without Docker." \
+            "" \
+            "---" \
+            "" \
+            "Games are dropped into the games directory as \`.kbg\` packages or plain folders and appear without a restart. Client addons are versioned separately under the \`addons-v*\` tags — see [docs/ADDONS.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/ADDONS.md)." )"
+
+          args=(--draft --target "${{ needs.preflight.outputs.sha }}" --title "KnockBox $TAG" --notes "$notes")
+          if [ "${{ needs.preflight.outputs.prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}"
+
+      - name: Upload the assets
+        if: '!inputs.DryRun'
+        run: gh release upload "$TAG" assets/* --clobber
+
+      # The single visible, notifying transition — and the moment the git tag comes into existence.
+      - name: Publish
+        if: '!inputs.DryRun'
+        run: gh release edit "$TAG" --draft=false
+
+      # The draft is the only thing that can be cleanly undone, and it is undone here. The image tags
+      # cannot be (deleting a GHCR version needs `packages: delete` and a version id, and getting that
+      # wrong deletes the wrong image), so they are NAMED instead — an orphan you know about is a
+      # re-run away from being correct, one you don't is a mystery.
+      - name: Clean up a failed release
+        if: failure() && !inputs.DryRun
+        run: |
+          gh release delete "$TAG" --yes 2>/dev/null && echo "removed the draft $TAG" || true
+          {
+            echo "### :x: Release failed"
+            echo
+            echo "The draft release was removed. These image tags may already be pushed to GHCR and"
+            echo "were NOT rolled back — re-running this workflow overwrites them:"
+            echo
+            echo '```'
+            for tag in ${{ steps.plan.outputs.tags }}; do echo "$tag"; done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary
+        if: success() && !inputs.DryRun
+        run: |
+          {
+            echo "### :rocket: Released $TAG"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Commit | \`${{ needs.preflight.outputs.sha }}\` |"
+            echo "| Release | ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG |"
+            echo
+            echo "**Image tags pushed**"
+            echo
+            echo '```'
+            for tag in ${{ steps.plan.outputs.tags }}; do echo "$tag"; done
+            echo '```'
+            if [ "${{ needs.preflight.outputs.latest }}" != "true" ]; then
+              echo
+              echo ":information_source: \`:latest\` was **not** moved — this version is either a"
+              echo "prerelease or not the highest released version. Nothing points at it implicitly."
+            fi
+            if [ "${{ inputs.OverwriteExisting }}" = "true" ]; then
+              echo
+              echo ":warning: **OverwriteExisting was used.** The previous release for $TAG was deleted:"
+              echo "its asset download counts are gone, any bookmarked \`releases/download/$TAG/...\` URL"
+              echo "now 404s, and anyone who already pulled \`$IMAGE:$VERSION\` holds different bytes"
+              echo "than the next puller."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

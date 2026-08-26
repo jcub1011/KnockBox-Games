@@ -37,8 +37,28 @@ against new markup.
 ## Docker / CI
 
 Docker does not build locally on this machine — verify container changes via GitHub Actions
-(`gh run watch`). CI (`.github/workflows/ci.yml`) runs eight jobs (the last two publish, on
-`main`/`v*` tags only):
+(`gh run watch`).
+
+**Three workflow files, and the split between them is deliberate.** `gate.yml` holds the six
+build-and-test jobs as a **reusable workflow** (`workflow_call` only — it has no trigger of its own and
+cannot be run from the Actions tab); `ci.yml` calls it on push/PR and then publishes `:develop` or an
+addon release; `release.yml` calls it as the gate for a manual platform release. One definition of
+"is this commit good?", so a release can't be verified by a second, drifting copy of the suite.
+
+It is factored **suite-extracted rather than publish-extracted**, and that direction is the whole
+point: a called workflow's jobs cannot request more `GITHUB_TOKEN` permission than the calling job
+holds, and that is a workflow *validation* error — it fires even for jobs that will be skipped. When
+`release.yml` called `ci.yml`, its gate job had to grant `contents`/`packages`/`id-token` write purely
+to satisfy `publish` and `addons`, which never run during a release. `gate.yml` contains no publishing
+job, so `release.yml`'s gate needs nothing but `contents: read`. Moving `publish`/`addons` out instead
+would have worked equally well for permissions and was rejected: **the npm trusted publisher on
+npmjs.com names the publishing workflow by filename**, and both OIDC claims it can be matched against
+(`workflow_ref`, `job_workflow_ref`) resolve to the file the job is *defined* in — so relocating
+`addons` breaks `npm publish` with an auth error until that config is edited by hand.
+`ReleaseWorkflowTests` pins all of this: `release.yml` must call `gate.yml` and not `ci.yml`, and
+`gate.yml` must grant no write permission anywhere.
+
+The six jobs in `gate.yml`:
 - `dotnet` — .NET build & tests.
 - `aot` — Native AOT publish with `/warnaserror`; any new trim/AOT `ILxxxx` warning fails the
   build (mirrors the Dockerfile build stage, needs clang + zlib). Keeps the server AOT-clean.
@@ -50,21 +70,82 @@ Docker does not build locally on this machine — verify container changes via G
   discovery, and that the admin portal binds its own port, claims a password once and stays 404 on the
   public origins — the only place a real listener is exercised). Build context is the repo root;
   `web/` must be present.
-- `publish` — the container image to GHCR (`:develop` from main, semver tags from `v*`).
-
-**Two release tag namespaces, and they must stay separate.** `v1.2.3` releases the *platform* (the
-csproj `<Version>`, which becomes the image's semver tags); `addons-v1.2.3` releases the *client
-addons* (the manifest's `sdkVersion`). The two version numbers are independent by design, so one tag
-namespace made every tag claim both at once: a server-only release failed the `addons` job's
-tag-vs-manifest guard for no real reason, and an addon-only release published an image tagged with a
-version its own assembly didn't report — and `KnockBoxVersion` (from the assembly, not the tag) is
-what marketplace `minAppVersion` bounds are judged against. `v*` is anchored so it does not match
-`addons-v*`; both are listed in the trigger, and `publish`'s `refs/tags/v*` condition already
-excludes the addon namespace.
+The two publishing jobs live in `ci.yml`, each `needs: [gate]`:
+- `publish` — **`:develop` only**, from `main`. Versioned and `:latest` tags are `release.yml`'s and
+  are deliberately unreachable from here: this job publishes whatever `main` happens to be, which is
+  exactly what a release must not be. `release.yml` cannot reach it at all — it calls `gate.yml`, not
+  this file.
 - `addons` — **`addons-v*` tags only**: verifies the tag matches `addons.manifest.json`'s `sdkVersion`, builds the
   addon archives + `ADDONS.json`, uploads the archives to the release, commits the index to `main`, and
   publishes `knockbox-cli` to npm via **trusted publishing (OIDC)** — which keeps the repo's
   "no long-lived secrets beyond `GITHUB_TOKEN`" property. Also needs `id-token: write`.
+
+`gate.yml`'s one input is `export_image`, which `release.yml` passes as `true`: the `docker` job then
+`docker save`s the image it just smoke-tested and uploads it as an artifact, so a release pushes
+**those bytes** rather than a cache-hit rebuild of them — same layers, but a rebuild is still a
+separate build, and what users pull should be what was tested. Off by default so PRs don't pay the
+artifact round trip. The `docker` job also runs `tools/compose-release.mjs --check` on every PR: the
+release bundle's compose file is *generated* from the repo's, so a compose edit that moves an anchor
+must fail on the PR rather than during a release.
+
+### Releasing the platform (`.github/workflows/release.yml`)
+
+**Two release tag namespaces, and they must stay separate.** `v1.2.3` releases the *platform* (the
+csproj `<Version>`); `addons-v1.2.3` releases the *client addons* (the manifest's `sdkVersion`). The
+two version numbers are independent by design, so one tag namespace made every tag claim both at
+once: a server-only release failed the `addons` job's tag-vs-manifest guard for no real reason, and
+an addon-only release published an image tagged with a version its own assembly didn't report — and
+`KnockBoxVersion` (from the assembly, not the tag) is what marketplace `minAppVersion` bounds are
+judged against.
+
+Only **`addons-v*` is a push trigger**. `v*` used to be, and a hand-pushed tag was then a second path
+to a platform release — one that bypassed every guard `release.yml` adds. Two paths to one artifact
+drift, and the unguarded one wins by being easier to reach; worse, re-adding it is *silent*, because
+a tag pushed by CI with `GITHUB_TOKEN` does not trigger further workflow runs, so the duplicate only
+fires when you tag by hand. `ReleaseWorkflowTests` asserts it stays absent.
+
+**`release.yml` is `workflow_dispatch` only, and takes no version input.** The version is read from
+`KnockBox.Server.csproj` `<Version>` with `dotnet msbuild -getProperty:Version` (a real MSBuild
+evaluation, not a grep) — the same number `KnockBoxVersion` reports off the assembly, so tag and
+binary cannot disagree. That also makes "I forgot to bump the version" a hard stop rather than a bad
+release: the tag for an un-bumped csproj already exists, and preflight refuses a reused tag. Two
+inputs only: `OverwriteExisting` (replace an existing release + tag) and `DryRun` (run every gate,
+mutate nothing — the only way to exercise the workflow, notably the `windows-latest` AOT publish,
+without publishing).
+
+**"If any build fails, upload nothing" is the `needs:` list, not an `if:` chain.** Every build, test
+and asset is a gate job; `release` is the only job that writes anything and `needs:` all of them, and
+a dependency that fails *or is skipped* skips the dependent job. `ReleaseWorkflowTests` pins that
+list — dropping one entry silently converts a gate into an advisory.
+
+**Ordering inside `release` is load-bearing, because cross-service atomicity doesn't exist.** GHCR
+and the Releases API share no transaction, so: push the image **first** (a stray image tag nobody has
+been pointed at is harmless and idempotently re-pushable; a published release whose `docker pull`
+line 404s is not), then create the release as a **draft**, upload assets, and only then flip it to
+published — so a partial upload never becomes visible, watchers get exactly one notification, and the
+git tag (which a draft does not create) appears at that same instant. On failure the draft is deleted
+and the pushed image tags are **named in the job summary** rather than auto-deleted: removing a GHCR
+version needs `packages: delete` plus a version id, and an orphan you know about is a re-run away
+from correct.
+
+**`OverwriteExisting` deletes in the `release` job, never in preflight.** Preflight only *verifies*
+that overwriting is permitted — deleting up front and then failing the suite would leave you with
+less than you started with, which is the opposite of the point. Preflight checks **three** claims on
+the version, each invisible to the others: the git tag, a published release, and a **draft** release
+(which creates no git ref, so neither of the first two sees it).
+
+**`:latest` is computed, not assumed.** `docker/metadata-action`'s `latest=auto` only ever saw the
+current ref, so re-running an older `v*` tag silently moved `:latest` backwards. Preflight instead
+compares against every existing `v*` tag with `sort -V` and declines `:latest`/`:MAJOR.MINOR` for a
+prerelease or a back-port. `sort -V` is correct there *because* prereleases are excluded up front —
+it does not implement semver prerelease precedence, and comparing plain `X.Y.Z` is all it is asked to
+do.
+
+Release assets (all built in the gate, so a broken one cancels the release): a `windows-latest` AOT
+desktop zip, a `linux-x64` tarball (tar, not zip — zip drops the executable bit), and a Docker bundle
+whose `docker-compose.yml` is generated by `tools/compose-release.mjs` with the repo's `build:` stanza
+rewritten to a pinned `image:`. One compose file in the repo rather than two that drift — the same
+reasoning as the generated `ADDONS.json`.
 
 Deployment: the `games/` directory is mounted **read-only** from a stable host path
 **outside** the image, so it survives image updates (see `docs/HOSTING.md`). That read-only-ness is
