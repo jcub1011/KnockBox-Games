@@ -9,6 +9,7 @@
 
 import {
   AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
+  TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
   filterSettings, formatBytes, formatClock, formatCount, formatDuration, formatVersion,
@@ -16,7 +17,7 @@ import {
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, sdkBadge,
   noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
-  sparklinePath, tabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  sparklinePath, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
@@ -30,6 +31,7 @@ const JOB_VIEW_LIMIT = 50;
 // ── Module state ──────────────────────────────────────────────────────────────
 
 let pollTimer = null;
+let activeTopTab = 'monitoring';
 let activeSettingId = 'setting-overview';
 let activeTab = 'overview';
 // The tab enterTab last ran for, so a scroll that ends where it started re-fetches nothing.
@@ -312,7 +314,105 @@ export function centerActiveSidebarItem(settingId = activeSettingId) {
   updateSidebarScrollIndicators();
 }
 
-// ── Navigation, Tree View & Settings Routing ──────────────────────────────────
+// ── Top-Bar Tabs & Settings Routing ──────────────────────────────────────────
+
+export function selectTopTab(topTabKey, { replaceHash = true, scroll = false } = {}) {
+  const topTab = topTabFromHash(topTabKey);
+  activeTopTab = topTab;
+
+  // Highlight active top-bar tab button
+  for (const btn of document.querySelectorAll('.top-tab-btn')) {
+    btn.classList.toggle('active', btn.dataset.tab === activeTopTab);
+  }
+
+  // Toggle tab panel visibility
+  const panels = [
+    { id: 'tab-panel-monitoring', tab: 'monitoring' },
+    { id: 'tab-panel-logs', tab: 'logs' },
+    { id: 'tab-panel-plugins', tab: 'plugins' },
+    { id: 'tab-panel-settings', tab: 'settings' },
+  ];
+  for (const p of panels) {
+    const panelEl = el(p.id);
+    if (panelEl) panelEl.classList.toggle('hidden', p.tab !== activeTopTab);
+  }
+
+  // Update activeTab & activeSettingId
+  if (topTab === 'monitoring') {
+    activeTab = 'overview';
+    activeSettingId = 'setting-overview';
+  } else if (topTab === 'logs') {
+    activeTab = 'logs';
+    activeSettingId = 'setting-logs';
+  } else if (topTab === 'plugins') {
+    activeTab = 'marketplace';
+    activeSettingId = 'setting-games';
+  } else if (topTab === 'settings') {
+    activeTab = 'platform';
+    activeSettingId = 'setting-maintenance';
+  }
+
+  // Highlight active tree item & nav items
+  for (const item of document.querySelectorAll('.tree-item')) {
+    item.classList.toggle('active', item.dataset.settingId === activeSettingId);
+  }
+  for (const nav of document.querySelectorAll('.nav-item:not(.tree-item)')) {
+    nav.classList.toggle('active', nav.dataset.tab === activeTab);
+  }
+
+  const setting = ALL_SETTINGS.find((s) => s.id === activeSettingId);
+  const panelTitle = el('panel-title');
+  if (panelTitle && setting) panelTitle.textContent = setting.label;
+
+  if (replaceHash) {
+    if (location.hash !== `#${topTab}`) {
+      history.replaceState(null, '', `#${topTab}`);
+    }
+  }
+
+  enterTab(activeTab, { force: true });
+}
+
+let pendingScrollSettingId = null;
+
+/**
+ * Robust scroll-into-view helper that accounts for tab unhiding / reflow
+ * and async content loading (such as dynamically loaded platform limits).
+ */
+export function scrollSettingIntoView(settingId, { behavior = 'smooth', block = 'start' } = {}) {
+  const targetEl = typeof settingId === 'string' ? el(settingId) : settingId;
+  if (!targetEl) return;
+  const id = targetEl.id || (typeof settingId === 'string' ? settingId : null);
+  pendingScrollSettingId = id;
+
+  const performScroll = () => {
+    if (typeof targetEl.scrollIntoView === 'function') {
+      targetEl.scrollIntoView({ behavior, block });
+    }
+  };
+
+  performScroll();
+
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => {
+      performScroll();
+    });
+  }
+
+  // Backup passes after async DOM rendering settles
+  setTimeout(() => {
+    if (pendingScrollSettingId === id) {
+      performScroll();
+    }
+  }, 100);
+
+  setTimeout(() => {
+    if (pendingScrollSettingId === id) {
+      performScroll();
+      pendingScrollSettingId = null;
+    }
+  }, 350);
+}
 
 export function selectSetting(settingKey, { replaceHash = true, scroll = false } = {}) {
   const settingId = settingFromHash(settingKey);
@@ -320,7 +420,28 @@ export function selectSetting(settingKey, { replaceHash = true, scroll = false }
   activeSettingId = setting.id;
   activeTab = setting.legacyTab || 'overview';
 
-  el('panel-title').textContent = setting.label;
+  const targetTopTab = setting.topTab || (TAB_MAPPING[setting.legacyTab] || 'monitoring');
+  activeTopTab = targetTopTab;
+
+  // Highlight active top-bar tab button
+  for (const btn of document.querySelectorAll('.top-tab-btn')) {
+    btn.classList.toggle('active', btn.dataset.tab === activeTopTab);
+  }
+
+  // Toggle tab panel visibility
+  const panels = [
+    { id: 'tab-panel-monitoring', tab: 'monitoring' },
+    { id: 'tab-panel-logs', tab: 'logs' },
+    { id: 'tab-panel-plugins', tab: 'plugins' },
+    { id: 'tab-panel-settings', tab: 'settings' },
+  ];
+  for (const p of panels) {
+    const panelEl = el(p.id);
+    if (panelEl) panelEl.classList.toggle('hidden', p.tab !== activeTopTab);
+  }
+
+  const panelTitle = el('panel-title');
+  if (panelTitle) panelTitle.textContent = setting.label;
 
   // Highlight active tree item & nav items
   for (const item of document.querySelectorAll('.tree-item')) {
@@ -340,10 +461,7 @@ export function selectSetting(settingKey, { replaceHash = true, scroll = false }
 
   // Smooth scroll to the target setting if requested
   if (scroll) {
-    const targetEl = el(activeSettingId);
-    if (targetEl && typeof targetEl.scrollIntoView === 'function') {
-      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    scrollSettingIntoView(activeSettingId);
   }
 
   if (replaceHash) {
@@ -353,14 +471,22 @@ export function selectSetting(settingKey, { replaceHash = true, scroll = false }
     }
   }
 
-  // The operator picked this, so it happens now and unconditionally — a second click on a setting in
-  // the tab you are already on is a refresh, and should behave like one.
+  // The operator picked this, so it happens now and unconditionally
   enterTab(activeTab, { force: true });
 }
 
 export function selectTab(tab, { replaceHash = true } = {}) {
+  const clean = String(tab || '').replace(/^#/, '').trim().toLowerCase();
+  if (TOP_TABS.includes(clean)) {
+    selectTopTab(clean, { replaceHash, scroll: true });
+    return;
+  }
   const settingId = settingFromHash(tab);
   selectSetting(settingId, { replaceHash, scroll: true });
+}
+
+export function navigateToSetting(settingId) {
+  selectSetting(settingId, { replaceHash: true, scroll: true });
 }
 
 // ── Tree View Expand/Collapse ─────────────────────────────────────────────────
@@ -518,7 +644,9 @@ function enterTab(tab, { force = false } = {}) {
   if (!force && tab === enteredTab) return;
   enteredTab = tab;
   if (tab === 'logs') { logCursor = 0; logEntries = []; }
-  if (tab === 'marketplace') { jobCursor = 0; jobs = []; refreshCatalog(); }
+  if (tab === 'marketplace' || tab === 'plugins') { jobCursor = 0; jobs = []; refreshCatalog(); refreshGames(); }
+  if (tab === 'monitoring' || tab === 'overview') { refreshOverview(); refreshLobbies(); }
+  if (tab === 'platform' || tab === 'settings') { refreshPlatform(); }
   refreshActiveTab();
   startPolling();
 }
@@ -541,7 +669,17 @@ function enterTabWhenSettled(tab) {
   }, TAB_SETTLE_MS);
 }
 
-const POLL_MS = { overview: 5000, lobbies: 5000, games: 20000, marketplace: 3000, logs: 2000, platform: 0 };
+const POLL_MS = {
+  overview: 5000,
+  lobbies: 5000,
+  monitoring: 5000,
+  games: 20000,
+  marketplace: 3000,
+  plugins: 3000,
+  logs: 2000,
+  platform: 0,
+  settings: 0,
+};
 
 function startPolling() {
   stopPolling();
@@ -566,15 +704,35 @@ export function stopScrollSettle() {
 
 async function refreshActiveTab() {
   switch (activeTab) {
-    case 'overview': await refreshOverview(); break;
-    case 'lobbies': await refreshLobbies(); break;
-    case 'games': await refreshGames(); break;
-    case 'marketplace': await refreshJobs(); break;
-    case 'logs': await refreshLogs(); break;
-    case 'platform': await refreshPlatform(); break;
-    default: await refreshOverview(); break;
+    case 'overview':
+    case 'monitoring':
+      await refreshOverview();
+      break;
+    case 'lobbies':
+      await refreshLobbies();
+      break;
+    case 'games':
+      await refreshGames();
+      break;
+    case 'marketplace':
+    case 'plugins':
+      await refreshJobs();
+      break;
+    case 'logs':
+      await refreshLogs();
+      break;
+    case 'platform':
+    case 'settings':
+      await refreshPlatform();
+      break;
+    default:
+      await refreshOverview();
+      break;
   }
-  el('last-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  const timeStr = `Updated ${new Date().toLocaleTimeString()}`;
+  for (const ind of document.querySelectorAll('.refresh-indicator')) {
+    ind.textContent = timeStr;
+  }
 }
 
 // ── Overview ──────────────────────────────────────────────────────────────────
@@ -1895,6 +2053,15 @@ async function refreshPlatform() {
     codesDraft = { words: [...(codes.words || [])], patterns: [...(codes.patterns || [])] };
     renderRoomCodes();
   }
+
+  // If a setting was requested to scroll into view while data was fetching,
+  // re-align after the DOM elements have rendered to prevent height-shift cutoffs
+  if (pendingScrollSettingId) {
+    const targetEl = el(pendingScrollSettingId);
+    if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
 }
 
 /**
@@ -2347,6 +2514,22 @@ function wire() {
       toggleGroup(toggleBtn.dataset.groupToggle);
     });
   }
+
+  // Top-bar Tab Buttons
+  for (const tabBtn of document.querySelectorAll('.top-tab-btn')) {
+    tabBtn.addEventListener('click', () => {
+      selectTopTab(tabBtn.dataset.tab);
+    });
+  }
+
+  // Cross-tab deep links to settings (e.g. data-goto-setting="setting-schedule")
+  document.addEventListener('click', (e) => {
+    const jumpLink = e.target.closest('[data-goto-setting]');
+    if (jumpLink) {
+      e.preventDefault();
+      navigateToSetting(jumpLink.dataset.gotoSetting);
+    }
+  });
 
   for (const item of document.querySelectorAll('.tree-item')) {
     item.addEventListener('click', (e) => {

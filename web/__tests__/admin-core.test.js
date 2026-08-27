@@ -3,17 +3,54 @@
 // kb-core.test.js, and the reason admin-core.js exists as a module of its own.
 import { describe, it, expect } from 'vitest';
 import {
-  AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS, UPDATE_MODES,
+  AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS,
+  TOP_TABS, TAB_MAPPING,
+  UPDATE_MODES,
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
   cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterSettings, formatBytes,
   formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, noLimitOverrides,
-  pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, uploadGuard,
+  pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge,
 } from '../admin/admin-core.js';
+
+describe('topTabFromHash & TOP_TABS', () => {
+  it('defines the 4 top-bar tabs', () => {
+    expect(TOP_TABS).toEqual(['monitoring', 'logs', 'plugins', 'settings']);
+  });
+
+  it('maps hashes and setting keys to the correct top tab', () => {
+    expect(topTabFromHash('#monitoring')).toBe('monitoring');
+    expect(topTabFromHash('#overview')).toBe('monitoring');
+    expect(topTabFromHash('#lobbies')).toBe('monitoring');
+    expect(topTabFromHash('#history')).toBe('monitoring');
+    expect(topTabFromHash('#cost')).toBe('monitoring');
+
+    expect(topTabFromHash('#logs')).toBe('logs');
+
+    expect(topTabFromHash('#plugins')).toBe('plugins');
+    expect(topTabFromHash('#games')).toBe('plugins');
+    expect(topTabFromHash('#marketplace')).toBe('plugins');
+
+    expect(topTabFromHash('#settings')).toBe('settings');
+    expect(topTabFromHash('#platform')).toBe('settings');
+    expect(topTabFromHash('#maintenance')).toBe('settings');
+    expect(topTabFromHash('#schedule')).toBe('settings');
+    expect(topTabFromHash('#limits')).toBe('settings');
+    expect(topTabFromHash('#room-codes')).toBe('settings');
+    expect(topTabFromHash('#webhooks')).toBe('settings');
+    expect(topTabFromHash('#startup-config')).toBe('settings');
+  });
+
+  it('falls back to monitoring for unknown or empty hashes', () => {
+    expect(topTabFromHash('')).toBe('monitoring');
+    expect(topTabFromHash('#')).toBe('monitoring');
+    expect(topTabFromHash('#unknown-random-123')).toBe('monitoring');
+  });
+});
 
 describe('tabFromHash', () => {
   it('selects the tab a fragment names', () => {

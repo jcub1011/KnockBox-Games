@@ -18,6 +18,7 @@ export const SETTINGS_GROUPS = [
     settings: [
       {
         id: 'setting-overview',
+        topTab: 'monitoring',
         legacyTab: 'overview',
         label: 'System Overview',
         icon: 'overview',
@@ -26,6 +27,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-history',
+        topTab: 'monitoring',
         legacyTab: 'overview',
         label: 'Recent History',
         icon: 'history',
@@ -34,6 +36,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-cost',
+        topTab: 'monitoring',
         legacyTab: 'overview',
         label: 'Per-Game Server Cost',
         icon: 'cost',
@@ -42,6 +45,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-lobbies',
+        topTab: 'monitoring',
         legacyTab: 'lobbies',
         label: 'Active Lobbies',
         icon: 'lobbies',
@@ -50,6 +54,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-logs',
+        topTab: 'logs',
         legacyTab: 'logs',
         label: 'System Logs',
         icon: 'logs',
@@ -65,19 +70,21 @@ export const SETTINGS_GROUPS = [
     settings: [
       {
         id: 'setting-games',
+        topTab: 'plugins',
         legacyTab: 'games',
         label: 'Game Catalog',
         icon: 'games',
         description: 'Installed game catalog, availability controls (available, disabled, staged), disk breakdown, and rescan.',
-        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package'],
+        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package', 'plugins'],
       },
       {
         id: 'setting-marketplace',
+        topTab: 'plugins',
         legacyTab: 'marketplace',
         label: 'Marketplace & Packages',
         icon: 'marketplace',
         description: 'Marketplace catalog, package update jobs, manual .kbg uploads, version rollback, and package sources.',
-        keywords: ['marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'jobs', 'operations', 'rollback', 'install'],
+        keywords: ['marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'jobs', 'operations', 'rollback', 'install', 'plugins'],
       },
     ],
   },
@@ -88,6 +95,7 @@ export const SETTINGS_GROUPS = [
     settings: [
       {
         id: 'setting-maintenance',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Maintenance Mode',
         icon: 'maintenance',
@@ -96,6 +104,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-announcement',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Player Announcement',
         icon: 'announcement',
@@ -104,6 +113,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-limits',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Limits & Capacity',
         icon: 'limits',
@@ -112,6 +122,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-schedule',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Update Schedule',
         icon: 'schedule',
@@ -120,6 +131,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-room-codes',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Banned Room Codes',
         icon: 'roomCodes',
@@ -128,6 +140,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-webhooks',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Webhooks & Alerts',
         icon: 'webhooks',
@@ -136,6 +149,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-startup-config',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Startup Configuration',
         icon: 'startup',
@@ -149,13 +163,48 @@ export const SETTINGS_GROUPS = [
 /** Flat list of all registered settings across all groups. */
 export const ALL_SETTINGS = SETTINGS_GROUPS.flatMap((g) => g.settings);
 
+/** The 4 top-bar dashboard tabs in order. */
+export const TOP_TABS = ['monitoring', 'logs', 'plugins', 'settings'];
+
+/** Mapping from legacy tab names and top tabs to the top-bar tabs. */
+export const TAB_MAPPING = {
+  overview: 'monitoring',
+  history: 'monitoring',
+  cost: 'monitoring',
+  lobbies: 'monitoring',
+  monitoring: 'monitoring',
+  logs: 'logs',
+  games: 'plugins',
+  marketplace: 'plugins',
+  plugins: 'plugins',
+  platform: 'settings',
+  settings: 'settings',
+};
+
 /** The dashboard tabs/settings IDs in order. */
-export const TABS = ['overview', 'lobbies', 'games', 'marketplace', 'logs', 'platform'];
+export const TABS = ['monitoring', 'logs', 'plugins', 'settings', 'overview', 'lobbies', 'games', 'marketplace', 'platform'];
+
+/**
+ * Resolves the top-level tab ('monitoring', 'logs', 'plugins', 'settings') for a hash or tab key.
+ */
+export function topTabFromHash(hash) {
+  const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
+  if (!clean) return 'monitoring';
+  if (TOP_TABS.includes(clean)) return clean;
+  if (TAB_MAPPING[clean]) return TAB_MAPPING[clean];
+  const settingId = settingFromHash(hash);
+  const setting = ALL_SETTINGS.find((s) => s.id === settingId);
+  if (setting) {
+    if (setting.topTab) return setting.topTab;
+    if (setting.legacyTab && TAB_MAPPING[setting.legacyTab]) return TAB_MAPPING[setting.legacyTab];
+  }
+  return 'monitoring';
+}
 
 /**
  * Resolves the target setting ID from a URL fragment or query.
  * Accepts exact setting IDs ('setting-limits'), stripped names ('limits'),
- * legacy tab names ('platform'), or group IDs ('monitoring').
+ * legacy tab names ('platform'), top tab names ('settings'), or group IDs ('monitoring').
  */
 export function settingFromHash(hash, groups = SETTINGS_GROUPS) {
   const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
@@ -167,6 +216,10 @@ export function settingFromHash(hash, groups = SETTINGS_GROUPS) {
 
   const withPrefix = allSettings.find((s) => s.id.toLowerCase() === `setting-${clean}`);
   if (withPrefix) return withPrefix.id;
+
+  if (clean === 'plugins') return 'setting-games';
+  if (clean === 'settings') return 'setting-maintenance';
+  if (clean === 'monitoring') return 'setting-overview';
 
   const byGroup = groups.find((g) => g.id.toLowerCase() === clean);
   if (byGroup && byGroup.settings[0]) return byGroup.settings[0].id;
@@ -184,10 +237,12 @@ export function tabFromHash(hash, tabs = TABS) {
   const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
   if (!clean) return tabs[0];
   if (tabs.includes(clean)) return clean;
-  // If it's a setting id like setting-lobbies or lobbies, map to legacy tab
-  const settingId = settingFromHash(hash);
-  const setting = ALL_SETTINGS.find((s) => s.id === settingId);
-  if (setting && tabs.includes(setting.legacyTab)) return setting.legacyTab;
+  if (TAB_MAPPING[clean] && tabs.includes(TAB_MAPPING[clean])) return TAB_MAPPING[clean];
+  const exact = ALL_SETTINGS.find((s) => s.id.toLowerCase() === clean || s.id.toLowerCase() === `setting-${clean}`);
+  if (exact) {
+    if (tabs.includes(exact.legacyTab)) return exact.legacyTab;
+    if (exact.topTab && tabs.includes(exact.topTab)) return exact.topTab;
+  }
   return tabs[0];
 }
 
