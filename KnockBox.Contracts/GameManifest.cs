@@ -62,6 +62,21 @@ namespace KnockBox.Contracts;
 /// <see cref="ServerAuthority"/> to be set (words are server-only). The game origin never serves
 /// these files — they are server-side data and, for hidden-information games, secret.
 /// </param>
+/// <param name="MinPlayers">
+/// Minimum recommended player count for the game (defaults to 1).
+/// </param>
+/// <param name="Tags">
+/// Optional list of category/genre tags for the game (e.g. "party", "drawing", "word-game").
+/// </param>
+/// <param name="Description">
+/// Optional short description of the game.
+/// </param>
+/// <param name="CreatedAt">
+/// Optional game creation/installation timestamp.
+/// </param>
+/// <param name="UpdatedAt">
+/// Optional game last updated/modified timestamp.
+/// </param>
 public sealed record GameManifest(
     string Id,
     string Name,
@@ -74,7 +89,12 @@ public sealed record GameManifest(
     string? ServerAuthority = null,
     IReadOnlyDictionary<string, AuthorityWordDeclaration>? AuthorityWords = null,
     string? Version = null,
-    IReadOnlyDictionary<string, string>? Sdk = null);
+    IReadOnlyDictionary<string, string>? Sdk = null,
+    int MinPlayers = 1,
+    IReadOnlyList<string>? Tags = null,
+    string? Description = null,
+    DateTimeOffset? CreatedAt = null,
+    DateTimeOffset? UpdatedAt = null);
 
 /// <summary>
 /// One entry in <see cref="GameManifest.AuthorityWords"/>: the game-relative path of a line-delimited

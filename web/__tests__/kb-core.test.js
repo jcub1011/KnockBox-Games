@@ -33,6 +33,12 @@ import {
   shouldShowAnnouncement,
   announcementSeverity,
   announcementText,
+  matchesGameSearch,
+  matchesPlayerCount,
+  sortGames,
+  formatPlayerCapacity,
+  formatTagsTooltip,
+  filterAndSortGames,
 } from '../kb-core.js';
 
 describe('normalizeReady', () => {
@@ -580,5 +586,168 @@ describe('announcements', () => {
     // No name resolved (a game since uninstalled) → the text alone, never a raw id.
     expect(announcementText(a, null)).toBe('retires on the 15th.');
     expect(announcementText(a, '  ')).toBe('retires on the 15th.');
+  });
+});
+
+describe('matchesGameSearch', () => {
+  const sampleGame = {
+    id: 'alpha-chain',
+    name: 'Alpha Chain',
+    description: 'A multiplayer word game',
+    tags: ['word-game', 'party', 'multiplayer'],
+  };
+
+  it('matches on game name (case-insensitive and substring)', () => {
+    expect(matchesGameSearch(sampleGame, 'alpha')).toBe(true);
+    expect(matchesGameSearch(sampleGame, 'CHAIN')).toBe(true);
+    expect(matchesGameSearch(sampleGame, 'pha ch')).toBe(true);
+  });
+
+  it('matches on game id', () => {
+    expect(matchesGameSearch(sampleGame, 'alpha-chain')).toBe(true);
+  });
+
+  it('matches on tags', () => {
+    expect(matchesGameSearch(sampleGame, 'word')).toBe(true);
+    expect(matchesGameSearch(sampleGame, 'party')).toBe(true);
+    expect(matchesGameSearch(sampleGame, 'multiplayer')).toBe(true);
+  });
+
+  it('matches on description', () => {
+    expect(matchesGameSearch(sampleGame, 'multiplayer word')).toBe(true);
+  });
+
+  it('returns false when no fields match', () => {
+    expect(matchesGameSearch(sampleGame, 'racing')).toBe(false);
+  });
+
+  it('returns true for empty or whitespace-only search', () => {
+    expect(matchesGameSearch(sampleGame, '')).toBe(true);
+    expect(matchesGameSearch(sampleGame, '   ')).toBe(true);
+    expect(matchesGameSearch(sampleGame, null)).toBe(true);
+    expect(matchesGameSearch(sampleGame, undefined)).toBe(true);
+  });
+});
+
+describe('matchesPlayerCount', () => {
+  const game1 = { id: 'ttt', minPlayers: 2, maxPlayers: 2 };
+  const game2 = { id: 'party', minPlayers: 2, maxPlayers: 8 };
+  const game3 = { id: 'big-party', minPlayers: 1, maxPlayers: 16 };
+  const gameDefault = { id: 'solo' }; // minPlayers default 1, maxPlayers default 1
+
+  it('returns true when filter is empty or null', () => {
+    expect(matchesPlayerCount(game1, '')).toBe(true);
+    expect(matchesPlayerCount(game1, '   ')).toBe(true);
+    expect(matchesPlayerCount(game1, null)).toBe(true);
+  });
+
+  it('matches exact player count within range', () => {
+    expect(matchesPlayerCount(game1, '2')).toBe(true);
+    expect(matchesPlayerCount(game1, '1')).toBe(false);
+    expect(matchesPlayerCount(game1, '3')).toBe(false);
+
+    expect(matchesPlayerCount(game2, '2')).toBe(true);
+    expect(matchesPlayerCount(game2, '4')).toBe(true);
+    expect(matchesPlayerCount(game2, '8')).toBe(true);
+    expect(matchesPlayerCount(game2, '9')).toBe(false);
+
+    expect(matchesPlayerCount(gameDefault, '1')).toBe(true);
+    expect(matchesPlayerCount(gameDefault, '2')).toBe(false);
+  });
+
+  it('matches 9+ range', () => {
+    expect(matchesPlayerCount(game1, '9+')).toBe(false);
+    expect(matchesPlayerCount(game2, '9+')).toBe(false);
+    expect(matchesPlayerCount(game3, '9+')).toBe(true);
+  });
+});
+
+describe('sortGames', () => {
+  const g1 = { id: 'b', name: 'Bravo', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-03-01T00:00:00Z' };
+  const g2 = { id: 'a', name: 'Alpha', createdAt: '2026-02-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
+  const g3 = { id: 'c', name: 'Charlie', createdAt: '2026-03-01T00:00:00Z', updatedAt: '2026-02-01T00:00:00Z' };
+
+  it('sorts alphabetical by name A-Z', () => {
+    const sorted = sortGames([g1, g2, g3], 'alphabetical');
+    expect(sorted.map((g) => g.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+  });
+
+  it('sorts newest first by createdAt descending', () => {
+    const sorted = sortGames([g1, g2, g3], 'newest');
+    expect(sorted.map((g) => g.name)).toEqual(['Charlie', 'Alpha', 'Bravo']);
+  });
+
+  it('sorts recently updated first by updatedAt descending', () => {
+    const sorted = sortGames([g1, g2, g3], 'updated');
+    expect(sorted.map((g) => g.name)).toEqual(['Bravo', 'Charlie', 'Alpha']);
+  });
+
+  it('tie-breaks by name when dates are equal', () => {
+    const same1 = { id: '1', name: 'Zebra', createdAt: '2026-01-01T00:00:00Z' };
+    const same2 = { id: '2', name: 'Apple', createdAt: '2026-01-01T00:00:00Z' };
+    const sorted = sortGames([same1, same2], 'newest');
+    expect(sorted.map((g) => g.name)).toEqual(['Apple', 'Zebra']);
+  });
+});
+
+describe('formatPlayerCapacity', () => {
+  it('formats single player capacity', () => {
+    expect(formatPlayerCapacity(1, 1)).toBe('1');
+  });
+
+  it('formats exact multiple players capacity', () => {
+    expect(formatPlayerCapacity(2, 2)).toBe('2');
+    expect(formatPlayerCapacity(4, 4)).toBe('4');
+  });
+
+  it('formats player ranges', () => {
+    expect(formatPlayerCapacity(1, 8)).toBe('1–8');
+    expect(formatPlayerCapacity(2, 6)).toBe('2–6');
+  });
+
+  it('handles defaults when omitted', () => {
+    expect(formatPlayerCapacity(null, 4)).toBe('1–4');
+    expect(formatPlayerCapacity(null, null)).toBe('1');
+  });
+});
+
+describe('formatTagsTooltip', () => {
+  it('formats tag list into a comma-separated string', () => {
+    expect(formatTagsTooltip(['word-game', 'party', 'multiplayer'])).toBe('word-game, party, multiplayer');
+  });
+
+  it('returns empty string for empty or missing tags', () => {
+    expect(formatTagsTooltip([])).toBe('');
+    expect(formatTagsTooltip(null)).toBe('');
+    expect(formatTagsTooltip(undefined)).toBe('');
+  });
+});
+
+describe('filterAndSortGames', () => {
+  const games = [
+    { id: 'tictactoe', name: 'Tic-Tac-Toe', minPlayers: 2, maxPlayers: 2, tags: ['classic', 'board-game'], createdAt: '2026-01-01T00:00:00Z' },
+    { id: 'alpha-chain', name: 'Alpha Chain', minPlayers: 2, maxPlayers: 8, tags: ['word-game', 'party'], createdAt: '2026-02-01T00:00:00Z' },
+    { id: 'dice-sim', name: 'Dice Simulator', minPlayers: 1, maxPlayers: 8, tags: ['dice', 'casual'], createdAt: '2026-03-01T00:00:00Z' },
+  ];
+
+  it('filters by search term across name and tags', () => {
+    const res1 = filterAndSortGames(games, { search: 'word' });
+    expect(res1.map((g) => g.id)).toEqual(['alpha-chain']);
+
+    const res2 = filterAndSortGames(games, { search: 'dice' });
+    expect(res2.map((g) => g.id)).toEqual(['dice-sim']);
+  });
+
+  it('filters by player count', () => {
+    const res = filterAndSortGames(games, { playerCount: '1' });
+    expect(res.map((g) => g.id)).toEqual(['dice-sim']);
+  });
+
+  it('combines search, player count, and sorting', () => {
+    const res = filterAndSortGames(games, { search: 'classic', playerCount: '2', sort: 'alphabetical' });
+    expect(res.map((g) => g.id)).toEqual(['tictactoe']);
+
+    const res2 = filterAndSortGames(games, { search: 'game', playerCount: '2', sort: 'alphabetical' });
+    expect(res2.map((g) => g.id)).toEqual(['alpha-chain', 'tictactoe']);
   });
 });

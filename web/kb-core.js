@@ -310,3 +310,105 @@ export function announcementText(announcement, gameName) {
   const name = String(gameName ?? '').trim();
   return name ? `${name}: ${text}` : text;
 }
+
+// ── Games list search, player filter & sorting ───────────────────────────────
+
+// Checks if a game matches a text search query across its name, id, tags, and description.
+export function matchesGameSearch(game, query) {
+  if (!query || typeof query !== 'string') return true;
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+
+  if (game?.name && game.name.toLowerCase().includes(q)) return true;
+  if (game?.id && game.id.toLowerCase().includes(q)) return true;
+  if (game?.description && game.description.toLowerCase().includes(q)) return true;
+  if (Array.isArray(game?.tags) && game.tags.some((t) => typeof t === 'string' && t.toLowerCase().includes(q))) {
+    return true;
+  }
+  return false;
+}
+
+// Checks if a game matches the selected player count filter.
+// Handles exact player counts ("1", "2", "3", ...) and "9+" ranges.
+export function matchesPlayerCount(game, filterValue) {
+  if (!filterValue || typeof filterValue !== 'string') return true;
+  const val = filterValue.trim();
+  if (!val) return true;
+
+  const min = Number.isFinite(game?.minPlayers) ? game.minPlayers : 1;
+  const max = Number.isFinite(game?.maxPlayers) ? game.maxPlayers : min;
+
+  if (val.endsWith('+')) {
+    const threshold = parseInt(val, 10);
+    if (!Number.isFinite(threshold)) return true;
+    return max >= threshold;
+  }
+
+  const count = parseInt(val, 10);
+  if (!Number.isFinite(count)) return true;
+  return min <= count && max >= count;
+}
+
+// Parses an ISO timestamp into millisecond epoch for date sorting, or 0 if absent/invalid.
+function parseDateEpoch(val) {
+  if (!val) return 0;
+  const d = new Date(val);
+  const time = d.getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+// Sorts an array of games according to the sort option:
+// - 'alphabetical': name A-Z (case-insensitive)
+// - 'newest': createdAt descending (newest first), tie-breaking by name
+// - 'updated': updatedAt descending (most recently updated first), tie-breaking by name
+export function sortGames(gamesList, sortOption = 'newest') {
+  const list = Array.isArray(gamesList) ? [...gamesList] : [];
+  const opt = String(sortOption || '').toLowerCase();
+
+  return list.sort((a, b) => {
+    const nameA = String(a?.name || a?.id || '');
+    const nameB = String(b?.name || b?.id || '');
+
+    if (opt === 'alphabetical') {
+      return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+    }
+
+    if (opt === 'updated') {
+      const timeA = parseDateEpoch(a?.updatedAt) || parseDateEpoch(a?.createdAt);
+      const timeB = parseDateEpoch(b?.updatedAt) || parseDateEpoch(b?.createdAt);
+      if (timeA !== timeB) return timeB - timeA;
+      return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+    }
+
+    // Default: 'newest'
+    const timeA = parseDateEpoch(a?.createdAt) || parseDateEpoch(a?.updatedAt);
+    const timeB = parseDateEpoch(b?.createdAt) || parseDateEpoch(b?.updatedAt);
+    if (timeA !== timeB) return timeB - timeA;
+    return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+  });
+}
+
+// Formats a game's player capacity for the chin bar (e.g. "1–8", "2", "1").
+export function formatPlayerCapacity(minPlayers, maxPlayers) {
+  const min = Number.isFinite(minPlayers) && minPlayers > 0 ? minPlayers : 1;
+  const max = Number.isFinite(maxPlayers) && maxPlayers > 0 ? maxPlayers : min;
+
+  if (min === max) {
+    return `${max}`;
+  }
+  return `${min}–${max}`;
+}
+
+// Formats the full list of tags for the hover tooltip.
+export function formatTagsTooltip(tags) {
+  if (!Array.isArray(tags) || tags.length === 0) return '';
+  return tags.filter(Boolean).map((t) => String(t).trim()).filter(Boolean).join(', ');
+}
+
+// Unified filtering and sorting pipeline for the games catalog.
+export function filterAndSortGames(gamesList, { search = '', playerCount = '', sort = 'newest' } = {}) {
+  const base = Array.isArray(gamesList) ? gamesList : [];
+  const filtered = base.filter((g) => matchesGameSearch(g, search) && matchesPlayerCount(g, playerCount));
+  return sortGames(filtered, sort);
+}
+

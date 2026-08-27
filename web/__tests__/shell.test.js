@@ -139,6 +139,120 @@ describe('game catalog rendering', () => {
     const fallback = el('games').querySelector('.game-tile-fallback');
     expect(fallback.textContent).toBe('Tic Tac Toe');
   });
+
+  it('renders chin bar with player capacity and tag chips with tooltip', async () => {
+    await importShell();
+    await bootWithGames([
+      {
+        id: 'alpha-chain',
+        name: 'Alpha Chain',
+        minPlayers: 2,
+        maxPlayers: 8,
+        tags: ['word-game', 'party'],
+      },
+    ]);
+
+    const chin = el('games').querySelector('.game-tile-chin');
+    expect(chin).toBeTruthy();
+
+    const capIcon = chin.querySelector('.game-chin-icon svg');
+    expect(capIcon).toBeTruthy();
+
+    const capText = chin.querySelector('.game-chin-capacity-text');
+    expect(capText.textContent).toBe('2–8');
+
+    const tagsEl = chin.querySelector('.game-chin-tags');
+    expect(tagsEl).toBeTruthy();
+    expect(tagsEl.title).toBe('word-game, party');
+
+    const chips = tagsEl.querySelectorAll('.game-chin-tag');
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toBe('word-game');
+    expect(chips[1].textContent).toBe('party');
+  });
+
+  it('filters games list dynamically with search input', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'ttt', name: 'Tic Tac Toe', tags: ['classic'] },
+      { id: 'word-rush', name: 'Word Rush', tags: ['word-game', 'party'] },
+    ]);
+
+    expect(el('games').querySelectorAll('.game-tile')).toHaveLength(2);
+
+    const searchInput = el('games-search-input');
+    searchInput.value = 'rush';
+    searchInput.dispatchEvent(new Event('input'));
+
+    let tiles = el('games').querySelectorAll('.game-tile');
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].getAttribute('aria-label')).toBe('Word Rush');
+
+    // Search by tag
+    searchInput.value = 'classic';
+    searchInput.dispatchEvent(new Event('input'));
+    tiles = el('games').querySelectorAll('.game-tile');
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].getAttribute('aria-label')).toBe('Tic Tac Toe');
+
+    // No matches
+    searchInput.value = 'nonexistent';
+    searchInput.dispatchEvent(new Event('input'));
+    tiles = el('games').querySelectorAll('.game-tile');
+    expect(tiles).toHaveLength(0);
+    expect(el('games').querySelector('.games-empty').textContent).toBe('No games match your search.');
+  });
+
+  it('filters games list dynamically with player count filter', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'solo', name: 'Solo Game', minPlayers: 1, maxPlayers: 1 },
+      { id: 'duo', name: 'Duo Game', minPlayers: 2, maxPlayers: 2 },
+      { id: 'party', name: 'Party Game', minPlayers: 2, maxPlayers: 8 },
+    ]);
+
+    const playerFilter = el('games-player-filter');
+    playerFilter.value = '1';
+    playerFilter.dispatchEvent(new Event('change'));
+
+    let tiles = el('games').querySelectorAll('.game-tile');
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].getAttribute('aria-label')).toBe('Solo Game');
+
+    playerFilter.value = '2';
+    playerFilter.dispatchEvent(new Event('change'));
+    tiles = el('games').querySelectorAll('.game-tile');
+    expect(tiles).toHaveLength(2); // duo and party both support 2 players
+  });
+
+  it('sorts games by alphabetical, newest, and recently updated', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'b', name: 'Bravo', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-03-01T00:00:00Z' },
+      { id: 'a', name: 'Alpha', createdAt: '2026-02-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+      { id: 'c', name: 'Charlie', createdAt: '2026-03-01T00:00:00Z', updatedAt: '2026-02-01T00:00:00Z' },
+    ]);
+
+    const sortSelect = el('games-sort-select');
+
+    // Alphabetical
+    sortSelect.value = 'alphabetical';
+    sortSelect.dispatchEvent(new Event('change'));
+    let tiles = el('games').querySelectorAll('.game-tile');
+    expect([...tiles].map((t) => t.getAttribute('aria-label'))).toEqual(['Alpha', 'Bravo', 'Charlie']);
+
+    // Newest
+    sortSelect.value = 'newest';
+    sortSelect.dispatchEvent(new Event('change'));
+    tiles = el('games').querySelectorAll('.game-tile');
+    expect([...tiles].map((t) => t.getAttribute('aria-label'))).toEqual(['Charlie', 'Alpha', 'Bravo']);
+
+    // Recently Updated
+    sortSelect.value = 'updated';
+    sortSelect.dispatchEvent(new Event('change'));
+    tiles = el('games').querySelectorAll('.game-tile');
+    expect([...tiles].map((t) => t.getAttribute('aria-label'))).toEqual(['Bravo', 'Charlie', 'Alpha']);
+  });
 });
 
 describe('Play Log', () => {

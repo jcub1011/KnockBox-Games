@@ -333,6 +333,19 @@ public sealed class GameCatalog : IDisposable
                 return;
             }
 
+            if (manifest.CreatedAt is null || manifest.UpdatedAt is null)
+            {
+                var fileInfo = new FileInfo(manifestPath);
+                var createdAt = manifest.CreatedAt ?? (DateTimeOffset)fileInfo.CreationTimeUtc;
+                var updatedAt = manifest.UpdatedAt ?? (DateTimeOffset)fileInfo.LastWriteTimeUtc;
+                if (PackageMarker.TryRead(dir) is { } marker)
+                {
+                    var markerTime = new DateTimeOffset(marker.Mtime, TimeSpan.Zero);
+                    if (manifest.UpdatedAt is null) updatedAt = markerTime;
+                }
+                manifest = manifest with { CreatedAt = createdAt, UpdatedAt = updatedAt };
+            }
+
             next[manifest.Id] = new GameLocation(manifest, dir);
             pass.Add(LogLevel.Information, "Discovered game '{Id}' ({Name}) from {Dir}",
                 manifest.Id, manifest.Name, dir);

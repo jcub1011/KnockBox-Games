@@ -3,5 +3,7 @@
   "name": "Tic-Tac-Toe",
   "entry": "index.html",
   "thumbnail": "thumb.svg",
-  "maxPlayers": 2
+  "minPlayers": 2,
+  "maxPlayers": 2,
+  "tags": ["classic", "board-game", "2-player"]
 }

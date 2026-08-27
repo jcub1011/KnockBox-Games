@@ -3,6 +3,8 @@
   "name": "Dice Simulator",
   "entry": "index.html",
   "thumbnail": "thumb.svg",
+  "minPlayers": 1,
   "maxPlayers": 8,
+  "tags": ["dice", "casual", "utility"],
   "crossOriginIsolated": false
 }

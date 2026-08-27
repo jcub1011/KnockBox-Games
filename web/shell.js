@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, filterAndSortGames, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -54,6 +54,9 @@ const el = (id) => document.getElementById(id);
 let ws = null;
 let reconnectAttempt = 0;       // 0-based; drives exponential backoff, reset once a session is confirmed
 let games = new Map();          // gameId -> manifest
+let searchQuery = '';           // search text filter (name/tags)
+let playerFilter = '';          // player count filter (e.g. "4", "9+")
+let sortOption = 'newest';      // 'newest' | 'updated' | 'alphabetical'
 let lobby = null;               // { lobbyId, gameId, hostId, players: [] } once in a game
 // The operator's live announcement, or null. Server-owned: pushed on connect and whenever it changes,
 // never persisted here — only the id of the one this browser dismissed is.
@@ -377,13 +380,30 @@ export async function refreshGames() {
   // (undefined, so it isn't serialized) on a normal load, which is every load but a staged link.
   const reply = await request('ListGames', stagedGameId ? { include: stagedGameId } : {});
   games = new Map((reply.games || []).map((g) => [g.id, g]));
+  renderGames();
+}
+
+export function renderGames() {
   const host = el('games');
+  if (!host) return;
   host.innerHTML = '';
   if (games.size === 0) {
     host.innerHTML = '<p class="games-empty">No games discovered. Drop one in /games.</p>';
     return;
   }
-  for (const g of games.values()) {
+
+  const visibleGames = filterAndSortGames([...games.values()], {
+    search: searchQuery,
+    playerCount: playerFilter,
+    sort: sortOption,
+  });
+
+  if (visibleGames.length === 0) {
+    host.innerHTML = '<p class="games-empty">No games match your search.</p>';
+    return;
+  }
+
+  for (const g of visibleGames) {
     const btn = document.createElement('button');
     btn.className = 'game-tile';
     btn.type = 'button';
@@ -395,19 +415,61 @@ export async function refreshGames() {
       btn.classList.add('is-staged');
       btn.title = `${g.name} — unlisted (staged) game`;
     }
+
+    const surface = document.createElement('div');
+    surface.className = 'game-tile-surface';
+
+    const art = document.createElement('div');
+    art.className = 'game-tile-art';
+
     if (g.thumbnail) {
       const img = document.createElement('img');
-      img.className = 'game-tile-img game-tile-surface';
+      img.className = 'game-tile-img';
       img.src = `/games/${g.id}/${g.thumbnail}`;
       img.alt = '';
       img.draggable = false;
       img.loading = 'lazy';
       // No tile art → fall back to the hot-pink "needs art" surface showing the name.
       img.onerror = () => { img.replaceWith(fallbackSurface(g.name)); };
-      btn.appendChild(img);
+      art.appendChild(img);
     } else {
-      btn.appendChild(fallbackSurface(g.name));
+      art.appendChild(fallbackSurface(g.name));
     }
+    surface.appendChild(art);
+
+    // Chin bar: player capacity + overflowing tag chips with tooltip
+    const chin = document.createElement('div');
+    chin.className = 'game-tile-chin';
+
+    const cap = document.createElement('span');
+    cap.className = 'game-chin-capacity';
+    const capIcon = document.createElement('span');
+    capIcon.className = 'game-chin-icon';
+    capIcon.setAttribute('aria-hidden', 'true');
+    capIcon.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>';
+    const capText = document.createElement('span');
+    capText.className = 'game-chin-capacity-text';
+    capText.textContent = `${formatPlayerCapacity(g.minPlayers, g.maxPlayers)}`;
+    cap.append(capIcon, capText);
+    chin.appendChild(cap);
+
+    if (Array.isArray(g.tags) && g.tags.length > 0) {
+      const tagsEl = document.createElement('span');
+      tagsEl.className = 'game-chin-tags';
+      const tooltip = formatTagsTooltip(g.tags);
+      if (tooltip) tagsEl.title = tooltip;
+      for (const tag of g.tags) {
+        const tagChip = document.createElement('span');
+        tagChip.className = 'game-chin-tag';
+        tagChip.textContent = tag;
+        tagsEl.appendChild(tagChip);
+      }
+      chin.appendChild(tagsEl);
+    }
+
+    surface.appendChild(chin);
+    btn.appendChild(surface);
+
     // The button is handed along so the launch overlay can fly this very tile to the centre.
     btn.onclick = () => createLobby(g.id, btn);
     host.appendChild(btn);
@@ -417,7 +479,7 @@ export async function refreshGames() {
 
 function fallbackSurface(name) {
   const div = document.createElement('div');
-  div.className = 'game-tile-surface game-tile-fallback';
+  div.className = 'game-tile-fallback';
   div.textContent = name;
   return div;
 }
@@ -1065,6 +1127,30 @@ nameInput.addEventListener('input', () => {
   applyGate();
   sendNameDebounced();
 });
+
+const searchInput = el('games-search-input');
+if (searchInput) {
+  searchInput.addEventListener('input', () => {
+    searchQuery = searchInput.value;
+    renderGames();
+  });
+}
+
+const playerFilterSelect = el('games-player-filter');
+if (playerFilterSelect) {
+  playerFilterSelect.addEventListener('change', () => {
+    playerFilter = playerFilterSelect.value;
+    renderGames();
+  });
+}
+
+const sortSelect = el('games-sort-select');
+if (sortSelect) {
+  sortSelect.addEventListener('change', () => {
+    sortOption = sortSelect.value;
+    renderGames();
+  });
+}
 
 // A game iframe (on the game origin) can tell us its session ended terminally — kicked, ticket
 // expired, or lobby gone — so we leave the game view even if the control-plane push was missed.

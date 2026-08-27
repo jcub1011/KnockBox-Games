@@ -3,6 +3,8 @@
   "name": "Code Word",
   "entry": "index.html",
   "thumbnail": "thumb.svg",
+  "minPlayers": 2,
   "maxPlayers": 8,
+  "tags": ["word-game", "party", "multiplayer"],
   "crossOriginIsolated": false
 }

@@ -3,6 +3,8 @@
   "name": "Tic-Tac-Toe (Server)",
   "entry": "index.html",
   "thumbnail": "thumb.svg",
+  "minPlayers": 2,
   "maxPlayers": 2,
+  "tags": ["classic", "server-authority", "2-player"],
   "serverAuthority": "authority.js"
 }

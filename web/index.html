@@ -66,6 +66,48 @@
     <div class="home-main">
       <div class="games-section">
         <h2 class="games-heading">Host a Game</h2>
+        <div class="games-toolbar" id="games-toolbar">
+          <div class="games-search-box">
+            <span class="games-search-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="7"></circle>
+                <line x1="21" y1="21" x2="16.5" y2="16.5"></line>
+              </svg>
+            </span>
+            <input type="search"
+                   id="games-search-input"
+                   class="games-search-input"
+                   placeholder="Search by name or tag…"
+                   aria-label="Search games by name or tag"
+                   autocomplete="off"
+                   spellcheck="false" />
+          </div>
+          <div class="games-filters">
+            <div class="games-filter-item">
+              <label for="games-player-filter" class="games-filter-label">Players</label>
+              <select id="games-player-filter" class="games-select" aria-label="Filter by player count">
+                <option value="">All</option>
+                <option value="1">1 Player</option>
+                <option value="2">2 Players</option>
+                <option value="3">3 Players</option>
+                <option value="4">4 Players</option>
+                <option value="5">5 Players</option>
+                <option value="6">6 Players</option>
+                <option value="7">7 Players</option>
+                <option value="8">8 Players</option>
+                <option value="9+">9+ Players</option>
+              </select>
+            </div>
+            <div class="games-filter-item">
+              <label for="games-sort-select" class="games-filter-label">Sort</label>
+              <select id="games-sort-select" class="games-select" aria-label="Sort games">
+                <option value="newest">Newest</option>
+                <option value="updated">Recently Updated</option>
+                <option value="alphabetical">Alphabetical</option>
+              </select>
+            </div>
+          </div>
+        </div>
         <div id="games" class="game-grid"></div>
       </div>
 
@@ -154,6 +196,6 @@
 
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module">import { bootstrap } from '/shell.js?v=12'; bootstrap();</script>
+  <script type="module">import { bootstrap } from '/shell.js?v=14'; bootstrap();</script>
 </body>
 </html>
