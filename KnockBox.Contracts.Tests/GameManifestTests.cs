@@ -6,6 +6,11 @@ namespace KnockBox.Contracts.Tests;
 
 public class GameManifestTests
 {
+    // Reflection-based, because the source-generated KnockBoxProtocolContext — which is what every
+    // production read of a GAME.json actually uses — lives in KnockBox.Server and is not visible from
+    // this project. The constructor defaults are therefore pinned against the generated context in
+    // KnockBox.Server.Tests/GameManifestSourceGenTests.cs; what is asserted here is the record's shape,
+    // not the path the server takes. Keep both when adding a field.
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
 
     [Fact]

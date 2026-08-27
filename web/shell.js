@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, filterAndSortGames, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, filterAndSortGames, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -54,6 +54,7 @@ const el = (id) => document.getElementById(id);
 let ws = null;
 let reconnectAttempt = 0;       // 0-based; drives exponential backoff, reset once a session is confirmed
 let games = new Map();          // gameId -> manifest
+let gamesLoaded = false;        // has a ListGames reply landed? distinguishes "empty" from "not yet"
 let searchQuery = '';           // search text filter (name/tags)
 let playerFilter = '';          // player count filter (e.g. "4", "9+")
 let sortOption = 'newest';      // 'newest' | 'updated' | 'alphabetical'
@@ -113,6 +114,11 @@ function sendName() {
 // rate limit (5/sec) when typing fast. Debounce the network send so a burst collapses into one
 // frame — local UI (gate, localStorage) still updates immediately on every keystroke.
 const sendNameDebounced = debounce(sendName, 250);
+
+// Search re-renders the whole grid, so it is debounced for the same reason the name send is: a
+// keystroke burst must collapse into one pass. Short enough to feel immediate, long enough that no
+// intermediate query ever paints. See the search input's wiring below.
+const renderGamesDebounced = debounce(renderGames, 120);
 
 export function handle(msg) {
   // Resolve any awaiting request first.
@@ -380,6 +386,7 @@ export async function refreshGames() {
   // (undefined, so it isn't serialized) on a normal load, which is every load but a staged link.
   const reply = await request('ListGames', stagedGameId ? { include: stagedGameId } : {});
   games = new Map((reply.games || []).map((g) => [g.id, g]));
+  gamesLoaded = true;
   renderGames();
 }
 
@@ -388,7 +395,12 @@ export function renderGames() {
   if (!host) return;
   host.innerHTML = '';
   if (games.size === 0) {
-    host.innerHTML = '<p class="games-empty">No games discovered. Drop one in /games.</p>';
+    // "Drop one in /games" is a DEPLOYMENT diagnostic, and this path is reachable before the ListGames
+    // reply lands or while the socket is reconnecting — a search keystroke during connect used to
+    // render it. Only claim the server has no games once one reply has actually said so.
+    const empty = gamesLoaded ? 'No games discovered. Drop one in /games.' : 'Loading games…';
+    host.innerHTML = `<p class="games-empty">${empty}</p>`;
+    setGamesStatus(gamesLoaded ? empty : '');
     return;
   }
 
@@ -400,8 +412,10 @@ export function renderGames() {
 
   if (visibleGames.length === 0) {
     host.innerHTML = '<p class="games-empty">No games match your search.</p>';
+    setGamesStatus('No games match your search.');
     return;
   }
+  setGamesStatus(`${visibleGames.length} game${visibleGames.length === 1 ? '' : 's'} shown`);
 
   for (const g of visibleGames) {
     const btn = document.createElement('button');
@@ -453,12 +467,15 @@ export function renderGames() {
     cap.append(capIcon, capText);
     chin.appendChild(cap);
 
-    if (Array.isArray(g.tags) && g.tags.length > 0) {
+    // Normalized once, so the chips, the tooltip and the search all agree about what a tag is —
+    // nothing validates `tags` server-side, and a raw iteration renders a bordered chip for `""`.
+    const tags = normalizeTags(g.tags);
+    if (tags.length > 0) {
       const tagsEl = document.createElement('span');
       tagsEl.className = 'game-chin-tags';
-      const tooltip = formatTagsTooltip(g.tags);
+      const tooltip = formatTagsTooltip(tags);
       if (tooltip) tagsEl.title = tooltip;
-      for (const tag of g.tags) {
+      for (const tag of tags) {
         const tagChip = document.createElement('span');
         tagChip.className = 'game-chin-tag';
         tagChip.textContent = tag;
@@ -475,6 +492,15 @@ export function renderGames() {
     host.appendChild(btn);
   }
   applyGate();
+}
+
+// The grid's screen-reader narration. A live region on #games itself would re-announce every tile on
+// every render (and renderGames rebuilds all of them), so the count lives in its own .sr-only region:
+// typing in the search box then reports what changed, which is the only feedback a non-sighted user
+// gets that the result set moved at all.
+function setGamesStatus(text) {
+  const status = el('games-status');
+  if (status) status.textContent = text;
 }
 
 function fallbackSurface(name) {
@@ -830,6 +856,10 @@ function flyLaunchTile(sourceEl) {
   if (tile.hidden) { launchSource = null; return; }
   const src = sourceEl ? sourceEl.getBoundingClientRect() : null;
   if (src && src.width) tile.style.width = `${Math.round(launchTileWidth(src.width))}px`;
+  // Carry the clicked tile's own shadow colour across. The grid cycles pink/cyan/yellow by
+  // nth-child, so a hardcoded shadow here snaps two thirds of the tiles to pink on the first frame
+  // of the flight — which is the one frame this whole transition exists to make continuous.
+  adoptLaunchShadow(sourceEl, tile);
   const flip = src ? launchFlipFrom(src, tile.getBoundingClientRect()) : null;
   if (!flip) {
     // No usable source rect: no click to fly from, a tile scrolled out of view, or jsdom (where every
@@ -864,6 +894,16 @@ function restartLaunchRise() {
   status.style.animation = 'none';
   void status.offsetWidth;
   status.style.animation = '';
+}
+
+// Reads --tile-shadow-hover off the clicked tile onto the launch tile. Falsy (no source element, or
+// jsdom, where custom properties resolve to '') leaves the CSS fallback in place, so a launch with no
+// tile to fly from is unaffected.
+function adoptLaunchShadow(sourceEl, tile) {
+  tile.style.removeProperty('--launch-shadow-color');
+  if (!sourceEl) return;
+  const hover = getComputedStyle(sourceEl).getPropertyValue('--tile-shadow-hover').trim();
+  if (hover) tile.style.setProperty('--launch-shadow-color', hover);
 }
 
 // How big the tile should be once it lands: a quarter larger than the one that was clicked, so the
@@ -1038,6 +1078,7 @@ function teardownLaunchOverlay() {
     tile.classList.remove('is-popping', 'no-transition');
     tile.style.transform = '';
     tile.style.width = '';
+    tile.style.removeProperty('--launch-shadow-color');
   }
   unveilGameView();   // belt and braces: the overlay must never leave the game veiled behind it
   restoreLaunchSource();
@@ -1128,16 +1169,27 @@ nameInput.addEventListener('input', () => {
   sendNameDebounced();
 });
 
+// The three filter controls. Each seeds its module state from the DOM as it is wired, because
+// browsers restore form-control values across a soft reload and back/forward navigation: without
+// this the user comes back to "Sort: Alphabetical" on screen while the module still holds 'newest',
+// and the controls contradict the grid until touched. (The markup also carries autocomplete="off",
+// which is the other half — this half makes the DOM authoritative whatever any browser does.)
 const searchInput = el('games-search-input');
 if (searchInput) {
+  searchQuery = searchInput.value;
+  // Per-keystroke rendering rebuilds every tile and every <img>, so typing five characters
+  // re-creates the thumbnails five times — visible flicker, a re-decode each pass, and lazy loading
+  // restarted for everything below the fold. Collapse a burst into one render.
   searchInput.addEventListener('input', () => {
     searchQuery = searchInput.value;
-    renderGames();
+    renderGamesDebounced();
   });
 }
 
 const playerFilterSelect = el('games-player-filter');
 if (playerFilterSelect) {
+  playerFilter = playerFilterSelect.value;
+  // Discrete events, not a keystroke stream: render immediately.
   playerFilterSelect.addEventListener('change', () => {
     playerFilter = playerFilterSelect.value;
     renderGames();
@@ -1146,6 +1198,7 @@ if (playerFilterSelect) {
 
 const sortSelect = el('games-sort-select');
 if (sortSelect) {
+  sortOption = sortSelect.value || 'newest';
   sortSelect.addEventListener('change', () => {
     sortOption = sortSelect.value;
     renderGames();

@@ -55,7 +55,10 @@ can be dropped into a server's games directory.
   "version": "1.0.0",          // optional; semver. Set it if you publish to the marketplace
   "entry": "index.html",       // the HTML file loaded in the iframe
   "thumbnail": "thumb.svg",    // optional; served from your folder
+  "minPlayers": 1,             // optional; how many the game needs. Display only — nothing is gated
   "maxPlayers": 2,             // joins are rejected beyond this
+  "tags": ["party", "word"],   // optional; searchable chips on your game's tile
+  "description": "…",          // optional; searchable
   "crossOriginIsolated": false // set true ONLY for threaded engine exports (see §11)
 }
 ```
@@ -67,7 +70,11 @@ can be dropped into a server's games directory.
 | `version` | — | Your build's version, conventionally semver (`"1.2.3"`, `"1.2.3-beta.1"`). The platform never validates it and it never affects whether your game loads. It matters if you publish to the official marketplace: it is what an operator's server compares to decide whether their copy is out of date, and the catalog entry is generated from it. `knockbox-pack` copies it into the `.kbg` header too, so the two can't disagree. See [MARKETPLACE.md](./MARKETPLACE.md). |
 | `entry` | ✅ | HTML file the iframe loads, relative to your folder. |
 | `thumbnail` | — | Path (relative to your folder) to an image for the game card. |
+| `minPlayers` | — | How many players your game needs, shown on your tile and used by the home page's **Players** filter. Defaults to `1`. Nothing is gated on it — your game still loads for one player (see below), so this is a recommendation to the person browsing, not a lobby rule. `knockbox pack` **rejects** a value outside `1..maxPlayers` so you fix the typo here; a server that meets one anyway clamps it and warns, rather than dropping the game from an operator's catalog. |
 | `maxPlayers` | ✅ | The platform refuses joins past this count. |
+| `tags` | — | Category/genre labels (`["party", "word-game"]`). Rendered as chips on your tile and matched by the search box. Never validated; blank and non-text entries are dropped rather than drawn. |
+| `description` | — | One short line about your game. Not shown on the tile, but matched by the search box, so it is worth filling in. |
+| `createdAt` / `updatedAt` | — | ISO 8601 timestamps (`"2026-01-15T10:00:00Z"`) backing the home page's **Newest** and **Recently Updated** sorts. When you omit them the server derives them from your `GAME.json` file's own timestamps — which for a `.kbg` means *when this build was installed on that server*, and a `.kbg` update resets it, since the game folder is re-extracted. Set `createdAt` yourself if you want your game to hold a stable position under "Newest" across releases. |
 | `crossOriginIsolated` | — | `true` makes the platform serve your game with COOP/COEP so a **threaded** Godot/Unity export can use `SharedArrayBuffer`. Leave `false` for hand-written games and single-threaded exports. |
 
 Your game **loads as soon as a player creates or joins a lobby** — there is no minimum-player gate.

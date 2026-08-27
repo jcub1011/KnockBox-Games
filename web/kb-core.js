@@ -322,9 +322,7 @@ export function matchesGameSearch(game, query) {
   if (game?.name && game.name.toLowerCase().includes(q)) return true;
   if (game?.id && game.id.toLowerCase().includes(q)) return true;
   if (game?.description && game.description.toLowerCase().includes(q)) return true;
-  if (Array.isArray(game?.tags) && game.tags.some((t) => typeof t === 'string' && t.toLowerCase().includes(q))) {
-    return true;
-  }
+  if (normalizeTags(game?.tags).some((t) => t.toLowerCase().includes(q))) return true;
   return false;
 }
 
@@ -399,10 +397,17 @@ export function formatPlayerCapacity(minPlayers, maxPlayers) {
   return `${min}–${max}`;
 }
 
+// The one rule for what counts as a renderable tag. Nothing validates `tags` server-side, so a
+// GAME.json can declare `["", null, 3]` — and every consumer (the chips, the tooltip, the search)
+// must agree about it, or the grid shows zero-width chips for entries the search can never match.
+export function normalizeTags(tags) {
+  if (!Array.isArray(tags)) return [];
+  return tags.filter(Boolean).map((t) => String(t).trim()).filter(Boolean);
+}
+
 // Formats the full list of tags for the hover tooltip.
 export function formatTagsTooltip(tags) {
-  if (!Array.isArray(tags) || tags.length === 0) return '';
-  return tags.filter(Boolean).map((t) => String(t).trim()).filter(Boolean).join(', ');
+  return normalizeTags(tags).join(', ');
 }
 
 // Unified filtering and sorting pipeline for the games catalog.

@@ -85,7 +85,7 @@
           <div class="games-filters">
             <div class="games-filter-item">
               <label for="games-player-filter" class="games-filter-label">Players</label>
-              <select id="games-player-filter" class="games-select" aria-label="Filter by player count">
+              <select id="games-player-filter" class="games-select" autocomplete="off" aria-label="Filter by player count">
                 <option value="">All</option>
                 <option value="1">1 Player</option>
                 <option value="2">2 Players</option>
@@ -100,7 +100,7 @@
             </div>
             <div class="games-filter-item">
               <label for="games-sort-select" class="games-filter-label">Sort</label>
-              <select id="games-sort-select" class="games-select" aria-label="Sort games">
+              <select id="games-sort-select" class="games-select" autocomplete="off" aria-label="Sort games">
                 <option value="newest">Newest</option>
                 <option value="updated">Recently Updated</option>
                 <option value="alphabetical">Alphabetical</option>
@@ -108,6 +108,9 @@
             </div>
           </div>
         </div>
+        <!-- The grid's narration. Deliberately NOT aria-live on #games itself: renderGames rebuilds
+             every tile, so a live region there would re-announce the whole catalog on each keystroke. -->
+        <p id="games-status" class="sr-only" role="status" aria-live="polite"></p>
         <div id="games" class="game-grid"></div>
       </div>
 
@@ -196,6 +199,6 @@
 
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module">import { bootstrap } from '/shell.js?v=14'; bootstrap();</script>
+  <script type="module">import { bootstrap } from '/shell.js?v=15'; bootstrap();</script>
 </body>
 </html>

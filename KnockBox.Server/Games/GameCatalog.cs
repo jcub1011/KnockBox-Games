@@ -333,10 +333,27 @@ public sealed class GameCatalog : IDisposable
                 return;
             }
 
+            // An inverted or zero range is cosmetically wrong but not dangerous, so it is clamped rather
+            // than skipped — a game must not vanish over a display field. Left alone it would read "4–2"
+            // in the chin bar AND make the shell's player-count filter false for every option, so the
+            // game would be reachable only via "All", with nothing to explain it.
+            if (manifest.MinPlayers < 1 || manifest.MinPlayers > manifest.MaxPlayers)
+            {
+                var clamped = Math.Clamp(manifest.MinPlayers, 1, Math.Max(1, manifest.MaxPlayers));
+                pass.Add(LogLevel.Warning,
+                    "Game '{Id}': minPlayers {Min} is not within 1..{Max} — using {Clamped}.",
+                    manifest.Id, manifest.MinPlayers, manifest.MaxPlayers, clamped);
+                manifest = manifest with { MinPlayers = clamped };
+            }
+
+            // Dates the author didn't declare are derived from the manifest file. For a package-backed
+            // game the folder is re-extracted on every update, so a derived createdAt means "when this
+            // build appeared on this server", not when the game was authored — an author who wants a
+            // stable position under the "Newest" sort declares createdAt in GAME.json.
             if (manifest.CreatedAt is null || manifest.UpdatedAt is null)
             {
                 var fileInfo = new FileInfo(manifestPath);
-                var createdAt = manifest.CreatedAt ?? (DateTimeOffset)fileInfo.CreationTimeUtc;
+                var createdAt = manifest.CreatedAt ?? FileCreated(fileInfo);
                 var updatedAt = manifest.UpdatedAt ?? (DateTimeOffset)fileInfo.LastWriteTimeUtc;
                 if (PackageMarker.TryRead(dir) is { } marker)
                 {
@@ -355,6 +372,18 @@ public sealed class GameCatalog : IDisposable
             _logger.LogError(ex, "Failed to load manifest at {Path}", manifestPath);
         }
     }
+
+    /// <summary>Creation time of a file, falling back to its last-write time where there is no birthtime.</summary>
+    /// <remarks>
+    /// A filesystem that records no creation time — overlayfs, which is both a container's own layers and
+    /// the usual backing for the unpacked-games volume — makes .NET report 1601-01-01 for every file. That
+    /// is not a date, it is an absence, and taken literally it ties the whole catalog under the "Newest"
+    /// sort, which then silently degrades to the alphabetical tie-break.
+    /// </remarks>
+    private static DateTimeOffset FileCreated(FileInfo fileInfo) =>
+        fileInfo.CreationTimeUtc.Year < 1980
+            ? (DateTimeOffset)fileInfo.LastWriteTimeUtc
+            : (DateTimeOffset)fileInfo.CreationTimeUtc;
 
     private bool ValidateServerAuthority(GameManifest manifest, string dir, string dirPrefix, PassLog pass)
     {

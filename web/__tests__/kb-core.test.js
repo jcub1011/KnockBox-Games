@@ -38,6 +38,7 @@ import {
   sortGames,
   formatPlayerCapacity,
   formatTagsTooltip,
+  normalizeTags,
   filterAndSortGames,
 } from '../kb-core.js';
 
@@ -708,6 +709,25 @@ describe('formatPlayerCapacity', () => {
   it('handles defaults when omitted', () => {
     expect(formatPlayerCapacity(null, 4)).toBe('1–4');
     expect(formatPlayerCapacity(null, null)).toBe('1');
+  });
+});
+
+describe('normalizeTags', () => {
+  it('drops entries that are not renderable text', () => {
+    // Nothing validates `tags` server-side, so a GAME.json can declare any of these. The chips, the
+    // tooltip and the search all go through here, so they cannot disagree about what a tag is.
+    expect(normalizeTags(['word-game', '', null, undefined, '   ', 'party'])).toEqual(['word-game', 'party']);
+  });
+
+  it('stringifies and trims what it keeps', () => {
+    expect(normalizeTags(['  party  ', 3])).toEqual(['party', '3']);
+  });
+
+  it('returns an empty array for anything that is not an array', () => {
+    expect(normalizeTags(null)).toEqual([]);
+    expect(normalizeTags(undefined)).toEqual([]);
+    expect(normalizeTags('party')).toEqual([]);
+    expect(normalizeTags([])).toEqual([]);
   });
 });
 

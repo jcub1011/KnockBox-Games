@@ -37,6 +37,17 @@ async function bootWithGames(games = [{ id: 'ttt', name: 'Tic Tac Toe', entry: '
   return ws;
 }
 
+// The search box debounces its re-render (renderGames rebuilds every tile and every <img>, so a
+// keystroke burst must collapse into one pass) — the grid is therefore asserted after that window
+// rather than synchronously, unlike the two <select> filters, which render on the spot.
+const SEARCH_DEBOUNCE_WAIT = 200;
+async function typeSearch(value) {
+  const input = el('games-search-input');
+  input.value = value;
+  input.dispatchEvent(new Event('input'));
+  await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_WAIT));
+}
+
 // Drive createLobby to its success reply so the module is "in a lobby" (lobby state + room view).
 async function createLobbySuccess(ws, { gameId = 'ttt', lobbyId = 'AB12' } = {}) {
   const p = shell.createLobby(gameId);
@@ -180,27 +191,92 @@ describe('game catalog rendering', () => {
 
     expect(el('games').querySelectorAll('.game-tile')).toHaveLength(2);
 
-    const searchInput = el('games-search-input');
-    searchInput.value = 'rush';
-    searchInput.dispatchEvent(new Event('input'));
-
+    await typeSearch('rush');
     let tiles = el('games').querySelectorAll('.game-tile');
     expect(tiles).toHaveLength(1);
     expect(tiles[0].getAttribute('aria-label')).toBe('Word Rush');
 
     // Search by tag
-    searchInput.value = 'classic';
-    searchInput.dispatchEvent(new Event('input'));
+    await typeSearch('classic');
     tiles = el('games').querySelectorAll('.game-tile');
     expect(tiles).toHaveLength(1);
     expect(tiles[0].getAttribute('aria-label')).toBe('Tic Tac Toe');
 
     // No matches
-    searchInput.value = 'nonexistent';
-    searchInput.dispatchEvent(new Event('input'));
+    await typeSearch('nonexistent');
     tiles = el('games').querySelectorAll('.game-tile');
     expect(tiles).toHaveLength(0);
     expect(el('games').querySelector('.games-empty').textContent).toBe('No games match your search.');
+  });
+
+  it('collapses a burst of keystrokes into a single re-render', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'ttt', name: 'Tic Tac Toe' },
+      { id: 'word-rush', name: 'Word Rush' },
+    ]);
+
+    const firstTile = el('games').querySelector('.game-tile');
+    const searchInput = el('games-search-input');
+
+    // Five keystrokes inside the debounce window. Rendering each one would tear down and rebuild every
+    // tile (and every <img>) five times — visible thumbnail flicker, and lazy loading restarted below
+    // the fold. Nothing may be rebuilt until the burst settles.
+    for (const value of ['w', 'wo', 'wor', 'word', 'word ']) {
+      searchInput.value = value;
+      searchInput.dispatchEvent(new Event('input'));
+    }
+    expect(el('games').querySelector('.game-tile')).toBe(firstTile);   // untouched so far
+
+    await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_WAIT));
+    const tiles = el('games').querySelectorAll('.game-tile');
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].getAttribute('aria-label')).toBe('Word Rush');
+  });
+
+  it('renders only real tags, skipping the blanks a GAME.json may declare', async () => {
+    await importShell();
+    // Nothing validates `tags` server-side. A raw iteration renders a bordered, zero-width chip for
+    // each empty entry — and the tooltip, which already filtered, then disagreed with the chips.
+    await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', tags: ['', null, 'party', '   ', 3] }]);
+
+    const tagsEl = el('games').querySelector('.game-chin-tags');
+    const chips = [...tagsEl.querySelectorAll('.game-chin-tag')].map((c) => c.textContent);
+    expect(chips).toEqual(['party', '3']);
+    expect(tagsEl.title).toBe('party, 3');
+  });
+
+  it('does not blame the deployment for an empty grid before the catalog has loaded', async () => {
+    await importShell();
+    // "Drop one in /games" is a deployment diagnostic. This path is reachable from a search keystroke
+    // during connect, or while the socket is reconnecting — neither of which says anything about the
+    // games directory. Render before any ListGames reply, which is exactly that state.
+    shell.renderGames();
+    expect(el('games').querySelector('.games-empty').textContent).toBe('Loading games…');
+    expect(el('games-status').textContent).toBe('');
+
+    await bootWithGames([]);
+    expect(el('games').querySelector('.games-empty').textContent).toBe('No games discovered. Drop one in /games.');
+  });
+
+  it('announces the visible game count in a live region', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'ttt', name: 'Tic Tac Toe' },
+      { id: 'word-rush', name: 'Word Rush' },
+    ]);
+
+    // #games itself is deliberately NOT a live region: renderGames rebuilds every tile, so it would
+    // re-announce the whole catalog on each keystroke. The count gets its own .sr-only region.
+    const status = el('games-status');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.textContent).toBe('2 games shown');
+
+    await typeSearch('rush');
+    expect(status.textContent).toBe('1 game shown');
+
+    await typeSearch('nonexistent');
+    expect(status.textContent).toBe('No games match your search.');
   });
 
   it('filters games list dynamically with player count filter', async () => {

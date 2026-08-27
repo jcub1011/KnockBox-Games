@@ -44,7 +44,9 @@ public static class PackageMarker
     /// </summary>
     /// <remarks>
     /// A null answer always means "looks stale", which reinstalls — safe in every caller, which is why an
-    /// IO failure here is swallowed rather than propagated.
+    /// IO failure here is swallowed rather than propagated. "Unreadable" includes an <c>Mtime</c> outside
+    /// <see cref="DateTime"/>'s tick range: <see cref="GameCatalog"/> builds a <see cref="DateTimeOffset"/>
+    /// from it, so a value no real file could carry has to be rejected here rather than throw there.
     ///
     /// Markers written before the managed root existed have three fields and no token. They are read as
     /// <see cref="GamesRoot"/>, which is exactly what they meant when they were written, so upgrading a
@@ -63,6 +65,12 @@ public static class PackageMarker
             if (parts.Length < 3) return null;
             if (!long.TryParse(parts[0], out var mtime)) return null;
             if (!long.TryParse(parts[1], out var length)) return null;
+
+            // The mtime is format-checked above but not range-checked, and GameCatalog turns it into a
+            // DateTimeOffset — which throws for ticks outside DateTime's range, inside a catch-all that
+            // would drop the game from the catalog entirely. A value that cannot be a file's mtime belongs
+            // in "unreadable", which reinstalls: safe here, and safe in every other caller.
+            if (mtime < 0 || mtime > DateTime.MaxValue.Ticks) return null;
 
             // Four fields AND a token we recognise is the current format. Anything else is legacy — which
             // includes the pathological case of a THREE-field marker whose file name contains a tab, since

@@ -622,6 +622,25 @@ never validated — the marketplace's installed-side version, see below),
 shell-validated, so invalid values are ignored — no CSS injection), and `sdk` (optional
 `{ "<addon>": "<version>" }`, stamped by `knockbox pack`, never validated — see Addon distribution).
 
+Five more feed the home page's search, filter and sort controls, and all are **display metadata**:
+`minPlayers` (defaults to 1), `tags`, `description`, `createdAt`, `updatedAt`. Two catalog behaviours
+are worth knowing because both were bugs first. `minPlayers` is **clamped** into `[1, maxPlayers]`
+with a warning rather than skipping the game: a game must not vanish over a cosmetic field, but left
+as declared an inverted range renders "4–2" in the chin bar *and* makes the shell's player-count
+filter false for every option, so the game is reachable only via "All" with nothing to explain it.
+`knockbox pack` takes the opposite side of that same split and **rejects** the range outright — the
+author is standing in front of the message, which is the one place the typo can still be fixed.
+And the dates, when the author declares none, are derived from the manifest file — `createdAt` via
+`GameCatalog.FileCreated`, which falls back to last-write time where **there is no birthtime**
+(overlayfs: a container's own layers, and the usual backing for the unpacked-games volume, where
+.NET reports 1601-01-01 for every file, tying the whole catalog under the default "Newest" sort and
+silently degrading it to the alphabetical tie-break). A derived `createdAt` therefore means "when
+this build appeared on this server", not when the game was authored — a package-backed game is
+re-extracted on every update, so an author who wants a stable position under "Newest" declares
+`createdAt` themselves. `tags`/`description` are never validated; `web/kb-core.js` `normalizeTags`
+is the one rule for what counts as a renderable tag, shared by the chips, the tooltip and the
+search, so they cannot disagree about a `GAME.json` declaring `["", null, 3]`.
+
 ### `.kbg` game packages
 A game can be installed as a single `.kbg` file instead of a folder: copying it into `games/` is the
 whole procedure, no CLI and no restart. Spec: `docs/KBG_FORMAT.md`. It is a ZIP with every entry

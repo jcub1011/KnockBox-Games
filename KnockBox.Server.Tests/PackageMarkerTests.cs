@@ -104,4 +104,31 @@ public class PackageMarkerTests : IDisposable
 
         Assert.Null(PackageMarker.TryRead(_dir));
     }
+
+    [Theory]
+    [InlineData("99999999999999999999\t42\tgames\tdemo.kbg\n")]   // overflows long entirely
+    [InlineData("9223372036854775807\t42\tgames\tdemo.kbg\n")]    // parses, but past DateTime.MaxValue
+    [InlineData("-1\t42\tgames\tdemo.kbg\n")]                     // parses, but before DateTime.MinValue
+    public void An_mtime_no_file_could_carry_reads_as_null_rather_than_throwing_later(string contents)
+    {
+        // GameCatalog builds a DateTimeOffset from this value, inside a catch-all that drops the game
+        // from the catalog. A marker that survives to that point with out-of-range ticks therefore makes
+        // a healthy game DISAPPEAR, reported only as "Failed to load manifest". Reject it here instead:
+        // null means "looks stale", which reinstalls, and no real file mtime is out of range.
+        File.WriteAllText(MarkerPath, contents);
+
+        Assert.Null(PackageMarker.TryRead(_dir));
+    }
+
+    [Fact]
+    public void The_largest_representable_mtime_still_reads()
+    {
+        // The boundary is inclusive — a real (if absurd) tick value must not be rejected.
+        File.WriteAllText(MarkerPath, $"{DateTime.MaxValue.Ticks}\t42\tgames\tdemo.kbg\n");
+
+        var marker = PackageMarker.TryRead(_dir);
+
+        Assert.NotNull(marker);
+        Assert.Equal(DateTime.MaxValue.Ticks, marker.Value.Mtime);
+    }
 }

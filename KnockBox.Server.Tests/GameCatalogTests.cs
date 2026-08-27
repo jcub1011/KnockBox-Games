@@ -41,6 +41,104 @@ public class GameCatalogTests : IDisposable
     }
 
     [Fact]
+    public void Clamps_an_inverted_minPlayers_rather_than_skipping_the_game()
+    {
+        // Cosmetically wrong, not dangerous — so the game must stay playable. Left as declared it reads
+        // "4–2" in the chin bar AND makes the shell's player-count filter false for every option, so the
+        // game is reachable only via "All", with nothing to explain why.
+        WriteGame("odd", """
+        { "id": "odd", "name": "Odd", "entry": "index.html", "minPlayers": 4, "maxPlayers": 2 }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("odd", out var m));
+        Assert.Equal(2, m.MinPlayers);
+        Assert.Equal(2, m.MaxPlayers);
+    }
+
+    [Fact]
+    public void Clamps_a_zero_minPlayers_up_to_one()
+    {
+        WriteGame("zero", """
+        { "id": "zero", "name": "Zero", "entry": "index.html", "minPlayers": 0, "maxPlayers": 4 }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("zero", out var m));
+        Assert.Equal(1, m.MinPlayers);
+    }
+
+    [Fact]
+    public void A_declared_minPlayers_within_range_is_left_alone()
+    {
+        WriteGame("fine", """
+        { "id": "fine", "name": "Fine", "entry": "index.html", "minPlayers": 2, "maxPlayers": 8 }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("fine", out var m));
+        Assert.Equal(2, m.MinPlayers);
+    }
+
+    [Fact]
+    public void Derives_dates_that_are_usable_for_sorting_when_the_manifest_declares_none()
+    {
+        // The home page's default sort is createdAt-descending. A filesystem with no birthtime
+        // (overlayfs — a container's own layers, and the usual backing for the unpacked-games volume)
+        // makes CreationTimeUtc report 1601-01-01 for every file, which ties the entire catalog and
+        // silently degrades the sort to its alphabetical tie-break. Fall back to last-write instead.
+        WriteGame("dated", """
+        { "id": "dated", "name": "Dated", "entry": "index.html", "maxPlayers": 2 }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("dated", out var m));
+        Assert.NotNull(m.CreatedAt);
+        Assert.NotNull(m.UpdatedAt);
+        Assert.True(m.CreatedAt!.Value.Year >= 1980, $"createdAt fell back to a sentinel: {m.CreatedAt}");
+        Assert.True(m.UpdatedAt!.Value.Year >= 1980, $"updatedAt fell back to a sentinel: {m.UpdatedAt}");
+    }
+
+    [Fact]
+    public void Declared_dates_win_over_the_derived_ones()
+    {
+        WriteGame("authored", """
+        { "id": "authored", "name": "Authored", "entry": "index.html", "maxPlayers": 2,
+          "createdAt": "2020-05-04T00:00:00Z", "updatedAt": "2021-06-05T00:00:00Z" }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("authored", out var m));
+        Assert.Equal(2020, m.CreatedAt!.Value.Year);
+        Assert.Equal(2021, m.UpdatedAt!.Value.Year);
+    }
+
+    [Fact]
+    public void A_corrupt_package_marker_does_not_remove_the_game_from_the_catalog()
+    {
+        // The marker's mtime is turned into a DateTimeOffset for `updatedAt`. It is untrusted file text,
+        // so an out-of-range tick value used to throw inside TryAddGame's catch-all and drop the game
+        // entirely — a healthy game vanishing, reported only as "Failed to load manifest".
+        WriteGame("packaged", """
+        { "id": "packaged", "name": "Packaged", "entry": "index.html", "maxPlayers": 2 }
+        """);
+        File.WriteAllText(Path.Combine(_root, "packaged", PackageMarker.FileName),
+            "9223372036854775807\t42\tgames\tpackaged.kbg\n");
+
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("packaged", out var m));
+        Assert.NotNull(m.UpdatedAt);
+        Assert.True(m.UpdatedAt!.Value.Year >= 1980);
+    }
+
+    [Fact]
     public void Skips_a_game_whose_entry_file_is_missing()
     {
         WriteGame("broken",

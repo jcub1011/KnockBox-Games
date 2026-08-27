@@ -21,7 +21,10 @@
  * KnockBox.Server/Games/GameCatalog.cs (Discover) and the KnockBox.Contracts
  * GameManifest record, and is intentionally STRICTER: the server leaves `name` and
  * `maxPlayers` to deserialization, while the packer rejects an empty name and a
- * non-positive/non-integer maxPlayers so authors fail fast. For `serverAuthority`
+ * non-positive/non-integer maxPlayers so authors fail fast. `minPlayers` is the same
+ * split in a sharper form — the server clamps a bad range and warns (an operator's
+ * game must not vanish over a display field), the packer refuses it, because here the
+ * author is present to fix the typo. For `serverAuthority`
  * (server-authoritative games) the packer additionally runs two checks the catalog
  * can't do cheaply: a static import scan (single-file rule) and a load check that
  * dynamic-imports the module and asserts its exports — the developer's own code, run
@@ -166,6 +169,21 @@ export function validate(manifest, manifestPath, inDir) {
   if (typeof entry !== "string" || entry.trim() === "") throw new PackError("GAME.json: 'entry' is required.");
   if (!Number.isInteger(maxPlayers) || maxPlayers <= 0) {
     throw new PackError("GAME.json: 'maxPlayers' must be an integer greater than 0.");
+  }
+  // minPlayers (optional, defaults to 1): the server CLAMPS a bad value into 1..maxPlayers and logs a
+  // warning — a game must not disappear from an operator's catalog over a display field. That is the
+  // right answer at runtime and the wrong one here: the author is standing in front of the message, and
+  // an inverted range is a typo with a visible cost (the tile reads "4–2" and the home page's player
+  // filter matches no option at all, so the game is reachable only via "All"). Reject it instead.
+  if (manifest.minPlayers !== undefined) {
+    const minPlayers = manifest.minPlayers;
+    if (!Number.isInteger(minPlayers) || minPlayers <= 0) {
+      throw new PackError("GAME.json: 'minPlayers' must be an integer greater than 0 when present.");
+    }
+    if (minPlayers > maxPlayers) {
+      throw new PackError(
+        `GAME.json: 'minPlayers' (${minPlayers}) cannot exceed 'maxPlayers' (${maxPlayers}).`);
+    }
   }
   if (crossOriginIsolated !== undefined && typeof crossOriginIsolated !== "boolean") {
     throw new PackError("GAME.json: 'crossOriginIsolated' must be a boolean when present.");

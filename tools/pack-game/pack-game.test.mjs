@@ -173,6 +173,8 @@ describe("pack (contract validation — mirrors GameCatalog)", () => {
     "rejects missing entry": { ...VALID, entry: "" },
     "rejects non-positive maxPlayers": { ...VALID, maxPlayers: 0 },
     "rejects non-integer maxPlayers": { ...VALID, maxPlayers: 2.5 },
+    "rejects non-positive minPlayers": { ...VALID, minPlayers: 0 },
+    "rejects non-integer minPlayers": { ...VALID, minPlayers: 1.5 },
   };
   for (const [label, obj] of Object.entries(cases)) {
     it(label, async () => {
@@ -183,6 +185,21 @@ describe("pack (contract validation — mirrors GameCatalog)", () => {
   it("rejects crossOriginIsolated that is not a boolean", async () => {
     await expect(pack({ in: work.src, manifest: manifest({ ...VALID, crossOriginIsolated: "yes" }), dir: work.out }))
       .rejects.toThrow(PackError);
+  });
+
+  it("rejects minPlayers above maxPlayers", async () => {
+    // The server clamps this and warns, because an operator's game must not vanish over a display
+    // field. The author gets the stricter answer: left in, the tile reads "4–2" and the home page's
+    // player filter matches no option, so the game is reachable only via "All".
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, minPlayers: 5 }), dir: work.out }))
+      .rejects.toThrow(/'minPlayers' \(5\) cannot exceed 'maxPlayers' \(4\)/);
+  });
+
+  it("accepts minPlayers equal to maxPlayers, and its absence", async () => {
+    // The boundary is inclusive (a strictly-2-player game), and the field is optional — it defaults
+    // to 1 server-side, so a manifest that never mentions it must keep packing.
+    await pack({ in: work.src, manifest: manifest({ ...VALID, minPlayers: VALID.maxPlayers }), dir: work.out });
+    await pack({ in: work.src, manifest: manifest({ ...VALID }), dir: work.out });
   });
 
   it("rejects a version that is not a string", async () => {
