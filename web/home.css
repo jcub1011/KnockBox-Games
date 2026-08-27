@@ -607,13 +607,28 @@ body.in-game::after {
     outline-offset: 5px;
 }
 
-.game-tile:nth-child(5n+1) { transform: rotate(-1deg); }
-.game-tile:nth-child(5n+2) { transform: rotate(0.4deg); }
-.game-tile:nth-child(5n+3) { transform: rotate(1deg); }
-.game-tile:nth-child(5n+4) { transform: rotate(-0.6deg); }
-.game-tile:nth-child(5n+5) { transform: rotate(0.7deg); }
+/* Palette rhythm: cycle through darkened, semi-transparent brand colors for the hard drop shadow */
+.game-tile:nth-child(3n+1) {
+    --tile-accent: var(--accent-color);
+    --tile-shadow-color: rgba(255, 0, 85, 0.45);
+    --tile-shadow-hover: rgba(255, 0, 85, 0.65);
+}
 
-.game-tile:hover:not(:disabled) { transform: rotate(0deg) translateY(-3px); }
+.game-tile:nth-child(3n+2) {
+    --tile-accent: var(--tile-cyan);
+    --tile-shadow-color: rgba(30, 255, 188, 0.4);
+    --tile-shadow-hover: rgba(30, 255, 188, 0.6);
+}
+
+.game-tile:nth-child(3n+3) {
+    --tile-accent: var(--banner-yellow);
+    --tile-shadow-color: rgba(254, 222, 102, 0.4);
+    --tile-shadow-hover: rgba(254, 222, 102, 0.6);
+}
+
+.game-tile:hover:not(:disabled) {
+    transform: translateY(-3px);
+}
 
 .game-tile:disabled {
     opacity: 0.5;
@@ -623,7 +638,7 @@ body.in-game::after {
 }
 
 .game-tile:focus-visible {
-    outline: 3px solid var(--accent-color);
+    outline: 3px solid var(--tile-accent, var(--accent-color));
     outline-offset: 6px;
     border-radius: 18px;
 }
@@ -637,18 +652,18 @@ body.in-game::after {
     border-radius: 16px;
     width: 100%;
     background-color: black;
-    box-shadow: var(--shadow-card-rest);
-    transition: transform 0.1s, box-shadow 0.1s;
+    box-shadow: 4px 4px 0 var(--tile-shadow-color, rgba(255, 0, 85, 0.45));
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .game-tile:hover:not(:disabled) > .game-tile-surface {
-    transform: translate(-3px, -3px);
-    box-shadow: var(--shadow-card-lift);
+    transform: translate(-2px, -2px);
+    box-shadow: 7px 7px 0 var(--tile-shadow-hover, rgba(255, 0, 85, 0.65));
 }
 
 .game-tile:active:not(:disabled) > .game-tile-surface {
-    transform: translate(3px, 3px);
-    box-shadow: var(--shadow-card-press);
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0 var(--tile-shadow-color, rgba(255, 0, 85, 0.45));
 }
 
 .game-tile-art {
@@ -1394,7 +1409,7 @@ body.in-game::after {
 }
 
 /* The tile, at rest in the centre. Keeps the grid tiles' own sticker language (5px black border,
-   16px radius) so the thing that lands is recognisably the thing that was clicked — but lifted, hence
+   16px radius, glowing rim) so the thing that lands is recognisably the thing that was clicked — but lifted, hence
    the larger shadow. shell.js sets an inline start transform for one frame; this transition carries
    it home. cubic-bezier(0.16, 1, 0.3, 1) is a pure ease-out: fast departure, no overshoot, because a
    bounce here would still be moving when the game may already be ready. */
@@ -1407,7 +1422,7 @@ body.in-game::after {
     border: 5px solid #000;
     border-radius: 16px;
     background-color: #000;
-    box-shadow: var(--shadow-card-lift);
+    box-shadow: 8px 8px 0 rgba(255, 0, 85, 0.65);
     transition: transform 0.42s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -1563,14 +1578,6 @@ body.in-game::after {
     .launch-status { gap: 10px; }
 }
 
-@media (hover: none) {
-    .game-tile:nth-child(5n+1) { transform: rotate(-0.5deg); }
-    .game-tile:nth-child(5n+2) { transform: rotate(0.2deg); }
-    .game-tile:nth-child(5n+3) { transform: rotate(0.5deg); }
-    .game-tile:nth-child(5n+4) { transform: rotate(-0.3deg); }
-    .game-tile:nth-child(5n+5) { transform: rotate(0.7deg); }
-}
-
 /* ── Reduced motion ──────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
     .title-letter,
@@ -1599,7 +1606,10 @@ body.in-game::after {
     .join-card, .game-tile, .game-tile-surface { transition: none; }
     /* No hover lift/slide under reduced motion — keep only the (non-moving) shadow cue. */
     .game-tile:hover:not(:disabled) { transform: none; }
-    .game-tile:hover:not(:disabled) > .game-tile-surface { transform: none; box-shadow: var(--shadow-card-lift); }
+    .game-tile:hover:not(:disabled) > .game-tile-surface {
+        transform: none;
+        box-shadow: 7px 7px 0 var(--tile-shadow-hover, rgba(255, 0, 85, 0.65));
+    }
     .hero-ribbon-track { animation: none; }
     body:not(.in-game)::before,
     body:not(.in-game)::after { animation: none; }
