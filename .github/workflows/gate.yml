@@ -238,10 +238,22 @@ jobs:
             -e KnockBox__MarketplaceCatalogUrl=http://127.0.0.1:9000/CATALOG.json \
             -e KnockBox__MarketplaceDownloadBaseUrl=http://127.0.0.1:9000 \
             -e KnockBox__MetricSampleSeconds=2 \
+            -e KnockBox__WebhookAllowPrivateTargets=true \
             knockbox:ci
           # The catalog host is stood up later (it needs a package to serve). Pointing at it now is free
           # — the URL is only dereferenced on demand — and it buys an assertion that an unreachable
           # catalog is REPORTED rather than fatal.
+          #
+          # WebhookAllowPrivateTargets is on because the webhook target in this job IS the loopback
+          # sidecar — precisely the "notifier really is on the LAN" case PrivateAddressGuard's knob
+          # exists for. Without it the guard refuses http://127.0.0.1:9000 with a 400 and every
+          # assertion past registration is unreachable, which is how this job broke: the guard landed
+          # with unit tests, but the container it has to run in was never told.
+          #
+          # NOT a recommended production value — refusing is the default because the services this
+          # feature exists for are public, and the range it protects includes a cloud instance's
+          # metadata endpoint. The rule itself stays covered by PrivateAddressGuardTests and
+          # WebhookTargetGuardTests, so lifting it here costs no coverage of the guard.
 
       - name: Shell serves from the baked-in web root
         run: |
