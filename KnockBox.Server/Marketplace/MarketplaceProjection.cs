@@ -11,12 +11,28 @@ namespace KnockBox.Server.Marketplace;
 /// Set when another source offers this id first and won. Surfaced rather than silently dropped, the
 /// same way a duplicate game id is reported by the installer.
 /// </param>
+/// <param name="Homepage">
+/// Author-supplied link out of the catalog entry. Untrusted text: the schema restricts it to
+/// <c>https://</c> and the portal opens it with <c>rel="noopener noreferrer"</c>.
+/// </param>
+/// <param name="Bugs">Same provenance and caveats as <paramref name="Homepage"/>.</param>
+/// <param name="MinPlayers">
+/// Nullable, not defaulted: absent means the entry never said, which the portal renders differently
+/// from a declared 1. Describes the version being OFFERED, not the installed one — the whole point is
+/// deciding whether to install it.
+/// </param>
 public sealed record MarketplaceEntry(
     string Id,
     string Name,
     string? Description,
     string? Author,
     IReadOnlyList<string>? Tags,
+    string? License,
+    string? Homepage,
+    string? Bugs,
+    string? ContentRating,
+    int? MinPlayers,
+    int? MaxPlayers,
     string? AvailableVersion,
     string? InstalledVersion,
     string Status,
@@ -96,6 +112,12 @@ public static class MarketplaceProjection
                     plugin.Description,
                     plugin.Author?.Name,
                     plugin.Tags,
+                    plugin.License,
+                    plugin.Homepage,
+                    plugin.Bugs,
+                    plugin.ContentRating,
+                    plugin.MinPlayers,
+                    plugin.MaxPlayers,
                     plugin.Version,
                     location?.Manifest.Version,
                     Camel(status.Status.ToString()),
@@ -121,7 +143,16 @@ public static class MarketplaceProjection
             rows.Add(new MarketplaceEntry(
                 location.Manifest.Id,
                 location.Manifest.Name,
-                null, null, null,
+                Description: null, Author: null, Tags: null,
+                // No catalog entry to read, so these come from the installed manifest itself. Homepage
+                // and Bugs stay null because GameManifest has no equivalent — they exist only in a
+                // catalog entry, so an uploaded game genuinely has none to show.
+                License: location.Manifest.License,
+                Homepage: null,
+                Bugs: null,
+                ContentRating: location.Manifest.ContentRating,
+                MinPlayers: location.Manifest.MinPlayers,
+                MaxPlayers: location.Manifest.MaxPlayers,
                 AvailableVersion: null,
                 location.Manifest.Version,
                 InstalledOnly,

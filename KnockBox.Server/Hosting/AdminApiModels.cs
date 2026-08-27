@@ -324,12 +324,27 @@ public sealed record AdminJobResponse(
 /// </param>
 /// <param name="ShadowedBy">Another source offered this id first and won. Reported, never silently dropped.</param>
 /// <param name="Managed">Its package is in the managed root, so update/rollback/uninstall apply to it.</param>
+/// <param name="Homepage">
+/// Author-supplied link, carried verbatim out of the catalog entry — unlike the package download URL,
+/// which the server derives. Untrusted: the schema restricts it to <c>https://</c>, and the portal
+/// renders it with <c>rel="noopener noreferrer"</c>.
+/// </param>
+/// <param name="ContentRating">
+/// The author's own declaration, not a legal classification, and null when they never made one — which
+/// the portal shows differently from a declared rating.
+/// </param>
 public sealed record AdminMarketplaceEntry(
     string Id,
     string Name,
     string? Description,
     string? Author,
     IReadOnlyList<string>? Tags,
+    string? License,
+    string? Homepage,
+    string? Bugs,
+    string? ContentRating,
+    int? MinPlayers,
+    int? MaxPlayers,
     string? AvailableVersion,
     string? InstalledVersion,
     string Status,

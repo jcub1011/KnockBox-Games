@@ -55,6 +55,8 @@ const CATALOG = {
     {
       id: 'word-rush', name: 'Word Rush', description: 'Fast word game', author: 'Someone',
       tags: ['party'], availableVersion: '1.3.0', installedVersion: '1.2.0', status: 'updateAvailable',
+      license: 'MIT', contentRating: 'everyone', minPlayers: 2, maxPlayers: 8,
+      homepage: 'https://example.com/word-rush', bugs: 'https://example.com/word-rush/issues',
       reason: null, sizeBytes: 2_000_000, publishedAt: null, minAppVersion: null, maxAppVersion: null,
       sourceId: 'official', sourceName: 'Official KnockBox marketplace', shadowedBy: null,
       managed: true, installed: true, activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
@@ -62,6 +64,8 @@ const CATALOG = {
     },
     {
       id: 'alpha-chain', name: 'Alpha Chain', description: 'A chain game', author: null, tags: [],
+      // Deliberately none: this is every entry published before catalog schema 1.1.0.
+      license: null, contentRating: null, minPlayers: null, maxPlayers: null, homepage: null, bugs: null,
       availableVersion: '2.0.0', installedVersion: null, status: 'notInstalled', reason: null,
       sizeBytes: 1_000_000, publishedAt: null, minAppVersion: null, maxAppVersion: null,
       sourceId: 'official', sourceName: 'Official KnockBox marketplace', shadowedBy: null,
@@ -143,6 +147,55 @@ describe('marketplace catalog', () => {
     expect(wordRush.textContent).toContain('v1.2.0');
     expect(wordRush.textContent).toContain('v1.3.0');
     expect(card('alpha-chain').textContent).toContain('Not installed');
+  });
+
+  it('shows the listing metadata a 1.1 catalog carries', async () => {
+    await openMarketplace();
+
+    const wordRush = card('word-rush');
+    expect(wordRush.textContent).toContain('everyone');
+    expect(wordRush.textContent).toContain('2–8');
+    expect(wordRush.textContent).toContain('MIT');
+
+    const links = [...wordRush.querySelectorAll('.mkt-links a')];
+    expect(links.map((a) => a.textContent)).toEqual(['Homepage', 'Report a problem']);
+    expect(links.map((a) => a.getAttribute('href')))
+      .toEqual(['https://example.com/word-rush', 'https://example.com/word-rush/issues']);
+    // The destination is chosen by the game's author, so it gets neither a window handle nor a referrer.
+    for (const link of links) expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('renders nothing for the listing metadata an entry omits', async () => {
+    // Every entry published before catalog 1.1.0 has none of these. Absent has to render as absent
+    // rather than as "1–1 players" or an empty link.
+    await openMarketplace();
+
+    const alpha = card('alpha-chain');
+    expect(alpha.textContent).not.toContain('Players');
+    expect(alpha.textContent).not.toContain('License');
+    expect(alpha.querySelector('.mkt-links')).toBeNull();
+  });
+
+  it('refuses to link a catalog url that is not https', async () => {
+    // The catalog comes from a repository this server does not control, and the schema's https-only rule
+    // is enforced where an entry is PUBLISHED. If a hand-edited or compromised catalog gets a
+    // `javascript:` url this far, the portal must not turn it into a link on an authenticated page.
+    await openMarketplace({
+      'GET /admin/api/marketplace/catalog': {
+        body: {
+          ...CATALOG,
+          entries: [{
+            ...CATALOG.entries[0],
+            homepage: 'javascript:alert(document.cookie)',
+            bugs: 'http://insecure.example.com/issues',
+          }],
+        },
+      },
+    });
+
+    const wordRush = card('word-rush');
+    expect(wordRush.querySelector('.mkt-links')).toBeNull();
+    expect(wordRush.innerHTML).not.toContain('javascript:');
   });
 
   it('reads the catalog once on entry, then polls only the job feed', async () => {

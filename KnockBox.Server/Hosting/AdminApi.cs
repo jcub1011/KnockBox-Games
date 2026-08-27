@@ -947,6 +947,7 @@ internal static class AdminApi
         var entries = MarketplaceProjection.Project(fetched, installed, managed, KnockBoxVersion.Current)
             .Select(e => new AdminMarketplaceEntry(
                 e.Id, e.Name, e.Description, e.Author, e.Tags,
+                e.License, e.Homepage, e.Bugs, e.ContentRating, e.MinPlayers, e.MaxPlayers,
                 e.AvailableVersion, e.InstalledVersion, e.Status, e.Reason,
                 e.SizeBytes, e.PublishedAt, e.MinAppVersion, e.MaxAppVersion,
                 e.SourceId, e.SourceName, e.ShadowedBy, e.Managed, e.Installed,

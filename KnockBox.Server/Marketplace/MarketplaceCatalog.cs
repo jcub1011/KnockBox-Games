@@ -33,6 +33,36 @@ public sealed record MarketplaceCatalog(
 }
 
 /// <summary>One game plugin's entry in the catalog.</summary>
+/// <remarks>
+/// Field order mirrors <c>marketplace.schema.json</c>'s <c>catalogPluginEntry</c> so the two can be
+/// read side by side. Nothing constructs this type in C# — it exists only to be deserialized — which
+/// is why a field can be inserted in schema order rather than appended to keep positional callers
+/// compiling.
+/// </remarks>
+/// <param name="License">
+/// SPDX identifier or expression, derived from the game's own <c>GAME.json</c> at publish time.
+/// Display only; the server neither validates nor acts on it.
+/// </param>
+/// <param name="Homepage">
+/// The game's own page or repository. Author-supplied and rendered as a link by the admin portal,
+/// unlike the package download URL which is *derived* from repo/tag/asset and never carried — so the
+/// schema constrains this to <c>https://</c> and the portal opens it with <c>rel="noopener
+/// noreferrer"</c>. Treat it as untrusted text either way.
+/// </param>
+/// <param name="Bugs">Where to report problems with the game. Same provenance and caveats as <see cref="Homepage"/>.</param>
+/// <param name="ContentRating">
+/// The author's self-declaration of what the game contains (<c>"everyone"</c>, <c>"teen"</c>,
+/// <c>"mature"</c>) — a platform label for browsing, not a legal classification. A string, not an
+/// enum, for the reason every member here is nullable: an unrecognised value published tomorrow must
+/// not make today's catalog unreadable. Absent means the author never declared one, which is
+/// deliberately distinct from any value they could have chosen.
+/// </param>
+/// <param name="MinPlayers">
+/// Player count the game is meant for, so the portal can show and filter the range before anything is
+/// downloaded. Nullable rather than defaulted to 1: absent means the entry did not say, and the
+/// installed manifest's own default is not this catalog's to assume.
+/// </param>
+/// <param name="MaxPlayers">Upper end of that range. Same nullability reasoning as <see cref="MinPlayers"/>.</param>
 public sealed record MarketplacePlugin(
     string? Id,
     string? Name,
@@ -43,6 +73,12 @@ public sealed record MarketplacePlugin(
     string? MinAppVersion,
     string? MaxAppVersion,
     IReadOnlyList<string>? Tags,
+    string? License,
+    string? Homepage,
+    string? Bugs,
+    string? ContentRating,
+    int? MinPlayers,
+    int? MaxPlayers,
     MarketplaceSource? Source);
 
 /// <summary>

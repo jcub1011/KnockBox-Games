@@ -77,6 +77,24 @@ namespace KnockBox.Contracts;
 /// <param name="UpdatedAt">
 /// Optional game last updated/modified timestamp.
 /// </param>
+/// <param name="License">
+/// Optional SPDX license identifier or expression the game declares for itself (<c>"MIT"</c>,
+/// <c>"Apache-2.0"</c>). Never validated and never affects whether a game loads — like
+/// <see cref="Version"/>, and for the same reason: most hand-written games declare none, and a
+/// platform that refused those would refuse most of what it hosts. Surfaced so an operator can see
+/// the terms of something they installed without unpacking it.
+/// </param>
+/// <param name="ContentRating">
+/// Optional self-declaration of what the game contains, for browsing and filtering — a platform
+/// label (<c>"everyone"</c>, <c>"teen"</c>, <c>"mature"</c>), explicitly NOT an ESRB, PEGI or any
+/// other legal classification.
+///
+/// Deliberately a <c>string</c> rather than an enum. An unknown value must not stop a game loading,
+/// and an enum would either throw during deserialization or need a converter to avoid it — the same
+/// reasoning that keeps every member of this record nullable. Absent is meaningfully distinct from
+/// any declared value: it means the author never said, which a rating filter has to treat
+/// differently from a game that positively declared itself suitable for everyone.
+/// </param>
 public sealed record GameManifest(
     string Id,
     string Name,
@@ -94,7 +112,9 @@ public sealed record GameManifest(
     IReadOnlyList<string>? Tags = null,
     string? Description = null,
     DateTimeOffset? CreatedAt = null,
-    DateTimeOffset? UpdatedAt = null);
+    DateTimeOffset? UpdatedAt = null,
+    string? License = null,
+    string? ContentRating = null);
 
 /// <summary>
 /// One entry in <see cref="GameManifest.AuthorityWords"/>: the game-relative path of a line-delimited

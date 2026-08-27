@@ -47,6 +47,11 @@ public class GameManifestSourceGenTests
         Assert.Null(manifest.UpdatedAt);
         Assert.Null(manifest.Tags);
         Assert.Null(manifest.Description);
+
+        // Absent is a distinct answer for both: a rating filter has to tell "never declared" apart from
+        // a game that positively declared itself suitable for everyone, and most games declare neither.
+        Assert.Null(manifest.License);
+        Assert.Null(manifest.ContentRating);
     }
 
     [Fact]
@@ -68,5 +73,36 @@ public class GameManifestSourceGenTests
         Assert.Equal("A fun word game", manifest.Description);
         Assert.Equal(DateTimeOffset.Parse("2026-01-15T10:00:00Z"), manifest.CreatedAt);
         Assert.Equal(DateTimeOffset.Parse("2026-02-20T12:30:00Z"), manifest.UpdatedAt);
+    }
+
+    [Fact]
+    public void License_and_contentRating_parse_from_camelCase()
+    {
+        var manifest = Parse("""
+        {
+          "id": "alpha-chain", "name": "Alpha Chain", "entry": "index.html", "maxPlayers": 8,
+          "license": "MIT",
+          "contentRating": "teen"
+        }
+        """);
+
+        Assert.Equal("MIT", manifest.License);
+        Assert.Equal("teen", manifest.ContentRating);
+    }
+
+    [Fact]
+    public void An_unrecognised_contentRating_is_read_verbatim_rather_than_refused()
+    {
+        // The reason it is a string and not an enum: a value this build has never heard of must not stop
+        // the game loading. The server does not act on the rating, so carrying it through unchanged is
+        // strictly better than refusing a manifest — or worse, dropping the game from the catalog.
+        var manifest = Parse("""
+        {
+          "id": "x", "name": "X", "entry": "index.html", "maxPlayers": 2,
+          "contentRating": "adults-only-18"
+        }
+        """);
+
+        Assert.Equal("adults-only-18", manifest.ContentRating);
     }
 }

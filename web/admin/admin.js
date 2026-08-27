@@ -1071,6 +1071,55 @@ function gameCard(game) {
   return card;
 }
 
+/**
+ * A catalog entry's link fields, but only if they really are https URLs.
+ *
+ * These strings are author-supplied and arrive from a repository this server does not control. The
+ * marketplace schema restricts them to https://, but that is enforced where an entry is PUBLISHED —
+ * nothing revalidates them on the way in here, so a portal that trusted them would be one compromised
+ * or hand-edited catalog away from rendering a `javascript:` link on an authenticated admin page.
+ */
+function httpsUrl(value) {
+  if (typeof value !== 'string' || value === '') return null;
+  try {
+    return new URL(value).protocol === 'https:' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** "2–8", "4", "up to 8", "2+", or '' when the entry declared no range at all. */
+function playerRange(entry) {
+  const min = entry.minPlayers;
+  const max = entry.maxPlayers;
+  if (!min && !max) return '';
+  if (min && max) return min === max ? `${min}` : `${min}–${max}`;
+  return max ? `up to ${max}` : `${min}+`;
+}
+
+/** The homepage/issues row, or null when the entry offers neither usable link. */
+function marketplaceLinks(entry) {
+  const targets = [
+    ['Homepage', httpsUrl(entry.homepage)],
+    ['Report a problem', httpsUrl(entry.bugs)],
+  ].filter(([, href]) => href);
+  if (targets.length === 0) return null;
+
+  const row = document.createElement('div');
+  row.className = 'mkt-links';
+  for (const [label, href] of targets) {
+    const link = document.createElement('a');
+    link.href = href;
+    link.textContent = label;
+    link.target = '_blank';
+    // noreferrer as well as noopener: the destination is chosen by the game's author, and an admin
+    // portal URL is not something they need to be told.
+    link.rel = 'noopener noreferrer';
+    row.appendChild(link);
+  }
+  return row;
+}
+
 function addFact(host, label, value, sub) {
   const fact = document.createElement('div');
   fact.className = 'game-fact';
@@ -1362,6 +1411,15 @@ function marketplaceCard(entry) {
   status.title = pluginStatusHint(entry.status);
   header.appendChild(status);
 
+  if (entry.contentRating) {
+    const rating = document.createElement('span');
+    rating.className = 'badge badge-muted';
+    rating.textContent = entry.contentRating;
+    // Said plainly, because "everyone" beside a game name reads like a guarantee otherwise.
+    rating.title = 'Content rating the game declares for itself — not an ESRB or PEGI rating.';
+    header.appendChild(rating);
+  }
+
   for (const tag of (entry.tags || []).slice(0, 3)) {
     const chip = document.createElement('span');
     chip.className = 'badge badge-muted';
@@ -1384,8 +1442,15 @@ function marketplaceCard(entry) {
     entry.sourceName || entry.sourceId || '');
   if (entry.sizeBytes) addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
   if (entry.author) addFact(facts, 'Author', entry.author, '');
+  // Both describe the version being OFFERED — the point is deciding whether to install it.
+  const players = playerRange(entry);
+  if (players) addFact(facts, 'Players', players, '');
+  if (entry.license) addFact(facts, 'License', entry.license, '');
   if (entry.activeLobbies > 0) addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, '');
   card.appendChild(facts);
+
+  const links = marketplaceLinks(entry);
+  if (links) card.appendChild(links);
 
   const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
   const actions = document.createElement('div');

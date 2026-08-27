@@ -1763,6 +1763,14 @@ code, pre {
   margin: 0.4rem 0 0.8rem;
 }
 
+.mkt-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+
 .job-row {
   display: flex;
   align-items: center;

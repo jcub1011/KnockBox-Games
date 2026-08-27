@@ -17,26 +17,38 @@ public class MarketplaceCatalogParsingTests
         Assert.Throws<MarketplaceException>(() => Parse(json)).Message;
 
     /// <summary>
-    /// The real published catalog, verbatim (revision 4, after the asset/sha256 fix). If the
-    /// marketplace's own format drifts away from what this server reads, this is the test that says so.
+    /// The published catalog, verbatim — schemaVersion 1.1.0, revision 6. If the
+    /// marketplace's own format drifts away from what this server reads, this is the test that says so,
+    /// so it is copied from `.plugins/CATALOG.json` rather than written by hand and needs refreshing
+    /// when a publish changes shape.
+    ///
+    /// Note what it records rather than what it should say: Alpha Chain's `minAppVersion` is `1.0.0`
+    /// because its manifest declared none and the publish action defaulted it — the fabricated value
+    /// that default was removed for. This fixture asserts the catalog can be READ, not that it is right.
     /// </summary>
     private const string LiveCatalog = """
     {
-      "schemaVersion": "1.0.0",
+      "schemaVersion": "1.1.0",
       "name": "KnockBox Games Marketplace Catalog",
       "description": "Official catalog index of available game plugins for the KnockBox Marketplace.",
-      "lastUpdated": "2026-08-12T17:23:47.371Z",
-      "revision": 4,
+      "lastUpdated": "2026-08-26T18:26:54.797Z",
+      "revision": 6,
       "plugins": [
         {
           "id": "jcub1011-Alpha-Chain",
           "name": "Alpha Chain",
           "description": "A multiplayer, shinitori-esq game about building the most broken word scoring engine.",
           "version": "0.1.0",
-          "author": { "name": "jcub1011" },
-          "lastUpdated": "2026-08-12T17:23:47.371Z",
+          "author": {
+            "name": "jcub1011"
+          },
+          "lastUpdated": "2026-08-11T16:14:37.766Z",
           "minAppVersion": "1.0.0",
-          "tags": ["word-game", "party", "multiplayer"],
+          "tags": [
+            "word-game",
+            "party",
+            "multiplayer"
+          ],
           "source": {
             "type": "github-release",
             "repo": "jcub1011/Alpha-Chain-Phaser-",
@@ -44,6 +56,32 @@ public class MarketplaceCatalogParsingTests
             "asset": "jcub1011-Alpha-Chain.kbg",
             "sha256": "76f72e5079494e883c0717e7501367f830c42fbed0127b0eb9326aca0a618f4c",
             "size": 2319262
+          }
+        },
+        {
+          "id": "jcub1011-Drawn-To-Dress",
+          "name": "Drawn to Dress",
+          "description": "A multiplayer fashion drawing and Swiss tournament voting game.",
+          "version": "0.1.0",
+          "author": {
+            "name": "jcub1011"
+          },
+          "lastUpdated": "2026-08-26T18:26:54.797Z",
+          "minAppVersion": "0.1.0",
+          "tags": [
+            "drawing",
+            "fashion",
+            "party",
+            "multiplayer",
+            "voting"
+          ],
+          "source": {
+            "type": "github-release",
+            "repo": "jcub1011/Drawn-To-Dress",
+            "tag": "v0.1.0",
+            "asset": "jcub1011-Drawn-To-Dress.kbg",
+            "sha256": "60e34ad5bdacaa02fc9e2594d56dccd549e8af025c2c09040444cd276e6959c2",
+            "size": 1386129
           }
         }
       ]
@@ -55,10 +93,11 @@ public class MarketplaceCatalogParsingTests
     {
         var catalog = Parse(LiveCatalog);
 
-        Assert.Equal("1.0.0", catalog.SchemaVersion);
-        Assert.Equal(4, catalog.Revision);
-        var plugin = Assert.Single(catalog.Plugins!);
+        Assert.Equal("1.1.0", catalog.SchemaVersion);
+        Assert.Equal(6, catalog.Revision);
+        Assert.Equal(2, catalog.Plugins!.Count);
 
+        var plugin = catalog.Plugins!.Single(p => p.Id == "jcub1011-Alpha-Chain");
         Assert.Equal("jcub1011-Alpha-Chain", plugin.Id);
         Assert.Equal("Alpha Chain", plugin.Name);
         Assert.Equal("0.1.0", plugin.Version);
@@ -73,6 +112,72 @@ public class MarketplaceCatalogParsingTests
         Assert.Equal("jcub1011-Alpha-Chain.kbg", plugin.Source?.Asset);
         Assert.Equal("76f72e5079494e883c0717e7501367f830c42fbed0127b0eb9326aca0a618f4c", plugin.Source?.Sha256);
         Assert.Equal(2319262, plugin.Source?.Size);
+    }
+
+    [Fact]
+    public void Reads_the_listing_metadata_a_1_1_catalog_carries()
+    {
+        // Added in catalog schemaVersion 1.1.0. "Within a major, unknown properties are ignored" is what
+        // makes a minor bump safe for OLDER servers; this pins the other half of that promise, which is
+        // that a newer server actually reads them rather than quietly dropping them in the DTO.
+        var catalog = Parse("""
+        {
+          "schemaVersion": "1.1.0",
+          "name": "Test",
+          "lastUpdated": "2026-08-27T00:00:00Z",
+          "revision": 7,
+          "plugins": [
+            {
+              "id": "demo",
+              "name": "Demo",
+              "description": "A demo.",
+              "version": "1.0.0",
+              "author": { "name": "someone" },
+              "lastUpdated": "2026-08-27T00:00:00Z",
+              "minAppVersion": "1.0.0",
+              "tags": ["party"],
+              "license": "MIT",
+              "homepage": "https://example.com/demo",
+              "bugs": "https://example.com/demo/issues",
+              "contentRating": "everyone",
+              "minPlayers": 2,
+              "maxPlayers": 8,
+              "source": {
+                "type": "github-release",
+                "repo": "o/r",
+                "tag": "v1",
+                "asset": "demo.kbg",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          ]
+        }
+        """);
+
+        var plugin = Assert.Single(catalog.Plugins!);
+        Assert.Equal("MIT", plugin.License);
+        Assert.Equal("https://example.com/demo", plugin.Homepage);
+        Assert.Equal("https://example.com/demo/issues", plugin.Bugs);
+        Assert.Equal("everyone", plugin.ContentRating);
+        Assert.Equal(2, plugin.MinPlayers);
+        Assert.Equal(8, plugin.MaxPlayers);
+    }
+
+    [Fact]
+    public void Reads_a_published_entry_that_carries_no_listing_metadata_as_absent()
+    {
+        // Every entry published so far predates these fields. Absent must stay absent rather than
+        // arriving as a default: the portal shows "no rating declared" differently from a declared one,
+        // and 1..1 is a player range no entry ever claimed.
+        foreach (var plugin in Parse(LiveCatalog).Plugins!)
+        {
+            Assert.Null(plugin.License);
+            Assert.Null(plugin.Homepage);
+            Assert.Null(plugin.Bugs);
+            Assert.Null(plugin.ContentRating);
+            Assert.Null(plugin.MinPlayers);
+            Assert.Null(plugin.MaxPlayers);
+        }
     }
 
     [Fact]

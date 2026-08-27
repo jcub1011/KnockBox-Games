@@ -19,7 +19,9 @@ public class PluginUpdateEvaluatorTests
     private static MarketplacePlugin Entry(
         string id = "demo", string? version = "1.0.0", string? min = "1.0.0", string? max = null) =>
         new(id, "Demo", "A demo.", version, new MarketplaceAuthor("tester", null), null, min, max, null,
-            new MarketplaceSource("github-release", "o/r", "v1", $"{id}.kbg", new string('a', 64), null, null));
+            // The listing metadata is nothing to do with update evaluation — see MarketplaceProjectionTests.
+            License: null, ContentRating: null, Homepage: null, Bugs: null, MinPlayers: null, MaxPlayers: null,
+            Source: new MarketplaceSource("github-release", "o/r", "v1", $"{id}.kbg", new string('a', 64), null, null));
 
     /// <summary>The installed side, as GameCatalog would hand it over.</summary>
     private static IReadOnlyDictionary<string, GameCatalog.GameLocation> Installed(params (string Id, string? Version)[] games) =>
