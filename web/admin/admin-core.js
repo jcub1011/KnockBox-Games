@@ -636,6 +636,30 @@ export function pluginStatusHint(value) {
   return PLUGIN_STATUS.find((s) => s.value === value)?.hint ?? '';
 }
 
+/**
+ * The one sentence both destructive dialogs show when nothing can bring a plugin back.
+ *
+ * It used to read "This plugin was manually uploaded and may not be re-downloadable via the
+ * marketplace", from two predicates that disagreed about the same plugin. Delete's fired for every
+ * games/-folder game as well, which was simply false — a folder game was never uploaded — and a
+ * warning that appears on nearly every card is one an operator stops reading, which costs exactly the
+ * case it exists for. What actually matters is the same either way: no source offers it, so the copy
+ * on disk is the only copy.
+ */
+const NO_SOURCE_WARNING =
+  'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.';
+
+/** The warning for a destructive action on `entry`, or null when a source can re-supply it. */
+export function pluginRestoreWarning(entry) {
+  if (!entry) return NO_SOURCE_WARNING;
+  if (entry.status === 'installedOnly') return NO_SOURCE_WARNING;
+  // A merged entry always carries a sourceId; 'games' and 'upload' are the synthesized ones, standing
+  // for "found on disk" rather than a source that could serve it again.
+  const source = entry.sourceId || entry.sourceKind || '';
+  if (!source || source === 'games' || source === 'upload') return NO_SOURCE_WARNING;
+  return entry.availableVersion ? null : NO_SOURCE_WARNING;
+}
+
 const INSTALLED_STATUSES = new Set([
   'upToDate', 'updateAvailable', 'installedAhead', 'installedVersionUnknown', 'installedOnly',
 ]);

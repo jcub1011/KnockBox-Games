@@ -263,6 +263,9 @@ internal sealed class RecordingLogger<T> : ILogger<T>
         Func<TState, Exception?, string> formatter)
     {
         var message = formatter(state, exception);
+        // The exception rides along: these lines are read by assertion messages, and "it will be
+        // retried" without the reason it failed is the half of the story that does not help.
+        if (exception is not null) message = $"{message} [{exception.GetType().Name}: {exception.Message}]";
         OnLog?.Invoke(logLevel, message);
         Lines.Add((logLevel, message));
     }

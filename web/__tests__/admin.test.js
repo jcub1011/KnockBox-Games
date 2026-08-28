@@ -653,6 +653,29 @@ describe('lobby directory', () => {
     expect(rows[0].querySelector('.member-dropped')).not.toBeNull();
   });
 
+  it('keeps polling the lobby table while Monitoring is open', async () => {
+    // The four top tabs each render several of the old tabs at once, and the poll used to refresh only
+    // the one `activeTab` named — so Monitoring fetched this table once on arrival and then never
+    // again, which is a frozen list for the operator hunting the lobby they came here to close.
+    vi.useFakeTimers();
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await vi.advanceTimersByTimeAsync(1);
+    admin.selectTab('monitoring');
+    await vi.advanceTimersByTimeAsync(1);
+
+    const lobbyCalls = () => fake.calls.filter((c) => c.path === '/admin/api/lobbies').length;
+    const statusCalls = () => fake.calls.filter((c) => c.path === '/admin/api/system/status').length;
+    const lobbiesOnEntry = lobbyCalls();
+
+    await vi.advanceTimersByTimeAsync(11000);
+
+    // Both halves of the panel, not one of them.
+    expect(lobbyCalls()).toBeGreaterThan(lobbiesOnEntry);
+    expect(statusCalls()).toBeGreaterThan(1);
+  });
+
   it('badges a stale lobby differently from a healthy one', async () => {
     await openLobbies();
     const rows = el('lobbies-body').querySelectorAll('tr');
@@ -856,14 +879,15 @@ describe('game catalog', () => {
     expect(anchor.href).toContain('/admin/api/games/tictactoe/export');
   });
 
-  it('shows manual upload warning and export button in delete confirmation dialog for folder games', async () => {
+  it('warns that nothing can re-supply an unoffered plugin, and offers an export, before deleting', async () => {
     await openGames();
     const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
       .find((b) => b.textContent === 'Delete');
     remove.click();
 
     expect(el('confirm-warning').classList.contains('hidden')).toBe(false);
-    expect(el('confirm-warning').textContent).toBe('This plugin was manually uploaded and may not be re-downloadable via the marketplace.');
+    expect(el('confirm-warning').textContent).toBe(
+      'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.');
     expect(el('confirm-export').classList.contains('hidden')).toBe(false);
     expect(el('confirm-export').textContent).toBe('Export');
 

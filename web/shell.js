@@ -1322,7 +1322,11 @@ function closeClearModal() {
 const rc = el('room-code-btn');
 let longPressTimer = null;
 let longPressed = false;
-let lastClickAt = 0;
+// -Infinity, not 0, and the same on reset below: this is "there was no previous click", which must not
+// be a value the clock can actually report. performance.now() starts AT 0, so a 0 sentinel says "a click
+// just happened" for the first quarter-second of the timeline — and a fake clock, which stays at 0, says
+// it forever, so the very first click opened the modal instead of revealing the code.
+let lastClickAt = -Infinity;
 const DBL_MS = 250;
 
 // Single click/tap toggles the crossfade immediately (instant feedback); a quick second click/tap
@@ -1335,7 +1339,7 @@ rc.addEventListener('click', () => {
   if (!el('rc-modal').hidden) return; // never toggle the code behind an open modal
   const now = performance.now();
   if (now - lastClickAt < DBL_MS) { // second click/tap → open the large view
-    lastClickAt = 0;
+    lastClickAt = -Infinity;
     rc.classList.remove('revealed'); // reset to "Room Code" behind the modal so it's hidden on close
     openCodeModal();
     return;

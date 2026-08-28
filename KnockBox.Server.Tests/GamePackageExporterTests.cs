@@ -39,6 +39,13 @@ public sealed class GamePackageExporterTests : IDisposable
         try { Directory.Delete(_temp, recursive: true); } catch { /* best effort */ }
     }
 
+    private static async Task<byte[]> ReadAll(Stream stream)
+    {
+        using var memory = new MemoryStream();
+        await stream.CopyToAsync(memory);
+        return memory.ToArray();
+    }
+
     [Fact]
     public async Task PackageBacked_Game_Exports_As_Kbg()
     {
@@ -51,15 +58,11 @@ public sealed class GamePackageExporterTests : IDisposable
             new GameManifest(gameId, "Pkg Game", "index.html", null, 2, Version: "1.0.0"),
             Path.Combine(_paths.GamesUnpackedRoot, gameId));
 
-        var info = GamePackageExporter.GetExportInfo(location, _paths);
-        Assert.Equal("pkg-game.kbg", info.FileName);
-        Assert.Equal(GamePackageExporter.KbgContentType, info.ContentType);
-
-        using var memory = new MemoryStream();
-        var result = await GamePackageExporter.ExportAsync(location, _paths, memory);
-        Assert.Equal("pkg-game.kbg", result.FileName);
-        Assert.Equal(GamePackageExporter.KbgContentType, result.ContentType);
-        Assert.Equal(pkgBytes, memory.ToArray());
+        await using var export = await GamePackageExporter.OpenAsync(location, _paths);
+        Assert.Equal("pkg-game.kbg", export.FileName);
+        Assert.Equal(GamePackageExporter.KbgContentType, export.ContentType);
+        Assert.Equal(pkgBytes.Length, export.Length);
+        Assert.Equal(pkgBytes, await ReadAll(export.Content));
     }
 
     [Fact]
@@ -83,16 +86,18 @@ public sealed class GamePackageExporterTests : IDisposable
             new GameManifest(gameId, "Folder Game", "index.html", null, 4),
             gameDir);
 
-        var info = GamePackageExporter.GetExportInfo(location, _paths);
-        Assert.Equal("folder-game.zip", info.FileName);
-        Assert.Equal(GamePackageExporter.ZipContentType, info.ContentType);
+        byte[] bytes;
+        await using (var export = await GamePackageExporter.OpenAsync(location, _paths))
+        {
+            Assert.Equal("folder-game.zip", export.FileName);
+            Assert.Equal(GamePackageExporter.ZipContentType, export.ContentType);
+            bytes = await ReadAll(export.Content);
+            // The length the handler puts on Content-Length has to be the length it then writes, or a
+            // truncated download is something the browser accepts silently.
+            Assert.Equal(export.Length, bytes.Length);
+        }
 
-        using var memory = new MemoryStream();
-        var result = await GamePackageExporter.ExportAsync(location, _paths, memory);
-        Assert.Equal("folder-game.zip", result.FileName);
-        Assert.Equal(GamePackageExporter.ZipContentType, result.ContentType);
-
-        memory.Position = 0;
+        using var memory = new MemoryStream(bytes);
         using var zip = new ZipArchive(memory, ZipArchiveMode.Read);
         var entryNames = zip.Entries.Select(e => e.FullName).OrderBy(s => s).ToList();
 
@@ -118,50 +123,57 @@ public sealed class GamePackageExporterTests : IDisposable
             new GameManifest("missing", "Missing", "index.html", null, 4),
             Path.Combine(_paths.GamesRoot, "missing"));
 
-        using var memory = new MemoryStream();
         await Assert.ThrowsAsync<DirectoryNotFoundException>(() =>
-            GamePackageExporter.ExportAsync(location, _paths, memory));
+            GamePackageExporter.OpenAsync(location, _paths));
     }
 
     [Fact]
-    public async Task PlainFolder_Game_Exports_To_AsyncOnly_Stream()
+    public async Task File_Stamped_Before_The_Zip_Epoch_Still_Exports()
     {
-        var gameId = "async-folder-game";
+        // ZipArchiveEntry.LastWriteTime throws below 1980 — an ArgumentOutOfRangeException that no
+        // catch filter on the request path covers. In production the trigger is a file that vanished
+        // between the walk and the write, which File.GetLastWriteTimeUtc answers as 1601-01-01; that
+        // exact stamp is FILETIME 0, which Windows treats as "leave unchanged", so the fixture uses
+        // the last stamp below the clamp instead. Same branch.
+        var gameId = "ancient-game";
         var gameDir = Path.Combine(_paths.GamesRoot, gameId);
         Directory.CreateDirectory(gameDir);
 
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "GAME.json"),
-            """{"id":"async-folder-game","name":"Async Folder Game","entry":"index.html","maxPlayers":4}""");
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "index.html"), "<!doctype html><title>Game</title>");
+        var stale = Path.Combine(gameDir, "index.html");
+        await File.WriteAllTextAsync(stale, "<!doctype html>");
+        File.SetLastWriteTimeUtc(stale, new DateTime(1979, 12, 31, 23, 59, 58, DateTimeKind.Utc));
 
         var location = new GameCatalog.GameLocation(
-            new GameManifest(gameId, "Async Folder Game", "index.html", null, 4),
+            new GameManifest(gameId, "Ancient Game", "index.html", null, 4),
             gameDir);
 
-        using var memory = new MemoryStream();
-        using var asyncOnly = new AsyncOnlyStream(memory);
-        var result = await GamePackageExporter.ExportAsync(location, _paths, asyncOnly);
-        Assert.Equal("async-folder-game.zip", result.FileName);
-        Assert.Equal(GamePackageExporter.ZipContentType, result.ContentType);
-        Assert.True(memory.Length > 0);
+        await using var export = await GamePackageExporter.OpenAsync(location, _paths);
+        using var memory = new MemoryStream(await ReadAll(export.Content));
+        using var zip = new ZipArchive(memory, ZipArchiveMode.Read);
+
+        var entry = zip.GetEntry("index.html");
+        Assert.NotNull(entry);
+        Assert.Equal(1980, entry.LastWriteTime.Year);
     }
 
-    private sealed class AsyncOnlyStream(Stream inner) : Stream
+    [Fact]
+    public async Task Export_Leaves_No_Temp_File_Behind()
     {
-        public override bool CanRead => inner.CanRead;
-        public override bool CanSeek => inner.CanSeek;
-        public override bool CanWrite => inner.CanWrite;
-        public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => inner.Position = value; }
-        public override void Flush() => inner.Flush();
-        public override int Read(byte[] buffer, int offset, int count) => throw new InvalidOperationException("Sync read disallowed");
-        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
-        public override void SetLength(long value) => inner.SetLength(value);
-        public override void Write(byte[] buffer, int offset, int count) => throw new InvalidOperationException("Synchronous operations are disallowed.");
-        public override void Write(ReadOnlySpan<byte> buffer) => throw new InvalidOperationException("Synchronous operations are disallowed.");
-        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
-            inner.WriteAsync(buffer, offset, count, cancellationToken);
-        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
-            inner.WriteAsync(buffer, cancellationToken);
+        var gameId = "tidy-game";
+        var gameDir = Path.Combine(_paths.GamesRoot, gameId);
+        Directory.CreateDirectory(gameDir);
+        await File.WriteAllTextAsync(Path.Combine(gameDir, "index.html"), "<!doctype html>");
+
+        var location = new GameCatalog.GameLocation(
+            new GameManifest(gameId, "Tidy Game", "index.html", null, 4),
+            gameDir);
+
+        var before = Directory.EnumerateFiles(Path.GetTempPath(), "kb-export-*.zip").Count();
+        await using (var export = await GamePackageExporter.OpenAsync(location, _paths))
+        {
+            await ReadAll(export.Content);
+        }
+
+        Assert.Equal(before, Directory.EnumerateFiles(Path.GetTempPath(), "kb-export-*.zip").Count());
     }
 }

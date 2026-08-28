@@ -250,15 +250,16 @@ describe('marketplace catalog', () => {
 
     await vi.advanceTimersByTimeAsync(3500);
     expect(catalogCalls()).toBe(2);
-    expect(gameCalls()).toBe(2);
+    expect(gameCalls()).toBeGreaterThan(1);
     expect(el('toast-host').querySelectorAll('.toast')).toHaveLength(1);
     expect(el('toast-host').textContent).toContain('Updated to 1.3.0');
 
     // The same finished job keeps arriving on every subsequent poll, and must be announced exactly
-    // once — and must not re-read the catalog again either.
+    // once — and must not re-read the catalog again either. /admin/api/games is a different matter:
+    // it IS on the poll path, because this panel shows availability, lifecycle and live lobby counts.
     await vi.advanceTimersByTimeAsync(9000);
     expect(catalogCalls()).toBe(2);
-    expect(gameCalls()).toBe(2);
+    expect(gameCalls()).toBeGreaterThan(2);
   });
 
   it('filters client-side, with no round trip', async () => {
@@ -327,7 +328,7 @@ describe('marketplace catalog', () => {
     expect(uninstallBtn.textContent).toBe('Uninstall');
   });
 
-  it('shows manual upload warning and export button in uninstall confirmation dialog for manual/folder uploads', async () => {
+  it('warns that nothing can re-supply an unoffered plugin, and offers an export, before uninstalling', async () => {
     await openMarketplace({
       'GET /admin/api/marketplace/catalog': {
         body: {
@@ -352,7 +353,8 @@ describe('marketplace catalog', () => {
     card('folder-game').querySelector('.mkt-uninstall').click();
 
     expect(el('confirm-warning').classList.contains('hidden')).toBe(false);
-    expect(el('confirm-warning').textContent).toBe('This plugin was manually uploaded and may not be re-downloadable via the marketplace.');
+    expect(el('confirm-warning').textContent).toBe(
+      'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.');
     expect(el('confirm-export').classList.contains('hidden')).toBe(false);
   });
 });

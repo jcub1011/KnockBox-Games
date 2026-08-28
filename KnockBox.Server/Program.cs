@@ -680,8 +680,8 @@ catalog.Discovered += games =>
 // Install .kbg packages off the same signal, for the same reason: it rides the catalog's watcher and
 // polling instead of adding a second watcher, and extraction (potentially hundreds of megabytes) is
 // offloaded so it never blocks a discovery running on a timer callback. Having changed something, it
-// asks for a rediscovery through ScheduleRescan — never Discover() directly, which has no mutual
-// exclusion and could let an older scan win the publish and hide the game just installed.
+// asks for a rediscovery through ScheduleRescan rather than Discover(): this fires on every pass, and
+// the debounce is what collapses a burst of them into one walk.
 GamePackageInstaller? installer = packagesEnabled ? app.Services.GetRequiredService<GamePackageInstaller>() : null;
 if (installer is not null)
 {

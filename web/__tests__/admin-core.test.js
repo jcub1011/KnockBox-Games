@@ -10,7 +10,8 @@ import {
   cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
   formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
-  playerRange, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, topTabFromHash, uploadGuard,
+  playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
+  tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
@@ -1129,6 +1130,30 @@ describe('playerRange', () => {
   it('returns empty string when neither is declared', () => {
     expect(playerRange({})).toBe('');
     expect(playerRange(null)).toBe('');
+  });
+});
+
+describe('pluginRestoreWarning', () => {
+  const OFFERED = { id: 'word-rush', sourceId: 'official', status: 'upToDate', availableVersion: '1.2.0' };
+  const warning = 'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.';
+
+  it('says nothing when a source can re-supply the plugin', () => {
+    expect(pluginRestoreWarning(OFFERED)).toBeNull();
+    expect(pluginRestoreWarning({ ...OFFERED, status: 'updateAvailable' })).toBeNull();
+  });
+
+  it('warns for a plugin no catalog offers, however it got here', () => {
+    // A folder game, a hand-dropped .kbg and an uploaded one differ in how they arrived and not at all
+    // in what matters here: the copy on disk is the only copy.
+    expect(pluginRestoreWarning({ ...OFFERED, sourceId: 'games', availableVersion: null })).toBe(warning);
+    expect(pluginRestoreWarning({ ...OFFERED, sourceId: 'upload', availableVersion: null })).toBe(warning);
+    expect(pluginRestoreWarning({ ...OFFERED, status: 'installedOnly' })).toBe(warning);
+    expect(pluginRestoreWarning({ ...OFFERED, availableVersion: null })).toBe(warning);
+  });
+
+  it('warns rather than staying silent on an entry it cannot read', () => {
+    expect(pluginRestoreWarning(null)).toBe(warning);
+    expect(pluginRestoreWarning({})).toBe(warning);
   });
 });
 

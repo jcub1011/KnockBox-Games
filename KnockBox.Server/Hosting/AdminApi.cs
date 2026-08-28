@@ -11,6 +11,9 @@ using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using KnockBox.Server.Serialization;
 using KnockBox.Server.Webhooks;
+// Aliased, not imported: the namespace also carries a SameSiteMode that collides with
+// Microsoft.AspNetCore.Http.SameSiteMode, which the session cookie below uses.
+using ContentDispositionHeaderValue = Microsoft.Net.Http.Headers.ContentDispositionHeaderValue;
 
 namespace KnockBox.Server.Hosting;
 
@@ -122,14 +125,13 @@ internal static class AdminApi
             routes.MapGet("/admin/api/lobbies", RequireSession(options, ctx => Lobbies(ctx, options)));
             routes.MapGet("/admin/api/games", RequireSession(options, ctx => Games(ctx, options)));
             routes.MapGet("/admin/api/games/{id}/export",
-                (HttpContext ctx, string id) => RequireSession(options, inner => ExportGame(inner, options))(ctx));
+                RequireSession(options, ctx => ExportGame(ctx, options)));
             routes.MapGet("/admin/api/logs", RequireSession(options, ctx => Logs(ctx, options)));
             routes.MapGet("/admin/api/logs/files", RequireSession(options, ctx => LogFiles(ctx, options)));
             routes.MapGet("/admin/api/logs/files/{name}",
-                (HttpContext ctx, string name) => RequireSession(options, inner => DownloadLogFile(inner, options))(ctx));
+                RequireSession(options, ctx => DownloadLogFile(ctx, options)));
             routes.MapGet("/admin/api/packages/jobs", RequireSession(options, ctx => Jobs(ctx, options)));
-            routes.MapGet("/admin/api/packages/jobs/{jobId}",
-                (HttpContext ctx, string jobId) => RequireSession(options, inner => Job(inner, options))(ctx));
+            routes.MapGet("/admin/api/packages/jobs/{jobId}", RequireSession(options, ctx => Job(ctx, options)));
             routes.MapGet("/admin/api/marketplace/catalog", RequireSession(options, ctx => Catalog(ctx, options)));
             routes.MapGet("/admin/api/limits", RequireSession(options, ctx => Limits(ctx, options)));
             routes.MapGet("/admin/api/room-codes", RequireSession(options, ctx => RoomCodes(ctx, options)));
@@ -146,15 +148,15 @@ internal static class AdminApi
             routes.MapPost("/admin/api/lobbies/purge-stale",
                 RequireSession(options, WriteGuard(ctx => PurgeStale(ctx, options))));
             routes.MapPost("/admin/api/lobbies/{code}/close",
-                (HttpContext ctx, string code) => RequireSession(options, inner => CloseLobby(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => CloseLobby(ctx, options))));
             routes.MapPost("/admin/api/lobbies/{code}/kick",
-                (HttpContext ctx, string code) => RequireSession(options, inner => KickPlayer(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => KickPlayer(ctx, options))));
             routes.MapPost("/admin/api/games/rescan",
                 RequireSession(options, WriteGuard(ctx => Rescan(ctx, options))));
             routes.MapPost("/admin/api/games/{id}/availability",
-                (HttpContext ctx, string id) => RequireSession(options, inner => SetAvailability(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => SetAvailability(ctx, options))));
             routes.MapPost("/admin/api/games/{id}/delete",
-                (HttpContext ctx, string id) => RequireSession(options, inner => DeleteGame(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => DeleteGame(ctx, options))));
             routes.MapPost("/admin/api/maintenance",
                 RequireSession(options, WriteGuard(ctx => SetMaintenance(ctx, options))));
             routes.MapPost("/admin/api/limits",
@@ -180,11 +182,11 @@ internal static class AdminApi
             routes.MapPost("/admin/api/packages/upload",
                 RequireSession(options, WriteGuard(ctx => UploadPackage(ctx, options), MediaKind.Package)));
             routes.MapPost("/admin/api/packages/{id}/rollback",
-                (HttpContext ctx, string id) => RequireSession(options, inner => Rollback(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => Rollback(ctx, options))));
             routes.MapPost("/admin/api/packages/{id}/uninstall",
-                (HttpContext ctx, string id) => RequireSession(options, inner => Uninstall(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => Uninstall(ctx, options))));
             routes.MapPost("/admin/api/packages/jobs/{jobId}/cancel",
-                (HttpContext ctx, string jobId) => RequireSession(options, inner => CancelJob(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => CancelJob(ctx, options))));
 
             // ── Marketplace ──
             routes.MapPost("/admin/api/marketplace/install/{id}",
@@ -192,13 +194,13 @@ internal static class AdminApi
             routes.MapPost("/admin/api/marketplace/sources",
                 RequireSession(options, WriteGuard(ctx => AddSource(ctx, options))));
             routes.MapPost("/admin/api/marketplace/sources/{id}/delete",
-                (HttpContext ctx, string id) => RequireSession(options, inner => RemoveSource(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => RemoveSource(ctx, options))));
             routes.MapPost("/admin/api/marketplace/sources/{id}/enabled",
-                (HttpContext ctx, string id) => RequireSession(options, inner => SetSourceEnabled(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => SetSourceEnabled(ctx, options))));
             routes.MapPost("/admin/api/marketplace/check",
                 RequireSession(options, WriteGuard(ctx => CheckForUpdates(ctx, options))));
             routes.MapPost("/admin/api/packages/{id}/update-policy",
-                (HttpContext ctx, string id) => RequireSession(options, inner => SetUpdatePolicy(inner, options))(ctx));
+                RequireSession(options, WriteGuard(ctx => SetUpdatePolicy(ctx, options))));
         });
     }
 
@@ -580,11 +582,17 @@ internal static class AdminApi
 
         try
         {
-            var exportInfo = GamePackageExporter.GetExportInfo(location, options.Paths);
+            // Opened before a single header is written: everything that can fail — the walk, a per-file
+            // read, building the archive — fails here, where a clean refusal is still possible. Setting
+            // the headers first meant a mid-stream IOException logged a warning and handed the operator a
+            // truncated archive under HTTP 200.
+            await using var export = await GamePackageExporter.OpenAsync(location, options.Paths, ctx.RequestAborted);
             ctx.Response.StatusCode = StatusCodes.Status200OK;
-            ctx.Response.ContentType = exportInfo.ContentType;
-            ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{exportInfo.FileName}\"";
-            await GamePackageExporter.ExportAsync(location, options.Paths, ctx.Response.Body, ctx.RequestAborted);
+            ctx.Response.ContentType = export.ContentType;
+            // Known, so a short read is something the browser reports rather than saves.
+            ctx.Response.ContentLength = export.Length;
+            ctx.Response.Headers.ContentDisposition = Attachment(export.FileName);
+            await export.Content.CopyToAsync(ctx.Response.Body, ctx.RequestAborted);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
@@ -697,7 +705,7 @@ internal static class AdminApi
                 FileShare.ReadWrite | FileShare.Delete);
             ctx.Response.StatusCode = StatusCodes.Status200OK;
             ctx.Response.ContentType = "text/plain; charset=utf-8";
-            ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{Path.GetFileName(resolved)}\"";
+            ctx.Response.Headers.ContentDisposition = Attachment(Path.GetFileName(resolved));
             await stream.CopyToAsync(ctx.Response.Body, ctx.RequestAborted);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -2180,6 +2188,22 @@ internal static class AdminApi
 
     private static Task Accept(HttpContext ctx) =>
         WriteJson(ctx, KnockBoxProtocolContext.Default.AdminApiResponse, new AdminApiResponse(true));
+
+    /// <summary>
+    /// Builds an <c>attachment</c> Content-Disposition for a download.
+    /// </summary>
+    /// <remarks>
+    /// Through <see cref="ContentDispositionHeaderValue"/> rather than string interpolation, which is what
+    /// both download routes did: a game id is the folder name on disk, and on Linux that may contain a
+    /// double quote, which truncated the header at the quote. SetHttpFileName emits both the quoted ASCII
+    /// <c>filename</c> and the encoded <c>filename*</c>.
+    /// </remarks>
+    private static string Attachment(string fileName)
+    {
+        var disposition = new ContentDispositionHeaderValue("attachment");
+        disposition.SetHttpFileName(fileName);
+        return disposition.ToString();
+    }
 
     private static Task Refuse(HttpContext ctx, int status, string error) =>
         WriteJson(ctx, KnockBoxProtocolContext.Default.AdminApiResponse, new AdminApiResponse(false, error), status);

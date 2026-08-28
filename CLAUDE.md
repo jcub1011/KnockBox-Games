@@ -368,7 +368,12 @@ body" let a cross-site post through on a technicality *and* made `ReadJson` disc
 substituted its all-defaulted record (for `lobbies/close`: close every lobby on the server, answered
 `success: true`). The decision is a pure `WriteGuardRefusal`, kept free of `HttpContext` for the reason
 `OriginRouting` is — composing the route table needs thirty-odd dependencies, so otherwise the rule would
-be pinned only by the Docker job. Operator guide:
+be pinned only by the Docker job. That leaves whether a route still ASKS uncovered, and a rewrite of the
+route table duly dropped the wrapper from ten of them while their neighbours kept it, so nothing failed:
+`AdminRouteGuardTests` now reads `AdminApi.cs` and asserts every `MapPost` registration contains
+`WriteGuard(`, matched to the registration's own parens — a fixed line window runs into the next
+registration and reads a neighbour's guard as this route's, which is how the first version of that test
+passed against the very file it was written to fail on. Operator guide:
 `docs/ADMIN.md`.
 
 **Portal tabs** (six; the frontend is `web/admin/{index.html,admin.js,admin-core.js,admin.css}`, where
@@ -396,11 +401,32 @@ re-render a field mid-edit and throw away what the operator was typing. It reads
 and on Refresh. A jsdom test asserts it arms no timer, beside the one asserting the others do.
 
 **The marketplace tab's poll rate is split, and that split is the design.** `POLL_MS.marketplace = 3000`
-hits **only** the in-memory job feed; the catalog — which reaches the network with a 30-second timeout — is
-read on tab entry, on Refresh, and when a job reaches a terminal status (which is what flips a card from
-"Update to 1.3.0" to "Up to date" the moment it's true). That is also why it is a fifth tab rather than
-part of Game Catalog: one panel means one timer, and 20 s (a disk walk) and 3 s (a progress bar) have no
-common answer. `web/__tests__/admin-marketplace.test.js` asserts exactly this.
+hits only what this server already holds — the in-memory job feed and the local game list; the catalog,
+which reaches the network with a 30-second timeout, is read on tab entry, on Refresh, and when a job
+reaches a terminal status (which is what flips a card from "Update to 1.3.0" to "Up to date" the moment
+it's true). `web/__tests__/admin-marketplace.test.js` asserts exactly this.
+
+**`refreshActiveTab` is keyed on the visible PANEL, not on `activeTab`.** Each top tab renders several of
+the old tabs at once, so refreshing only the one `activeTab` names leaves the rest of the same screen
+frozen: Monitoring showed live counters above a lobby table fetched once on arrival, and scrolling down to
+Active Lobbies froze the counters instead. `enterTab` therefore does the cursor resets and the one read
+that is NOT on the poll path (`refreshCatalog`), and leaves the rest to `refreshActiveTab` — doing both
+fetched everything twice on entry.
+
+**`shell.test.js` runs entirely on a fake clock, and that is load-bearing.** Same root as the traps below
+— one `window` per file — but through timers rather than listeners: a **real** timer armed by one test's
+module copy is still pending when the next test starts, and its callback resolves `document.body` and
+`getElementById` against the DOM that exists **when it fires**, which is the next test's. The launch fade
+(220 ms) and the morph safety net (420 ms) both end by adding `body.in-game`, so a launch examined in one
+test dropped that class onto a test that had launched nothing, and the launch-overlay assertions read it as
+state they had caused. The launch block alone used to install its own fake clock, which stopped it *arming*
+leaky timers but not the rest of the file arming them **at** it — so it still failed about one run in three
+while passing every time the file ran alone. The file-level `beforeEach` now owns the clock and `afterEach`
+throws it away, which is what makes a timer unable to outlive the test that armed it. One production
+consequence worth knowing: a fake clock freezes `performance.now()` at 0, which caught `lastClickAt = 0` as
+the room-code button's "no previous click" sentinel — a value the clock really can report, so the first
+click read as a double-click. It is `-Infinity` now, which is also correct for the real clock's first
+quarter-second.
 
 **Two jsdom traps that file documents**, both from vitest reusing one `window` per file: every
 previously-imported copy of `admin.js` still holds its `hashchange` listener, so assigning
@@ -725,6 +751,19 @@ Tests are split for a reason: a real sharing violation is unreproducible on the 
 consults), so `AtomicFile.Retry` takes an injected operation for the portable tests, and the Windows-only
 pair feeds a real `File.Move` through that same seam — releasing the handle from *inside* the operation, so
 ordering is guaranteed rather than raced.
+
+**`MoveDirectoryWithRetry` is the same primitive for a whole tree, and the directory case is the worse
+one.** Windows denies a directory rename while **any** file anywhere beneath it is open without
+share-delete, so a folder of files written microseconds ago offers a scanner one chance to lose per file,
+not one per rename. `GamePackageInstaller.SwapIntoPlace` does exactly that shape — extract into
+`.staging/<id>-<guid>`, rename it over the live folder — and without the retry it failed with "Access to
+the path ….staging<id>-<guid> is denied" on roughly **one full test run in two**, a different package each
+time. All three of its renames use it (move-aside, publish, and the rollback that puts the previous version
+back). The log line said "it will be retried", and it was — but only on the next reconcile pass, which
+comes from a file event or the poll, so under the image's 10-second `GamesPollSeconds` that is a
+ten-second-late install, and for `PackageManager` it is long past the bounded wait on `Installed` that
+holds the lifecycle gate. Note `Directory.Move` has no overwrite form, which is why the caller moves the
+live folder aside rather than passing a flag.
 
 **Placing is not installing, and the lifecycle gate spans both.** `Place` only renames the `.kbg` and asks
 for a rescan; the extraction — and `SwapIntoPlace` moving the live directory aside — happens on a later

@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text.Json;
+using KnockBox.Server.Hosting;
 using KnockBox.Server.Serialization;
 
 namespace KnockBox.Server.Games;
@@ -561,6 +562,15 @@ public sealed class GamePackageInstaller(
     /// destination exists, and on Windows deleting a directory whose files are open throws (POSIX allows
     /// unlink-while-open), so deleting the live folder first would fail whenever a request happened to be
     /// streaming an asset. A leftover aside-folder is swept on the next pass.
+    ///
+    /// All three renames go through <see cref="AtomicFile.MoveDirectoryWithRetry"/> for the reason that
+    /// helper documents: on Windows a directory rename fails outright while any file beneath it is held
+    /// open without share-delete, and both directories here are ones this process has just finished
+    /// writing — the moment a real-time scanner is looking at them. Without the retry an install failed
+    /// with "Access to the path ... is denied", logged "it will be retried", and then genuinely was, on
+    /// the next pass — but a pass only comes from a file event or the poll, so under Docker's 10-second
+    /// poll that is a ten-second-late install, and for <see cref="PackageManager"/> it is long past the
+    /// bounded wait on <c>Installed</c> that holds the lifecycle gate.
     /// </remarks>
     private void SwapIntoPlace(string staging, string target)
     {
@@ -569,18 +579,18 @@ public sealed class GamePackageInstaller(
 
         if (Directory.Exists(target))
         {
-            Directory.Move(target, aside);
+            AtomicFile.MoveDirectoryWithRetry(target, aside);
             movedAside = true;
         }
 
         try
         {
-            Directory.Move(staging, target);
+            AtomicFile.MoveDirectoryWithRetry(staging, target);
         }
         catch when (movedAside)
         {
             // Put the previous version back rather than leaving the game missing entirely.
-            try { Directory.Move(aside, target); } catch { /* best effort: the next pass reinstalls */ }
+            try { AtomicFile.MoveDirectoryWithRetry(aside, target); } catch { /* best effort: the next pass reinstalls */ }
             throw;
         }
 

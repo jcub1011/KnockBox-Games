@@ -579,10 +579,12 @@ public sealed class GameCatalog : IDisposable
     }
 
     /// <summary>
-    /// Queues a debounced rediscovery. This is the ONLY way anything outside the class should ask for
-    /// a rescan: <see cref="Discover"/> has no mutual exclusion and publishes by reference, so two
-    /// concurrent runs could let the older scan win the swap and hide a just-installed game. Routing
-    /// every trigger through the single debounce timer keeps that impossible.
+    /// Queues a debounced rediscovery. This is the right call for anything EVENT-DRIVEN — a watcher
+    /// notification, a poll, an installer pass — because those arrive in bursts and the debounce
+    /// collapses the burst into one scan. <see cref="Discover"/> is serialized by its own gate, so
+    /// calling it directly no longer risks an older scan winning the swap and hiding a just-installed
+    /// game; but it walks every root inline, on whatever thread asked. Reach for it only when the
+    /// caller must observe the result within its own response (see AdminOperations.DeleteGame).
     /// </summary>
     public void ScheduleRescan()
     {

@@ -15,7 +15,7 @@ import {
   filterPlugins, filterSettings, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
-  noLimitOverrides, playerRange, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
+  noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
   sparklinePath, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
@@ -410,6 +410,13 @@ export function selectTopTab(topTabKey, { replaceHash = true, scroll = false } =
     }
   }
 
+  // A deep link names the tab, not a place inside it, so it lands at the top. The sidebar path scrolls
+  // to its target setting instead; without this, following #plugins landed wherever that panel happened
+  // to be left scrolled the last time it was open.
+  if (scroll) {
+    el(`tab-panel-${topTab}`)?.querySelector('.tab-scroll-container')?.scrollTo?.({ top: 0 });
+  }
+
   enterTab(activeTab, { force: true });
 }
 
@@ -687,11 +694,11 @@ function enterTab(tab, { force = false } = {}) {
   if (tab === 'marketplace' || tab === 'plugins' || tab === 'games') {
     jobCursor = 0;
     jobs = [];
+    // The one read that is NOT on the poll path — it reaches the network with a 30-second timeout —
+    // so arriving is one of the few moments it happens. Everything else this panel shows is
+    // refreshActiveTab's job; calling it here too just fetched each of them twice on entry.
     refreshCatalog();
-    refreshGames();
   }
-  if (tab === 'monitoring' || tab === 'overview') { refreshOverview(); refreshLobbies(); }
-  if (tab === 'platform' || tab === 'settings') { refreshPlatform(); }
   refreshActiveTab();
   startPolling();
 }
@@ -747,19 +754,29 @@ export function stopScrollSettle() {
   settleTimer = null;
 }
 
+/**
+ * The poll tick. Keyed on what the visible PANEL shows, not on which setting inside it is active —
+ * the four top tabs each render several of the old tabs at once, so refreshing one of them leaves the
+ * rest of the same screen frozen. Monitoring showed live counters above a lobby table fetched once on
+ * entry (an operator watching for a stuck lobby saw a list that never moved), and scrolling to Active
+ * Lobbies froze the counters and graphs instead.
+ *
+ * refreshCatalog stays off this path: it reaches the network with a 30-second timeout, and refreshJobs
+ * already re-reads it the moment a job goes terminal. See POLL_MS.
+ */
 async function refreshActiveTab() {
   switch (activeTab) {
     case 'overview':
     case 'monitoring':
-      await refreshOverview();
-      break;
     case 'lobbies':
+      await refreshOverview();
       await refreshLobbies();
       break;
     case 'games':
     case 'marketplace':
     case 'plugins':
       await refreshJobs();
+      await refreshGames();
       break;
     case 'logs':
       await refreshLogs();
@@ -1615,7 +1632,14 @@ export function openPluginDetails(entry) {
       const tbody = document.createElement('tbody');
       for (const b of entry.backups) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${formatVersion(b.version)}</td><td>${formatBytes(b.bytes)}</td><td>${formatDateTime(b.retainedAt)}</td>`;
+        // textContent, not innerHTML: b.version is parsed out of the backup filename, which is built
+        // from GameManifest.Version — a field a .kbg declares and nothing validates. Interpolated, a
+        // package could put script in this modal, on the admin origin, with the session cookie.
+        for (const text of [formatVersion(b.version), formatBytes(b.bytes), formatDateTime(b.retainedAt)]) {
+          const td = document.createElement('td');
+          td.textContent = text;
+          tr.appendChild(td);
+        }
         tbody.appendChild(tr);
       }
       table.appendChild(tbody);
@@ -1812,11 +1836,8 @@ async function setAvailability(game, state) {
 }
 
 async function deleteGame(game) {
-  const isManuallyUploaded = game.root === 'games' || game.packageRoot !== 'managed'
-    || !catalogData?.entries?.some((e) => e.id === game.id && e.sourceId);
-  const warning = isManuallyUploaded
-    ? 'This plugin was manually uploaded and may not be re-downloadable via the marketplace.'
-    : null;
+  // Same predicate as uninstallGame: the two had drifted into disagreeing about the same plugin.
+  const warning = pluginRestoreWarning(game);
   if (!await confirmAction(
     `Delete ${game.name} and all ${formatBytes(game.diskBytes)} of its files from disk? `
     + (game.activeLobbies > 0 ? `Its ${game.activeLobbies} running lobby/lobbies are closed first. ` : '')
@@ -2105,10 +2126,7 @@ function describeMode(mode, running) {
 
 async function uninstallGame(entry) {
   const running = entry.activeLobbies;
-  const isManuallyUploaded = !entry.sourceId || entry.status === 'installedOnly' || !entry.availableVersion;
-  const warning = isManuallyUploaded
-    ? 'This plugin was manually uploaded and may not be re-downloadable via the marketplace.'
-    : null;
+  const warning = pluginRestoreWarning(entry);
   if (!await confirmAction(
     `Uninstall ${entry.name || entry.id}? Its files, its cached assets and any retained versions are `
     + `deleted from disk${running > 0 ? `, and its ${running} running lobby/lobbies are closed` : ''}.`,

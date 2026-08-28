@@ -13,38 +13,57 @@ public static class GamePackageExporter
     public const string KbgContentType = "application/vnd.knockbox.game+zip";
     public const string ZipContentType = "application/zip";
 
-    public readonly record struct ExportInfo(string FileName, string ContentType);
+    /// <summary>
+    /// The oldest timestamp a ZIP entry can carry. <see cref="ZipArchiveEntry.LastWriteTime"/> throws
+    /// below it, and <see cref="File.GetLastWriteTimeUtc"/> answers 1601-01-01 for a file that no longer
+    /// exists — which a rescan or a reinstall running alongside an export makes entirely reachable.
+    /// </summary>
+    private static readonly DateTimeOffset ZipEpoch = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     /// <summary>
-    /// Determines the export filename and content type for a game.
+    /// An export that is fully built and ready to be copied out: the caller knows its name, type and
+    /// exact length before writing a single response byte.
     /// </summary>
-    public static ExportInfo GetExportInfo(GameCatalog.GameLocation location, ContentPaths.Resolved paths)
+    public sealed class OpenExport(string fileName, string contentType, long length, Stream content)
+        : IAsyncDisposable
     {
-        var id = location.Manifest.Id;
-        var package = GamePackageLocations.Find(paths, id);
-        if (package is { } found && File.Exists(found.Path))
-        {
-            return new ExportInfo($"{id}{GamePackage.Extension}", KbgContentType);
-        }
+        public string FileName { get; } = fileName;
+        public string ContentType { get; } = contentType;
+        public long Length { get; } = length;
+        public Stream Content { get; } = content;
 
-        return new ExportInfo($"{id}.zip", ZipContentType);
+        public ValueTask DisposeAsync() => Content.DisposeAsync();
     }
 
     /// <summary>
-    /// Exports the game at <paramref name="location"/> to <paramref name="destination"/>.
+    /// Opens the export for the game at <paramref name="location"/>.
     /// </summary>
-    public static async Task<ExportInfo> ExportAsync(
+    /// <remarks>
+    /// Open-then-stream rather than build-into-the-response, for two reasons that are really one. The
+    /// directory walk, a per-file read and the zip construction can all fail, and once a response has
+    /// started there is no way to say so: the browser saves a truncated archive under HTTP 200, which is
+    /// the worst possible outcome for a button offered as "keep a copy before you delete this". Failing
+    /// here means the caller has still sent nothing and can answer a clean refusal. It also means the
+    /// length is known, so a short read is something the browser can notice.
+    ///
+    /// The zip is built into a temp FILE, never a MemoryStream: a folder-installed WASM game runs to
+    /// hundreds of megabytes, which would otherwise be resident per concurrent export (and throws
+    /// outright past int.MaxValue). <see cref="FileOptions.DeleteOnClose"/> on the read handle ties its
+    /// lifetime to the response — disposing the <see cref="OpenExport"/> removes it.
+    /// </remarks>
+    public static async Task<OpenExport> OpenAsync(
         GameCatalog.GameLocation location,
         ContentPaths.Resolved paths,
-        Stream destination,
         CancellationToken cancellationToken = default)
     {
         var id = location.Manifest.Id;
-        var package = GamePackageLocations.Find(paths, id);
 
+        // Resolved ONCE. Looking it up again to stream after looking it up to name the download let a
+        // package removed in between produce a body that disagreed with its own Content-Disposition.
+        var package = GamePackageLocations.Find(paths, id);
         if (package is { } found && File.Exists(found.Path))
         {
-            await using var source = new FileStream(
+            var source = new FileStream(
                 found.Path,
                 FileMode.Open,
                 FileAccess.Read,
@@ -52,50 +71,66 @@ public static class GamePackageExporter
                 bufferSize: 81920,
                 useAsync: true);
 
-            await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
-            return new ExportInfo($"{id}{GamePackage.Extension}", KbgContentType);
+            return new OpenExport($"{id}{GamePackage.Extension}", KbgContentType, source.Length, source);
         }
 
         var sourceDir = location.Directory;
         if (!Directory.Exists(sourceDir))
             throw new DirectoryNotFoundException($"Game directory '{sourceDir}' does not exist.");
 
-        using var memory = new MemoryStream();
-        using (var archive = new ZipArchive(memory, ZipArchiveMode.Create, leaveOpen: true))
+        var temp = Path.Combine(Path.GetTempPath(), "kb-export-" + Guid.NewGuid().ToString("N") + ".zip");
+        try
         {
-            foreach (var filePath in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
+            await using (var writer = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var archive = new ZipArchive(writer, ZipArchiveMode.Create))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var relative = Path.GetRelativePath(sourceDir, filePath);
-
-                // Skip internal metadata/marker files
-                var fileName = Path.GetFileName(filePath);
-                if (fileName is PackageMarker.FileName or ".kb-precompress.index"
-                    || fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+                foreach (var filePath in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
                 {
-                    continue;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var relative = Path.GetRelativePath(sourceDir, filePath);
+
+                    // Skip internal metadata/marker files
+                    var fileName = Path.GetFileName(filePath);
+                    if (fileName is PackageMarker.FileName or ".kb-precompress.index"
+                        || fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var entryName = relative.Replace('\\', '/');
+                    var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+                    var stamp = File.GetLastWriteTimeUtc(filePath);
+                    entry.LastWriteTime = stamp.Year < 1980 ? ZipEpoch : new DateTimeOffset(stamp, TimeSpan.Zero);
+
+                    await using var fileStream = new FileStream(
+                        filePath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        bufferSize: 81920,
+                        useAsync: true);
+
+                    await using var entryStream = entry.Open();
+                    await fileStream.CopyToAsync(entryStream, cancellationToken).ConfigureAwait(false);
                 }
-
-                var entryName = relative.Replace('\\', '/');
-                var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
-                entry.LastWriteTime = File.GetLastWriteTimeUtc(filePath);
-
-                await using var fileStream = new FileStream(
-                    filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite,
-                    bufferSize: 81920,
-                    useAsync: true);
-
-                await using var entryStream = entry.Open();
-                await fileStream.CopyToAsync(entryStream, cancellationToken).ConfigureAwait(false);
             }
+
+            var read = new FileStream(
+                temp,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                bufferSize: 81920,
+                FileOptions.DeleteOnClose | FileOptions.Asynchronous);
+
+            return new OpenExport($"{id}.zip", ZipContentType, read.Length, read);
         }
-
-        memory.Position = 0;
-        await memory.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
-
-        return new ExportInfo($"{id}.zip", ZipContentType);
+        catch
+        {
+            // Nothing holds the temp file yet (the read handle is the last thing built), so a best-effort
+            // delete here is what keeps a failed export from leaving one behind.
+            try { File.Delete(temp); } catch { /* best effort */ }
+            throw;
+        }
     }
 }
