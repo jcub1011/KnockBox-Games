@@ -1151,6 +1151,21 @@ export const LIMIT_FIELDS = [
     key: 'maxLobbiesPerGame', label: 'Max lobbies per game', integer: true,
     hint: 'Stops one popular game consuming every remaining slot.',
   },
+  // The two server-authority knobs come last, and they come from a DIFFERENT provider on the server
+  // (AuthorityOptionsProvider, not LimitsProvider) — the wire is flat so this table stays the only place
+  // a field is declared. Note the label: 'Max lobbies (server-authority)' is not the platform cap above
+  // it, and the hints have to keep those two apart because nothing else on screen does.
+  {
+    key: 'authorityMaxLobbies', label: 'Max lobbies (server-authority)', integer: true,
+    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine — not the '
+      + 'platform cap above. Empty or 0 means unlimited, which is the default: the host (in Docker, the '
+      + 'container memory limit) is what bounds them until you set this.',
+  },
+  {
+    key: 'authorityModuleCacheIdleMinutes', label: 'Authority module cache idle (min)', integer: true,
+    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. '
+      + 'Costs one re-parse when someone next plays it. 0 keeps it until the server restarts.',
+  },
 ];
 
 /** The startup-only limits, with why each one is not editable here. */

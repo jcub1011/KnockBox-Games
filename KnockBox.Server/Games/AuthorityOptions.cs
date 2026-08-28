@@ -4,13 +4,18 @@ namespace KnockBox.Server.Games;
 /// Knobs for the server-authority sandbox (<c>KnockBox:Authority*</c> config; see
 /// docs/SERVER_AUTHORITY_DESIGN.md §8). The per-call constraints (memory / timeout / statements /
 /// recursion) bound what one module invocation can burn; <see cref="TickHzMax"/> clamps a module's
-/// requested tick rate and <see cref="MaxLobbies"/> bounds the aggregate — that is the v1 answer to
-/// a hot module (a shared scheduler is future work). Note <see cref="MaxMemoryBytes"/> is a
+/// requested tick rate and <see cref="MaxLobbies"/> bounds the aggregate when an operator sets it —
+/// that is the v1 answer to a hot module (a shared scheduler is future work). Note <see cref="MaxMemoryBytes"/> is a
 /// per-invocation allocation budget, not a cap on what an engine retains across calls: authority
 /// modules are operator-installed (dropped into games/), so the sandbox is defense-in-depth against
-/// buggy or compromised games, not arbitrary hostile uploads. Sizing note: MaxLobbies ×
-/// MaxMemoryBytes is the theoretical per-call ceiling (~3.2 GB at the defaults) — lower both on
-/// small hosts.
+/// buggy or compromised games, not arbitrary hostile uploads.
+///
+/// Sizing note: <see cref="MaxLobbies"/> defaults to <b>0 (unlimited)</b>, so nothing server-side
+/// refuses the hundredth concurrent authority lobby — concurrent engines are bounded by the host, and
+/// in Docker by the container memory limit, where the GC pushes back rather than the server refusing.
+/// That is deliberate: a default refusal nobody configured is worse than a host-level bound. Set
+/// MaxLobbies (from the admin portal, which persists it) when you want the server to refuse *before*
+/// the GC starts fighting; MaxLobbies × MaxMemoryBytes is then the theoretical per-call ceiling.
 /// </summary>
 public sealed record AuthorityOptions(
     // Master switch. When false, creating a lobby for a serverAuthority game fails with a clear
@@ -34,8 +39,14 @@ public sealed record AuthorityOptions(
     // Actor inbound channel bound. Two-tier overflow: intents drop with a warning (client
     // resyncs), ticks coalesce, roster work is never dropped.
     int QueueCapacity,
-    // Cap on concurrent server-authority lobbies (0 = unlimited).
-    int MaxLobbies)
+    // Cap on concurrent server-authority lobbies (0 = unlimited, and the default). Read LIVE via
+    // AuthorityOptionsProvider, so a portal edit applies to the next lobby rather than the next restart.
+    int MaxLobbies,
+    // How long a game's shared parsed authority module may sit unused before the cache stops holding it
+    // (0 = keep for the process lifetime). Defaulted rather than required so the one test that builds this
+    // record by hand keeps compiling; FromConfiguration is the only caller with a policy to state.
+    // Also read live — see AuthorityModuleCache.EvictIdle and ServerAuthorityManager.SweepModuleCache.
+    TimeSpan ModuleCacheIdle = default)
 {
     public const long DefaultMaxScriptBytes = 1_048_576;
     public const long DefaultMaxWordFileBytes = 33_554_432;
@@ -50,5 +61,8 @@ public sealed record AuthorityOptions(
         config.GetValue("KnockBox:AuthorityMaxScriptBytes", DefaultMaxScriptBytes),
         config.GetValue("KnockBox:AuthorityMaxWordFileBytes", DefaultMaxWordFileBytes),
         config.GetValue("KnockBox:AuthorityQueueCapacity", 256),
-        config.GetValue("KnockBox:AuthorityMaxLobbies", 100));
+        // 0 = unlimited. See the sizing note above: the host (and the container's memory limit) is the
+        // bound by default, and an operator who wants a hard refusal sets this from the portal.
+        config.GetValue("KnockBox:AuthorityMaxLobbies", 0),
+        TimeSpan.FromMinutes(config.GetValue("KnockBox:AuthorityModuleCacheIdleMinutes", 30)));
 }

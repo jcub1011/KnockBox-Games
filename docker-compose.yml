@@ -69,8 +69,12 @@ services:
       - "127.0.0.1:8082:8082"
     # Cap container memory so .NET sizes its (Server) GC heaps and collects against the cgroup budget
     # instead of the host's full RAM — the main lever on "RSS climbs and stays high" as
-    # server-authority Jint engines come and go. Tune to your host; raise if you run many concurrent
-    # authority lobbies (each holds a Jint engine — see KnockBox__AuthorityMaxLobbies).
+    # server-authority Jint engines come and go. Tune to your host.
+    #
+    # This IS the bound on concurrent authority lobbies by default: KnockBox__AuthorityMaxLobbies ships at
+    # 0 (unlimited), so nothing server-side refuses the hundredth one and the GC is what pushes back. If
+    # you would rather the server refuse cleanly before that happens, set the cap — from the admin portal
+    # (Platform → Limits & Caps), which persists it, or here as a starting value.
     mem_limit: 1g
     volumes:
       # The server only READS the games dir (hence :ro), so it can be any stable host path and

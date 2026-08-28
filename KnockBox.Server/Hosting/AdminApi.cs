@@ -72,6 +72,9 @@ internal static class AdminApi
         MetricHistory History,
         int MetricSampleSeconds,
         LimitsProvider Limits,
+        // The server-authority half of the same form. Named AuthorityLimits rather than Authority because
+        // that name is already taken above by AuthorityMetrics, which is a different thing entirely.
+        AuthorityOptionsProvider AuthorityLimits,
         // Null when KnockBox:WebhooksEnabled is false — the same nullable-when-disabled precedent as
         // Marketplace. Registered endpoints are still listed; the mutating routes refuse with 409.
         WebhookDispatcher? Webhooks,
@@ -1512,10 +1515,13 @@ internal static class AdminApi
         var provider = options.Limits;
         var overrides = provider.Overrides;
         var startup = provider.Configured;
+        // Two providers behind one flat response: the connection limits and the server-authority knobs are
+        // different records enforced in different places, but they are one form on the operator's screen.
+        var authority = options.AuthorityLimits;
         return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminLimitsResponse, new AdminLimitsResponse(
-            Defaults: Values(startup),
-            Effective: Values(provider.Current),
-            Overridden: OverriddenKeys(overrides),
+            Defaults: Values(startup, authority.Configured),
+            Effective: Values(provider.Current, authority.Current),
+            Overridden: OverriddenKeys(overrides, authority.Overrides),
             // Reported read-only. The portal shows them greyed with the reason rather than omitting them:
             // an operator looking for "handshake timeout" and not finding it assumes the portal is
             // incomplete, where a disabled field with "set in configuration" answers the question.
@@ -1524,17 +1530,23 @@ internal static class AdminApi
             AdminLoginAttemptsPerMinute: startup.AdminLoginAttemptsPerMinute,
             AdminLoginAttemptsPerMinuteGlobal: startup.AdminLoginAttemptsPerMinuteGlobal,
             ActiveLobbies: options.Lobbies.Count,
-            ConnectedPlayers: options.Connections.ControlCount));
+            ConnectedPlayers: options.Connections.ControlCount,
+            // Zero when server-authority is switched off entirely: Authorities is a metric, not a
+            // dependency, and a portal that failed to render because nobody ships an authority game would
+            // be a worse answer than two honest zeroes.
+            AuthorityModulesCached: options.Authorities?.CachedModules ?? 0,
+            AuthorityModulesEvicted: options.Authorities?.EvictedModules ?? 0));
 
-        static AdminLimitValues Values(ServerLimits limits) => new(
+        static AdminLimitValues Values(ServerLimits limits, AuthorityOptions authority) => new(
             limits.GameMessagesPerSecond, limits.GameMessagesBurst,
             limits.ControlMessagesPerSecond, limits.ControlMessagesBurst,
             limits.LobbyCreatesPerMinute, limits.MaxConnectionsPerIp,
-            limits.MaxLobbies, limits.MaxLobbiesPerGame);
+            limits.MaxLobbies, limits.MaxLobbiesPerGame,
+            authority.MaxLobbies, (int)authority.ModuleCacheIdle.TotalMinutes);
 
-        static IReadOnlyList<string> OverriddenKeys(OperatorLimits o)
+        static IReadOnlyList<string> OverriddenKeys(OperatorLimits o, OperatorAuthorityOptions a)
         {
-            var keys = new List<string>(8);
+            var keys = new List<string>(10);
             if (o.GameMessagesPerSecond is not null) keys.Add("gameMessagesPerSecond");
             if (o.GameMessagesBurst is not null) keys.Add("gameMessagesBurst");
             if (o.ControlMessagesPerSecond is not null) keys.Add("controlMessagesPerSecond");
@@ -1543,6 +1555,8 @@ internal static class AdminApi
             if (o.MaxConnectionsPerIp is not null) keys.Add("maxConnectionsPerIp");
             if (o.MaxLobbies is not null) keys.Add("maxLobbies");
             if (o.MaxLobbiesPerGame is not null) keys.Add("maxLobbiesPerGame");
+            if (a.MaxLobbies is not null) keys.Add("authorityMaxLobbies");
+            if (a.ModuleCacheIdleMinutes is not null) keys.Add("authorityModuleCacheIdleMinutes");
             return keys;
         }
     }
@@ -1556,36 +1570,59 @@ internal static class AdminApi
             body.ControlMessagesPerSecond, body.ControlMessagesBurst,
             body.LobbyCreatesPerMinute, body.MaxConnectionsPerIp,
             body.MaxLobbies, body.MaxLobbiesPerGame);
+        var authorityOverrides = new OperatorAuthorityOptions(
+            body.AuthorityMaxLobbies, body.AuthorityModuleCacheIdleMinutes);
 
         // 400, not 409: an out-of-range number or a burst that would refuse every message is a bad
         // request, not a state conflict. The message names the field and the range, matching how the
         // availability and update-policy routes enumerate their legal values.
+        //
+        // BOTH are validated before EITHER is persisted. One form posts one body, so a bad server-authority
+        // value must not leave the connection limits half-applied with nothing on screen saying so.
         if (overrides.Validate(options.Limits.Configured) is { } error)
         {
             await Refuse(ctx, StatusCodes.Status400BadRequest, error);
+            return;
+        }
+        if (authorityOverrides.Validate() is { } authorityError)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, authorityError);
             return;
         }
 
         // Persist first, then publish — both happen regardless of whether the write succeeded, which is
         // the store's contract: a change is in effect even when it can't be saved.
         var warning = options.Settings.SetLimits(overrides);
+        var authorityWarning = options.Settings.SetAuthorityLimits(authorityOverrides);
         options.Limits.Apply(overrides);
+        options.AuthorityLimits.Apply(authorityOverrides);
 
         var effective = options.Limits.Current;
-        var detail = overrides.IsEmpty
+        var detail = overrides.IsEmpty && authorityOverrides.IsEmpty
             ? "Every limit is back to its default."
-            : Applied(effective, options.Lobbies);
-        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: detail));
+            : Applied(effective, options.AuthorityLimits.Current, options.Lobbies, options.Authorities);
+        // Both setters write the same file, so at most one of them has anything new to report.
+        await WriteAction(ctx, new AdminActionResponse(
+            true, Warning: warning ?? authorityWarning, Detail: detail));
 
         // What the operator most needs told: the change reached sockets that were already open (that is
         // the whole point), but a lowered cap never tears anything down — it refuses the next one.
-        static string Applied(ServerLimits effective, LobbyManager lobbies)
+        static string Applied(
+            ServerLimits effective, AuthorityOptions authority, LobbyManager lobbies,
+            ServerAuthorityManager? authorities)
         {
             var note = "In force now, including for connections that are already open.";
             if (effective.MaxLobbies > 0 && lobbies.Count > effective.MaxLobbies)
                 note += $" {lobbies.Count} lobbies are already running, above the new cap of " +
                         $"{effective.MaxLobbies} — they continue until they finish; no new ones start " +
                         "until the count falls below it.";
+            // Says "server-authority lobbies" throughout, so it can never be read as the platform cap above
+            // it: the two count different things and both can be over at the same time.
+            if (authority.MaxLobbies > 0 && authorities is not null &&
+                authorities.ActorCount > authority.MaxLobbies)
+                note += $" {authorities.ActorCount} server-authority lobbies are already running, above " +
+                        $"the new cap of {authority.MaxLobbies} — same rule: they finish, and no new ones " +
+                        "start until the count falls below it.";
             return note;
         }
     }

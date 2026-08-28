@@ -399,10 +399,21 @@ public sealed record AdminMarketplaceResponse(
 // ── Platform limits ──────────────────────────────────────────────────────────
 
 /// <summary>
-/// The eight limits an operator may change at runtime. Values only — the labels and hints the portal
+/// The ten limits an operator may change at runtime. Values only — the labels and hints the portal
 /// renders live in <c>admin-core.js</c>, the same split every other control here uses, so the wire
 /// carries policy rather than presentation.
 /// </summary>
+/// <remarks>
+/// Flat, though the values come from <b>two</b> providers: the first eight are <c>ServerLimits</c> via
+/// <c>LimitsProvider</c>, the last two <c>AuthorityOptions</c> via <c>AuthorityOptionsProvider</c>. Keeping
+/// one flat shape is what lets the portal add a knob by adding one entry to its field table and nothing
+/// else; nesting would buy tidiness on the wire and cost that everywhere.
+///
+/// <b><see cref="MaxLobbies"/> and <see cref="AuthorityMaxLobbies"/> are different caps.</b> The first is
+/// every lobby on the platform; the second counts only lobbies whose game runs a server-side module, each
+/// of which holds a Jint engine. They are read from different config keys and enforced in different places,
+/// and the portal labels them so that they cannot be read as one setting shown twice.
+/// </remarks>
 public sealed record AdminLimitValues(
     double GameMessagesPerSecond,
     double GameMessagesBurst,
@@ -411,7 +422,9 @@ public sealed record AdminLimitValues(
     int LobbyCreatesPerMinute,
     int MaxConnectionsPerIp,
     int MaxLobbies,
-    int MaxLobbiesPerGame);
+    int MaxLobbiesPerGame,
+    int AuthorityMaxLobbies,
+    int AuthorityModuleCacheIdleMinutes);
 
 /// <summary>
 /// The default limits, the ones actually in force, and which of them the operator changed.
@@ -425,6 +438,10 @@ public sealed record AdminLimitValues(
 /// which would call an override that happens to match the default "not overridden".</param>
 /// <param name="ActiveLobbies">So the portal can warn when a new cap is already below what's running:
 /// existing lobbies are never torn down by a cap, they just aren't replaced.</param>
+/// <param name="AuthorityModulesCached">Parsed authority modules the server is currently holding, and how
+/// many idle ones it has dropped since startup. Reported here because this is the only screen that shows
+/// the idle window, and "is my window doing anything?" is the only question anyone asks about it.
+/// Cumulative and never reset, like every other counter — a rate needs two samples.</param>
 public sealed record AdminLimitsResponse(
     AdminLimitValues Defaults,
     AdminLimitValues Effective,
@@ -434,7 +451,9 @@ public sealed record AdminLimitsResponse(
     int AdminLoginAttemptsPerMinute,
     int AdminLoginAttemptsPerMinuteGlobal,
     int ActiveLobbies,
-    int ConnectedPlayers);
+    int ConnectedPlayers,
+    int AuthorityModulesCached,
+    long AuthorityModulesEvicted);
 
 // ── Room codes ───────────────────────────────────────────────────────────────
 
@@ -627,4 +646,6 @@ public sealed record AdminLimitsRequest(
     int? LobbyCreatesPerMinute = null,
     int? MaxConnectionsPerIp = null,
     int? MaxLobbies = null,
-    int? MaxLobbiesPerGame = null);
+    int? MaxLobbiesPerGame = null,
+    int? AuthorityMaxLobbies = null,
+    int? AuthorityModuleCacheIdleMinutes = null);

@@ -455,6 +455,51 @@ between the policy gate and `LeaveLobbiesExcept` — *not* behind `IPlatformPoli
 implementation knows anything about live lobbies while that method already holds the manager that does, and
 that ordering is what stops a refused player also losing the lobby they were in.
 
+**The server-authority knobs get a SECOND provider, not more fields on `OperatorLimits`.**
+`Games/AuthorityOptionsProvider.cs` + `Games/OperatorAuthorityOptions.cs` mirror the pair above for
+`AuthorityOptions`. Folding them in was rejected twice over: `OperatorLimits.ApplyTo` targets `ServerLimits`
+and members it silently ignored would make its central invariant a lie, and `ServerLimits.MaxLobbies` (every
+lobby) and `AuthorityMaxLobbies` (only those holding a Jint engine) are **different caps read from different
+config keys** that can never merge. They are persisted as their own `"authority"` object beside `"limits"`,
+because that key means "`ServerLimits` overrides" to anyone hand-editing the file. But the **wire is flat** —
+both ride the existing `/admin/api/limits` GET/POST as extra keys on `AdminLimitValues`, which is what keeps
+"a knob is one entry in `LIMIT_FIELDS` and nothing else client-side" true and buys no new card, route or
+`index.html` change. The cost is that the two lobby caps land on one card, so labels, hints and a pinned
+`admin-core.test.js` case are what keep them apart. Only **two** authority knobs are editable, and the
+omissions are the interesting part: the four per-call constraints are baked into `new Engine(...)`, so an
+edit reaching only later lobbies would be a knob that lies about when it applies; `MaxScriptBytes` /
+`MaxWordFileBytes` are captured by `GameCatalog`'s constructor at discovery; `Enabled` / `TickHzMax` /
+`QueueCapacity` are read at lobby construction. `TryStart` snapshots the live record **once** at the top and
+hands that snapshot onward, so a running lobby's budgets never shift underneath it. The provider reaches
+`ServerAuthorityManager` as an **optional trailing parameter** (the `AuthorityMetrics? metrics = null`
+precedent), which is why the four tests that build a manager directly needed no edit.
+
+**`AuthorityMaxLobbies` defaults to `0` (unlimited), and that is a decision, not an omission.** It used to be
+100. A refusal nobody configured is worse than letting the host bound it — in Docker `mem_limit`, where the
+GC pushes back rather than the server turning players away — so the cap is now opt-in, which is exactly why
+making it reachable from the portal mattered. Anything claiming "`AuthorityMaxLobbies` bounds the aggregate"
+now needs "once an operator sets it".
+
+**Idle-evicting the shared parsed module: the in-use set is the load-bearing part.**
+`AuthorityModuleCache` already shared one `Engine.PrepareModule` result per game across every lobby engine,
+lazily, but only `Prune` (wired to `GameCatalog.Discovered`) ever dropped one — so a game played once at boot
+held its AST for the process lifetime. `EvictIdle(inUse, window)` fixes that, swept once a minute from
+`ServerAuthorityManager.SweepModuleCache`. A plain last-`Get` timestamp would be **wrong**: `Get` runs once
+per lobby at `Initialize`, so a game with fifty live lobbies carries the same stamp as one nobody has touched
+since boot, and the busiest game on the server would be evicted first. So the sweep *refreshes* the stamp for
+in-use paths, and the in-use set is read off `_actors` — whose value is now an `Actor(ServerAuthority,
+ModulePath)` pair rather than a second dictionary keyed by the same lobby id, because two dictionaries cannot
+be swapped together (the `GameCatalog` rule). Removal is value-comparing `TryRemove`, so a `Get` racing the
+sweep doesn't lose the parse it just paid for. The **cadence is fixed while the window is read live** —
+deriving the interval from the window is precisely the trap that forced `DisconnectGraceSeconds` to stay
+startup-only, and the timer is armed even at a window of `0` so eviction can be switched on without a
+restart. An `Acquire`/`Release` refcount was tried and rejected: `Initialize` can throw its size check
+*before* reaching `Get`, and `Dispose` runs on both the load-failure and teardown paths, so the pairing is
+fiddly and silently wrong when it isn't. Finally, **eviction is not disposal**: `Prepared<Module>` is not
+`IDisposable`, each engine holds its own reference, and the honest claim is "stopped holding the parsed AST",
+never "returned N MB". It is also *small* — a few-KB module has a tens-of-KB AST — which is why the plan that
+added it said so rather than selling it as the answer to a large RSS.
+
 **Banned room codes are globs, deliberately not regexes.** `Lobby/RoomCodeFilter.cs` compiles two operator
 lists — substring `words` and whole-code `patterns` (`?`/`*`) — and `LobbyManager` reads it per draw, so an
 edit applies to the next lobby. A blocked draw is **re-drawn without consuming one of the five placement
@@ -935,6 +980,30 @@ lock-guarded) is the owner holding kick/open powers, reassignable by the module 
 a module throw is contained (drop + re-broadcast snapshot; 5 in a row → fatal), a constraint
 violation is fatal (`LobbyClosed`, sockets aborted). See `docs/SERVER_AUTHORITY_DESIGN.md` and
 GAME_DEVELOPER_GUIDE §5b. Knobs: `Authority*` (§Configuration).
+
+**Nothing in `JsAuthorityRuntime` compiles a source string any more**, and each removal used a host API
+verified against Jint 4.11 rather than assumed: `JsValue.IsCallable()` replaces a compiled
+`(v) => typeof v === 'function'` plus nine `engine.Call`s (it is an `ICallable` test, which matches
+`typeof` for plain functions, arrows, classes, bound functions and callable proxies alike);
+`engine.Intrinsics.Object.Get("freeze")` replaces `Evaluate("Object.freeze")`; and `engine.Global.Delete("Date")`
+replaces `Evaluate("delete globalThis.Date")` — `Engine.Realm` is still not public in 4.11, but
+`Engine.Global` is and it *is* the global object, so the old comment saying otherwise was wrong. These are
+latency and allocation wins on the lobby-create path (~5 KB retained per lobby), **not** a fix for a large
+RSS; don't let a future summary claim otherwise.
+
+**`RegexTimeout` is a PREPARATION option, and getting that wrong is why this was broken.** Jint's default is
+**10 seconds** against a 250 ms `AuthorityCallTimeoutMs`, and `TimeoutInterval` is checked *between*
+statements so it cannot interrupt a single `Regex.IsMatch` — one catastrophically-backtracking literal in a
+module owned its lobby's drain task for 40x the budget while the bounded channel backed up. Setting
+`.RegexTimeoutInterval(...)` on the engine **does not fix it**: a literal like `/(a+)+b/` is compiled to a
+`Regex` at `Engine.PrepareModule` time, carrying whatever timeout it was given then, so the fix is
+`ModulePreparationOptions.ParsingOptions.RegexTimeout` inside `AuthorityModuleCache.Get`. Both are set — the
+engine-level one still covers regexes a module builds at runtime with `new RegExp(...)`. No `Invoke`
+catch-clause change was needed: `RegexMatchTimeoutException` derives from `TimeoutException`, which the
+constraint tuple already matches. A test pins the *duration*, which is the part that was wrong.
+An open question left deliberately unaddressed: `Options.StringCompilationAllowed` defaults to `true`, so a
+module can still `eval()` and `new Function(src)`. `.DisableStringCompilation(true)` would close it; not done
+because it could break a legitimate module and the threat model is operator-installed, defense-in-depth.
 
 **Shared word dictionaries (`kb.words`)**: a game declares immutable word lists in `GAME.json`
 (`authorityWords: { "<key>": { file, caseInsensitive } }`, validated like `serverAuthority` + a size

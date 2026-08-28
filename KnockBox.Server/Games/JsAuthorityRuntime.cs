@@ -66,26 +66,36 @@ public sealed class JsAuthorityRuntime(
                 .Strict()
                 .LimitMemory(options.MaxMemoryBytes)
                 .TimeoutInterval(options.CallTimeout)
+                // Jint's own default here is TEN SECONDS, against a 250ms call budget. TimeoutInterval is
+                // checked BETWEEN statements, so it cannot interrupt a single Regex.IsMatch: without this
+                // line one catastrophically-backtracking regex in a module owns the lobby's drain task for
+                // 40x the budget while its bounded channel backs up behind it. (The resulting
+                // RegexMatchTimeoutException derives from TimeoutException, so Invoke below already
+                // classifies it as a constraint trip — only the duration was wrong.)
+                .RegexTimeoutInterval(options.CallTimeout)
                 .MaxStatements(options.MaxStatements)
                 .LimitRecursion(options.RecursionLimit));
             _engine = engine;
             _parser = new JsonParser(engine);
             _serializer = new JsonSerializer(engine);
 
-            // Scrub ambient time BEFORE the module's top-level code can run and capture it.
-            // (Engine.Realm is not public in Jint 4.11; deleting a globalThis PROPERTY is legal even
-            // in strict mode — only unqualified `delete Date` isn't.)
-            engine.Evaluate("delete globalThis.Date");
+            // Scrub ambient time BEFORE the module's top-level code can run and capture it. Engine.Realm is
+            // not public in Jint 4.11, but Engine.Global is, and it IS the global object — so this is a
+            // direct property delete with no source string to parse per lobby.
+            engine.Global.Delete("Date");
 
             // Register the SHARED prepared module (parsed once, reused across every lobby engine of
             // this game) rather than re-reading and re-parsing the file per lobby. The size cap was
             // already enforced above; the cache only parses/caches.
-            engine.Modules.Add("authority", b => b.AddModule(modules.Get(scriptPath)));
+            engine.Modules.Add("authority", b => b.AddModule(modules.Get(scriptPath, options.CallTimeout)));
             var ns = engine.Modules.Import("authority");
 
+            // JsValueExtensions.IsCallable is exactly `typeof v === 'function'` for everything that can turn
+            // up here — plain functions, arrows, class constructors, bound functions and callable proxies all
+            // answer true, callable-less objects false — so the nine round trips through a compiled
+            // `(v) => typeof v === 'function'` (one here, eight below) buy nothing over a CLR type test.
             var create = ns.Get("createAuthority");
-            var isFunction = engine.Evaluate("(v) => typeof v === 'function'");
-            if (!engine.Call(isFunction, create).AsBoolean())
+            if (!create.IsCallable())
                 throw new AuthorityLoadException("Authority module must export a createAuthority(kb) function.");
 
             Config = ParseConfig(engine, ns.Get("config"));
@@ -97,7 +107,7 @@ public sealed class JsAuthorityRuntime(
 
             var exports = new HashSet<string>(StringComparer.Ordinal);
             foreach (var hook in RequiredHooks.Concat(OptionalHooks))
-                if (engine.Call(isFunction, instance.Get(hook)).AsBoolean())
+                if (instance.Get(hook).IsCallable())
                     exports.Add(hook);
             var missing = RequiredHooks.Where(h => !exports.Contains(h)).ToList();
             if (missing.Count > 0)
@@ -201,8 +211,10 @@ public sealed class JsAuthorityRuntime(
         var words = BuildWords(engine);
         kb.Set("words", words);
 
-        // Freeze so a buggy module can't repoint capabilities mid-game.
-        var freeze = engine.Evaluate("Object.freeze");
+        // Freeze so a buggy module can't repoint capabilities mid-game. Engine.Intrinsics.Object is the
+        // realm's Object constructor, so Object.freeze is reachable as a property read — the previous
+        // `engine.Evaluate("Object.freeze")` compiled that one expression afresh for every lobby.
+        var freeze = engine.Intrinsics.Object.Get("freeze");
         engine.Call(freeze, log);
         engine.Call(freeze, words);
         engine.Call(freeze, kb);

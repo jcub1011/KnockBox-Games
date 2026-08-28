@@ -27,6 +27,8 @@ const DEFAULTS = {
   controlMessagesPerSecond: 5, controlMessagesBurst: 10,
   lobbyCreatesPerMinute: 10, maxConnectionsPerIp: 32,
   maxLobbies: 0, maxLobbiesPerGame: 0,
+  // The server-authority pair, which the same flat response carries from a second provider.
+  authorityMaxLobbies: 0, authorityModuleCacheIdleMinutes: 30,
 };
 
 function limits(overrides = {}, effective = {}) {
@@ -37,6 +39,7 @@ function limits(overrides = {}, effective = {}) {
     handshakeTimeoutSeconds: 10, disconnectGraceSeconds: 60,
     adminLoginAttemptsPerMinute: 10, adminLoginAttemptsPerMinuteGlobal: 60,
     activeLobbies: 3, connectedPlayers: 7,
+    authorityModulesCached: 0, authorityModulesEvicted: 0,
   };
 }
 
@@ -139,7 +142,7 @@ describe('limits form', () => {
     expect(limitInput('maxLobbies').value).toBe('40');
     expect(el('limits-badge').hidden).toBe(false);
     expect(el('limits-reset').disabled).toBe(false);
-    expect(el('limits-note').textContent).toContain('1 of 8');
+    expect(el('limits-note').textContent).toContain('1 of 10');
   });
 
   it('reports the startup-only limits read-only rather than hiding them', async () => {
@@ -176,6 +179,39 @@ describe('limits form', () => {
     // Zero would mean "disable this limit" — a completely different instruction from "leave it alone".
     expect(post.body.maxLobbies).toBeNull();
     expect(post.body.gameMessagesBurst).toBeNull();
+  });
+
+  it('saves the server-authority knobs on the same POST as the connection limits', async () => {
+    await openPlatform();
+
+    // They come from a different provider server-side but ride the one flat body, which is what lets the
+    // portal declare a knob in LIMIT_FIELDS and nowhere else. If the wire ever nests them, this fails.
+    expect(limitInput('authorityMaxLobbies')).toBeTruthy();
+    expect(limitInput('authorityModuleCacheIdleMinutes')).toBeTruthy();
+
+    limitInput('authorityModuleCacheIdleMinutes').value = '5';
+
+    el('limits-save').click();
+    await tick();
+    await tick();
+
+    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/limits');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.authorityModuleCacheIdleMinutes).toBe(5);
+    // Untouched, so cleared rather than pinned to whatever was showing — same rule as every other field.
+    expect(posts[0].body.authorityMaxLobbies).toBeNull();
+  });
+
+  it('confirms before capping server-authority lobbies, which refuses players like any other cap', async () => {
+    await openPlatform();
+    limitInput('authorityMaxLobbies').value = '1';
+
+    el('limits-save').click();
+    await tick();
+
+    // The confirmation exists because a cap is felt immediately by everyone connected. An authority cap
+    // refuses lobby creation exactly like the platform cap, so it earns the same prompt.
+    expect(document.body.textContent).toContain('Apply Limits');
   });
 
   it('refuses a burst below one against a live rate without asking the server', async () => {

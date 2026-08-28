@@ -33,7 +33,7 @@ public class JsAuthorityRuntimeTests : IDisposable
     private static readonly IReadOnlyDictionary<string, IWordPool> NoWords = new Dictionary<string, IWordPool>();
     // Shared across a test's Loads, exactly as the singleton manager shares one across all lobbies.
     // Each Load writes a unique path, so entries never collide.
-    private readonly AuthorityModuleCache _modules = new();
+    private readonly AuthorityModuleCache _modules = new(TimeProvider.System);
 
     private JsAuthorityRuntime Load(string moduleSource, AuthorityOptions? opts = null,
         TimeProvider? time = null, string playersJson = """[{"id":"p1","displayName":"Ann"}]""",
@@ -373,5 +373,53 @@ public class JsAuthorityRuntimeTests : IDisposable
             """);
 
         Assert.Throws<AuthorityScriptException>(() => runtime.Invoke("applyIntent", "\"p1\"", "{}"));
+    }
+
+    [Fact]
+    public void Kb_log_is_frozen_against_capability_swaps()
+    {
+        // The third frozen object, and the one nothing pinned: kb and kb.words each had a test, kb.log
+        // didn't. Repointing kb.log.error is how a module makes its own failures stop reaching the
+        // operator's log, so it is worth the same guarantee as the other two.
+        var runtime = Load("""
+            export function createAuthority(kb) {
+              return {
+                init() {},
+                applyIntent() { kb.log.error = function () {}; return null; },
+                snapshot() { return {}; },
+              };
+            }
+            """);
+
+        Assert.Throws<AuthorityScriptException>(() => runtime.Invoke("applyIntent", "\"p1\"", "{}"));
+    }
+
+    [Fact]
+    public void A_backtracking_regex_trips_the_call_budget_rather_than_Jints_ten_second_default()
+    {
+        // Jint's own Constraints.RegexTimeout default is TEN SECONDS. TimeoutInterval is checked BETWEEN
+        // statements, so it cannot interrupt a single Regex.IsMatch — without an explicit
+        // RegexTimeoutInterval, one catastrophically-backtracking regex owns the lobby's drain task for
+        // 40x the call budget at the shipped defaults, while its bounded channel backs up behind it.
+        var runtime = Load("""
+            export function createAuthority() {
+              return {
+                init() {},
+                applyIntent() { return /(a+)+b/.test('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX'); },
+                snapshot() { return {}; },
+              };
+            }
+            """, opts: Opts(timeoutMs: 100));
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        // Fatal, not contained: RegexMatchTimeoutException derives from TimeoutException, which Invoke
+        // already classifies as a constraint trip. This asserts the DURATION, which is what was wrong.
+        Assert.Throws<AuthorityConstraintException>(() => runtime.Invoke("applyIntent", "\"p1\"", "{}"));
+        started.Stop();
+
+        // Generous multiple of the budget: the point is that it is nowhere near Jint's 10s default, not
+        // that the regex engine honours the interval to the millisecond.
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(3),
+            $"regex ran for {started.Elapsed.TotalSeconds:0.00}s against a 100ms call budget");
     }
 }

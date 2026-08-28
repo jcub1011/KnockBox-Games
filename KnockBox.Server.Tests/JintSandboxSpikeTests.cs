@@ -65,11 +65,30 @@ public class JintSandboxSpikeTests
     // ── Ambient time removal (§3b) ───────────────────────────────────────────
 
     [Fact]
+    public void Date_global_can_be_deleted_from_the_host_and_stays_gone()
+    {
+        // What production actually does (JsAuthorityRuntime.Initialize). Engine.Realm is not public in
+        // Jint 4.11, but Engine.Global IS, and it is the global object — so the scrub needs no source
+        // string compiled per lobby. Pinned separately from the script form below because a Jint upgrade
+        // could plausibly change one without the other.
+        var engine = NewEngine();
+        Assert.True(engine.Global.Delete("Date"));
+
+        Assert.Equal("undefined", engine.Evaluate("typeof Date").AsString());
+        Assert.False(engine.Evaluate("'Date' in globalThis").AsBoolean());
+
+        var fn = ImportFunction(engine, "export function stamp() { return new Date().getTime(); }", "stamp");
+        var ex = Assert.Throws<JavaScriptException>(() => engine.Call(fn));
+        Assert.Contains("Date", ex.Message);
+    }
+
+    [Fact]
     public void Date_global_can_be_deleted_and_stays_gone()
     {
         var engine = NewEngine();
-        // Engine.Realm is not public in Jint 4.11, so the global is scrubbed from script: deleting a
-        // *property* of globalThis is legal even in strict mode (only unqualified `delete Date` isn't).
+        // The script form, kept as documentation of the JS-level fact that made the original approach
+        // legal: deleting a *property* of globalThis is fine even in strict mode (only unqualified
+        // `delete Date` isn't). Production uses the host API above instead.
         Assert.True(engine.Evaluate("delete globalThis.Date").AsBoolean());
 
         Assert.Equal("undefined", engine.Evaluate("typeof Date").AsString());

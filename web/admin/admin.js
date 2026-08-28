@@ -2508,7 +2508,8 @@ async function saveLimits() {
 
   // Tightening a limit is not destructive, but it is felt immediately by everyone connected, so the two
   // that can refuse a player outright get a confirmation naming what is running right now.
-  const capping = checked.values.maxLobbies !== null || checked.values.maxLobbiesPerGame !== null;
+  const capping = checked.values.maxLobbies !== null || checked.values.maxLobbiesPerGame !== null
+    || checked.values.authorityMaxLobbies !== null;
   if (capping && !noLimitOverrides(checked.values) && !await confirmAction(
     `Apply these limits now? They take effect for connections that are already open. `
     + `${formatCount(limitsData?.activeLobbies)} lobbies are running; a cap below that number lets them `

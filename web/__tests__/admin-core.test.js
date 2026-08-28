@@ -765,10 +765,12 @@ describe('uploadGuard', () => {
 });
 
 describe('platform limit fields', () => {
-  it('covers exactly the eight limits the server lets an operator change', () => {
-    // Pinned against AdminLimitValues / OperatorLimits. A knob added on one side only shows up here,
-    // rather than as a field that silently never saves.
+  it('covers exactly the ten limits the server lets an operator change', () => {
+    // Pinned against AdminLimitValues, which is flat across TWO server-side records: the first eight are
+    // OperatorLimits/ServerLimits, the last two OperatorAuthorityOptions/AuthorityOptions. A knob added on
+    // one side only shows up here, rather than as a field that silently never saves.
     expect(LIMIT_FIELDS.map((f) => f.key).sort()).toEqual([
+      'authorityMaxLobbies', 'authorityModuleCacheIdleMinutes',
       'controlMessagesBurst', 'controlMessagesPerSecond', 'gameMessagesBurst', 'gameMessagesPerSecond',
       'lobbyCreatesPerMinute', 'maxConnectionsPerIp', 'maxLobbies', 'maxLobbiesPerGame',
     ]);
@@ -776,6 +778,26 @@ describe('platform limit fields', () => {
       expect(field.label).toBeTruthy();
       expect(field.hint).toBeTruthy();
     }
+  });
+
+  it('keeps the platform lobby cap and the server-authority lobby cap distinguishable', () => {
+    // These are different caps from different config keys, enforced in different places, and they sit on
+    // one card. Nothing but the label and hint stops an operator reading them as one setting shown twice,
+    // so both are pinned: a rename that collapses them has to fail here.
+    const platform = LIMIT_FIELDS.find((f) => f.key === 'maxLobbies');
+    const authority = LIMIT_FIELDS.find((f) => f.key === 'authorityMaxLobbies');
+    expect(platform).toBeTruthy();
+    expect(authority).toBeTruthy();
+
+    expect(platform.label).not.toBe(authority.label);
+    expect(platform.label.includes(authority.label)).toBe(false);
+    expect(authority.label.includes(platform.label)).toBe(false);
+
+    // Each hint has to say which population it counts, or the labels are doing the work alone.
+    expect(platform.hint).toMatch(/every game|platform|across/i);
+    expect(authority.hint).toMatch(/server-side|server-authority/i);
+    // And the authority one must say what leaving it empty means, because its default is "no cap at all".
+    expect(authority.hint).toMatch(/unlimited/i);
   });
 
   it('lists the startup-only limits, which are deliberately NOT editable', () => {

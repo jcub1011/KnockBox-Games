@@ -318,8 +318,10 @@ definition, already connected. It is also saved, so it survives a restart.
 | Connections per IP | One player legitimately holds two (shell + game) per tab. Only meaningful with `ForwardedHeaders` behind a proxy. |
 | Max lobbies (platform) | Total simultaneous lobbies across every game. |
 | Max lobbies per game | Stops one popular title consuming every remaining slot. |
+| Max lobbies (server-authority) | **A different cap from the platform one above.** Counts only lobbies whose game runs server-side logic, each of which holds its own JavaScript engine — the one thing on this server whose memory grows with how many people are playing. Empty or **0** is unlimited, and that is the default. |
+| Authority module cache idle (min) | How long a game's shared parsed server logic is kept after its last lobby ends. **0** keeps it until the server restarts. |
 
-Three rules worth knowing:
+Four rules worth knowing:
 
 - **Empty means "use the default"** — the value from configuration, shown as the field's placeholder. That is
   also how you revert one field: clear the box and save. **0** is different: it means *disable this limit
@@ -329,6 +331,12 @@ Three rules worth knowing:
   start until the count falls under the cap; the portal says so when you save.
 - **A rate above 0 with a burst below 1 is refused.** It would refuse *every* message forever, which for the
   control plane means nobody can create or join a lobby again until someone hand-edits the settings file.
+- **The module cache window does not free memory on a schedule, and the wording here is careful on purpose.**
+  When it expires the server stops *holding* that game's parsed logic; the memory comes back whenever .NET
+  next collects, and the process's resident size falls behind that again. A game currently being played is
+  never affected — its lobbies each hold their own copy regardless — so the only cost of a short window is
+  one re-parse the next time somebody starts that game. The sweep runs once a minute, so expiry lands
+  somewhere between the window you set and a minute after it.
 
 **Set in Configuration** lists four limits that are deliberately *not* editable here. The handshake timeout
 and the reconnect grace window are read when the server starts (the reaper's own interval is derived from
@@ -442,7 +450,8 @@ Both thresholds are off by default, because a number that fits one host is noise
 
 Availability overrides, maintenance mode, registered marketplaces, per-game update enrolments, the update
 schedule, runtime limit
-overrides, the room-code blocklist, the live announcement and the webhook endpoints are all written to
+overrides, the server-authority overrides, the room-code blocklist, the live announcement and the webhook
+endpoints are all written to
 **`admin-settings.json`**, next to the admin
 password file (`AdminSettingsPath`; by default the same directory as `AdminPasswordPath`, which in the
 image is the persisted `/app/data` volume).
@@ -472,6 +481,10 @@ The file is indented and safe to hand-edit while the server is stopped:
   "limits": {
     "maxLobbies": 40,
     "maxLobbiesPerGame": 8
+  },
+  "authority": {
+    "maxLobbies": 4,
+    "moduleCacheIdleMinutes": 30
   },
   "roomCodes": {
     "words": ["XQ"],
@@ -505,8 +518,14 @@ The file is indented and safe to hand-edit while the server is stopped:
 }
 ```
 
+`authority` is its own object rather than two more keys inside `limits`, and that separation is worth
+keeping if you hand-edit: `limits` means the connection and platform caps, and both objects have a
+`maxLobbies` that counts a **different** population — 40 lobbies of anything, of which at most 4 may be
+running server-side logic.
+
 Defaults are recorded by **absence**: a game left Available has no `games` row, one left Manual has no
-`updates` row, a limit left at its default has no `limits` entry, a schedule you never chose has no
+`updates` row, a limit left at its default has no `limits` entry (and likewise no `authority` entry), a
+schedule you never chose has no
 `schedule` object (the configured one stands), and an empty blocklist or webhook
 list is omitted entirely. Otherwise the file would accumulate an entry per game you ever looked at, and "no override"
 and "explicitly the default" would become two ways to say one thing.
@@ -557,6 +576,8 @@ values a fresh deployment gets:
 | `GameMessagesPerSecond` / `…Burst` | `30` / `60` | Frames per game socket. |
 | `LobbyCreatesPerMinute` | `10` | Lobby creates per player. |
 | `MaxConnectionsPerIp` | `32` | Concurrent `/ws` sockets from one address. |
+| `AuthorityMaxLobbies` | `0` (unlimited) | Cap on lobbies running server-side game logic — **not** the same population as `MaxLobbies`. Each holds a JavaScript engine, so this is the one lobby count whose memory cost is real; unlimited by default because a refusal nobody configured is worse than letting the host's own memory limit be the bound. |
+| `AuthorityModuleCacheIdleMinutes` | `30` | How long a game's shared parsed server logic is kept once no lobby is using it. `0` keeps it for the life of the process. |
 
 Outbound webhooks (§6):
 
