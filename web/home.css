@@ -979,43 +979,49 @@ body.in-game::after {
 }
 
 /* ── Operator announcement ───────────────────────────────────────────────────
-   Deliberately NOT a toast: an announcement has to still be on screen when the player looks up, so it
-   sits in the page flow above the hero, stays until dismissed, and takes pointer events (it has an x).
-   Card styling, not fixed-position, so it pushes the page down rather than covering the title. */
+   Fixed toast at the top of the screen: stays visible no matter where the player is on
+   the page, stays until dismissed or cleared by the operator, and causes no layout shift. */
 .home-announcement {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20000;
     display: flex;
     align-items: center;
     gap: 10px;
-    margin: 0 auto 14px;
-    /* The home container is a flex column, where a flex item shrinks to its content unless told otherwise —
-       so without this the banner is as narrow as its text and reads as a chip, not a notice. */
-    width: 100%;
-    max-width: 900px;
-    padding: 10px 14px;
-    border-radius: 10px;
-    border: 2px solid var(--canvas-card-border);
-    background: var(--canvas-card);
+    width: max-content;
+    max-width: min(800px, calc(100vw - 32px));
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--canvas-card-border);
+    background: #271a38;
     color: var(--ink);
     font-family: var(--font-primary);
     font-weight: 600;
     font-size: 0.95rem;
-    box-shadow: var(--shadow-card-rest);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+    animation: home-announcement-slide 0.25s ease-out;
 }
 
 /* shell.js toggles the banner via the `hidden` attribute (and index.html ships it hidden), so the
    display rule above has to be undone the same way the Play Log's is — otherwise `display: flex` beats
-   the UA `[hidden] { display: none }` and an empty bordered notice is drawn above the hero on every
-   load, announcement or not. */
+   the UA `[hidden] { display: none }` and an empty bordered notice is drawn on every load, announcement or not. */
 .home-announcement[hidden] { display: none; }
 
-/* The one severity that should catch an eye already looking elsewhere. */
-.home-announcement.severity-warning {
-    border-color: var(--banner-yellow);
-    background: rgba(254, 222, 102, 0.12);
+.home-announcement.severity-info {
+    border-color: rgba(30, 255, 188, 0.35);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45), 0 0 12px rgba(30, 255, 188, 0.15);
 }
 
-.home-announcement-icon { font-size: 1.1rem; line-height: 1; }
-.home-announcement-text { flex: 1 1 auto; }
+.home-announcement.severity-warning {
+    border-color: var(--banner-yellow);
+    background: #35261d;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45), 0 0 12px rgba(254, 222, 102, 0.2);
+}
+
+.home-announcement-icon { font-size: 1.1rem; line-height: 1; flex: 0 0 auto; }
+.home-announcement-text { flex: 1 1 auto; word-break: break-word; }
 
 .home-announcement-close {
     flex: 0 0 auto;
@@ -1030,6 +1036,11 @@ body.in-game::after {
 }
 
 .home-announcement-close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.08); }
+
+@keyframes home-announcement-slide {
+    0%   { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+    100% { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
 
 /* ── Error toast ─────────────────────────────────────────────────────────── */
 .home-error-toast {
@@ -1617,5 +1628,6 @@ body.in-game::after {
     .hero-ribbon-track { animation: none; }
     body:not(.in-game)::before,
     body:not(.in-game)::after { animation: none; }
-    .home-error-toast { animation: none; opacity: 1; transform: translateX(-50%); }
+    .home-error-toast,
+    .home-announcement { animation: none; opacity: 1; transform: translateX(-50%); }
 }

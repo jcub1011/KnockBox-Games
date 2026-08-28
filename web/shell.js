@@ -227,11 +227,11 @@ export function handle(msg) {
   }
 }
 
-// ── Operator announcement (home page) ─────────────────────────────────────────
-// The one banner the platform shows players. Not a toast: it stays until the player dismisses it or the
-// operator takes it down, because "maintenance in 20 minutes" has to be readable when they look up.
-// Text is untrusted operator input and goes in via textContent; the severity is validated to a known
-// value before it becomes a class name.
+// ── Operator announcement ───────────────────────────────────────────────────
+// The one banner the platform shows players. A fixed toast at the top of the screen: it stays until the
+// player dismisses it or the operator takes it down, so "maintenance in 20 minutes" stays readable without
+// causing layout shift. Text is untrusted operator input and goes in via textContent; the severity is
+// validated to a known value before it becomes a class name.
 const ANNOUNCEMENT_DISMISSED_KEY = 'kb.announcementDismissed';
 
 function renderAnnouncement() {
