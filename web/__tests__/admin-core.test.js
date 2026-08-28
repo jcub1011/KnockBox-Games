@@ -415,7 +415,9 @@ describe('availability metadata', () => {
 
 describe('lifecycle', () => {
   it('renders nothing for the ordinary state', () => {
-    // 'ready' is what almost every game is almost all the time; a badge saying "fine" is noise.
+    // 'idle' (and legacy 'ready') is what almost every game is almost all the time; a badge saying "fine" is noise.
+    expect(lifecycleLabel('idle')).toBe('');
+    expect(isBusyLifecycle('idle')).toBe(false);
     expect(lifecycleLabel('ready')).toBe('');
     expect(isBusyLifecycle('ready')).toBe(false);
     expect(isBusyLifecycle(undefined)).toBe(false);

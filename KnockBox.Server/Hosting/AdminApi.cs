@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using KnockBox.Contracts;
@@ -121,12 +121,15 @@ internal static class AdminApi
                 RequireSession(options, ctx => MetricHistoryFeed(ctx, options)));
             routes.MapGet("/admin/api/lobbies", RequireSession(options, ctx => Lobbies(ctx, options)));
             routes.MapGet("/admin/api/games", RequireSession(options, ctx => Games(ctx, options)));
+            routes.MapGet("/admin/api/games/{id}/export",
+                (HttpContext ctx, string id) => RequireSession(options, inner => ExportGame(inner, options))(ctx));
             routes.MapGet("/admin/api/logs", RequireSession(options, ctx => Logs(ctx, options)));
             routes.MapGet("/admin/api/logs/files", RequireSession(options, ctx => LogFiles(ctx, options)));
             routes.MapGet("/admin/api/logs/files/{name}",
-                RequireSession(options, ctx => DownloadLogFile(ctx, options)));
+                (HttpContext ctx, string name) => RequireSession(options, inner => DownloadLogFile(inner, options))(ctx));
             routes.MapGet("/admin/api/packages/jobs", RequireSession(options, ctx => Jobs(ctx, options)));
-            routes.MapGet("/admin/api/packages/jobs/{jobId}", RequireSession(options, ctx => Job(ctx, options)));
+            routes.MapGet("/admin/api/packages/jobs/{jobId}",
+                (HttpContext ctx, string jobId) => RequireSession(options, inner => Job(inner, options))(ctx));
             routes.MapGet("/admin/api/marketplace/catalog", RequireSession(options, ctx => Catalog(ctx, options)));
             routes.MapGet("/admin/api/limits", RequireSession(options, ctx => Limits(ctx, options)));
             routes.MapGet("/admin/api/room-codes", RequireSession(options, ctx => RoomCodes(ctx, options)));
@@ -143,15 +146,15 @@ internal static class AdminApi
             routes.MapPost("/admin/api/lobbies/purge-stale",
                 RequireSession(options, WriteGuard(ctx => PurgeStale(ctx, options))));
             routes.MapPost("/admin/api/lobbies/{code}/close",
-                RequireSession(options, WriteGuard(ctx => CloseLobby(ctx, options))));
+                (HttpContext ctx, string code) => RequireSession(options, inner => CloseLobby(inner, options))(ctx));
             routes.MapPost("/admin/api/lobbies/{code}/kick",
-                RequireSession(options, WriteGuard(ctx => KickPlayer(ctx, options))));
+                (HttpContext ctx, string code) => RequireSession(options, inner => KickPlayer(inner, options))(ctx));
             routes.MapPost("/admin/api/games/rescan",
                 RequireSession(options, WriteGuard(ctx => Rescan(ctx, options))));
             routes.MapPost("/admin/api/games/{id}/availability",
-                RequireSession(options, WriteGuard(ctx => SetAvailability(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => SetAvailability(inner, options))(ctx));
             routes.MapPost("/admin/api/games/{id}/delete",
-                RequireSession(options, WriteGuard(ctx => DeleteGame(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => DeleteGame(inner, options))(ctx));
             routes.MapPost("/admin/api/maintenance",
                 RequireSession(options, WriteGuard(ctx => SetMaintenance(ctx, options))));
             routes.MapPost("/admin/api/limits",
@@ -177,11 +180,11 @@ internal static class AdminApi
             routes.MapPost("/admin/api/packages/upload",
                 RequireSession(options, WriteGuard(ctx => UploadPackage(ctx, options), MediaKind.Package)));
             routes.MapPost("/admin/api/packages/{id}/rollback",
-                RequireSession(options, WriteGuard(ctx => Rollback(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => Rollback(inner, options))(ctx));
             routes.MapPost("/admin/api/packages/{id}/uninstall",
-                RequireSession(options, WriteGuard(ctx => Uninstall(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => Uninstall(inner, options))(ctx));
             routes.MapPost("/admin/api/packages/jobs/{jobId}/cancel",
-                RequireSession(options, WriteGuard(ctx => CancelJob(ctx, options))));
+                (HttpContext ctx, string jobId) => RequireSession(options, inner => CancelJob(inner, options))(ctx));
 
             // ── Marketplace ──
             routes.MapPost("/admin/api/marketplace/install/{id}",
@@ -189,13 +192,13 @@ internal static class AdminApi
             routes.MapPost("/admin/api/marketplace/sources",
                 RequireSession(options, WriteGuard(ctx => AddSource(ctx, options))));
             routes.MapPost("/admin/api/marketplace/sources/{id}/delete",
-                RequireSession(options, WriteGuard(ctx => RemoveSource(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => RemoveSource(inner, options))(ctx));
             routes.MapPost("/admin/api/marketplace/sources/{id}/enabled",
-                RequireSession(options, WriteGuard(ctx => SetSourceEnabled(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => SetSourceEnabled(inner, options))(ctx));
             routes.MapPost("/admin/api/marketplace/check",
                 RequireSession(options, WriteGuard(ctx => CheckForUpdates(ctx, options))));
             routes.MapPost("/admin/api/packages/{id}/update-policy",
-                RequireSession(options, WriteGuard(ctx => SetUpdatePolicy(ctx, options))));
+                (HttpContext ctx, string id) => RequireSession(options, inner => SetUpdatePolicy(inner, options))(ctx));
         });
     }
 
@@ -564,6 +567,31 @@ internal static class AdminApi
             && options.Disk.WhyNotWritable(packageDir) is not null)
             return $"the source package in '{packageDir}' can't be removed, so the game would reinstall itself.";
         return null;
+    }
+
+    private static async Task ExportGame(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (!options.Catalog.GameLocations.TryGetValue(id, out var location))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No installed game with id '{id}'.");
+            return;
+        }
+
+        try
+        {
+            var exportInfo = GamePackageExporter.GetExportInfo(location, options.Paths);
+            ctx.Response.StatusCode = StatusCodes.Status200OK;
+            ctx.Response.ContentType = exportInfo.ContentType;
+            ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{exportInfo.FileName}\"";
+            await GamePackageExporter.ExportAsync(location, options.Paths, ctx.Response.Body, ctx.RequestAborted);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            if (!ctx.Response.HasStarted)
+                await Refuse(ctx, StatusCodes.Status500InternalServerError, $"Could not export game '{id}' ({ex.Message}).");
+            options.Logger.LogWarning(ex, "Admin export of game {GameId} failed.", id);
+        }
     }
 
     private static Task Logs(HttpContext ctx, Options options)

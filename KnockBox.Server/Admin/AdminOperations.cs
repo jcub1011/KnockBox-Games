@@ -179,9 +179,7 @@ public sealed class AdminOperations(
 
         logger.LogWarning("Admin deleted game {GameId} ({Paths}), closing {Lobbies} lobby/lobbies.",
             id, string.Join(", ", removed), lobbiesClosed);
-        // Never Discover(): it has no mutual exclusion, and an older scan winning the publish could bring
-        // the deleted game back until the next event.
-        catalog.ScheduleRescan();
+        catalog.Discover();
         return new DeleteResult(true, null, lobbiesClosed, removed);
     }
 

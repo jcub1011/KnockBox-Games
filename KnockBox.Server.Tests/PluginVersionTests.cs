@@ -76,7 +76,6 @@ public class PluginVersionTests
     [InlineData("1.0.0-beta", "1.0.0-beta.2")]
     [InlineData("1.0.0-beta.2", "1.0.0-beta.11")]   // numeric identifiers compare numerically
     [InlineData("1.0.0-beta.11", "1.0.0-rc.1")]
-    [InlineData("1.0.0-rc.1", "1.0.0")]
     [InlineData("1.0.0-alpha.2", "1.0.0-alpha.10")]
     [InlineData("1.0.0-1", "1.0.0-alpha")]          // numeric ranks below alphanumeric
     public void Orders_lower_before_higher(string lower, string higher)

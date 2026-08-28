@@ -182,9 +182,30 @@ export function toast(message, kind = 'info') {
 let confirmResolve = null;
 
 /** Resolves true when the operator confirms. Every destructive action goes through this. */
-function confirmAction(body, okLabel = 'Confirm') {
+function confirmAction(body, okLabel = 'Confirm', { warning = null, onExport = null, exportLabel = 'Export' } = {}) {
   el('confirm-body').textContent = body;
   el('confirm-ok').textContent = okLabel;
+  const warningEl = el('confirm-warning');
+  if (warningEl) {
+    if (warning) {
+      warningEl.textContent = warning;
+      warningEl.classList.remove('hidden');
+    } else {
+      warningEl.textContent = '';
+      warningEl.classList.add('hidden');
+    }
+  }
+  const exportBtn = el('confirm-export');
+  if (exportBtn) {
+    if (onExport) {
+      exportBtn.textContent = exportLabel;
+      exportBtn.classList.remove('hidden');
+      exportBtn.onclick = () => onExport();
+    } else {
+      exportBtn.classList.add('hidden');
+      exportBtn.onclick = null;
+    }
+  }
   el('confirm-backdrop').classList.remove('hidden');
   el('confirm-ok').focus();
   return new Promise((resolve) => { confirmResolve = resolve; });
@@ -192,9 +213,28 @@ function confirmAction(body, okLabel = 'Confirm') {
 
 function settleConfirm(result) {
   el('confirm-backdrop').classList.add('hidden');
+  const warningEl = el('confirm-warning');
+  if (warningEl) {
+    warningEl.textContent = '';
+    warningEl.classList.add('hidden');
+  }
+  const exportBtn = el('confirm-export');
+  if (exportBtn) {
+    exportBtn.classList.add('hidden');
+    exportBtn.onclick = null;
+  }
   const resolve = confirmResolve;
   confirmResolve = null;
   if (resolve) resolve(result);
+}
+
+export function exportGame(id) {
+  const link = document.createElement('a');
+  link.href = `/admin/api/games/${encodeURIComponent(id)}/export`;
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -1189,6 +1229,13 @@ function gameCard(game) {
   spacer.className = 'filter-spacer';
   actions.appendChild(spacer);
 
+  const exportBtn = document.createElement('button');
+  exportBtn.className = 'btn btn-primary btn-small game-export';
+  exportBtn.type = 'button';
+  exportBtn.textContent = 'Export';
+  exportBtn.onclick = () => exportGame(game.id);
+  actions.appendChild(exportBtn);
+
   const remove = document.createElement('button');
   remove.className = 'btn btn-danger btn-small';
   remove.type = 'button';
@@ -1313,11 +1360,21 @@ async function setAvailability(game, state) {
 }
 
 async function deleteGame(game) {
+  const isManuallyUploaded = game.root === 'games' || game.packageRoot !== 'managed'
+    || !catalogData?.entries?.some((e) => e.id === game.id && e.sourceId);
+  const warning = isManuallyUploaded
+    ? 'This plugin was manually uploaded and may not be re-downloadable via the marketplace.'
+    : null;
   if (!await confirmAction(
     `Delete ${game.name} and all ${formatBytes(game.diskBytes)} of its files from disk? `
     + (game.activeLobbies > 0 ? `Its ${game.activeLobbies} running lobby/lobbies are closed first. ` : '')
-    + 'This cannot be undone — the game has to be reinstalled to come back.', 'Delete Permanently')) return;
-  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/delete`, {})) refreshGames();
+    + 'This cannot be undone — the game has to be reinstalled to come back.',
+    'Delete Permanently',
+    {
+      warning,
+      onExport: () => exportGame(game.id),
+    })) return;
+  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/delete`, {})) await refreshGames();
 }
 
 async function copyStagedLink(game) {
@@ -1685,7 +1742,14 @@ function marketplaceCard(entry) {
   spacer.className = 'filter-spacer';
   actions.appendChild(spacer);
 
-  if (entry.installed && entry.managed) {
+  if (entry.installed) {
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.className = 'btn btn-primary btn-small mkt-export';
+    exportBtn.textContent = 'Export';
+    exportBtn.onclick = () => exportGame(entry.id);
+    actions.appendChild(exportBtn);
+
     const uninstall = document.createElement('button');
     uninstall.type = 'button';
     uninstall.className = 'btn btn-danger btn-small mkt-uninstall';
@@ -1765,10 +1829,18 @@ function describeMode(mode, running) {
 
 async function uninstallGame(entry) {
   const running = entry.activeLobbies;
+  const isManuallyUploaded = !entry.sourceId || entry.status === 'installedOnly' || !entry.availableVersion;
+  const warning = isManuallyUploaded
+    ? 'This plugin was manually uploaded and may not be re-downloadable via the marketplace.'
+    : null;
   if (!await confirmAction(
     `Uninstall ${entry.name || entry.id}? Its files, its cached assets and any retained versions are `
     + `deleted from disk${running > 0 ? `, and its ${running} running lobby/lobbies are closed` : ''}.`,
-    'Uninstall')) return;
+    'Uninstall',
+    {
+      warning,
+      onExport: () => exportGame(entry.id),
+    })) return;
   if (await postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/uninstall`, {})) refreshJobs();
 }
 

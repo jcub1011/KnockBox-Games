@@ -547,7 +547,8 @@ export function availabilityLabel(value) {
  * engine state, never operator policy, and they render as a badge instead.
  */
 export const LIFECYCLE = [
-  // Empty label: the overwhelmingly common state renders nothing rather than a badge saying "fine".
+  // Empty label: the overwhelmingly common state (idle/ready) renders nothing rather than a badge saying "fine".
+  { value: 'idle', label: '', hint: '' },
   { value: 'ready', label: '', hint: '' },
   { value: 'draining', label: 'Draining', hint: 'Waiting for running lobbies to finish before updating. New lobbies are refused.' },
   { value: 'updating', label: 'Updating', hint: 'Files are being swapped. New lobbies are refused.' },
@@ -605,8 +606,8 @@ export function sdkBadge(game, serverSdkVersion) {
 
 /** True when the engine is mid-swap, so availability and delete must be held. */
 export function isBusyLifecycle(value) {
-  const name = String(value ?? 'ready').toLowerCase();
-  return name !== 'ready' && name !== '';
+  const name = String(value ?? 'idle').toLowerCase();
+  return name === 'draining' || name === 'updating';
 }
 
 // ── Marketplace ───────────────────────────────────────────────────────────────

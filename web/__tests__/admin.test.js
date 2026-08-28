@@ -840,6 +840,43 @@ describe('game catalog', () => {
 
     expect(fake.calls.find((c) => c.method === 'POST').path).toBe('/admin/api/games/tictactoe/delete');
   });
+
+  it('renders an Export button on each game card and triggers export', async () => {
+    await openGames();
+    const exportBtn = el('games-list').querySelectorAll('.game-card')[0].querySelector('.game-export');
+    expect(exportBtn).not.toBeNull();
+    expect(exportBtn.textContent).toBe('Export');
+
+    const appendChildSpy = vi.spyOn(document.body, 'appendChild');
+    exportBtn.click();
+
+    expect(appendChildSpy).toHaveBeenCalled();
+    const anchor = appendChildSpy.mock.calls.find(([node]) => node.tagName === 'A')?.[0];
+    expect(anchor).toBeDefined();
+    expect(anchor.href).toContain('/admin/api/games/tictactoe/export');
+  });
+
+  it('shows manual upload warning and export button in delete confirmation dialog for folder games', async () => {
+    await openGames();
+    const remove = [...el('games-list').querySelectorAll('.game-card')[0].querySelectorAll('button')]
+      .find((b) => b.textContent === 'Delete');
+    remove.click();
+
+    expect(el('confirm-warning').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-warning').textContent).toBe('This plugin was manually uploaded and may not be re-downloadable via the marketplace.');
+    expect(el('confirm-export').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-export').textContent).toBe('Export');
+
+    const appendChildSpy = vi.spyOn(document.body, 'appendChild');
+    el('confirm-export').click();
+
+    expect(appendChildSpy).toHaveBeenCalled();
+    const anchor = appendChildSpy.mock.calls.find(([node]) => node.tagName === 'A')?.[0];
+    expect(anchor).toBeDefined();
+    expect(anchor.href).toContain('/admin/api/games/tictactoe/export');
+    // The modal remains open after clicking Export
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(false);
+  });
 });
 
 describe('log stream', () => {

@@ -278,6 +278,78 @@ describe('marketplace catalog', () => {
     // Upload, rollback and uninstall all work on an air-gapped host, so that button stays live.
     expect(el('mkt-upload-btn').disabled).toBe(false);
   });
+
+  it('renders an Export button on installed marketplace cards', async () => {
+    await openMarketplace();
+    const exportBtn = card('word-rush').querySelector('.mkt-export');
+    expect(exportBtn).not.toBeNull();
+    expect(exportBtn.textContent).toBe('Export');
+
+    const appendChildSpy = vi.spyOn(document.body, 'appendChild');
+    exportBtn.click();
+
+    const anchor = appendChildSpy.mock.calls.find(([node]) => node.tagName === 'A')?.[0];
+    expect(anchor).toBeDefined();
+    expect(anchor.href).toContain('/admin/api/games/word-rush/export');
+  });
+
+  it('renders Uninstall button for unmanaged / folder-installed games', async () => {
+    await openMarketplace({
+      'GET /admin/api/marketplace/catalog': {
+        body: {
+          ...CATALOG,
+          entries: [
+            ...CATALOG.entries,
+            {
+              id: 'folder-game', name: 'Folder Game', description: null, author: null,
+              tags: [], availableVersion: null, installedVersion: '1.0.0', status: 'installedOnly',
+              license: null, contentRating: null, minPlayers: 1, maxPlayers: 4,
+              homepage: null, bugs: null, reason: 'No registered marketplace offers this game.',
+              sizeBytes: null, publishedAt: null, minAppVersion: null, maxAppVersion: null,
+              sourceId: '', sourceName: null, shadowedBy: null,
+              managed: false, installed: true, activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
+              backups: [],
+            },
+          ],
+        },
+      },
+    });
+
+    const folderCard = card('folder-game');
+    expect(folderCard).not.toBeNull();
+    const uninstallBtn = folderCard.querySelector('.mkt-uninstall');
+    expect(uninstallBtn).not.toBeNull();
+    expect(uninstallBtn.textContent).toBe('Uninstall');
+  });
+
+  it('shows manual upload warning and export button in uninstall confirmation dialog for manual/folder uploads', async () => {
+    await openMarketplace({
+      'GET /admin/api/marketplace/catalog': {
+        body: {
+          ...CATALOG,
+          entries: [
+            ...CATALOG.entries,
+            {
+              id: 'folder-game', name: 'Folder Game', description: null, author: null,
+              tags: [], availableVersion: null, installedVersion: '1.0.0', status: 'installedOnly',
+              license: null, contentRating: null, minPlayers: 1, maxPlayers: 4,
+              homepage: null, bugs: null, reason: 'No registered marketplace offers this game.',
+              sizeBytes: null, publishedAt: null, minAppVersion: null, maxAppVersion: null,
+              sourceId: '', sourceName: null, shadowedBy: null,
+              managed: false, installed: true, activeLobbies: 0, pendingJobId: null, updatePolicy: 'manual',
+              backups: [],
+            },
+          ],
+        },
+      },
+    });
+
+    card('folder-game').querySelector('.mkt-uninstall').click();
+
+    expect(el('confirm-warning').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-warning').textContent).toBe('This plugin was manually uploaded and may not be re-downloadable via the marketplace.');
+    expect(el('confirm-export').classList.contains('hidden')).toBe(false);
+  });
 });
 
 describe('marketplace actions', () => {
