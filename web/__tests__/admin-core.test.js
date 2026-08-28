@@ -7,10 +7,10 @@ import {
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES,
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
-  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterSettings, formatBytes,
+  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
   formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
-  jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, noLimitOverrides,
-  pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, topTabFromHash, uploadGuard,
+  jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
+  playerRange, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
@@ -93,7 +93,7 @@ describe('settingFromHash', () => {
 describe('SETTINGS_GROUPS and ALL_SETTINGS', () => {
   it('defines the 3 logical groups with unique ids and settings', () => {
     expect(SETTINGS_GROUPS.map((g) => g.id)).toEqual(['monitoring', 'games', 'platform']);
-    expect(ALL_SETTINGS.length).toBe(14);
+    expect(ALL_SETTINGS.length).toBe(13);
     for (const setting of ALL_SETTINGS) {
       expect(setting.id).toMatch(/^setting-/);
       expect(setting.label).toBeTruthy();
@@ -1108,3 +1108,94 @@ describe('sdkBadge', () => {
     expect(badge.title).toContain('godot 0.1.0, web 0.2.0');
   });
 });
+
+describe('playerRange', () => {
+  it('formats range when min and max are different', () => {
+    expect(playerRange({ minPlayers: 2, maxPlayers: 8 })).toBe('2–8');
+  });
+
+  it('formats single number when min and max are identical', () => {
+    expect(playerRange({ minPlayers: 4, maxPlayers: 4 })).toBe('4');
+  });
+
+  it('formats max only as up to N', () => {
+    expect(playerRange({ maxPlayers: 8 })).toBe('up to 8');
+  });
+
+  it('formats min only as N+', () => {
+    expect(playerRange({ minPlayers: 2 })).toBe('2+');
+  });
+
+  it('returns empty string when neither is declared', () => {
+    expect(playerRange({})).toBe('');
+    expect(playerRange(null)).toBe('');
+  });
+});
+
+describe('mergePluginEntries', () => {
+  const games = [
+    { id: 'tictactoe', name: 'Tic-Tac-Toe', root: 'games', version: '1.0.0', availability: 'available', diskBytes: 12000 },
+    { id: 'word-rush', name: 'Word Rush', root: 'packages', packageRoot: 'managed', version: '1.2.0', availability: 'available', diskBytes: 50000 },
+  ];
+
+  const catalog = [
+    { id: 'word-rush', name: 'Word Rush', sourceId: 'official', sourceName: 'Official Marketplace', availableVersion: '1.3.0', installedVersion: '1.2.0', status: 'updateAvailable', installed: true },
+    { id: 'alpha-chain', name: 'Alpha Chain', sourceId: 'official', sourceName: 'Official Marketplace', availableVersion: '2.0.0', status: 'notInstalled', installed: false, description: 'Word chain game' },
+    { id: 'custom-card', name: 'Custom Card Game', sourceId: 'community', sourceName: 'Community Repo', availableVersion: '1.0.0', status: 'notInstalled', installed: false },
+  ];
+
+  it('places installed plugins on top (alphabetical) and uninstalled below (alphabetical)', () => {
+    const merged = mergePluginEntries(games, catalog);
+    expect(merged).toHaveLength(4);
+    // Installed: Tic-Tac-Toe (games), Word Rush (managed)
+    expect(merged[0].id).toBe('tictactoe');
+    expect(merged[0].installed).toBe(true);
+    expect(merged[0].sourceKind).toBe('games');
+    expect(merged[0].sourceName).toBe('Games Folder');
+
+    expect(merged[1].id).toBe('word-rush');
+    expect(merged[1].installed).toBe(true);
+    expect(merged[1].sourceKind).toBe('official');
+    expect(merged[1].status).toBe('updateAvailable');
+
+    // Not installed: Alpha Chain, Custom Card Game
+    expect(merged[2].id).toBe('alpha-chain');
+    expect(merged[2].installed).toBe(false);
+
+    expect(merged[3].id).toBe('custom-card');
+    expect(merged[3].installed).toBe(false);
+  });
+});
+
+describe('filterPlugins', () => {
+  const entries = [
+    { id: 'tictactoe', name: 'Tic-Tac-Toe', sourceKind: 'games', sourceId: 'games', installed: true, status: 'installedOnly', tags: ['classic', 'board'] },
+    { id: 'word-rush', name: 'Word Rush', sourceKind: 'official', sourceId: 'official', installed: true, status: 'updateAvailable', tags: ['party', 'words'], description: 'Fast word game', author: 'Author A' },
+    { id: 'alpha-chain', name: 'Alpha Chain', sourceKind: 'official', sourceId: 'official', installed: false, status: 'notInstalled', tags: ['words'], author: 'Author B' },
+    { id: 'broken-game', name: 'Broken Game', sourceKind: 'official', sourceId: 'official', installed: false, status: 'incompatible', tags: ['puzzle'] },
+    { id: 'manual-pkg', name: 'Manual Plugin', sourceKind: 'upload', sourceId: 'upload', installed: true, status: 'installedOnly', tags: ['tools'] },
+  ];
+
+  it('filters by source', () => {
+    expect(filterPlugins(entries, { source: 'all' })).toHaveLength(5);
+    expect(filterPlugins(entries, { source: 'games' })).toEqual([entries[0]]);
+    expect(filterPlugins(entries, { source: 'upload' })).toEqual([entries[4]]);
+    expect(filterPlugins(entries, { source: 'official' })).toEqual([entries[1], entries[2], entries[3]]);
+  });
+
+  it('filters by status', () => {
+    expect(filterPlugins(entries, { status: 'installed' })).toEqual([entries[0], entries[1], entries[4]]);
+    expect(filterPlugins(entries, { status: 'notInstalled' })).toEqual([entries[2], entries[3]]);
+    expect(filterPlugins(entries, { status: 'updateAvailable' })).toEqual([entries[1]]);
+    expect(filterPlugins(entries, { status: 'problem' })).toEqual([entries[3]]);
+  });
+
+  it('filters by search query matching name, id, tags, author, description', () => {
+    expect(filterPlugins(entries, { q: 'tic' })).toEqual([entries[0]]);
+    expect(filterPlugins(entries, { q: 'party' })).toEqual([entries[1]]);
+    expect(filterPlugins(entries, { q: 'Author B' })).toEqual([entries[2]]);
+    expect(filterPlugins(entries, { q: 'Fast word' })).toEqual([entries[1]]);
+    expect(filterPlugins(entries, { q: 'words' })).toEqual([entries[1], entries[2]]);
+  });
+});
+

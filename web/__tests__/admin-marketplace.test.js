@@ -244,10 +244,13 @@ describe('marketplace catalog', () => {
     await vi.advanceTimersByTimeAsync(1);
 
     const catalogCalls = () => fake.calls.filter((c) => c.path === '/admin/api/marketplace/catalog').length;
+    const gameCalls = () => fake.calls.filter((c) => c.path === '/admin/api/games').length;
     expect(catalogCalls()).toBe(1);
+    expect(gameCalls()).toBe(1);
 
     await vi.advanceTimersByTimeAsync(3500);
     expect(catalogCalls()).toBe(2);
+    expect(gameCalls()).toBe(2);
     expect(el('toast-host').querySelectorAll('.toast')).toHaveLength(1);
     expect(el('toast-host').textContent).toContain('Updated to 1.3.0');
 
@@ -255,14 +258,16 @@ describe('marketplace catalog', () => {
     // once — and must not re-read the catalog again either.
     await vi.advanceTimersByTimeAsync(9000);
     expect(catalogCalls()).toBe(2);
+    expect(gameCalls()).toBe(2);
   });
 
   it('filters client-side, with no round trip', async () => {
     fake = await openMarketplace();
     const before = fake.calls.length;
 
-    el('mkt-filter-q').value = 'alpha';
-    el('mkt-filter-q').dispatchEvent(new Event('input'));
+    const filterInput = el('plugins-filter-q') || el('mkt-filter-q');
+    filterInput.value = 'alpha';
+    filterInput.dispatchEvent(new Event('input'));
 
     expect(document.querySelectorAll('.mkt-card')).toHaveLength(1);
     expect(card('alpha-chain')).not.toBeNull();
@@ -723,7 +728,7 @@ describe('games tab lifecycle', () => {
     return fake;
   }
 
-  const gameCard = () => document.querySelector('#games-list .game-card');
+  const gameCard = () => document.querySelector('#plugins-list .game-card') || document.querySelector('#games-list .game-card');
 
   it('badges a game the engine is mid-update on, and holds its controls', async () => {
     await openGames({
@@ -735,7 +740,7 @@ describe('games tab lifecycle', () => {
     const card = gameCard();
     expect(card.textContent).toContain('Updating');
     // An availability write racing a directory swap is arbitration the engine shouldn't have to do.
-    expect(card.querySelector('select').disabled).toBe(true);
+    expect(card.querySelector('.plugin-availability').disabled).toBe(true);
     expect(card.querySelector('.btn-danger').disabled).toBe(true);
   });
 
@@ -748,7 +753,7 @@ describe('games tab lifecycle', () => {
       },
     });
 
-    const options = [...gameCard().querySelector('select').options].map((o) => o.value);
+    const options = [...gameCard().querySelector('.plugin-availability').options].map((o) => o.value);
     expect(options).toEqual(['available', 'disabled', 'staged']);
   });
 
@@ -757,22 +762,19 @@ describe('games tab lifecycle', () => {
 
     const card = gameCard();
     expect(card.textContent).not.toContain('Updating');
-    expect(card.querySelector('select').disabled).toBe(false);
+    expect(card.querySelector('.plugin-availability').disabled).toBe(false);
   });
 
-  it('points at the marketplace tab rather than duplicating its controls', async () => {
+  it('indicates when a package operation is in progress', async () => {
     await openGames({
       'GET /admin/api/games': {
         body: { ...GAMES, games: [{ ...GAMES.games[0], lifecycle: 'draining' }] },
       },
     });
 
-    const jump = [...gameCard().querySelectorAll('button')].find((b) => b.textContent === 'View operation');
-    expect(jump).toBeTruthy();
-
-    jump.click();
-    expect(el('mkt-filter-q').value).toBe('word-rush');
-    expect(window.location.hash).toBe('#marketplace');
+    const card = gameCard();
+    expect(card.textContent).toContain('Draining');
+    expect(card.textContent).toContain('package operation in progress');
   });
 });
 
@@ -791,17 +793,17 @@ describe('scrolling is not arriving', () => {
     const catalogCalls = () => fake.calls.filter((c) => c.path === '/admin/api/marketplace/catalog').length;
     const before = catalogCalls();
 
-    // Only the marketplace card is above the activation line, which is what "scrolled onto it" looks
+    // Only the marketplace / plugins card is above the activation line, which is what "scrolled onto it" looks
     // like to updateScrollspy. Every other card is pushed below.
     for (const cardEl of document.querySelectorAll('.setting-card')) {
-      const onScreen = cardEl.id === 'setting-marketplace';
+      const onScreen = cardEl.id === 'setting-games' || cardEl.id === 'setting-marketplace';
       cardEl.getBoundingClientRect = () => ({ top: onScreen ? 10 : 9000, bottom: 9100, height: 100 });
     }
     window.dispatchEvent(new Event('scroll'));
     await tick();
 
     // The cheap half still happened — the sidebar and the panel title follow the scroll immediately.
-    expect(el('panel-title').textContent).toBe('Marketplace & Packages');
+    expect(el('panel-title').textContent).toBe('Plugins & Games');
     // The expensive half did not.
     expect(catalogCalls()).toBe(before);
   });
@@ -840,3 +842,173 @@ describe('the job feed survives a server restart', () => {
     expect(el('mkt-jobs').textContent).not.toContain('Word Rush');
   });
 });
+
+describe('combined plugins tile and metadata dialog', () => {
+  it('displays installed plugins on top and uninstalled plugins below with required facts', async () => {
+    await openMarketplace();
+
+    const cards = [...document.querySelectorAll('#plugins-list .game-card')];
+    expect(cards.length).toBeGreaterThanOrEqual(2);
+
+    const wordRush = cards.find((c) => c.dataset.id === 'word-rush');
+    const alphaChain = cards.find((c) => c.dataset.id === 'alpha-chain');
+
+    expect(wordRush).toBeTruthy();
+    expect(alphaChain).toBeTruthy();
+
+    // Word Rush is installed, so it should be before Alpha Chain (not installed)
+    expect(cards.indexOf(wordRush)).toBeLessThan(cards.indexOf(alphaChain));
+
+    // Word Rush card displays all required fields: name, tags, description, status, version, size (disk size), player range, game-id, author
+    expect(wordRush.textContent).toContain('Word Rush');
+    expect(wordRush.textContent).toContain('party');
+    expect(wordRush.textContent).toContain('Fast word game');
+    expect(wordRush.textContent).toContain('Update available');
+    expect(wordRush.textContent).toContain('v1.2.0');
+    expect(wordRush.textContent).toContain('Disk');
+    expect(wordRush.textContent).toContain('1000 B');
+    expect(wordRush.textContent).toContain('2–8');
+    expect(wordRush.textContent).toContain('word-rush');
+    expect(wordRush.textContent).toContain('Someone');
+
+    // Controls on installed card: version select, status select, primary button, export button, delete button, 3-dots button
+    expect(wordRush.querySelector('.plugin-version')).not.toBeNull();
+    expect(wordRush.querySelector('.plugin-availability')).not.toBeNull();
+    expect(wordRush.querySelector('.plugin-action')).not.toBeNull();
+    expect(wordRush.querySelector('.plugin-export')).not.toBeNull();
+    expect(wordRush.querySelector('.plugin-delete')).not.toBeNull();
+    expect(wordRush.querySelector('.plugin-details-btn')).not.toBeNull();
+
+    // Controls on not-installed card (Alpha Chain): version select, primary install button, 3-dots button
+    // Hidden / omitted: status select, export button, delete button
+    expect(alphaChain.querySelector('.plugin-version')).not.toBeNull();
+    expect(alphaChain.querySelector('.plugin-action')).not.toBeNull();
+    expect(alphaChain.querySelector('.plugin-details-btn')).not.toBeNull();
+    expect(alphaChain.querySelector('.plugin-availability')).toBeNull();
+    expect(alphaChain.querySelector('.plugin-export')).toBeNull();
+    expect(alphaChain.querySelector('.plugin-delete')).toBeNull();
+  });
+
+  it('filters by source, status, and search query using unified filter controls', async () => {
+    await openMarketplace({
+      'GET /admin/api/games': {
+        body: {
+          ...GAMES,
+          games: [
+            ...GAMES.games,
+            {
+              id: 'tictactoe', name: 'Tic-Tac-Toe', root: 'games', version: '1.0.0',
+              availability: 'available', diskBytes: 12000, directoryBytes: 8000, compressedBytes: 4000,
+              packageBytes: 0, activeLobbies: 1, activePlayers: 2, deletable: true,
+            },
+          ],
+        },
+      },
+    });
+
+    const qInput = el('plugins-filter-q');
+    const sourceSelect = el('plugins-filter-source');
+    const statusSelect = el('plugins-filter-status');
+
+    expect(sourceSelect).not.toBeNull();
+    expect(statusSelect).not.toBeNull();
+
+    // 1. Filter by source: Games Folder
+    sourceSelect.value = 'games';
+    sourceSelect.dispatchEvent(new Event('change'));
+    let visible = [...document.querySelectorAll('#plugins-list .game-card')];
+    expect(visible.map((c) => c.dataset.id)).toEqual(['tictactoe']);
+
+    // 2. Filter by source: Official Marketplace
+    sourceSelect.value = 'official';
+    sourceSelect.dispatchEvent(new Event('change'));
+    visible = [...document.querySelectorAll('#plugins-list .game-card')];
+    expect(visible.map((c) => c.dataset.id)).toEqual(['word-rush', 'alpha-chain']);
+
+    // Reset source
+    sourceSelect.value = '';
+    sourceSelect.dispatchEvent(new Event('change'));
+
+    // 3. Filter by status: Not Installed
+    statusSelect.value = 'notInstalled';
+    statusSelect.dispatchEvent(new Event('change'));
+    visible = [...document.querySelectorAll('#plugins-list .game-card')];
+    expect(visible.map((c) => c.dataset.id)).toEqual(['alpha-chain']);
+
+    // 4. Filter by status: Installed
+    statusSelect.value = 'installed';
+    statusSelect.dispatchEvent(new Event('change'));
+    visible = [...document.querySelectorAll('#plugins-list .game-card')];
+    expect(visible.map((c) => c.dataset.id)).toEqual(['tictactoe', 'word-rush']);
+
+    // Reset status
+    statusSelect.value = '';
+    statusSelect.dispatchEvent(new Event('change'));
+
+    // 5. Search query
+    qInput.value = 'Tic';
+    qInput.dispatchEvent(new Event('input'));
+    visible = [...document.querySelectorAll('#plugins-list .game-card')];
+    expect(visible.map((c) => c.dataset.id)).toEqual(['tictactoe']);
+  });
+
+  it('opens 3-dots full metadata popup dialog and renders details and footer actions', async () => {
+    await openMarketplace();
+
+    const wordRush = card('word-rush');
+    const dotsBtn = wordRush.querySelector('.plugin-details-btn');
+    expect(dotsBtn).not.toBeNull();
+
+    const modal = el('plugin-details-backdrop');
+    expect(modal.classList.contains('hidden')).toBe(true);
+
+    dotsBtn.click();
+    expect(modal.classList.contains('hidden')).toBe(false);
+
+    // Title
+    expect(el('plugin-details-title').textContent).toContain('Word Rush');
+
+    // Body content sections
+    const body = el('plugin-details-body');
+    expect(body.textContent).toContain('Overview & Identity');
+    expect(body.textContent).toContain('Description & Tags');
+    expect(body.textContent).toContain('Gameplay & Runtime');
+    expect(body.textContent).toContain('Storage & Disk Breakdown');
+    expect(body.textContent).toContain('Retained Version Backups');
+
+    // Metadata specifics
+    expect(body.textContent).toContain('word-rush');
+    expect(body.textContent).toContain('Someone');
+    expect(body.textContent).toContain('MIT');
+    expect(body.textContent).toContain('everyone');
+    expect(body.textContent).toContain('2–8');
+    expect(body.textContent).toContain('Fast word game');
+    expect(body.textContent).toContain('party');
+
+    // Action buttons in modal footer
+    const actions = el('plugin-details-actions');
+    expect(actions.querySelector('.mkt-version')).not.toBeNull();
+    expect(actions.querySelector('.plugin-availability')).not.toBeNull();
+    expect(actions.querySelector('.mkt-action')).not.toBeNull();
+    expect(actions.querySelector('.mkt-export')).not.toBeNull();
+    expect(actions.querySelector('.mkt-uninstall')).not.toBeNull();
+    expect(el('plugin-details-close')).not.toBeNull();
+
+    // Close button dismisses dialog
+    el('plugin-details-close').click();
+    expect(modal.classList.contains('hidden')).toBe(true);
+
+    // Reopen and test close with Escape key
+    dotsBtn.click();
+    expect(modal.classList.contains('hidden')).toBe(false);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(modal.classList.contains('hidden')).toBe(true);
+
+    // Reopen and test close with X button
+    dotsBtn.click();
+    expect(modal.classList.contains('hidden')).toBe(false);
+    el('plugin-details-close-x').click();
+    expect(modal.classList.contains('hidden')).toBe(true);
+  });
+});
+

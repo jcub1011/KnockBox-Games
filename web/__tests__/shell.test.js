@@ -883,6 +883,7 @@ describe('launch overlay', () => {
       const frame = await launchWithTile(ws);
       stubMorphAnimation();   // never resolved
 
+      vi.useFakeTimers();
       frame.dispatchEvent(new Event('load'));
       expect(document.body.classList.contains('in-game')).toBe(false);
 
@@ -897,6 +898,7 @@ describe('launch overlay', () => {
       await createLobbySuccess(ws, { lobbyId: 'AB12' });
       const frame = await embedGame(ws);
 
+      vi.useFakeTimers();
       frame.dispatchEvent(new Event('load'));
 
       expect(el('game-view').classList.contains('launch-morph')).toBe(false);

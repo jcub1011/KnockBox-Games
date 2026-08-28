@@ -1683,6 +1683,31 @@ code, pre {
   border: 1px solid var(--border-subtle);
 }
 
+.plugin-details-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 0.25rem 0.45rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.plugin-details-btn:hover {
+  color: var(--text-main);
+  background-color: var(--bg-hover);
+  border-color: var(--border-default);
+}
+
+.plugin-details-btn .dots-icon {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
 .game-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -1860,10 +1885,105 @@ code, pre {
   line-height: 1.55;
 }
 
+.modal-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.modal-header-row h3 {
+  margin-bottom: 0;
+}
+
+.modal-close-icon {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.modal-close-icon:hover {
+  color: var(--text-main);
+  background-color: var(--bg-hover);
+}
+
+.plugin-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.details-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.details-section-title {
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent-mint);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 0.25rem;
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem 1rem;
+}
+
+.details-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.details-label {
+  font-family: var(--font-display);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.details-value {
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+.details-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.details-table-wrap {
+  overflow-x: auto;
+  margin-top: 0.25rem;
+}
+
 .modal-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 0.6rem;
+  flex-wrap: wrap;
   margin-top: 1.5rem;
   padding-top: 1rem;
   border-top: 1px solid var(--border-subtle);

@@ -748,8 +748,8 @@ describe('game catalog', () => {
 
   it('renders a card per game with its disk breakdown and live counts', async () => {
     await openGames();
-    const cards = el('games-list').querySelectorAll('.game-card');
-    expect(cards).toHaveLength(2);
+    const cards = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card');
+    expect(cards).toHaveLength(3);
     expect(cards[0].textContent).toContain('Tic-Tac-Toe');
     expect(cards[0].textContent).toContain('12 KB');   // total
     expect(cards[0].textContent).toContain('7.6 KB');  // files
@@ -758,15 +758,15 @@ describe('game catalog', () => {
 
   it('shows the availability each game is actually in', async () => {
     await openGames();
-    const selects = el('games-list').querySelectorAll('select');
+    const selects = (el('plugins-list') || el('games-list')).querySelectorAll('.plugin-availability');
     expect(selects[0].value).toBe('available');
     expect(selects[1].value).toBe('disabled');
   });
 
   it('disables Delete and says why when the deployment forbids it', async () => {
     await openGames();
-    const wordRush = el('games-list').querySelectorAll('.game-card')[1];
-    const remove = [...wordRush.querySelectorAll('button')].find((b) => b.textContent === 'Delete');
+    const wordRush = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[1];
+    const remove = [...wordRush.querySelectorAll('button')].find((b) => b.textContent === 'Delete' || b.textContent === 'Uninstall');
 
     // Offering a button that always fails on a read-only games mount is worse than not offering it.
     expect(remove.disabled).toBe(true);
@@ -776,7 +776,7 @@ describe('game catalog', () => {
 
   it('confirms before hiding a game that has players in it, and says what survives', async () => {
     await openGames({ 'POST /admin/api/games/tictactoe/availability': { body: { success: true } } });
-    const select = el('games-list').querySelector('select');   // tictactoe, 1 running lobby
+    const select = (el('plugins-list') || el('games-list')).querySelector('.plugin-availability');   // tictactoe, 1 running lobby
     select.value = 'staged';
     select.dispatchEvent(new Event('change', { bubbles: true }));
 
@@ -795,7 +795,7 @@ describe('game catalog', () => {
 
   it('changes a game with nobody playing it without stopping to ask', async () => {
     await openGames({ 'POST /admin/api/games/word-rush/availability': { body: { success: true } } });
-    const select = el('games-list').querySelectorAll('select')[1];  // word-rush, 0 running lobbies
+    const select = (el('plugins-list') || el('games-list')).querySelectorAll('.plugin-availability')[1];  // word-rush, 0 running lobbies
     select.value = 'available';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     await tick();
@@ -813,7 +813,7 @@ describe('game catalog', () => {
         body: { success: true, warning: 'The change is active now but could not be saved, so it will be lost on restart.' },
       },
     });
-    const select = el('games-list').querySelector('select');
+    const select = (el('plugins-list') || el('games-list')).querySelector('.plugin-availability');
     select.value = 'disabled';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     el('confirm-ok').click();   // tictactoe has a running lobby, so this asks first
@@ -827,7 +827,7 @@ describe('game catalog', () => {
 
   it('confirms a delete before sending it', async () => {
     await openGames({ 'POST /admin/api/games/tictactoe/delete': { body: { success: true, detail: 'Deleted.' } } });
-    const remove = [...el('games-list').querySelectorAll('.game-card')[0].querySelectorAll('button')]
+    const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
       .find((b) => b.textContent === 'Delete');
     remove.click();
 
@@ -843,7 +843,7 @@ describe('game catalog', () => {
 
   it('renders an Export button on each game card and triggers export', async () => {
     await openGames();
-    const exportBtn = el('games-list').querySelectorAll('.game-card')[0].querySelector('.game-export');
+    const exportBtn = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelector('.game-export');
     expect(exportBtn).not.toBeNull();
     expect(exportBtn.textContent).toBe('Export');
 
@@ -858,7 +858,7 @@ describe('game catalog', () => {
 
   it('shows manual upload warning and export button in delete confirmation dialog for folder games', async () => {
     await openGames();
-    const remove = [...el('games-list').querySelectorAll('.game-card')[0].querySelectorAll('button')]
+    const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
       .find((b) => b.textContent === 'Delete');
     remove.click();
 

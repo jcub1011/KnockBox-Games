@@ -12,10 +12,10 @@ import {
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
-  filterSettings, formatBytes, formatClock, formatCount, formatDuration, formatVersion,
+  filterPlugins, filterSettings, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergeSamples, sdkBadge,
-  noLimitOverrides, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
+  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
+  noLimitOverrides, playerRange, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
   sparklinePath, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
@@ -684,7 +684,12 @@ function enterTab(tab, { force = false } = {}) {
   if (!force && tab === enteredTab) return;
   enteredTab = tab;
   if (tab === 'logs') { logCursor = 0; logEntries = []; }
-  if (tab === 'marketplace' || tab === 'plugins') { jobCursor = 0; jobs = []; refreshCatalog(); refreshGames(); }
+  if (tab === 'marketplace' || tab === 'plugins' || tab === 'games') {
+    jobCursor = 0;
+    jobs = [];
+    refreshCatalog();
+    refreshGames();
+  }
   if (tab === 'monitoring' || tab === 'overview') { refreshOverview(); refreshLobbies(); }
   if (tab === 'platform' || tab === 'settings') { refreshPlatform(); }
   refreshActiveTab();
@@ -713,7 +718,7 @@ const POLL_MS = {
   overview: 5000,
   lobbies: 5000,
   monitoring: 5000,
-  games: 20000,
+  games: 3000,
   marketplace: 3000,
   plugins: 3000,
   logs: 2000,
@@ -752,8 +757,6 @@ async function refreshActiveTab() {
       await refreshLobbies();
       break;
     case 'games':
-      await refreshGames();
-      break;
     case 'marketplace':
     case 'plugins':
       await refreshJobs();
@@ -1085,143 +1088,332 @@ function setNavCount(tab, count) {
   badge.hidden = count === 0;
 }
 
-// ── Games ─────────────────────────────────────────────────────────────────────
+// ── Plugins & Games ───────────────────────────────────────────────────────────
 
 async function refreshGames() {
   const data = await getJson('/admin/api/games');
   if (!data) return;
   gameData = data;
-  renderGames();
+  renderPlugins();
 }
 
-function renderGames() {
-  if (!gameData) return;
-  const filtered = filterGames(gameData.games, {
-    q: el('game-filter-q').value,
-    availability: el('game-filter-availability').value,
-  });
+export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
+  await Promise.all([
+    refreshGames(),
+    refreshCatalog({ refresh: refreshCatalogNow }),
+    refreshJobs(),
+  ]);
+}
 
-  const host = el('games-list');
+export function renderPlugins() {
+  renderSourceFilter();
+  const host = el('plugins-list') || el('mkt-list') || el('games-list');
+  if (!host) return;
   host.innerHTML = '';
-  const total = (gameData.games || []).length;
-  el('games-empty').textContent = total === 0
-    ? 'No games discovered. Drop a folder or a .kbg package into the games directory.'
-    : 'No games match these filters.';
-  el('games-empty').classList.toggle('hidden', filtered.length > 0);
-  setNavCount('games', total);
-  el('games-note').textContent =
-    `Games root: ${gameData.gamesRoot} — packages extracted to: ${gameData.packagesRoot}. `
-    + `Disk figures measured ${formatClock(gameData.diskMeasuredAt)} `
-    + `(compressed cache ${formatBytes(gameData.compressedCacheBytes)}, logs ${formatBytes(gameData.logsBytes)}).`;
 
-  for (const game of filtered) host.appendChild(gameCard(game));
+  const allEntries = mergePluginEntries(gameData?.games || [], catalogData?.entries || []);
+
+  const q = (el('plugins-filter-q') || el('mkt-filter-q') || el('game-filter-q'))?.value || '';
+  const source = (el('plugins-filter-source') || el('mkt-filter-source'))?.value || '';
+  const status = (el('plugins-filter-status') || el('mkt-filter-status') || el('game-filter-availability'))?.value || '';
+
+  const filtered = filterPlugins(allEntries, { q, source, status });
+
+  const totalInstalled = (gameData?.games || []).length;
+  const emptyEl = el('plugins-empty') || el('mkt-empty') || el('games-empty');
+  if (emptyEl) {
+    emptyEl.textContent = allEntries.length === 0
+      ? 'No plugins discovered or available.'
+      : 'No plugins match these filters.';
+    emptyEl.classList.toggle('hidden', filtered.length > 0);
+  }
+
+  for (const entry of filtered) {
+    host.appendChild(pluginCard(entry));
+  }
+
+  const disabledBanner = el('mkt-disabled');
+  if (disabledBanner) {
+    disabledBanner.classList.toggle('hidden', catalogData?.enabled !== false);
+  }
+
+  const noteEl = el('plugins-note') || el('mkt-note') || el('games-note');
+  if (noteEl) {
+    const parts = [];
+    if (gameData?.gamesRoot) {
+      parts.push(`Games root: ${gameData.gamesRoot}`);
+    }
+    if (gameData?.packagesRoot) {
+      parts.push(`packages: ${gameData.packagesRoot}`);
+    }
+    if (catalogData?.managedRoot) {
+      parts.push(`managed: ${catalogData.managedRoot}`);
+    }
+    if (catalogData?.fetchedAt) {
+      parts.push(`Catalog read ${formatClock(catalogData.fetchedAt)}`);
+    }
+    if (gameData?.diskMeasuredAt) {
+      parts.push(`Disk measured ${formatClock(gameData.diskMeasuredAt)}`);
+    }
+    const failed = (catalogData?.sources || []).filter((s) => s.error);
+    for (const source of failed) {
+      parts.push(`${source.name || source.id}: ${source.error}`);
+    }
+    noteEl.textContent = parts.join(' · ');
+  }
+
+  setNavCount('plugins', updatesAvailable());
+  setNavCount('marketplace', updatesAvailable());
+  setNavCount('games', totalInstalled);
 }
 
-function gameCard(game) {
+export function renderGames() {
+  renderPlugins();
+}
+
+export function pluginCard(entry) {
   const card = document.createElement('div');
-  card.className = 'game-card';
+  card.className = 'game-card plugin-card mkt-card';
+  card.dataset.id = entry.id;
 
   const header = document.createElement('div');
   header.className = 'game-card-header';
-  const title = document.createElement('h3');
-  title.textContent = game.name;
-  const id = document.createElement('code');
-  id.textContent = game.id;
-  header.append(title, id);
-  if (game.version) {
-    const version = document.createElement('span');
-    version.className = 'badge badge-muted';
-    version.textContent = `v${game.version}`;
-    header.appendChild(version);
-  }
-  if (game.serverAuthority) {
-    const authority = document.createElement('span');
-    authority.className = 'badge badge-muted';
-    authority.textContent = 'server authority';
-    header.appendChild(authority);
-  }
-  // Only the actionable states get a badge — see sdkBadge. A game with no stamp shows nothing.
-  const sdk = sdkBadge(game, gameData?.serverSdkVersion);
-  if (sdk) {
-    const badge = document.createElement('span');
-    badge.className = sdk.className;
-    badge.textContent = sdk.label;
-    badge.title = sdk.title;
-    header.appendChild(badge);
-  }
-  const state = document.createElement('span');
-  state.className = `badge badge-${game.availability === 'available' ? 'ok' : 'warning'}`;
-  state.textContent = availabilityLabel(game.availability);
-  header.appendChild(state);
 
-  // Engine state, separate from the availability badge and deliberately absent from the select below —
-  // that control is a command, and offering a value the server would refuse is worse than not offering
-  // it. 'ready' has an empty label and renders nothing.
-  const busy = isBusyLifecycle(game.lifecycle);
-  if (busy) {
-    const lifecycle = document.createElement('span');
-    lifecycle.className = `badge ${lifecycleClass(game.lifecycle)}`;
-    lifecycle.textContent = lifecycleLabel(game.lifecycle);
-    header.appendChild(lifecycle);
+  const title = document.createElement('h3');
+  title.textContent = entry.name;
+  const id = document.createElement('code');
+  id.textContent = entry.id;
+  header.append(title, id);
+
+  if (entry.installed) {
+    const state = document.createElement('span');
+    state.className = `badge badge-${entry.availability === 'available' ? 'ok' : 'warning'}`;
+    state.textContent = availabilityLabel(entry.availability);
+    header.appendChild(state);
+
+    if (entry.status === 'updateAvailable') {
+      const update = document.createElement('span');
+      update.className = 'badge badge-warning';
+      update.textContent = 'Update available';
+      update.title = pluginStatusHint('updateAvailable');
+      header.appendChild(update);
+    }
+
+    if (isBusyLifecycle(entry.lifecycle)) {
+      const lifecycle = document.createElement('span');
+      lifecycle.className = `badge ${lifecycleClass(entry.lifecycle)}`;
+      lifecycle.textContent = lifecycleLabel(entry.lifecycle);
+      header.appendChild(lifecycle);
+    }
+
+    const sdk = sdkBadge(entry, gameData?.serverSdkVersion);
+    if (sdk) {
+      const sdkEl = document.createElement('span');
+      sdkEl.className = sdk.className;
+      sdkEl.textContent = sdk.label;
+      sdkEl.title = sdk.title;
+      header.appendChild(sdkEl);
+    }
+
+    if (entry.serverAuthority) {
+      const authority = document.createElement('span');
+      authority.className = 'badge badge-muted';
+      authority.textContent = 'server authority';
+      header.appendChild(authority);
+    }
+  } else {
+    const status = document.createElement('span');
+    status.className = `badge ${pluginStatusClass(entry.status)}`;
+    status.textContent = pluginStatusLabel(entry.status);
+    status.title = pluginStatusHint(entry.status);
+    header.appendChild(status);
   }
-  // Read from the catalog snapshot the portal already holds, never fetched here: the games tab polls
-  // every 20 seconds because it triggers a disk walk, and a catalog fetch carries a 30-second timeout.
-  // Absent until the operator has visited the Marketplace tab, which is the right trade — this is a
-  // pointer to that tab, not the place the work happens.
-  const offered = (catalogData?.entries || []).find(
-    (e) => e.id === game.id && e.status === 'updateAvailable');
-  if (offered) {
-    const update = document.createElement('span');
-    update.className = 'badge badge-warning';
-    update.textContent = `update ${formatVersion(offered.availableVersion)}`;
-    header.appendChild(update);
+
+  const ver = entry.installed ? entry.installedVersion : entry.availableVersion;
+  if (ver) {
+    const versionBadge = document.createElement('span');
+    versionBadge.className = 'badge badge-muted';
+    versionBadge.textContent = `v${ver}`;
+    header.appendChild(versionBadge);
   }
+
+  if (entry.contentRating) {
+    const rating = document.createElement('span');
+    rating.className = 'badge badge-muted';
+    rating.textContent = entry.contentRating;
+    rating.title = 'Content rating declared by the game.';
+    header.appendChild(rating);
+  }
+
+  for (const tag of (entry.tags || []).slice(0, 3)) {
+    const chip = document.createElement('span');
+    chip.className = 'badge badge-muted';
+    chip.textContent = tag;
+    header.appendChild(chip);
+  }
+
+  // 3-dots button icon in the top right to see full game metadata in popup dialog
+  const dotsBtn = document.createElement('button');
+  dotsBtn.type = 'button';
+  dotsBtn.className = 'plugin-details-btn';
+  dotsBtn.title = 'View full metadata';
+  dotsBtn.setAttribute('aria-label', `View full metadata for ${entry.name}`);
+  dotsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="dots-icon"><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle><circle cx="5" cy="12" r="1.5"></circle></svg>';
+  dotsBtn.onclick = () => openPluginDetails(entry);
+  header.appendChild(dotsBtn);
+
   card.appendChild(header);
+
+  if (entry.description) {
+    const description = document.createElement('p');
+    description.className = 'mkt-desc';
+    description.textContent = entry.description;
+    card.appendChild(description);
+  }
 
   const facts = document.createElement('div');
   facts.className = 'game-facts';
-  addFact(facts, 'Disk', formatBytes(game.diskBytes),
-    `Files ${formatBytes(game.directoryBytes)} + compressed ${formatBytes(game.compressedBytes)}`
-    + (game.packageBacked ? ` + package ${formatBytes(game.packageBytes)}` : ''));
-  addFact(facts, 'Running now', `${game.activeLobbies} lobby/lobbies`, `${game.activePlayers} player(s)`);
-  addFact(facts, 'Max players', String(game.maxPlayers), '');
-  addFact(facts, 'Installed from', game.root === 'packages' ? '.kbg package' : 'games folder', game.directory);
+
+  if (entry.installed) {
+    addFact(facts, 'Installed', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed', '');
+    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
+      entry.sourceName || entry.sourceId || '');
+    addFact(facts, 'Disk', formatBytes(entry.diskBytes),
+      `Files ${formatBytes(entry.directoryBytes)} + compressed ${formatBytes(entry.compressedBytes)}`
+      + (entry.packageBacked ? ` + package ${formatBytes(entry.packageBytes)}` : ''));
+    if (entry.activeLobbies > 0 || entry.activePlayers > 0) {
+      addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, `${entry.activePlayers} player(s)`);
+    }
+  } else {
+    addFact(facts, 'Installed', 'Not installed', '');
+    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
+      entry.sourceName || entry.sourceId || '');
+    if (entry.sizeBytes) {
+      addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
+    }
+  }
+
+  if (entry.author) {
+    addFact(facts, 'Author', entry.author, '');
+  }
+
+  const players = playerRange(entry) || (entry.maxPlayers ? String(entry.maxPlayers) : '');
+  if (players) {
+    addFact(facts, 'Players', players, '');
+  }
+
+  if (entry.license) {
+    addFact(facts, 'License', entry.license, '');
+  }
+
+  addFact(facts, 'Game ID', entry.id, '');
+
+  addFact(facts, 'Source',
+    entry.sourceName || (entry.sourceKind === 'games' ? 'Games Folder' : 'Manual Upload'),
+    entry.directory || '');
+
   card.appendChild(facts);
+
+  const links = marketplaceLinks(entry);
+  if (links) card.appendChild(links);
+
+  const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+  const busy = isBusyLifecycle(entry.lifecycle);
 
   const actions = document.createElement('div');
   actions.className = 'game-actions';
 
-  const select = document.createElement('select');
-  select.className = 'text-input filter-narrow';
-  for (const option of AVAILABILITY) {
+  // Version selection dropdown
+  const versionSelect = document.createElement('select');
+  versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
+  for (const option of versionOptions(entry)) {
+    const opt = document.createElement('option');
+    opt.value = versionOptionValue(option);
+    opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
+    versionSelect.appendChild(opt);
+  }
+  if (versionSelect.options.length === 0) versionSelect.disabled = true;
+  actions.appendChild(versionSelect);
+
+  // Status selection dropdown (hidden when not installed)
+  if (entry.installed) {
+    const availSelect = document.createElement('select');
+    availSelect.className = 'text-input filter-narrow plugin-availability';
+    for (const option of AVAILABILITY) {
+      const opt = document.createElement('option');
+      opt.value = option.value;
+      opt.textContent = option.label;
+      opt.title = option.hint;
+      if (option.value === entry.availability) opt.selected = true;
+      availSelect.appendChild(opt);
+    }
+    availSelect.onchange = () => setAvailability(entry, availSelect.value);
+    if (busy) {
+      availSelect.disabled = true;
+      availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
+    }
+    actions.appendChild(availSelect);
+  }
+
+  // Update mode dropdown
+  const modeSelect = document.createElement('select');
+  modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
+  for (const option of UPDATE_MODES) {
     const opt = document.createElement('option');
     opt.value = option.value;
     opt.textContent = option.label;
     opt.title = option.hint;
-    if (option.value === game.availability) opt.selected = true;
-    select.appendChild(opt);
+    modeSelect.appendChild(opt);
   }
-  select.onchange = () => setAvailability(game, select.value);
-  if (busy) {
-    // An availability write racing a directory swap is arbitration the engine shouldn't have to do.
-    select.disabled = true;
-    select.title = `${lifecycleLabel(game.lifecycle)} — availability can't change mid-update.`;
+  if ((entry.activeLobbies || 0) === 0) {
+    modeSelect.disabled = true;
+    modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
   }
-  actions.appendChild(select);
+  actions.appendChild(modeSelect);
 
-  const hint = document.createElement('span');
-  hint.className = 'game-hint';
-  hint.textContent = AVAILABILITY.find((a) => a.value === game.availability)?.hint ?? '';
-  actions.appendChild(hint);
+  // Primary action button (Install, Reinstall, Update, Roll back)
+  const actionBtn = document.createElement('button');
+  actionBtn.type = 'button';
+  actionBtn.className = 'btn plugin-action mkt-action';
+  const refreshAction = () => {
+    const decided = versionAction(entry, versionSelect.value,
+      catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
+    actionBtn.textContent = decided.label;
+    actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
+    actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
+    actionBtn.title = decided.blockedReason || '';
+    actionBtn.onclick = () => runPackageAction(entry, decided, modeSelect.value);
+  };
+  versionSelect.onchange = refreshAction;
+  refreshAction();
+  actions.appendChild(actionBtn);
 
-  // A staged game is only reachable through a link carrying its id, so hand that link over rather than
-  // making the operator construct it. It is deliberately NOT presented as a secret.
-  if (game.availability === 'staged') {
+  // Update policy dropdown (installed & managed)
+  if (entry.installed && entry.managed) {
+    const policySelect = document.createElement('select');
+    policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
+    for (const option of UPDATE_POLICIES) {
+      const opt = document.createElement('option');
+      opt.value = option.value;
+      opt.textContent = option.label;
+      opt.title = option.hint;
+      if (option.value === entry.updatePolicy) opt.selected = true;
+      policySelect.appendChild(opt);
+    }
+    policySelect.value = entry.updatePolicy || 'manual';
+    policySelect.disabled = Boolean(pending);
+    policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
+      { policy: policySelect.value });
+    actions.appendChild(policySelect);
+  }
+
+  // Staged launch link
+  if (entry.installed && entry.availability === 'staged') {
     const copy = document.createElement('button');
-    copy.className = 'btn btn-secondary btn-small';
+    copy.className = 'btn btn-secondary';
     copy.type = 'button';
     copy.textContent = 'Copy launch link';
-    copy.onclick = () => copyStagedLink(game);
+    copy.onclick = () => copyStagedLink(entry);
     actions.appendChild(copy);
   }
 
@@ -1229,51 +1421,320 @@ function gameCard(game) {
   spacer.className = 'filter-spacer';
   actions.appendChild(spacer);
 
-  const exportBtn = document.createElement('button');
-  exportBtn.className = 'btn btn-primary btn-small game-export';
-  exportBtn.type = 'button';
-  exportBtn.textContent = 'Export';
-  exportBtn.onclick = () => exportGame(game.id);
-  actions.appendChild(exportBtn);
+  // Export button (hidden when not installed)
+  if (entry.installed) {
+    const exportBtn = document.createElement('button');
+    exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
+    exportBtn.type = 'button';
+    exportBtn.textContent = 'Export';
+    exportBtn.onclick = () => exportGame(entry.id);
+    actions.appendChild(exportBtn);
 
-  const remove = document.createElement('button');
-  remove.className = 'btn btn-danger btn-small';
-  remove.type = 'button';
-  remove.textContent = 'Delete';
-  if (busy) {
-    remove.disabled = true;
-    remove.title = `${lifecycleLabel(game.lifecycle)} — wait for the update to finish.`;
-  } else if (game.deletable) {
-    remove.onclick = () => deleteGame(game);
-  } else {
-    // Say why rather than offering a button that always fails: in production the games folder is a
-    // read-only mount, and no amount of clicking will change that.
-    remove.disabled = true;
-    remove.title = game.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
+    // Delete / Uninstall button (hidden when not installed)
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
+    removeBtn.type = 'button';
+    removeBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
+    if (busy) {
+      removeBtn.disabled = true;
+      removeBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
+    } else if (!entry.deletable) {
+      removeBtn.disabled = true;
+      removeBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
+    } else if (entry.root === 'games') {
+      removeBtn.onclick = () => deleteGame(entry);
+    } else {
+      removeBtn.disabled = Boolean(pending);
+      removeBtn.onclick = () => uninstallGame(entry);
+    }
+    actions.appendChild(removeBtn);
   }
-  actions.appendChild(remove);
+
   card.appendChild(actions);
 
   if (busy) {
     const why = document.createElement('p');
     why.className = 'game-hint game-hint-block';
-    why.textContent = `${lifecycleLabel(game.lifecycle)} — follow it in the Marketplace tab.`;
-    const jump = document.createElement('button');
-    jump.type = 'button';
-    jump.className = 'btn btn-secondary btn-small';
-    jump.textContent = 'View operation';
-    // Jumps rather than duplicating the controls: one place owns package operations.
-    jump.onclick = () => { el('mkt-filter-q').value = game.id; location.hash = '#marketplace'; };
-    why.appendChild(jump);
+    why.textContent = `${lifecycleLabel(entry.lifecycle)} — package operation in progress.`;
     card.appendChild(why);
-  } else if (!game.deletable && game.deleteBlockedReason) {
+  } else if (entry.installed && !entry.deletable && entry.deleteBlockedReason) {
     const why = document.createElement('p');
     why.className = 'game-hint game-hint-block';
-    why.textContent = `Delete unavailable: ${game.deleteBlockedReason} Disable the game instead.`;
+    why.textContent = `Delete unavailable: ${entry.deleteBlockedReason} Disable the game instead.`;
     card.appendChild(why);
   }
 
+  if (entry.shadowedBy) {
+    const shadow = document.createElement('p');
+    shadow.className = 'game-hint game-hint-block';
+    shadow.textContent =
+      `Also offered by '${entry.shadowedBy}', which takes precedence — installing here uses that copy.`;
+    card.appendChild(shadow);
+  }
+  if (entry.reason && entry.status !== 'installedOnly') {
+    const why = document.createElement('p');
+    why.className = 'game-hint game-hint-block';
+    why.textContent = entry.reason;
+    card.appendChild(why);
+  }
+  if (pending) card.appendChild(jobRow(pending, { compact: true }));
+
   return card;
+}
+
+export function gameCard(game) {
+  return pluginCard(game);
+}
+
+export function openPluginDetails(entry) {
+  const modal = el('plugin-details-backdrop');
+  if (!modal) return;
+
+  const title = el('plugin-details-title');
+  if (title) title.textContent = `${entry.name || entry.id}`;
+
+  const body = el('plugin-details-body');
+  if (body) {
+    body.innerHTML = '';
+
+    // Section 1: Overview & Identity
+    const secOverview = document.createElement('div');
+    secOverview.className = 'details-section';
+    const hOverview = document.createElement('h4');
+    hOverview.className = 'details-section-title';
+    hOverview.textContent = 'Overview & Identity';
+    secOverview.appendChild(hOverview);
+
+    const gridOverview = document.createElement('div');
+    gridOverview.className = 'details-grid';
+    addDetailField(gridOverview, 'Game ID', entry.id, true);
+    addDetailField(gridOverview, 'Status', entry.installed ? availabilityLabel(entry.availability) : pluginStatusLabel(entry.status));
+    addDetailField(gridOverview, 'Installed Version', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed');
+    addDetailField(gridOverview, 'Available Version', entry.availableVersion ? formatVersion(entry.availableVersion) : 'None');
+    addDetailField(gridOverview, 'Source', entry.sourceName || (entry.sourceKind === 'games' ? 'Games Folder' : 'Manual Upload'));
+    addDetailField(gridOverview, 'Author', entry.author || '--');
+    addDetailField(gridOverview, 'License', entry.license || '--');
+    addDetailField(gridOverview, 'Content Rating', entry.contentRating || '--');
+    secOverview.appendChild(gridOverview);
+
+    const links = marketplaceLinks(entry);
+    if (links) secOverview.appendChild(links);
+    body.appendChild(secOverview);
+
+    // Section 2: Description & Tags
+    const secDesc = document.createElement('div');
+    secDesc.className = 'details-section';
+    const hDesc = document.createElement('h4');
+    hDesc.className = 'details-section-title';
+    hDesc.textContent = 'Description & Tags';
+    secDesc.appendChild(hDesc);
+
+    const descP = document.createElement('p');
+    descP.className = 'mkt-desc';
+    descP.textContent = entry.description || 'No description provided.';
+    secDesc.appendChild(descP);
+
+    if (entry.tags && entry.tags.length > 0) {
+      const tagHost = document.createElement('div');
+      tagHost.className = 'details-badges';
+      for (const tag of entry.tags) {
+        const tagSpan = document.createElement('span');
+        tagSpan.className = 'badge badge-muted';
+        tagSpan.textContent = tag;
+        tagHost.appendChild(tagSpan);
+      }
+      secDesc.appendChild(tagHost);
+    }
+    body.appendChild(secDesc);
+
+    // Section 3: Gameplay & Runtime
+    const secGame = document.createElement('div');
+    secGame.className = 'details-section';
+    const hGame = document.createElement('h4');
+    hGame.className = 'details-section-title';
+    hGame.textContent = 'Gameplay & Runtime';
+    secGame.appendChild(hGame);
+
+    const gridGame = document.createElement('div');
+    gridGame.className = 'details-grid';
+    addDetailField(gridGame, 'Players', playerRange(entry) || (entry.maxPlayers ? String(entry.maxPlayers) : '--'));
+    addDetailField(gridGame, 'Server Authority', entry.serverAuthority ? 'Yes' : 'No');
+    if (entry.installed) {
+      addDetailField(gridGame, 'Active Lobbies', `${entry.activeLobbies || 0} lobby/lobbies`);
+      addDetailField(gridGame, 'Connected Players', `${entry.activePlayers || 0} player(s)`);
+      addDetailField(gridGame, 'Lifecycle', lifecycleLabel(entry.lifecycle) || 'Ready');
+      addDetailField(gridGame, 'Update Policy', entry.managed ? (entry.updatePolicy || 'manual') : 'N/A (folder game)');
+      if (entry.sdkStatus && entry.sdkStatus !== 'unknown') {
+        addDetailField(gridGame, 'SDK Status', entry.sdkStatus);
+      }
+    }
+    secGame.appendChild(gridGame);
+    body.appendChild(secGame);
+
+    // Section 4: Storage & Sizing
+    const secStorage = document.createElement('div');
+    secStorage.className = 'details-section';
+    const hStorage = document.createElement('h4');
+    hStorage.className = 'details-section-title';
+    hStorage.textContent = 'Storage & Disk Breakdown';
+    secStorage.appendChild(hStorage);
+
+    const gridStorage = document.createElement('div');
+    gridStorage.className = 'details-grid';
+    if (entry.installed) {
+      addDetailField(gridStorage, 'Total Disk Usage', formatBytes(entry.diskBytes));
+      addDetailField(gridStorage, 'Extracted Directory', formatBytes(entry.directoryBytes));
+      addDetailField(gridStorage, 'Compressed Cache', formatBytes(entry.compressedBytes));
+      addDetailField(gridStorage, 'Package Bytes', formatBytes(entry.packageBytes));
+      if (entry.backupBytes) {
+        addDetailField(gridStorage, 'Retained Backups Size', formatBytes(entry.backupBytes));
+      }
+      if (entry.directory) {
+        addDetailField(gridStorage, 'Location', entry.directory, true);
+      }
+    } else {
+      addDetailField(gridStorage, 'Download Size', formatBytes(entry.sizeBytes));
+    }
+    secStorage.appendChild(gridStorage);
+    body.appendChild(secStorage);
+
+    // Section 5: Retained Backups
+    if (entry.backups && entry.backups.length > 0) {
+      const secBackups = document.createElement('div');
+      secBackups.className = 'details-section';
+      const hBackups = document.createElement('h4');
+      hBackups.className = 'details-section-title';
+      hBackups.textContent = 'Retained Version Backups';
+      secBackups.appendChild(hBackups);
+
+      const tableWrap = document.createElement('div');
+      tableWrap.className = 'table-scroll';
+      const table = document.createElement('table');
+      table.className = 'data-table';
+      table.innerHTML = '<thead><tr><th>Version</th><th>Size</th><th>Retained Date</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      for (const b of entry.backups) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${formatVersion(b.version)}</td><td>${formatBytes(b.bytes)}</td><td>${formatDateTime(b.retainedAt)}</td>`;
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      tableWrap.appendChild(table);
+      secBackups.appendChild(tableWrap);
+      body.appendChild(secBackups);
+    }
+  }
+
+  // Populate Actions in footer
+  const actionsHost = el('plugin-details-actions');
+  if (actionsHost) {
+    actionsHost.innerHTML = '';
+
+    const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+
+    const versionSelect = document.createElement('select');
+    versionSelect.className = 'text-input filter-narrow mkt-version';
+    for (const option of versionOptions(entry)) {
+      const opt = document.createElement('option');
+      opt.value = versionOptionValue(option);
+      opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
+      versionSelect.appendChild(opt);
+    }
+    if (versionSelect.options.length === 0) versionSelect.disabled = true;
+    actionsHost.appendChild(versionSelect);
+
+    if (entry.installed) {
+      const availSelect = document.createElement('select');
+      availSelect.className = 'text-input filter-narrow plugin-availability';
+      for (const option of AVAILABILITY) {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.label;
+        if (option.value === entry.availability) opt.selected = true;
+        availSelect.appendChild(opt);
+      }
+      availSelect.onchange = () => setAvailability(entry, availSelect.value);
+      if (isBusyLifecycle(entry.lifecycle)) availSelect.disabled = true;
+      actionsHost.appendChild(availSelect);
+    }
+
+    const modeSelect = document.createElement('select');
+    modeSelect.className = 'text-input filter-narrow mkt-mode';
+    for (const option of UPDATE_MODES) {
+      const opt = document.createElement('option');
+      opt.value = option.value;
+      opt.textContent = option.label;
+      opt.title = option.hint;
+      modeSelect.appendChild(opt);
+    }
+    if ((entry.activeLobbies || 0) === 0) modeSelect.disabled = true;
+    actionsHost.appendChild(modeSelect);
+
+    const actionBtn = document.createElement('button');
+    actionBtn.type = 'button';
+    actionBtn.className = 'btn mkt-action';
+    const refreshModalAction = () => {
+      const decided = versionAction(entry, versionSelect.value,
+        catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
+      actionBtn.textContent = decided.label;
+      actionBtn.className = `btn mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
+      actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
+      actionBtn.title = decided.blockedReason || '';
+      actionBtn.onclick = () => {
+        runPackageAction(entry, decided, modeSelect.value);
+        modal.classList.add('hidden');
+      };
+    };
+    versionSelect.onchange = refreshModalAction;
+    refreshModalAction();
+    actionsHost.appendChild(actionBtn);
+
+    if (entry.installed) {
+      const exportBtn = document.createElement('button');
+      exportBtn.type = 'button';
+      exportBtn.className = 'btn btn-primary mkt-export';
+      exportBtn.textContent = 'Export';
+      exportBtn.onclick = () => exportGame(entry.id);
+      actionsHost.appendChild(exportBtn);
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'btn btn-danger mkt-uninstall';
+      deleteBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
+      deleteBtn.disabled = Boolean(pending) || (entry.root === 'games' && !entry.deletable);
+      if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      deleteBtn.onclick = () => {
+        modal.classList.add('hidden');
+        if (entry.root === 'games') deleteGame(entry);
+        else uninstallGame(entry);
+      };
+      actionsHost.appendChild(deleteBtn);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.id = 'plugin-details-close';
+    closeBtn.className = 'btn btn-secondary';
+    closeBtn.textContent = 'Close';
+    closeBtn.onclick = () => modal.classList.add('hidden');
+    actionsHost.appendChild(closeBtn);
+  }
+
+  modal.classList.remove('hidden');
+}
+
+function addDetailField(host, label, value, isCode = false) {
+  const field = document.createElement('div');
+  field.className = 'details-field';
+  const l = document.createElement('span');
+  l.className = 'details-label';
+  l.textContent = label;
+  field.appendChild(l);
+  const v = document.createElement(isCode ? 'code' : 'span');
+  v.className = 'details-value';
+  v.textContent = value;
+  field.appendChild(v);
+  host.appendChild(field);
 }
 
 /**
@@ -1291,15 +1752,6 @@ function httpsUrl(value) {
   } catch {
     return null;
   }
-}
-
-/** "2–8", "4", "up to 8", "2+", or '' when the entry declared no range at all. */
-function playerRange(entry) {
-  const min = entry.minPlayers;
-  const max = entry.maxPlayers;
-  if (!min && !max) return '';
-  if (min && max) return min === max ? `${min}` : `${min}–${max}`;
-  return max ? `up to ${max}` : `${min}+`;
 }
 
 /** The homepage/issues row, or null when the entry offers neither usable link. */
@@ -1374,7 +1826,7 @@ async function deleteGame(game) {
       warning,
       onExport: () => exportGame(game.id),
     })) return;
-  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/delete`, {})) await refreshGames();
+  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/delete`, {})) await refreshPlugins();
 }
 
 async function copyStagedLink(game) {
@@ -1548,7 +2000,10 @@ async function refreshJobs() {
 
   renderJobs();
   setNavCount('marketplace', updatesAvailable());
-  if (finished) refreshCatalog();
+  if (finished) {
+    refreshGames();
+    refreshCatalog();
+  }
 }
 
 function announceJob(job) {
@@ -1563,13 +2018,25 @@ function updatesAvailable() {
 }
 
 function renderSourceFilter() {
-  const select = el('mkt-filter-source');
+  const select = el('plugins-filter-source') || el('mkt-filter-source');
+  if (!select) return;
   const current = select.value;
-  select.textContent = '';
+  select.innerHTML = '';
   const any = document.createElement('option');
   any.value = '';
-  any.textContent = 'Any source';
+  any.textContent = 'All Sources';
   select.appendChild(any);
+
+  const gamesOpt = document.createElement('option');
+  gamesOpt.value = 'games';
+  gamesOpt.textContent = 'Games Folder';
+  select.appendChild(gamesOpt);
+
+  const uploadOpt = document.createElement('option');
+  uploadOpt.value = 'upload';
+  uploadOpt.textContent = 'Manual Upload';
+  select.appendChild(uploadOpt);
+
   for (const source of catalogData?.sources || []) {
     const opt = document.createElement('option');
     opt.value = source.id;
@@ -1579,203 +2046,12 @@ function renderSourceFilter() {
   select.value = current;
 }
 
-function renderMarketplace() {
-  const list = el('mkt-list');
-  list.textContent = '';
-  el('mkt-disabled').classList.toggle('hidden', catalogData?.enabled !== false);
-
-  const entries = filterCatalog(catalogData?.entries, {
-    q: el('mkt-filter-q').value,
-    status: el('mkt-filter-status').value,
-    source: el('mkt-filter-source').value,
-  });
-  el('mkt-empty').classList.toggle('hidden', entries.length > 0);
-  for (const entry of entries) list.appendChild(marketplaceCard(entry));
-
-  const failed = (catalogData?.sources || []).filter((s) => s.error);
-  const parts = [];
-  if (catalogData?.fetchedAt) parts.push(`Catalog read ${formatClock(catalogData.fetchedAt)}`);
-  if (catalogData?.appVersion) parts.push(`server v${catalogData.appVersion}`);
-  if (catalogData?.managedRoot) parts.push(`installs into ${catalogData.managedRoot}`);
-  if (catalogData?.backupRetention !== undefined) {
-    parts.push(catalogData.backupRetention > 0
-      ? `keeping ${catalogData.backupRetention} previous version(s) for rollback`
-      : 'not keeping previous versions (KnockBox:PackageBackupCount=0)');
-  }
-  for (const source of failed) parts.push(`${source.name || source.id}: ${source.error}`);
-  el('mkt-note').textContent = parts.join(' · ');
-  setNavCount('marketplace', updatesAvailable());
+export function renderMarketplace() {
+  renderPlugins();
 }
 
-function marketplaceCard(entry) {
-  const card = document.createElement('div');
-  card.className = 'game-card mkt-card';
-  card.dataset.id = entry.id;
-
-  const header = document.createElement('div');
-  header.className = 'game-card-header';
-  const title = document.createElement('h3');
-  title.textContent = entry.name;
-  const id = document.createElement('code');
-  id.textContent = entry.id;
-  header.append(title, id);
-
-  const status = document.createElement('span');
-  status.className = `badge ${pluginStatusClass(entry.status)}`;
-  status.textContent = pluginStatusLabel(entry.status);
-  status.title = pluginStatusHint(entry.status);
-  header.appendChild(status);
-
-  if (entry.contentRating) {
-    const rating = document.createElement('span');
-    rating.className = 'badge badge-muted';
-    rating.textContent = entry.contentRating;
-    // Said plainly, because "everyone" beside a game name reads like a guarantee otherwise.
-    rating.title = 'Content rating the game declares for itself — not an ESRB or PEGI rating.';
-    header.appendChild(rating);
-  }
-
-  for (const tag of (entry.tags || []).slice(0, 3)) {
-    const chip = document.createElement('span');
-    chip.className = 'badge badge-muted';
-    chip.textContent = tag;
-    header.appendChild(chip);
-  }
-  card.appendChild(header);
-
-  if (entry.description) {
-    const description = document.createElement('p');
-    description.className = 'mkt-desc';
-    description.textContent = entry.description;
-    card.appendChild(description);
-  }
-
-  const facts = document.createElement('div');
-  facts.className = 'game-facts';
-  addFact(facts, 'Installed', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed', '');
-  addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-    entry.sourceName || entry.sourceId || '');
-  if (entry.sizeBytes) addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
-  if (entry.author) addFact(facts, 'Author', entry.author, '');
-  // Both describe the version being OFFERED — the point is deciding whether to install it.
-  const players = playerRange(entry);
-  if (players) addFact(facts, 'Players', players, '');
-  if (entry.license) addFact(facts, 'License', entry.license, '');
-  if (entry.activeLobbies > 0) addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, '');
-  card.appendChild(facts);
-
-  const links = marketplaceLinks(entry);
-  if (links) card.appendChild(links);
-
-  const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
-  const actions = document.createElement('div');
-  actions.className = 'game-actions';
-
-  const version = document.createElement('select');
-  version.className = 'text-input filter-narrow mkt-version';
-  for (const option of versionOptions(entry)) {
-    const opt = document.createElement('option');
-    // Kind AND version: the version alone is not unique once a backup of the installed version exists,
-    // and versionAction resolved the collision to whichever came first — see versionOptionValue.
-    opt.value = versionOptionValue(option);
-    opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
-    version.appendChild(opt);
-  }
-  if (version.options.length === 0) version.disabled = true;
-  actions.appendChild(version);
-
-  // Always rendered, disabled with a reason when there is nothing running: a control that appears and
-  // disappears between polls is worse than one that is visibly inert.
-  const mode = document.createElement('select');
-  mode.className = 'text-input filter-narrow mkt-mode';
-  for (const option of UPDATE_MODES) {
-    const opt = document.createElement('option');
-    opt.value = option.value;
-    opt.textContent = option.label;
-    opt.title = option.hint;
-    mode.appendChild(opt);
-  }
-  if (entry.activeLobbies === 0) {
-    mode.disabled = true;
-    mode.title = 'Nobody is playing this game right now, so it applies immediately either way.';
-  }
-  actions.appendChild(mode);
-
-  const action = document.createElement('button');
-  action.type = 'button';
-  action.className = 'btn btn-small mkt-action';
-  const refresh = () => {
-    // The block reason is response-level, not per entry — see versionAction.
-    const decided = versionAction(entry, version.value,
-      catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
-    action.textContent = decided.label;
-    action.className = `btn btn-small mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
-    action.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
-    action.title = decided.blockedReason || '';
-    // decided.version, not version.value: the select's value carries the kind too, and what the rollback
-    // route wants is the version versionAction actually resolved.
-    action.onclick = () => runPackageAction(entry, decided, mode.value);
-  };
-  version.onchange = refresh;
-  refresh();
-  actions.appendChild(action);
-
-  if (entry.installed && entry.managed) {
-    const policy = document.createElement('select');
-    policy.className = 'text-input filter-narrow mkt-policy';
-    for (const option of UPDATE_POLICIES) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.updatePolicy) opt.selected = true;
-      policy.appendChild(opt);
-    }
-    policy.value = entry.updatePolicy || 'manual';
-    policy.disabled = Boolean(pending);
-    policy.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
-      { policy: policy.value });
-    actions.appendChild(policy);
-  }
-
-  const spacer = document.createElement('span');
-  spacer.className = 'filter-spacer';
-  actions.appendChild(spacer);
-
-  if (entry.installed) {
-    const exportBtn = document.createElement('button');
-    exportBtn.type = 'button';
-    exportBtn.className = 'btn btn-primary btn-small mkt-export';
-    exportBtn.textContent = 'Export';
-    exportBtn.onclick = () => exportGame(entry.id);
-    actions.appendChild(exportBtn);
-
-    const uninstall = document.createElement('button');
-    uninstall.type = 'button';
-    uninstall.className = 'btn btn-danger btn-small mkt-uninstall';
-    uninstall.textContent = 'Uninstall';
-    uninstall.disabled = Boolean(pending);
-    uninstall.onclick = () => uninstallGame(entry);
-    actions.appendChild(uninstall);
-  }
-  card.appendChild(actions);
-
-  if (entry.shadowedBy) {
-    const shadow = document.createElement('p');
-    shadow.className = 'game-hint game-hint-block';
-    shadow.textContent =
-      `Also offered by '${entry.shadowedBy}', which takes precedence — installing here uses that copy.`;
-    card.appendChild(shadow);
-  }
-  if (entry.reason && entry.status !== 'installedOnly') {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = entry.reason;
-    card.appendChild(why);
-  }
-  if (pending) card.appendChild(jobRow(pending, { compact: true }));
-
-  return card;
+export function marketplaceCard(entry) {
+  return pluginCard(entry);
 }
 
 async function runPackageAction(entry, decided, mode) {
@@ -2674,34 +2950,44 @@ function wire() {
   el('close-all-btn').addEventListener('click', closeAllLobbies);
   el('purge-stale-btn').addEventListener('click', purgeStale);
 
-  el('game-filter-q').addEventListener('input', renderGames);
-  el('game-filter-availability').addEventListener('change', renderGames);
-  el('rescan-btn').addEventListener('click', async () => {
-    // Give the catalog a beat to republish before re-reading, or the operator sees the pre-rescan list
-    // and concludes the button does nothing.
-    if (await postJson('/admin/api/games/rescan', {})) setTimeout(refreshGames, 800);
+  el('plugins-filter-q')?.addEventListener('input', renderPlugins);
+  el('plugins-filter-source')?.addEventListener('change', renderPlugins);
+  el('plugins-filter-status')?.addEventListener('change', renderPlugins);
+
+  el('plugin-details-close')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));
+  el('plugin-details-close-x')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));
+  el('plugin-details-backdrop')?.addEventListener('click', (e) => {
+    if (e.target === el('plugin-details-backdrop')) el('plugin-details-backdrop').classList.add('hidden');
   });
 
-  el('mkt-filter-q').addEventListener('input', renderMarketplace);
-  el('mkt-filter-status').addEventListener('change', renderMarketplace);
-  el('mkt-filter-source').addEventListener('change', renderMarketplace);
-  el('mkt-refresh-btn').addEventListener('click', () => refreshCatalog({ refresh: true }));
-  el('mkt-upload-btn').addEventListener('click', openUpload);
-  el('mkt-settings-btn').addEventListener('click', openSources);
-  el('mkt-settings-close').addEventListener('click', () => el('mkt-settings-backdrop').classList.add('hidden'));
-  el('mkt-source-add').addEventListener('click', addSource);
+  el('game-filter-q')?.addEventListener('input', renderGames);
+  el('game-filter-availability')?.addEventListener('change', renderGames);
+  el('rescan-btn')?.addEventListener('click', async () => {
+    // Give the catalog a beat to republish before re-reading, or the operator sees the pre-rescan list
+    // and concludes the button does nothing.
+    if (await postJson('/admin/api/games/rescan', {})) setTimeout(refreshPlugins, 800);
+  });
 
-  el('upload-close').addEventListener('click', closeUpload);
-  el('upload-abort').addEventListener('click', () => uploadXhr?.abort());
-  el('upload-submit').addEventListener('click', startUpload);
-  el('upload-drop').addEventListener('click', () => el('upload-file').click());
-  el('upload-file').addEventListener('change', () => pickUploadFile(el('upload-file').files?.[0]));
-  el('upload-drop').addEventListener('dragover', (e) => {
+  el('mkt-filter-q')?.addEventListener('input', renderMarketplace);
+  el('mkt-filter-status')?.addEventListener('change', renderMarketplace);
+  el('mkt-filter-source')?.addEventListener('change', renderMarketplace);
+  el('mkt-refresh-btn')?.addEventListener('click', () => refreshPlugins({ refreshCatalogNow: true }));
+  el('mkt-upload-btn')?.addEventListener('click', openUpload);
+  el('mkt-settings-btn')?.addEventListener('click', openSources);
+  el('mkt-settings-close')?.addEventListener('click', () => el('mkt-settings-backdrop').classList.add('hidden'));
+  el('mkt-source-add')?.addEventListener('click', addSource);
+
+  el('upload-close')?.addEventListener('click', closeUpload);
+  el('upload-abort')?.addEventListener('click', () => uploadXhr?.abort());
+  el('upload-submit')?.addEventListener('click', startUpload);
+  el('upload-drop')?.addEventListener('click', () => el('upload-file').click());
+  el('upload-file')?.addEventListener('change', () => pickUploadFile(el('upload-file').files?.[0]));
+  el('upload-drop')?.addEventListener('dragover', (e) => {
     e.preventDefault();
     el('upload-drop').classList.add('drop-active');
   });
-  el('upload-drop').addEventListener('dragleave', () => el('upload-drop').classList.remove('drop-active'));
-  el('upload-drop').addEventListener('drop', (e) => {
+  el('upload-drop')?.addEventListener('dragleave', () => el('upload-drop').classList.remove('drop-active'));
+  el('upload-drop')?.addEventListener('drop', (e) => {
     e.preventDefault();
     el('upload-drop').classList.remove('drop-active');
     pickUploadFile(e.dataTransfer?.files?.[0]);
@@ -2711,53 +2997,54 @@ function wire() {
   document.addEventListener('dragover', (e) => e.preventDefault());
   document.addEventListener('drop', (e) => e.preventDefault());
 
-  el('limits-save').addEventListener('click', saveLimits);
-  el('limits-reset').addEventListener('click', revertLimits);
-  el('limits-refresh').addEventListener('click', refreshPlatform);
+  el('limits-save')?.addEventListener('click', saveLimits);
+  el('limits-reset')?.addEventListener('click', revertLimits);
+  el('limits-refresh')?.addEventListener('click', refreshPlatform);
 
-  el('hook-add').addEventListener('click', addWebhook);
+  el('hook-add')?.addEventListener('click', addWebhook);
 
-  el('schedule-cadence').addEventListener('change', applyScheduleCadence);
-  el('schedule-save').addEventListener('click', () => saveSchedule());
-  el('schedule-reset').addEventListener('click', () => saveSchedule(true));
-  el('schedule-refresh').addEventListener('click', refreshPlatform);
+  el('schedule-cadence')?.addEventListener('change', applyScheduleCadence);
+  el('schedule-save')?.addEventListener('click', () => saveSchedule());
+  el('schedule-reset')?.addEventListener('click', () => saveSchedule(true));
+  el('schedule-refresh')?.addEventListener('click', refreshPlatform);
 
-  el('announce-post').addEventListener('click', postAnnouncement);
-  el('announce-clear').addEventListener('click', clearAnnouncement);
+  el('announce-post')?.addEventListener('click', postAnnouncement);
+  el('announce-clear')?.addEventListener('click', clearAnnouncement);
 
-  el('code-word-add').addEventListener('click', () => addRoomCode(false));
-  el('code-pattern-add').addEventListener('click', () => addRoomCode(true));
+  el('code-word-add')?.addEventListener('click', () => addRoomCode(false));
+  el('code-pattern-add')?.addEventListener('click', () => addRoomCode(true));
   // Enter in the box adds the entry rather than doing nothing: this is a list you build by typing.
-  el('code-word').addEventListener('keydown', (e) => { if (e.key === 'Enter') addRoomCode(false); });
-  el('code-pattern').addEventListener('keydown', (e) => { if (e.key === 'Enter') addRoomCode(true); });
-  el('codes-save').addEventListener('click', saveRoomCodes);
-  el('codes-clear').addEventListener('click', clearRoomCodes);
+  el('code-word')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') addRoomCode(false); });
+  el('code-pattern')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') addRoomCode(true); });
+  el('codes-save')?.addEventListener('click', saveRoomCodes);
+  el('codes-clear')?.addEventListener('click', clearRoomCodes);
 
-  el('log-filter-level').addEventListener('change', resetLogStream);
-  el('log-filter-category').addEventListener('input', resetLogStream);
-  el('log-filter-q').addEventListener('input', resetLogStream);
-  el('log-follow').addEventListener('change', () => { if (el('log-follow').checked) refreshLogs(); });
-  el('log-files-btn').addEventListener('click', openLogFiles);
-  el('files-close').addEventListener('click', () => el('files-backdrop').classList.add('hidden'));
+  el('log-filter-level')?.addEventListener('change', resetLogStream);
+  el('log-filter-category')?.addEventListener('input', resetLogStream);
+  el('log-filter-q')?.addEventListener('input', resetLogStream);
+  el('log-follow')?.addEventListener('change', () => { if (el('log-follow').checked) refreshLogs(); });
+  el('log-files-btn')?.addEventListener('click', openLogFiles);
+  el('files-close')?.addEventListener('click', () => el('files-backdrop').classList.add('hidden'));
 
-  el('confirm-ok').addEventListener('click', () => settleConfirm(true));
-  el('confirm-cancel').addEventListener('click', () => settleConfirm(false));
-  el('confirm-backdrop').addEventListener('click', (e) => {
+  el('confirm-ok')?.addEventListener('click', () => settleConfirm(true));
+  el('confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
+  el('confirm-backdrop')?.addEventListener('click', (e) => {
     if (e.target === el('confirm-backdrop')) settleConfirm(false);
   });
-  for (const id of ['upload-backdrop', 'mkt-settings-backdrop']) {
-    el(id).addEventListener('click', (e) => {
+  for (const id of ['upload-backdrop', 'mkt-settings-backdrop', 'plugin-details-backdrop']) {
+    el(id)?.addEventListener('click', (e) => {
       if (e.target === el(id)) el(id).classList.add('hidden');
     });
   }
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!el('confirm-backdrop').classList.contains('hidden')) settleConfirm(false);
-    el('files-backdrop').classList.add('hidden');
-    el('mkt-settings-backdrop').classList.add('hidden');
+    if (!el('confirm-backdrop')?.classList.contains('hidden')) settleConfirm(false);
+    el('files-backdrop')?.classList.add('hidden');
+    el('mkt-settings-backdrop')?.classList.add('hidden');
+    el('plugin-details-backdrop')?.classList.add('hidden');
     // Not closeUpload(): Escape must not silently abort a transfer that is halfway through. The Cancel
     // button is the deliberate way out.
-    if (!uploadXhr) el('upload-backdrop').classList.add('hidden');
+    if (!uploadXhr) el('upload-backdrop')?.classList.add('hidden');
   });
 }
 

@@ -72,19 +72,10 @@ export const SETTINGS_GROUPS = [
         id: 'setting-games',
         topTab: 'plugins',
         legacyTab: 'games',
-        label: 'Game Catalog',
+        label: 'Plugins & Games',
         icon: 'games',
-        description: 'Installed game catalog, availability controls (available, disabled, staged), disk breakdown, and rescan.',
-        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package', 'plugins'],
-      },
-      {
-        id: 'setting-marketplace',
-        topTab: 'plugins',
-        legacyTab: 'marketplace',
-        label: 'Marketplace & Packages',
-        icon: 'marketplace',
-        description: 'Marketplace catalog, package update jobs, manual .kbg uploads, version rollback, and package sources.',
-        keywords: ['marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'jobs', 'operations', 'rollback', 'install', 'plugins'],
+        description: 'Installed plugins & games, marketplace catalog, availability, manual uploads, and updates.',
+        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package', 'plugins', 'marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'rollback', 'install'],
       },
     ],
   },
@@ -217,7 +208,7 @@ export function settingFromHash(hash, groups = SETTINGS_GROUPS) {
   const withPrefix = allSettings.find((s) => s.id.toLowerCase() === `setting-${clean}`);
   if (withPrefix) return withPrefix.id;
 
-  if (clean === 'plugins') return 'setting-games';
+  if (clean === 'plugins' || clean === 'games' || clean === 'marketplace' || clean === 'setting-marketplace') return 'setting-games';
   if (clean === 'settings') return 'setting-maintenance';
   if (clean === 'monitoring') return 'setting-overview';
 
@@ -649,6 +640,251 @@ const INSTALLED_STATUSES = new Set([
   'upToDate', 'updateAvailable', 'installedAhead', 'installedVersionUnknown', 'installedOnly',
 ]);
 const PROBLEM_STATUSES = new Set(['incompatible', 'unusable']);
+
+/** "2–8", "4", "up to 8", "2+", or '' when the entry declared no range at all. */
+export function playerRange(entry) {
+  const min = entry?.minPlayers;
+  const max = entry?.maxPlayers;
+  if (!min && !max) return '';
+  if (min && max) return min === max ? `${min}` : `${min}–${max}`;
+  return max ? `up to ${max}` : `${min}+`;
+}
+
+/**
+ * Merges installed games and marketplace catalog entries into a unified list of plugins.
+ * Installed plugins (regardless of source) are placed at the top (sorted alphabetically by name),
+ * and not installed plugins from external sources populate the entries below (sorted alphabetically by name).
+ */
+export function mergePluginEntries(games = [], catalogEntries = []) {
+  const catalogById = new Map();
+  for (const entry of catalogEntries || []) {
+    if (entry && entry.id) catalogById.set(entry.id, entry);
+  }
+
+  const installedList = [];
+  const handledIds = new Set();
+
+  for (const game of games || []) {
+    if (!game || !game.id) continue;
+    handledIds.add(game.id);
+    const entry = catalogById.get(game.id);
+
+    const sourceKind = game.root === 'games' ? 'games' : (entry?.sourceId ? entry.sourceId : 'upload');
+    const sourceName = game.root === 'games'
+      ? 'Games Folder'
+      : (entry?.sourceName || (entry?.sourceId ? entry.sourceId : 'Manual Upload'));
+
+    installedList.push({
+      id: game.id,
+      name: game.name || entry?.name || game.id,
+      installed: true,
+      installedVersion: game.version || entry?.installedVersion || null,
+      availableVersion: entry?.availableVersion || null,
+      status: entry?.status || (game.availability === 'disabled' ? 'disabled' : 'installedOnly'),
+      availability: game.availability || 'available',
+      lifecycle: game.lifecycle || 'ready',
+      sdk: game.sdk || null,
+      sdkStatus: game.sdkStatus || 'unknown',
+      tags: entry?.tags || game.tags || [],
+      description: entry?.description || game.description || '',
+      author: entry?.author || game.author || '',
+      license: entry?.license || game.license || '',
+      contentRating: entry?.contentRating || game.contentRating || '',
+      homepage: entry?.homepage || game.homepage || '',
+      bugs: entry?.bugs || game.bugs || '',
+      minPlayers: entry?.minPlayers || game.minPlayers || null,
+      maxPlayers: game.maxPlayers || entry?.maxPlayers || null,
+      diskBytes: game.diskBytes ?? null,
+      directoryBytes: game.directoryBytes ?? null,
+      compressedBytes: game.compressedBytes ?? null,
+      packageBytes: game.packageBytes ?? null,
+      backupBytes: game.backupBytes ?? null,
+      sizeBytes: entry?.sizeBytes ?? null,
+      activeLobbies: game.activeLobbies ?? entry?.activeLobbies ?? 0,
+      activePlayers: game.activePlayers ?? 0,
+      root: game.root || 'packages',
+      packageRoot: game.packageRoot || null,
+      packageBacked: Boolean(game.packageBacked),
+      directory: game.directory || '',
+      deletable: game.deletable ?? true,
+      deleteBlockedReason: game.deleteBlockedReason || null,
+      managed: Boolean(game.packageRoot === 'managed' || entry?.managed),
+      updatePolicy: game.updatePolicy || entry?.updatePolicy || 'manual',
+      backups: entry?.backups || [],
+      sourceId: entry?.sourceId || (game.root === 'games' ? 'games' : 'upload'),
+      sourceName,
+      sourceKind,
+      pendingJobId: game.pendingJobId || entry?.pendingJobId || null,
+      serverAuthority: Boolean(game.serverAuthority),
+      reason: entry?.reason || null,
+      shadowedBy: entry?.shadowedBy || null,
+    });
+  }
+
+  for (const entry of catalogEntries || []) {
+    if (!entry || !entry.id || handledIds.has(entry.id)) continue;
+    if (entry.installed) {
+      handledIds.add(entry.id);
+      const sourceKind = entry.sourceId ? entry.sourceId : 'upload';
+      installedList.push({
+        id: entry.id,
+        name: entry.name || entry.id,
+        installed: true,
+        installedVersion: entry.installedVersion || null,
+        availableVersion: entry.availableVersion || null,
+        status: entry.status || 'installedOnly',
+        availability: 'available',
+        lifecycle: 'ready',
+        sdk: null,
+        sdkStatus: 'unknown',
+        tags: entry.tags || [],
+        description: entry.description || '',
+        author: entry.author || '',
+        license: entry.license || '',
+        contentRating: entry.contentRating || '',
+        homepage: entry.homepage || '',
+        bugs: entry.bugs || '',
+        minPlayers: entry.minPlayers || null,
+        maxPlayers: entry.maxPlayers || null,
+        diskBytes: null,
+        directoryBytes: null,
+        compressedBytes: null,
+        packageBytes: null,
+        backupBytes: null,
+        sizeBytes: entry.sizeBytes ?? null,
+        activeLobbies: entry.activeLobbies || 0,
+        activePlayers: 0,
+        root: 'packages',
+        packageRoot: entry.managed ? 'managed' : null,
+        packageBacked: true,
+        directory: '',
+        deletable: true,
+        deleteBlockedReason: null,
+        managed: Boolean(entry.managed),
+        updatePolicy: entry.updatePolicy || 'manual',
+        backups: entry.backups || [],
+        sourceId: entry.sourceId || 'upload',
+        sourceName: entry.sourceName || 'Manual Upload',
+        sourceKind,
+        pendingJobId: entry.pendingJobId || null,
+        serverAuthority: false,
+        reason: entry.reason || null,
+        shadowedBy: entry.shadowedBy || null,
+      });
+    }
+  }
+
+  const uninstalledList = [];
+  for (const entry of catalogEntries || []) {
+    if (!entry || !entry.id || handledIds.has(entry.id)) continue;
+    uninstalledList.push({
+      id: entry.id,
+      name: entry.name || entry.id,
+      installed: false,
+      installedVersion: null,
+      availableVersion: entry.availableVersion || null,
+      status: entry.status || 'notInstalled',
+      availability: null,
+      lifecycle: 'ready',
+      sdk: null,
+      sdkStatus: 'unknown',
+      tags: entry.tags || [],
+      description: entry.description || '',
+      author: entry.author || '',
+      license: entry.license || '',
+      contentRating: entry.contentRating || '',
+      homepage: entry.homepage || '',
+      bugs: entry.bugs || '',
+      minPlayers: entry.minPlayers || null,
+      maxPlayers: entry.maxPlayers || null,
+      diskBytes: null,
+      directoryBytes: null,
+      compressedBytes: null,
+      packageBytes: null,
+      backupBytes: null,
+      sizeBytes: entry.sizeBytes ?? null,
+      activeLobbies: 0,
+      activePlayers: 0,
+      root: null,
+      packageRoot: null,
+      packageBacked: false,
+      directory: '',
+      deletable: false,
+      deleteBlockedReason: null,
+      managed: false,
+      updatePolicy: 'manual',
+      backups: entry.backups || [],
+      sourceId: entry.sourceId || null,
+      sourceName: entry.sourceName || entry.sourceId || '',
+      sourceKind: entry.sourceId || 'marketplace',
+      pendingJobId: entry.pendingJobId || null,
+      serverAuthority: false,
+      reason: entry.reason || null,
+      shadowedBy: entry.shadowedBy || null,
+    });
+  }
+
+  installedList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+  uninstalledList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+
+  return [...installedList, ...uninstalledList];
+}
+
+/**
+ * Filter unified plugin entries by search query, source, and status.
+ */
+export function filterPlugins(entries, { q = '', source = '', status = '' } = {}) {
+  const needle = q.trim().toLowerCase();
+  const wantedSource = source.trim().toLowerCase();
+  const wantedStatus = status.trim().toLowerCase();
+
+  return (entries || []).filter((e) => {
+    // 1. Source filter: All, Games Folder ('games'), Manual Upload ('upload'), or specific marketplace sourceId
+    if (wantedSource && wantedSource !== 'all') {
+      const itemSource = String(e.sourceKind || e.sourceId || '').toLowerCase();
+      if (wantedSource === 'games' || wantedSource === 'games folder' || wantedSource === 'games-folder') {
+        if (e.sourceKind !== 'games' && e.root !== 'games') return false;
+      } else if (wantedSource === 'upload' || wantedSource === 'manual upload' || wantedSource === 'manual-upload') {
+        if (e.sourceKind !== 'upload') return false;
+      } else {
+        if (itemSource !== wantedSource && String(e.sourceId || '').toLowerCase() !== wantedSource) {
+          return false;
+        }
+      }
+    }
+
+    // 2. Status filter: All, Installed, Update Available, Problems, Not Installed
+    if (wantedStatus && wantedStatus !== 'all') {
+      if (wantedStatus === 'installed') {
+        if (!e.installed) return false;
+      } else if (wantedStatus === 'updateavailable' || wantedStatus === 'update available' || wantedStatus === 'update_available') {
+        if (e.status !== 'updateAvailable') return false;
+      } else if (wantedStatus === 'problem' || wantedStatus === 'problems') {
+        const isProblem = e.status === 'incompatible' || e.status === 'unusable' || e.sdkStatus === 'behind' || Boolean(e.reason && e.status !== 'installedOnly');
+        if (!isProblem) return false;
+      } else if (wantedStatus === 'notinstalled' || wantedStatus === 'not installed' || wantedStatus === 'not_installed') {
+        if (e.installed) return false;
+      } else {
+        // Exact status check (e.g. upToDate, staged, disabled, etc.)
+        if (String(e.status).toLowerCase() !== wantedStatus && String(e.availability).toLowerCase() !== wantedStatus) {
+          return false;
+        }
+      }
+    }
+
+    // 3. Search query: matches name, id, description, tags, author
+    if (needle) {
+      const matchName = matches(e.name, needle);
+      const matchId = matches(e.id, needle);
+      const matchDesc = matches(e.description, needle);
+      const matchAuthor = matches(e.author, needle);
+      const matchTags = (e.tags || []).some((t) => matches(t, needle));
+      if (!matchName && !matchId && !matchDesc && !matchAuthor && !matchTags) return false;
+    }
+
+    return true;
+  });
+}
 
 /** Catalog rows matching the marketplace view's filters. Client-side, like the other two filters. */
 export function filterCatalog(entries, { q = '', status = '', source = '' } = {}) {

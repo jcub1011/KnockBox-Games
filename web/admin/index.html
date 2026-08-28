@@ -300,32 +300,12 @@
                 <h2>Game Management</h2>
               </div>
 
-              <!-- Setting: Game Catalog -->
+              <!-- Combined Setting: Plugins & Games -->
               <div class="setting-card panel-card tab-panel" id="setting-games" data-setting-id="setting-games" data-tab="games">
                 <div class="panel-card-header">
-                  <h3>Downloaded Plugins &amp; Games</h3>
+                  <h3>Plugins &amp; Games</h3>
                 </div>
-                <div class="filter-bar">
-                  <input type="search" id="game-filter-q" class="text-input" placeholder="Filter by name or id" />
-                  <select id="game-filter-availability" class="text-input filter-narrow">
-                    <option value="">Any state</option>
-                    <option value="available">Available</option>
-                    <option value="disabled">Disabled</option>
-                    <option value="staged">Staged</option>
-                  </select>
-                  <span class="filter-spacer"></span>
-                  <button class="btn btn-secondary" id="rescan-btn">Rescan Now</button>
-                </div>
-                <div id="games-list" class="games-list"></div>
-                <p class="empty-state" id="games-empty">No games discovered.</p>
-                <p class="panel-card-note" id="games-note"></p>
-              </div>
 
-              <!-- Setting: Marketplace & Packages -->
-              <div class="setting-card panel-card tab-panel" id="setting-marketplace" data-setting-id="setting-marketplace" data-tab="marketplace">
-                <div class="panel-card-header">
-                  <h3>Marketplace &amp; Packages</h3>
-                </div>
                 <div class="panel-card hidden" id="mkt-disabled">
                   <div class="panel-card-header"><h4>Marketplace disabled</h4></div>
                   <p class="panel-card-note">
@@ -342,25 +322,28 @@
                 </div>
 
                 <div class="filter-bar">
-                  <input type="search" id="mkt-filter-q" class="text-input" placeholder="Filter by name, id or tag" />
-                  <select id="mkt-filter-status" class="text-input filter-narrow">
-                    <option value="">Any status</option>
-                    <option value="updateAvailable">Update available</option>
-                    <option value="notInstalled">Not installed</option>
-                    <option value="installed">Installed</option>
-                    <option value="problem">Problems</option>
+                  <input type="search" id="plugins-filter-q" class="text-input" placeholder="Filter by name, id, tag, or description" />
+                  <select id="plugins-filter-source" class="text-input filter-narrow">
+                    <option value="">All Sources</option>
+                    <option value="games">Games Folder</option>
+                    <option value="upload">Manual Upload</option>
                   </select>
-                  <select id="mkt-filter-source" class="text-input filter-narrow">
-                    <option value="">Any source</option>
+                  <select id="plugins-filter-status" class="text-input filter-narrow">
+                    <option value="">Any Status</option>
+                    <option value="installed">Installed</option>
+                    <option value="updateAvailable">Update Available</option>
+                    <option value="problem">Problems</option>
+                    <option value="notInstalled">Not Installed</option>
                   </select>
                   <span class="filter-spacer"></span>
+                  <button class="btn btn-secondary" id="rescan-btn">Rescan Now</button>
                   <button class="btn btn-secondary" id="mkt-upload-btn">Upload .kbg…</button>
                   <button class="btn btn-secondary" id="mkt-settings-btn">Sources…</button>
                   <button class="btn btn-secondary" id="mkt-refresh-btn">Refresh Catalog</button>
                 </div>
-                <div id="mkt-list" class="games-list"></div>
-                <p class="empty-state" id="mkt-empty">No games offered and none installed from a package.</p>
-                <p class="panel-card-note" id="mkt-note"></p>
+                <div id="plugins-list" class="games-list"></div>
+                <p class="empty-state" id="plugins-empty">No plugins discovered or available.</p>
+                <p class="panel-card-note" id="plugins-note"></p>
               </div>
             </section>
           </div>
@@ -754,6 +737,20 @@
       <p class="form-error hidden" id="mkt-settings-error"></p>
       <div class="modal-actions">
         <button class="btn btn-secondary" id="mkt-settings-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Full Plugin/Game Metadata Dialog -->
+  <div class="modal-backdrop hidden" id="plugin-details-backdrop">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="plugin-details-title">
+      <div class="modal-header-row">
+        <h3 id="plugin-details-title">Plugin Details</h3>
+        <button type="button" class="modal-close-icon" id="plugin-details-close-x" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body plugin-details-body" id="plugin-details-body"></div>
+      <div class="modal-actions" id="plugin-details-actions">
+        <button class="btn btn-secondary" id="plugin-details-close">Close</button>
       </div>
     </div>
   </div>
