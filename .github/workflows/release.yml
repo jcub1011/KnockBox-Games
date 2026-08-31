@@ -33,15 +33,12 @@ on:
     inputs:
       OverwriteExisting:
         description: >-
-          Replace an existing release/tag for this version. Destroys the old release's asset download
-          counts and breaks any bookmarked releases/download URL; force-moves the git tag. For "the
-          release I cut 90 seconds ago is wrong and nobody has it yet" — not for a release people have.
+          Replace an existing release/tag for this version.
         type: boolean
         default: false
       DryRun:
         description: >-
-          Run every gate and skip every mutation. The only way to exercise this workflow — including
-          the Windows AOT publish — without publishing anything.
+          Run without publishing.
         type: boolean
         default: false
 
