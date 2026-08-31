@@ -295,6 +295,10 @@ builder.Services.AddSingleton(limits);
 // from the portal. Registered as well as (not instead of) ServerLimits, because the values read once at
 // startup — the IP gate's cap being the exception, see below — genuinely are startup values.
 builder.Services.AddSingleton(sp => new LimitsProvider(sp.GetRequiredService<ServerLimits>()));
+// The same shape for the server-authority knobs. A second provider rather than more fields on
+// OperatorLimits: ApplyTo targets a different record, and ServerLimits.MaxLobbies (every lobby) and
+// AuthorityMaxLobbies (only those holding a Jint engine) are different caps that must not merge.
+builder.Services.AddSingleton(sp => new AuthorityOptionsProvider(sp.GetRequiredService<AuthorityOptions>()));
 // The resolved content roots as one object: the admin API needs LogsRoot for the log downloads and all
 // three game roots for disk-usage reporting, which is less error-prone than threading four strings
 // through AdminApi.Options.
@@ -394,7 +398,8 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
     sp.GetRequiredService<IAuthorityWordService>(),
     builder.Environment.IsDevelopment(),
     sp.GetRequiredService<ILoggerFactory>(),
-    sp.GetRequiredService<AuthorityMetrics>()));
+    sp.GetRequiredService<AuthorityMetrics>(),
+    sp.GetRequiredService<AuthorityOptionsProvider>()));
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
@@ -620,6 +625,15 @@ if (adminSettings.Limits.Validate(limitsProvider.Configured) is { } limitsError)
 else
     limitsProvider.Apply(adminSettings.Limits);
 
+// Same treatment for the saved server-authority overrides, for the reasons above.
+var authorityLimitsProvider = app.Services.GetRequiredService<AuthorityOptionsProvider>();
+if (adminSettings.AuthorityLimits.Validate() is { } authorityLimitsError)
+    app.Logger.LogError(
+        "Ignoring the saved server-authority overrides in '{Path}' and using the configured values: {Reason}",
+        adminSettings.FilePath, authorityLimitsError);
+else
+    authorityLimitsProvider.Apply(adminSettings.AuthorityLimits);
+
 // Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
 // Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
 // background task because SmallestSize over a large .wasm is slow and must never block discovery
@@ -680,8 +694,8 @@ catalog.Discovered += games =>
 // Install .kbg packages off the same signal, for the same reason: it rides the catalog's watcher and
 // polling instead of adding a second watcher, and extraction (potentially hundreds of megabytes) is
 // offloaded so it never blocks a discovery running on a timer callback. Having changed something, it
-// asks for a rediscovery through ScheduleRescan — never Discover() directly, which has no mutual
-// exclusion and could let an older scan win the publish and hide the game just installed.
+// asks for a rediscovery through ScheduleRescan rather than Discover(): this fires on every pass, and
+// the debounce is what collapses a burst of them into one walk.
 GamePackageInstaller? installer = packagesEnabled ? app.Services.GetRequiredService<GamePackageInstaller>() : null;
 if (installer is not null)
 {
@@ -749,6 +763,13 @@ if (app.Services.GetService<UpdateScheduler>() is { } updateScheduler)
     updateScheduler.Start(app.Lifetime.ApplicationStopping);
     app.Lifetime.ApplicationStopping.Register(updateScheduler.Dispose);
 }
+
+// Idle-module sweep: stop holding the parsed AST of an authority game nobody is playing. Armed
+// unconditionally — the window is editable from the portal, so a deployment that starts at 0 must still be
+// able to switch eviction on without a restart, and a tick with a window of 0 does nothing. The cadence is
+// fixed inside the manager while the window is read live; see the comment there for why deriving one from
+// the other is the trap DisconnectGraceSeconds already fell into. Disposed on shutdown by the manager.
+authorityManager.StartModuleCacheSweep(app.Lifetime.ApplicationStopping);
 
 // The webhook drain: one long-lived task posting whatever lands in the queue. Not a timer — the queue is
 // the schedule. Started here rather than as a hosted service to match the rest of this file's background
@@ -1088,6 +1109,7 @@ app.MapWhen(
             app.Services.GetRequiredService<MetricHistory>(),
             metricSampleSeconds,
             limitsProvider,
+            authorityLimitsProvider,
             app.Services.GetService<WebhookDispatcher>(),
             app.Services.GetService<WebhookLogSink>(),
             webhookOptions,

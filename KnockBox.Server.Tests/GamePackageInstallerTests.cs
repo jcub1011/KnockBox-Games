@@ -72,7 +72,9 @@ public class GamePackageInstallerTests : IDisposable
     // same-length drops inside one tick are indistinguishable to it, and any test replacing a package
     // would pass or fail on how fast the machine ran. Stamping makes "a different drop" always mean a
     // different stamp, which is what these tests are actually about.
-    private DateTime _dropClock = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static long _dropCounter;
+    private static DateTime NextDropClock() =>
+        new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(Interlocked.Increment(ref _dropCounter));
 
     /// <summary>Drops a package into the games folder and returns its path.</summary>
     private string Drop(string fileName, byte[] package) => DropInto(_gamesRoot, fileName, package);
@@ -84,8 +86,7 @@ public class GamePackageInstallerTests : IDisposable
     {
         var path = Path.Combine(root, fileName);
         System.IO.File.WriteAllBytes(path, package);
-        _dropClock = _dropClock.AddSeconds(1);
-        System.IO.File.SetLastWriteTimeUtc(path, _dropClock);
+        System.IO.File.SetLastWriteTimeUtc(path, NextDropClock());
         return path;
     }
 

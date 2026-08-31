@@ -2,6 +2,7 @@ using System.Text.Json;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
+using KnockBox.Server.Games;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using KnockBox.Server.Webhooks;
@@ -265,6 +266,43 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     }
 
     /// <summary>
+    /// The operator's overrides of the runtime-editable server-authority knobs, or
+    /// <see cref="OperatorAuthorityOptions.None"/> when they have never been touched.
+    /// </summary>
+    /// <remarks>
+    /// A sibling of <see cref="Limits"/> rather than two more fields on it, and stored as its own
+    /// <c>"authority"</c> object rather than inside <c>"limits"</c>: that key means "ServerLimits overrides"
+    /// and has to keep meaning that for anyone hand-editing this file. See
+    /// <see cref="OperatorAuthorityOptions"/> for why the two cannot share a type.
+    /// </remarks>
+    public OperatorAuthorityOptions AuthorityLimits => _state.Authority;
+
+    /// <summary>
+    /// Records new server-authority overrides. Returns null on success, or a message explaining why they
+    /// could not be persisted (they are in effect regardless, until the next restart).
+    /// </summary>
+    /// <remarks>
+    /// Its own setter rather than a widened <see cref="SetLimits"/>: two <c>Save()</c> calls per request is
+    /// one extra small atomic write, whereas coupling two unrelated policy objects in one setter is
+    /// permanent. <c>Save()</c> serializes the whole snapshot, so a crash between the two writes loses the
+    /// second change and never corrupts the file. Publishing to
+    /// <see cref="Games.AuthorityOptionsProvider"/> and validating are the caller's job, for the reasons
+    /// <see cref="SetLimits"/> gives.
+    /// </remarks>
+    public string? SetAuthorityLimits(OperatorAuthorityOptions authority)
+    {
+        lock (_writeGate)
+        {
+            _state = _state with
+            {
+                Authority = authority.IsEmpty ? OperatorAuthorityOptions.None : authority,
+            };
+            _logger.LogInformation("Admin changed the server-authority overrides.");
+            return Save();
+        }
+    }
+
+    /// <summary>
     /// The operator's chosen update schedule, or null when they have never set one — in which case the
     /// configured default (<c>KnockBox:MarketplaceUpdate*</c>) stands. Same record-by-absence shape as
     /// <see cref="Limits"/>, and for the same reason: "I never chose" and "I chose the same thing the
@@ -473,7 +511,8 @@ public sealed class AdminSettingsStore : IPlatformPolicy
             _state.Announcement,
             _state.Webhooks.Count == 0 ? null : _state.Webhooks,
             _state.OfficialSourceDisabled,
-            _state.Schedule);
+            _state.Schedule,
+            _state.Authority.IsEmpty ? null : _state.Authority);
         var temp = FilePath + ".tmp";
         try
         {
@@ -511,12 +550,13 @@ public sealed class AdminSettingsStore : IPlatformPolicy
         PlatformAnnouncement? Announcement,
         IReadOnlyList<WebhookEndpoint> Webhooks,
         bool OfficialSourceDisabled,
-        UpdateSchedule? Schedule)
+        UpdateSchedule? Schedule,
+        OperatorAuthorityOptions Authority)
     {
         public static readonly State Default =
             new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer), [],
                 new Dictionary<string, UpdatePolicy>(GameIdComparer), OperatorLimits.None,
-                RoomCodeFilter.Empty, null, [], false, null);
+                RoomCodeFilter.Empty, null, [], false, null, OperatorAuthorityOptions.None);
 
         public static State From(AdminSettings settings)
         {
@@ -587,7 +627,10 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 // Normalized rather than validated: an out-of-range hour is dropped to the default like any
                 // other hand-edited junk here, and normalizing on the way IN means the timer arithmetic
                 // downstream never has to defend against an hour of 25.
-                settings.Schedule?.Normalize());
+                settings.Schedule?.Normalize(),
+                // Kept as read and judged at startup, exactly like Limits: the range check needs nothing
+                // from this class, and rejecting here would silently drop a whole object over one bad field.
+                settings.Authority ?? OperatorAuthorityOptions.None);
         }
 
         /// <summary>

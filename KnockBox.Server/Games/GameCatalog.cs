@@ -76,6 +76,7 @@ public sealed class GameCatalog : IDisposable
     private FileSystemWatcher? _watcher;
     private Timer? _debounce;
     private readonly Lock _debounceGate = new();
+    private readonly Lock _discoverGate = new();
     private bool _disposed;
     private Timer? _poll;
     // Written by the poll timer thread and (once) by the startup thread; volatile guarantees the
@@ -188,82 +189,85 @@ public sealed class GameCatalog : IDisposable
     /// <summary>Scans every games root and atomically swaps in the rebuilt catalog.</summary>
     public void Discover()
     {
-        var next = new Dictionary<string, GameLocation>(StringComparer.OrdinalIgnoreCase);
-        var pass = new PassLog();
-        string? primaryError = null;
-
-        for (var i = 0; i < _roots.Count; i++)
+        lock (_discoverGate)
         {
-            var root = _roots[i];
-            var isPrimary = i == 0;
+            var next = new Dictionary<string, GameLocation>(StringComparer.OrdinalIgnoreCase);
+            var pass = new PassLog();
+            string? primaryError = null;
 
-            if (!Directory.Exists(root))
+            for (var i = 0; i < _roots.Count; i++)
             {
-                // Only the administrator's games directory is worth mentioning; a derived cache root
-                // that hasn't been created yet is entirely normal.
-                if (isPrimary) _logger.LogWarning("Games folder not found at {Path}; no games discovered.", root);
-                continue;
-            }
+                var root = _roots[i];
+                var isPrimary = i == 0;
 
-            // Materialize eagerly so an access failure throws HERE (and is caught) rather than
-            // mid-iteration. The folder exists but can't be read — e.g. a Docker mount the server's
-            // user (UID 1654) has no read/execute on. This must NOT crash startup (Discover() runs
-            // from Program.Main and from timer callbacks): skip the root, surface it for the warning
-            // page, and recover on the next rescan.
-            List<string> dirs;
-            try
-            {
-                dirs = [.. Directory.EnumerateDirectories(root)];
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                _logger.LogError(ex, "Cannot read games folder {Path}; skipping it until access is restored.", root);
-                if (isPrimary)
+                if (!Directory.Exists(root))
                 {
-                    primaryError = $"The games folder '{root}' exists but could not be read ({ex.Message}). " +
-                        "Ensure it is readable by the server — in Docker the container runs as UID 1654, so the " +
-                        "mounted folder must grant that user read and execute.";
+                    // Only the administrator's games directory is worth mentioning; a derived cache root
+                    // that hasn't been created yet is entirely normal.
+                    if (isPrimary) _logger.LogWarning("Games folder not found at {Path}; no games discovered.", root);
+                    continue;
                 }
-                continue;
+
+                // Materialize eagerly so an access failure throws HERE (and is caught) rather than
+                // mid-iteration. The folder exists but can't be read — e.g. a Docker mount the server's
+                // user (UID 1654) has no read/execute on. This must NOT crash startup (Discover() runs
+                // from Program.Main and from timer callbacks): skip the root, surface it for the warning
+                // page, and recover on the next rescan.
+                List<string> dirs;
+                try
+                {
+                    dirs = [.. Directory.EnumerateDirectories(root)];
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogError(ex, "Cannot read games folder {Path}; skipping it until access is restored.", root);
+                    if (isPrimary)
+                    {
+                        primaryError = $"The games folder '{root}' exists but could not be read ({ex.Message}). " +
+                            "Ensure it is readable by the server — in Docker the container runs as UID 1654, so the " +
+                            "mounted folder must grant that user read and execute.";
+                    }
+                    continue;
+                }
+
+                foreach (var dir in dirs) TryAddGame(dir, root, next, pass);
             }
 
-            foreach (var dir in dirs) TryAddGame(dir, root, next, pass);
+            _scanError = primaryError;
+
+            // A primary root that EXISTS but can't be read is a failed scan, not an empty library, so keep
+            // the catalog we already published and say nothing to the Discovered subscribers. They maintain
+            // derived state keyed on "which games exist" — the pre-compressed cache, the word pools, the
+            // parsed authority modules, the unpacked packages — and every one of them treats an absent id as
+            // "delete what you built for it". Publishing an empty map because a bind mount blipped for a
+            // second would therefore delete the entire games-compressed tree and re-pay max-effort Brotli
+            // over the whole library once the mount came back. The next rescan recovers the real state.
+            if (primaryError is not null)
+            {
+                _logger.LogWarning(
+                    "Keeping the previously discovered {Count} game(s): the games folder could not be read this pass.",
+                    _games.Count);
+                // Forget what the last good pass found, so the one that recovers reports the whole catalog at
+                // Information rather than matching a signature from before the outage and going quiet — the
+                // recovery is exactly the thing an operator watching a broken mount is waiting to see.
+                _lastSignature = "";
+                return;
+            }
+
+            _games = next; // atomic publish
+
+            pass.Add(LogLevel.Information, "Game catalog ready: {Count} game(s) [{Ids}]",
+                next.Count, string.Join(", ", next.Keys));
+            var signature = pass.Signature;
+            var changed = signature != _lastSignature;
+            _lastSignature = signature;
+            pass.Flush(_logger, changed);
+
+            // Notify after the swap so handlers see the published catalog. A misbehaving handler must not
+            // break hot-reload, so swallow and log — Discover() is itself called from timer callbacks.
+            try { Discovered?.Invoke(next); }
+            catch (Exception ex) { _logger.LogError(ex, "A Discovered handler threw; continuing."); }
         }
-
-        _scanError = primaryError;
-
-        // A primary root that EXISTS but can't be read is a failed scan, not an empty library, so keep
-        // the catalog we already published and say nothing to the Discovered subscribers. They maintain
-        // derived state keyed on "which games exist" — the pre-compressed cache, the word pools, the
-        // parsed authority modules, the unpacked packages — and every one of them treats an absent id as
-        // "delete what you built for it". Publishing an empty map because a bind mount blipped for a
-        // second would therefore delete the entire games-compressed tree and re-pay max-effort Brotli
-        // over the whole library once the mount came back. The next rescan recovers the real state.
-        if (primaryError is not null)
-        {
-            _logger.LogWarning(
-                "Keeping the previously discovered {Count} game(s): the games folder could not be read this pass.",
-                _games.Count);
-            // Forget what the last good pass found, so the one that recovers reports the whole catalog at
-            // Information rather than matching a signature from before the outage and going quiet — the
-            // recovery is exactly the thing an operator watching a broken mount is waiting to see.
-            _lastSignature = "";
-            return;
-        }
-
-        _games = next; // atomic publish
-
-        pass.Add(LogLevel.Information, "Game catalog ready: {Count} game(s) [{Ids}]",
-            next.Count, string.Join(", ", next.Keys));
-        var signature = pass.Signature;
-        var changed = signature != _lastSignature;
-        _lastSignature = signature;
-        pass.Flush(_logger, changed);
-
-        // Notify after the swap so handlers see the published catalog. A misbehaving handler must not
-        // break hot-reload, so swallow and log — Discover() is itself called from timer callbacks.
-        try { Discovered?.Invoke(next); }
-        catch (Exception ex) { _logger.LogError(ex, "A Discovered handler threw; continuing."); }
     }
 
     /// <summary>Validates one candidate game directory and adds it to <paramref name="next"/>.</summary>
@@ -575,10 +579,12 @@ public sealed class GameCatalog : IDisposable
     }
 
     /// <summary>
-    /// Queues a debounced rediscovery. This is the ONLY way anything outside the class should ask for
-    /// a rescan: <see cref="Discover"/> has no mutual exclusion and publishes by reference, so two
-    /// concurrent runs could let the older scan win the swap and hide a just-installed game. Routing
-    /// every trigger through the single debounce timer keeps that impossible.
+    /// Queues a debounced rediscovery. This is the right call for anything EVENT-DRIVEN — a watcher
+    /// notification, a poll, an installer pass — because those arrive in bursts and the debounce
+    /// collapses the burst into one scan. <see cref="Discover"/> is serialized by its own gate, so
+    /// calling it directly no longer risks an older scan winning the swap and hiding a just-installed
+    /// game; but it walks every root inline, on whatever thread asked. Reach for it only when the
+    /// caller must observe the result within its own response (see AdminOperations.DeleteGame).
     /// </summary>
     public void ScheduleRescan()
     {

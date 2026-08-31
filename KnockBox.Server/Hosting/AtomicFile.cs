@@ -61,6 +61,27 @@ internal static class AtomicFile
         RetryAsync(() => File.Move(source, destination, overwrite: true), attempts, delayMs, cancellationToken);
 
     /// <summary>
+    /// Moves a whole directory, retrying a transient IO failure exactly as <see cref="MoveWithRetry"/>
+    /// does for one file.
+    /// </summary>
+    /// <remarks>
+    /// A directory is MORE exposed to this than a single file, not less: Windows fails a directory
+    /// rename with <c>ERROR_ACCESS_DENIED</c> while any file anywhere beneath it is open without
+    /// share-delete, so one scanner handle on one freshly written asset sinks the whole swap.
+    /// <see cref="Games.GamePackageInstaller"/> renames a directory it finished writing microseconds
+    /// earlier, which is precisely the window a real-time scanner occupies — and did: the swap failed
+    /// on roughly one full test run in two, on a different package each time.
+    ///
+    /// Unlike the file form this cannot replace an existing destination — <see cref="Directory.Move"/>
+    /// requires it to be absent, which is why the installer moves the live folder aside first rather
+    /// than passing an overwrite flag that does not exist.
+    /// </remarks>
+    public static void MoveDirectoryWithRetry(
+        string source, string destination,
+        int attempts = DefaultAttempts, int delayMs = DefaultDelayMs) =>
+        Retry(() => Directory.Move(source, destination), attempts, delayMs);
+
+    /// <summary>
     /// Runs <paramref name="operation"/>, retrying while it fails transiently and attempts remain.
     /// </summary>
     /// <remarks>

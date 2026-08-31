@@ -41,11 +41,13 @@ async function bootWithGames(games = [{ id: 'ttt', name: 'Tic Tac Toe', entry: '
 // keystroke burst must collapse into one pass) — the grid is therefore asserted after that window
 // rather than synchronously, unlike the two <select> filters, which render on the spot.
 const SEARCH_DEBOUNCE_WAIT = 200;
+// Through the clock rather than around it, like tick(): the whole file runs on fake timers now.
+const settleSearch = () => vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_WAIT);
 async function typeSearch(value) {
   const input = el('games-search-input');
   input.value = value;
   input.dispatchEvent(new Event('input'));
-  await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_WAIT));
+  await settleSearch();
 }
 
 // Drive createLobby to its success reply so the module is "in a lobby" (lobby state + room view).
@@ -56,7 +58,22 @@ async function createLobbySuccess(ws, { gameId = 'ttt', lobbyId = 'AB12' } = {})
   await p;
 }
 
+// Every test on a fake clock, and afterEach throws that clock away — which is what makes a timer
+// unable to outlive the test that armed it.
+//
+// vitest reuses one `window` per FILE, so a REAL timer armed by one test's module copy is still
+// pending when the next test starts, and its callback resolves `document.body` and getElementById
+// against the DOM that is there WHEN IT FIRES — the next test's. A launch fade (220 ms) or the morph
+// safety net (420 ms) armed while examining one launch therefore landed `in-game` on the body of a
+// test that had launched nothing, and the launch-overlay assertions read it as state they had caused.
+// The launch block alone was already on a fake clock for this reason; that stopped it arming leaky
+// timers but not the rest of the file arming them AT it, which is why it still failed about one full
+// run in three while passing every time the file ran alone.
+//
+// Nothing is lost by making it universal: the only real waits in this file were the search debounce,
+// and `tick()` (helpers.js) already works under either clock.
 beforeEach(() => {
+  vi.useFakeTimers();
   vi.resetModules();
   localStorage.clear();
   sessionStorage.clear();
@@ -228,7 +245,7 @@ describe('game catalog rendering', () => {
     }
     expect(el('games').querySelector('.game-tile')).toBe(firstTile);   // untouched so far
 
-    await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_WAIT));
+    await settleSearch();
     const tiles = el('games').querySelectorAll('.game-tile');
     expect(tiles).toHaveLength(1);
     expect(tiles[0].getAttribute('aria-label')).toBe('Word Rush');
@@ -691,22 +708,10 @@ describe('enterGame (EnterGame)', () => {
 });
 
 describe('launch overlay', () => {
-  // FAKE TIMERS FOR THE WHOLE BLOCK, and this is load-bearing rather than tidiness.
-  //
-  // The overlay arms short real timers — the morph runs 300 ms and its safety net fires at 420 ms, the
-  // fade teardown at 220 ms — so under real timers these tests raced the machine: on a loaded CI box more
-  // than 420 ms could pass between dispatching a `load` event and asserting on what it did, and the
-  // safety timer would have already stripped the morph class and swapped the background. Worse, vitest
-  // reuses one `window` per file, so a timer armed by an EARLIER test's module copy is still pending and
-  // lands in the middle of a later one. Both mechanisms scale with how long the suite takes, which is why
-  // adding tests elsewhere in the file made this block start failing about one run in four while it stayed
-  // green whenever the file ran alone.
-  //
-  // Individual cases used to reach for `vi.useFakeTimers({ shouldAdvanceTime: true })`, a hybrid clock
-  // that still advances with real time — it kept `tick()` working but left the race intact. `tick()` now
-  // works under either clock (see helpers.js), so the block can take the fully fake one. The file-level
-  // afterEach already restores real timers.
-  beforeEach(() => vi.useFakeTimers());
+  // This block is the one that made the leak visible: the overlay arms short timers (the morph runs
+  // 300 ms, its safety net fires at 420 ms, the fade teardown at 220 ms) and then asserts on exactly the
+  // state those callbacks change. It used to install its own fake clock here, which stopped it arming
+  // leaky timers but not the rest of the file arming them AT it. The file-level beforeEach now owns that.
 
   // Drive enterGame to a live iframe. Returns the frame element.
   async function embedGame(ws, { lobbyId = 'AB12', gameId = 'ttt' } = {}) {
@@ -883,6 +888,7 @@ describe('launch overlay', () => {
       const frame = await launchWithTile(ws);
       stubMorphAnimation();   // never resolved
 
+      vi.useFakeTimers();
       frame.dispatchEvent(new Event('load'));
       expect(document.body.classList.contains('in-game')).toBe(false);
 
@@ -897,6 +903,7 @@ describe('launch overlay', () => {
       await createLobbySuccess(ws, { lobbyId: 'AB12' });
       const frame = await embedGame(ws);
 
+      vi.useFakeTimers();
       frame.dispatchEvent(new Event('load'));
 
       expect(el('game-view').classList.contains('launch-morph')).toBe(false);
@@ -1121,6 +1128,122 @@ describe('launch overlay', () => {
       expect(seen).toEqual([]);   // reloading an identical src would blink the tile mid-flight
       expect(art.getAttribute('src')).toBe('/games/ttt/tile.png');
       expect(el('launch-tile').hidden).toBe(false);
+    });
+
+    it('supports dragging the hero tile with momentum and rubber-banding back on release', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      expect(tile.hidden).toBe(false);
+
+      // Pointer down starts dragging
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+      expect(tile.classList.contains('is-dancing')).toBe(false);
+
+      // Pointer move updates target
+      tile.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 200, clientY: 150 }));
+      vi.advanceTimersByTime(60);
+      expect(tile.style.transform).toContain('translate(');
+
+      // Pointer up releases and triggers rubber-band back to center
+      tile.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, clientX: 200, clientY: 150 }));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+
+      // Advance timers until the spring settles
+      vi.advanceTimersByTime(800);
+      expect(tile.style.transform).toBe('');
+      expect(tile.classList.contains('is-dancing')).toBe(true);
+    });
+
+    it('dances when at rest and synchronizes after entrance flight', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      expect(tile.classList.contains('is-dancing')).toBe(false);
+
+      vi.advanceTimersByTime(450);
+      expect(tile.classList.contains('is-dancing')).toBe(true);
+    });
+
+    it('expands fullscreen morph from the current dragged position if load completes mid-drag', async () => {
+      await importShell();
+      const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      const frame = await launchWithTile(ws);
+      const morph = stubMorphAnimation();
+      const tile = el('launch-tile');
+
+      // Drag tile off-center
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      tile.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 250, clientY: 200 }));
+      tile.getBoundingClientRect = () => ({ left: 250, top: 150, width: 400, height: 200 });
+
+      // Frame load arrives while dragged
+      frame.dispatchEvent(new Event('load'));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+      expect(morph.calls.length).toBe(1);
+      const { keyframes } = morph.calls[0];
+      expect(keyframes[0].transform).toBe('translate(250px, 150px) scale(0.4, 0.25)');
+    });
+
+    it('resets drag state and clears is-dragging when launch is aborted', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      shell.abortLaunch();
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+      expect(tile.style.transform).toBe('');
+    });
+
+    it('resets drag state when window blurs or visibility is hidden', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      window.dispatchEvent(new Event('blur'));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+
+      // Drag again and test visibilitychange
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+
+      // Reset document.hidden
+      Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    });
+
+    it('resets drag state on lostpointercapture', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      tile.dispatchEvent(new PointerEvent('lostpointercapture', { bubbles: true, pointerId: 1 }));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
     });
   });
 

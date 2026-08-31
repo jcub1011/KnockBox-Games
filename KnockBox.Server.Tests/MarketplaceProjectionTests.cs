@@ -157,14 +157,17 @@ public class MarketplaceProjectionTests
     }
 
     [Fact]
-    public void An_installed_game_that_is_not_managed_and_not_offered_is_left_out()
+    public void An_installed_game_that_is_not_managed_and_not_offered_is_included()
     {
-        // A hand-placed folder in games/. Nothing here can act on it, so offering a row with every
-        // control disabled would be noise.
+        // A hand-placed folder in games/. Now exposed in the marketplace list so it can be uninstalled/exported.
         var rows = MarketplaceProjection.Project(
             [], Installed(("handmade", "1.0.0")), Managed(), App);
 
-        Assert.Empty(rows);
+        var row = Assert.Single(rows);
+        Assert.Equal("handmade", row.Id);
+        Assert.Equal(MarketplaceProjection.InstalledOnly, row.Status);
+        Assert.False(row.Managed);
+        Assert.True(row.Installed);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using KnockBox.Server.Admin;
+using KnockBox.Server.Games;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
@@ -314,6 +315,117 @@ public class AdminSettingsStoreTests : IDisposable
 
         // Turning the whole limit off is a legitimate choice, and stays one.
         Assert.Null(new OperatorLimits(ControlMessagesPerSecond: 0, ControlMessagesBurst: 0).Validate(configured));
+    }
+
+    // ── Server-authority overrides ─────────────────────────────────────────────
+    // The concurrent-lobby cap and the parsed-module idle window. Stored as their OWN object rather than
+    // inside "limits", because that key means "ServerLimits overrides" to anyone hand-editing the file —
+    // and the two lobby caps it would collide with count different things.
+
+    [Fact]
+    public void A_fresh_server_has_no_authority_overrides()
+    {
+        Assert.True(NewStore().AuthorityLimits.IsEmpty);
+    }
+
+    [Fact]
+    public void Authority_overrides_survive_a_restart()
+    {
+        Assert.Null(NewStore().SetAuthorityLimits(new OperatorAuthorityOptions(
+            MaxLobbies: 25, ModuleCacheIdleMinutes: 5)));
+
+        var reloaded = NewStore().AuthorityLimits;
+        Assert.Equal(25, reloaded.MaxLobbies);
+        Assert.Equal(5, reloaded.ModuleCacheIdleMinutes);
+    }
+
+    [Fact]
+    public void Authority_overrides_and_limit_overrides_are_two_objects_in_the_file_not_one()
+    {
+        var store = NewStore();
+        store.SetLimits(new OperatorLimits(MaxLobbies: 40));
+        store.SetAuthorityLimits(new OperatorAuthorityOptions(MaxLobbies: 4));
+
+        // Both are called "maxLobbies" inside their own object and they are DIFFERENT caps: 40 lobbies
+        // platform-wide, 4 of them running server-side logic. Folding the authority pair into "limits"
+        // would make one of those two numbers unreachable, so the split is pinned rather than commented.
+        var json = File.ReadAllText(_settingsPath);
+        Assert.Contains("\"limits\"", json);
+        Assert.Contains("\"authority\"", json);
+        Assert.Contains("\"maxLobbies\": 40", json);
+        Assert.Contains("\"maxLobbies\": 4,", json);
+
+        // And a restart still tells them apart.
+        var reloaded = NewStore();
+        Assert.Equal(40, reloaded.Limits.MaxLobbies);
+        Assert.Equal(4, reloaded.AuthorityLimits.MaxLobbies);
+    }
+
+    [Fact]
+    public void Reverting_every_authority_knob_removes_the_object_rather_than_recording_nulls()
+    {
+        var store = NewStore();
+        store.SetAuthorityLimits(new OperatorAuthorityOptions(ModuleCacheIdleMinutes: 5));
+        Assert.False(store.AuthorityLimits.IsEmpty);
+
+        store.SetAuthorityLimits(OperatorAuthorityOptions.None);
+        Assert.True(store.AuthorityLimits.IsEmpty);
+        Assert.True(NewStore().AuthorityLimits.IsEmpty);
+
+        var json = File.ReadAllText(_settingsPath);
+        Assert.Contains("\"authority\": null", json);
+        Assert.DoesNotContain("moduleCacheIdleMinutes", json);
+        // The record IS the persisted shape, so a computed property must not read like a settable field.
+        Assert.DoesNotContain("isEmpty", json);
+    }
+
+    [Fact]
+    public void Authority_overrides_are_laid_over_configuration_leaving_the_rest_alone()
+    {
+        var configured = AuthorityOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var merged = new OperatorAuthorityOptions(MaxLobbies: 12).ApplyTo(configured);
+
+        Assert.Equal(12, merged.MaxLobbies);
+        // Untouched, including the per-engine constraints, which are deliberately not editable at all.
+        Assert.Equal(configured.ModuleCacheIdle, merged.ModuleCacheIdle);
+        Assert.Equal(configured.CallTimeout, merged.CallTimeout);
+        Assert.Equal(configured.MaxMemoryBytes, merged.MaxMemoryBytes);
+    }
+
+    [Fact]
+    public void The_shipped_authority_defaults_are_an_uncapped_lobby_count_and_a_thirty_minute_cache()
+    {
+        // Both defaults are load-bearing and neither is obvious. Unlimited: a refusal nobody configured is
+        // worse than letting the host (in Docker, mem_limit) be the bound. Thirty minutes: a window of 0
+        // would ship the eviction switched off, which is a feature nobody gets.
+        var configured = AuthorityOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        Assert.Equal(0, configured.MaxLobbies);
+        Assert.Equal(TimeSpan.FromMinutes(30), configured.ModuleCacheIdle);
+    }
+
+    [Theory]
+    [InlineData(-1, null, "authorityMaxLobbies")]
+    [InlineData(null, -5, "authorityModuleCacheIdleMinutes")]
+    [InlineData(null, 10_081, "authorityModuleCacheIdleMinutes")]
+    public void Out_of_range_authority_overrides_are_refused_naming_the_field(
+        int? maxLobbies, int? idleMinutes, string expected)
+    {
+        var error = new OperatorAuthorityOptions(maxLobbies, idleMinutes).Validate();
+        Assert.NotNull(error);
+        Assert.Contains(expected, error);
+    }
+
+    [Fact]
+    public void Zero_is_legal_for_both_authority_knobs_and_means_two_different_things()
+    {
+        // Unlimited lobbies, and keep the parsed module for the process lifetime. Neither is a mistake,
+        // and a validator that rejected 0 would make the shipped default unreachable from the portal.
+        Assert.Null(new OperatorAuthorityOptions(MaxLobbies: 0, ModuleCacheIdleMinutes: 0).Validate());
+
+        var configured = AuthorityOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var merged = new OperatorAuthorityOptions(MaxLobbies: 0, ModuleCacheIdleMinutes: 0).ApplyTo(configured);
+        Assert.Equal(0, merged.MaxLobbies);
+        Assert.Equal(TimeSpan.Zero, merged.ModuleCacheIdle);
     }
 
     // ── Banned room codes (§2.4) ───────────────────────────────────────────────

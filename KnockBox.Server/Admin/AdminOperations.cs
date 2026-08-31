@@ -179,9 +179,11 @@ public sealed class AdminOperations(
 
         logger.LogWarning("Admin deleted game {GameId} ({Paths}), closing {Lobbies} lobby/lobbies.",
             id, string.Join(", ", removed), lobbiesClosed);
-        // Never Discover(): it has no mutual exclusion, and an older scan winning the publish could bring
-        // the deleted game back until the next event.
-        catalog.ScheduleRescan();
+        // Discover() rather than ScheduleRescan(), and inline on purpose: the portal refreshes as soon
+        // as this responds, and a debounced rescan would still be pending then — so the operator would
+        // watch the game they just deleted reappear for half a second. Serialized by the catalog's own
+        // discover gate, so it cannot lose a publish race with a poll-triggered scan.
+        catalog.Discover();
         return new DeleteResult(true, null, lobbiesClosed, removed);
     }
 

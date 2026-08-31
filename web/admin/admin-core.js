@@ -18,6 +18,7 @@ export const SETTINGS_GROUPS = [
     settings: [
       {
         id: 'setting-overview',
+        topTab: 'monitoring',
         legacyTab: 'overview',
         label: 'System Overview',
         icon: 'overview',
@@ -26,6 +27,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-history',
+        topTab: 'monitoring',
         legacyTab: 'overview',
         label: 'Recent History',
         icon: 'history',
@@ -34,6 +36,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-cost',
+        topTab: 'monitoring',
         legacyTab: 'overview',
         label: 'Per-Game Server Cost',
         icon: 'cost',
@@ -42,6 +45,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-lobbies',
+        topTab: 'monitoring',
         legacyTab: 'lobbies',
         label: 'Active Lobbies',
         icon: 'lobbies',
@@ -50,6 +54,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-logs',
+        topTab: 'logs',
         legacyTab: 'logs',
         label: 'System Logs',
         icon: 'logs',
@@ -65,19 +70,12 @@ export const SETTINGS_GROUPS = [
     settings: [
       {
         id: 'setting-games',
+        topTab: 'plugins',
         legacyTab: 'games',
-        label: 'Game Catalog',
+        label: 'Plugins & Games',
         icon: 'games',
-        description: 'Installed game catalog, availability controls (available, disabled, staged), disk breakdown, and rescan.',
-        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package'],
-      },
-      {
-        id: 'setting-marketplace',
-        legacyTab: 'marketplace',
-        label: 'Marketplace & Packages',
-        icon: 'marketplace',
-        description: 'Marketplace catalog, package update jobs, manual .kbg uploads, version rollback, and package sources.',
-        keywords: ['marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'jobs', 'operations', 'rollback', 'install'],
+        description: 'Installed plugins & games, marketplace catalog, availability, manual uploads, and updates.',
+        keywords: ['games', 'catalog', 'installed', 'availability', 'disabled', 'staged', 'delete', 'rescan', 'disk', 'package', 'plugins', 'marketplace', 'packages', 'kbg', 'upload', 'sources', 'updates', 'rollback', 'install'],
       },
     ],
   },
@@ -88,6 +86,7 @@ export const SETTINGS_GROUPS = [
     settings: [
       {
         id: 'setting-maintenance',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Maintenance Mode',
         icon: 'maintenance',
@@ -96,6 +95,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-announcement',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Player Announcement',
         icon: 'announcement',
@@ -104,6 +104,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-limits',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Limits & Capacity',
         icon: 'limits',
@@ -112,6 +113,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-schedule',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Update Schedule',
         icon: 'schedule',
@@ -120,6 +122,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-room-codes',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Banned Room Codes',
         icon: 'roomCodes',
@@ -128,6 +131,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-webhooks',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Webhooks & Alerts',
         icon: 'webhooks',
@@ -136,6 +140,7 @@ export const SETTINGS_GROUPS = [
       },
       {
         id: 'setting-startup-config',
+        topTab: 'settings',
         legacyTab: 'platform',
         label: 'Startup Configuration',
         icon: 'startup',
@@ -149,13 +154,48 @@ export const SETTINGS_GROUPS = [
 /** Flat list of all registered settings across all groups. */
 export const ALL_SETTINGS = SETTINGS_GROUPS.flatMap((g) => g.settings);
 
+/** The 4 top-bar dashboard tabs in order. */
+export const TOP_TABS = ['monitoring', 'logs', 'plugins', 'settings'];
+
+/** Mapping from legacy tab names and top tabs to the top-bar tabs. */
+export const TAB_MAPPING = {
+  overview: 'monitoring',
+  history: 'monitoring',
+  cost: 'monitoring',
+  lobbies: 'monitoring',
+  monitoring: 'monitoring',
+  logs: 'logs',
+  games: 'plugins',
+  marketplace: 'plugins',
+  plugins: 'plugins',
+  platform: 'settings',
+  settings: 'settings',
+};
+
 /** The dashboard tabs/settings IDs in order. */
-export const TABS = ['overview', 'lobbies', 'games', 'marketplace', 'logs', 'platform'];
+export const TABS = ['monitoring', 'logs', 'plugins', 'settings', 'overview', 'lobbies', 'games', 'marketplace', 'platform'];
+
+/**
+ * Resolves the top-level tab ('monitoring', 'logs', 'plugins', 'settings') for a hash or tab key.
+ */
+export function topTabFromHash(hash) {
+  const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
+  if (!clean) return 'monitoring';
+  if (TOP_TABS.includes(clean)) return clean;
+  if (TAB_MAPPING[clean]) return TAB_MAPPING[clean];
+  const settingId = settingFromHash(hash);
+  const setting = ALL_SETTINGS.find((s) => s.id === settingId);
+  if (setting) {
+    if (setting.topTab) return setting.topTab;
+    if (setting.legacyTab && TAB_MAPPING[setting.legacyTab]) return TAB_MAPPING[setting.legacyTab];
+  }
+  return 'monitoring';
+}
 
 /**
  * Resolves the target setting ID from a URL fragment or query.
  * Accepts exact setting IDs ('setting-limits'), stripped names ('limits'),
- * legacy tab names ('platform'), or group IDs ('monitoring').
+ * legacy tab names ('platform'), top tab names ('settings'), or group IDs ('monitoring').
  */
 export function settingFromHash(hash, groups = SETTINGS_GROUPS) {
   const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
@@ -167,6 +207,10 @@ export function settingFromHash(hash, groups = SETTINGS_GROUPS) {
 
   const withPrefix = allSettings.find((s) => s.id.toLowerCase() === `setting-${clean}`);
   if (withPrefix) return withPrefix.id;
+
+  if (clean === 'plugins' || clean === 'games' || clean === 'marketplace' || clean === 'setting-marketplace') return 'setting-games';
+  if (clean === 'settings') return 'setting-maintenance';
+  if (clean === 'monitoring') return 'setting-overview';
 
   const byGroup = groups.find((g) => g.id.toLowerCase() === clean);
   if (byGroup && byGroup.settings[0]) return byGroup.settings[0].id;
@@ -184,10 +228,12 @@ export function tabFromHash(hash, tabs = TABS) {
   const clean = String(hash || '').replace(/^#/, '').trim().toLowerCase();
   if (!clean) return tabs[0];
   if (tabs.includes(clean)) return clean;
-  // If it's a setting id like setting-lobbies or lobbies, map to legacy tab
-  const settingId = settingFromHash(hash);
-  const setting = ALL_SETTINGS.find((s) => s.id === settingId);
-  if (setting && tabs.includes(setting.legacyTab)) return setting.legacyTab;
+  if (TAB_MAPPING[clean] && tabs.includes(TAB_MAPPING[clean])) return TAB_MAPPING[clean];
+  const exact = ALL_SETTINGS.find((s) => s.id.toLowerCase() === clean || s.id.toLowerCase() === `setting-${clean}`);
+  if (exact) {
+    if (tabs.includes(exact.legacyTab)) return exact.legacyTab;
+    if (exact.topTab && tabs.includes(exact.topTab)) return exact.topTab;
+  }
   return tabs[0];
 }
 
@@ -492,7 +538,8 @@ export function availabilityLabel(value) {
  * engine state, never operator policy, and they render as a badge instead.
  */
 export const LIFECYCLE = [
-  // Empty label: the overwhelmingly common state renders nothing rather than a badge saying "fine".
+  // Empty label: the overwhelmingly common state (idle/ready) renders nothing rather than a badge saying "fine".
+  { value: 'idle', label: '', hint: '' },
   { value: 'ready', label: '', hint: '' },
   { value: 'draining', label: 'Draining', hint: 'Waiting for running lobbies to finish before updating. New lobbies are refused.' },
   { value: 'updating', label: 'Updating', hint: 'Files are being swapped. New lobbies are refused.' },
@@ -550,8 +597,8 @@ export function sdkBadge(game, serverSdkVersion) {
 
 /** True when the engine is mid-swap, so availability and delete must be held. */
 export function isBusyLifecycle(value) {
-  const name = String(value ?? 'ready').toLowerCase();
-  return name !== 'ready' && name !== '';
+  const name = String(value ?? 'idle').toLowerCase();
+  return name === 'draining' || name === 'updating';
 }
 
 // ── Marketplace ───────────────────────────────────────────────────────────────
@@ -589,10 +636,279 @@ export function pluginStatusHint(value) {
   return PLUGIN_STATUS.find((s) => s.value === value)?.hint ?? '';
 }
 
+/**
+ * The one sentence both destructive dialogs show when nothing can bring a plugin back.
+ *
+ * It used to read "This plugin was manually uploaded and may not be re-downloadable via the
+ * marketplace", from two predicates that disagreed about the same plugin. Delete's fired for every
+ * games/-folder game as well, which was simply false — a folder game was never uploaded — and a
+ * warning that appears on nearly every card is one an operator stops reading, which costs exactly the
+ * case it exists for. What actually matters is the same either way: no source offers it, so the copy
+ * on disk is the only copy.
+ */
+const NO_SOURCE_WARNING =
+  'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.';
+
+/** The warning for a destructive action on `entry`, or null when a source can re-supply it. */
+export function pluginRestoreWarning(entry) {
+  if (!entry) return NO_SOURCE_WARNING;
+  if (entry.status === 'installedOnly') return NO_SOURCE_WARNING;
+  // A merged entry always carries a sourceId; 'games' and 'upload' are the synthesized ones, standing
+  // for "found on disk" rather than a source that could serve it again.
+  const source = entry.sourceId || entry.sourceKind || '';
+  if (!source || source === 'games' || source === 'upload') return NO_SOURCE_WARNING;
+  return entry.availableVersion ? null : NO_SOURCE_WARNING;
+}
+
 const INSTALLED_STATUSES = new Set([
   'upToDate', 'updateAvailable', 'installedAhead', 'installedVersionUnknown', 'installedOnly',
 ]);
 const PROBLEM_STATUSES = new Set(['incompatible', 'unusable']);
+
+/** "2–8", "4", "up to 8", "2+", or '' when the entry declared no range at all. */
+export function playerRange(entry) {
+  const min = entry?.minPlayers;
+  const max = entry?.maxPlayers;
+  if (!min && !max) return '';
+  if (min && max) return min === max ? `${min}` : `${min}–${max}`;
+  return max ? `up to ${max}` : `${min}+`;
+}
+
+/**
+ * Merges installed games and marketplace catalog entries into a unified list of plugins.
+ * Installed plugins (regardless of source) are placed at the top (sorted alphabetically by name),
+ * and not installed plugins from external sources populate the entries below (sorted alphabetically by name).
+ */
+export function mergePluginEntries(games = [], catalogEntries = []) {
+  const catalogById = new Map();
+  for (const entry of catalogEntries || []) {
+    if (entry && entry.id) catalogById.set(entry.id, entry);
+  }
+
+  const installedList = [];
+  const handledIds = new Set();
+
+  for (const game of games || []) {
+    if (!game || !game.id) continue;
+    handledIds.add(game.id);
+    const entry = catalogById.get(game.id);
+
+    const sourceKind = game.root === 'games' ? 'games' : (entry?.sourceId ? entry.sourceId : 'upload');
+    const sourceName = game.root === 'games'
+      ? 'Games Folder'
+      : (entry?.sourceName || (entry?.sourceId ? entry.sourceId : 'Manual Upload'));
+
+    installedList.push({
+      id: game.id,
+      name: game.name || entry?.name || game.id,
+      installed: true,
+      installedVersion: game.version || entry?.installedVersion || null,
+      availableVersion: entry?.availableVersion || null,
+      status: entry?.status || (game.availability === 'disabled' ? 'disabled' : 'installedOnly'),
+      availability: game.availability || 'available',
+      lifecycle: game.lifecycle || 'ready',
+      sdk: game.sdk || null,
+      sdkStatus: game.sdkStatus || 'unknown',
+      tags: entry?.tags || game.tags || [],
+      description: entry?.description || game.description || '',
+      author: entry?.author || game.author || '',
+      license: entry?.license || game.license || '',
+      contentRating: entry?.contentRating || game.contentRating || '',
+      homepage: entry?.homepage || game.homepage || '',
+      bugs: entry?.bugs || game.bugs || '',
+      minPlayers: entry?.minPlayers || game.minPlayers || null,
+      maxPlayers: game.maxPlayers || entry?.maxPlayers || null,
+      diskBytes: game.diskBytes ?? null,
+      directoryBytes: game.directoryBytes ?? null,
+      compressedBytes: game.compressedBytes ?? null,
+      packageBytes: game.packageBytes ?? null,
+      backupBytes: game.backupBytes ?? null,
+      sizeBytes: entry?.sizeBytes ?? null,
+      activeLobbies: game.activeLobbies ?? entry?.activeLobbies ?? 0,
+      activePlayers: game.activePlayers ?? 0,
+      root: game.root || 'packages',
+      packageRoot: game.packageRoot || null,
+      packageBacked: Boolean(game.packageBacked),
+      directory: game.directory || '',
+      deletable: game.deletable ?? true,
+      deleteBlockedReason: game.deleteBlockedReason || null,
+      managed: Boolean(game.packageRoot === 'managed' || entry?.managed),
+      updatePolicy: game.updatePolicy || entry?.updatePolicy || 'manual',
+      backups: entry?.backups || [],
+      sourceId: entry?.sourceId || (game.root === 'games' ? 'games' : 'upload'),
+      sourceName,
+      sourceKind,
+      pendingJobId: game.pendingJobId || entry?.pendingJobId || null,
+      serverAuthority: Boolean(game.serverAuthority),
+      reason: entry?.reason || null,
+      shadowedBy: entry?.shadowedBy || null,
+    });
+  }
+
+  for (const entry of catalogEntries || []) {
+    if (!entry || !entry.id || handledIds.has(entry.id)) continue;
+    if (entry.installed) {
+      handledIds.add(entry.id);
+      const sourceKind = entry.sourceId ? entry.sourceId : 'upload';
+      installedList.push({
+        id: entry.id,
+        name: entry.name || entry.id,
+        installed: true,
+        installedVersion: entry.installedVersion || null,
+        availableVersion: entry.availableVersion || null,
+        status: entry.status || 'installedOnly',
+        availability: 'available',
+        lifecycle: 'ready',
+        sdk: null,
+        sdkStatus: 'unknown',
+        tags: entry.tags || [],
+        description: entry.description || '',
+        author: entry.author || '',
+        license: entry.license || '',
+        contentRating: entry.contentRating || '',
+        homepage: entry.homepage || '',
+        bugs: entry.bugs || '',
+        minPlayers: entry.minPlayers || null,
+        maxPlayers: entry.maxPlayers || null,
+        diskBytes: null,
+        directoryBytes: null,
+        compressedBytes: null,
+        packageBytes: null,
+        backupBytes: null,
+        sizeBytes: entry.sizeBytes ?? null,
+        activeLobbies: entry.activeLobbies || 0,
+        activePlayers: 0,
+        root: 'packages',
+        packageRoot: entry.managed ? 'managed' : null,
+        packageBacked: true,
+        directory: '',
+        deletable: true,
+        deleteBlockedReason: null,
+        managed: Boolean(entry.managed),
+        updatePolicy: entry.updatePolicy || 'manual',
+        backups: entry.backups || [],
+        sourceId: entry.sourceId || 'upload',
+        sourceName: entry.sourceName || 'Manual Upload',
+        sourceKind,
+        pendingJobId: entry.pendingJobId || null,
+        serverAuthority: false,
+        reason: entry.reason || null,
+        shadowedBy: entry.shadowedBy || null,
+      });
+    }
+  }
+
+  const uninstalledList = [];
+  for (const entry of catalogEntries || []) {
+    if (!entry || !entry.id || handledIds.has(entry.id)) continue;
+    uninstalledList.push({
+      id: entry.id,
+      name: entry.name || entry.id,
+      installed: false,
+      installedVersion: null,
+      availableVersion: entry.availableVersion || null,
+      status: entry.status || 'notInstalled',
+      availability: null,
+      lifecycle: 'ready',
+      sdk: null,
+      sdkStatus: 'unknown',
+      tags: entry.tags || [],
+      description: entry.description || '',
+      author: entry.author || '',
+      license: entry.license || '',
+      contentRating: entry.contentRating || '',
+      homepage: entry.homepage || '',
+      bugs: entry.bugs || '',
+      minPlayers: entry.minPlayers || null,
+      maxPlayers: entry.maxPlayers || null,
+      diskBytes: null,
+      directoryBytes: null,
+      compressedBytes: null,
+      packageBytes: null,
+      backupBytes: null,
+      sizeBytes: entry.sizeBytes ?? null,
+      activeLobbies: 0,
+      activePlayers: 0,
+      root: null,
+      packageRoot: null,
+      packageBacked: false,
+      directory: '',
+      deletable: false,
+      deleteBlockedReason: null,
+      managed: false,
+      updatePolicy: 'manual',
+      backups: entry.backups || [],
+      sourceId: entry.sourceId || null,
+      sourceName: entry.sourceName || entry.sourceId || '',
+      sourceKind: entry.sourceId || 'marketplace',
+      pendingJobId: entry.pendingJobId || null,
+      serverAuthority: false,
+      reason: entry.reason || null,
+      shadowedBy: entry.shadowedBy || null,
+    });
+  }
+
+  installedList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+  uninstalledList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+
+  return [...installedList, ...uninstalledList];
+}
+
+/**
+ * Filter unified plugin entries by search query, source, and status.
+ */
+export function filterPlugins(entries, { q = '', source = '', status = '' } = {}) {
+  const needle = q.trim().toLowerCase();
+  const wantedSource = source.trim().toLowerCase();
+  const wantedStatus = status.trim().toLowerCase();
+
+  return (entries || []).filter((e) => {
+    // 1. Source filter: All, Games Folder ('games'), Manual Upload ('upload'), or specific marketplace sourceId
+    if (wantedSource && wantedSource !== 'all') {
+      const itemSource = String(e.sourceKind || e.sourceId || '').toLowerCase();
+      if (wantedSource === 'games' || wantedSource === 'games folder' || wantedSource === 'games-folder') {
+        if (e.sourceKind !== 'games' && e.root !== 'games') return false;
+      } else if (wantedSource === 'upload' || wantedSource === 'manual upload' || wantedSource === 'manual-upload') {
+        if (e.sourceKind !== 'upload') return false;
+      } else {
+        if (itemSource !== wantedSource && String(e.sourceId || '').toLowerCase() !== wantedSource) {
+          return false;
+        }
+      }
+    }
+
+    // 2. Status filter: All, Installed, Update Available, Problems, Not Installed
+    if (wantedStatus && wantedStatus !== 'all') {
+      if (wantedStatus === 'installed') {
+        if (!e.installed) return false;
+      } else if (wantedStatus === 'updateavailable' || wantedStatus === 'update available' || wantedStatus === 'update_available') {
+        if (e.status !== 'updateAvailable') return false;
+      } else if (wantedStatus === 'problem' || wantedStatus === 'problems') {
+        const isProblem = e.status === 'incompatible' || e.status === 'unusable' || e.sdkStatus === 'behind' || Boolean(e.reason && e.status !== 'installedOnly');
+        if (!isProblem) return false;
+      } else if (wantedStatus === 'notinstalled' || wantedStatus === 'not installed' || wantedStatus === 'not_installed') {
+        if (e.installed) return false;
+      } else {
+        // Exact status check (e.g. upToDate, staged, disabled, etc.)
+        if (String(e.status).toLowerCase() !== wantedStatus && String(e.availability).toLowerCase() !== wantedStatus) {
+          return false;
+        }
+      }
+    }
+
+    // 3. Search query: matches name, id, description, tags, author
+    if (needle) {
+      const matchName = matches(e.name, needle);
+      const matchId = matches(e.id, needle);
+      const matchDesc = matches(e.description, needle);
+      const matchAuthor = matches(e.author, needle);
+      const matchTags = (e.tags || []).some((t) => matches(t, needle));
+      if (!matchName && !matchId && !matchDesc && !matchAuthor && !matchTags) return false;
+    }
+
+    return true;
+  });
+}
 
 /** Catalog rows matching the marketplace view's filters. Client-side, like the other two filters. */
 export function filterCatalog(entries, { q = '', status = '', source = '' } = {}) {
@@ -834,6 +1150,21 @@ export const LIMIT_FIELDS = [
   {
     key: 'maxLobbiesPerGame', label: 'Max lobbies per game', integer: true,
     hint: 'Stops one popular game consuming every remaining slot.',
+  },
+  // The two server-authority knobs come last, and they come from a DIFFERENT provider on the server
+  // (AuthorityOptionsProvider, not LimitsProvider) — the wire is flat so this table stays the only place
+  // a field is declared. Note the label: 'Max lobbies (server-authority)' is not the platform cap above
+  // it, and the hints have to keep those two apart because nothing else on screen does.
+  {
+    key: 'authorityMaxLobbies', label: 'Max lobbies (server-authority)', integer: true,
+    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine — not the '
+      + 'platform cap above. Empty or 0 means unlimited, which is the default: the host (in Docker, the '
+      + 'container memory limit) is what bounds them until you set this.',
+  },
+  {
+    key: 'authorityModuleCacheIdleMinutes', label: 'Authority module cache idle (min)', integer: true,
+    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. '
+      + 'Costs one re-parse when someone next plays it. 0 keeps it until the server restarts.',
   },
 ];
 

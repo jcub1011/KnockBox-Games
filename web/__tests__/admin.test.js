@@ -367,78 +367,121 @@ describe('overview', () => {
   });
 });
 
-describe('tree navigation & settings search', () => {
-  it('highlights only the top setting on overview without multi-highlighting other overview settings', async () => {
+describe('top-bar tab navigation & cross-tab deep linking', () => {
+  it('renders all 4 top-bar tabs and defaults to monitoring', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
     await tick();
     await tick();
 
-    expect(el('panel-title').textContent).toBe('System Overview');
-    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(true);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-history"]').classList.contains('active')).toBe(false);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-cost"]').classList.contains('active')).toBe(false);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-maintenance"]').classList.contains('active')).toBe(false);
+    const topTabs = document.querySelectorAll('.top-tab-btn');
+    expect(topTabs.length).toBe(4);
+    expect(document.querySelector('.top-tab-btn[data-tab="monitoring"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.top-tab-btn[data-tab="logs"]').classList.contains('active')).toBe(false);
+    expect(document.querySelector('.top-tab-btn[data-tab="plugins"]').classList.contains('active')).toBe(false);
+    expect(document.querySelector('.top-tab-btn[data-tab="settings"]').classList.contains('active')).toBe(false);
 
-    const activeTreeItems = document.querySelectorAll('.tree-item.active');
-    expect(activeTreeItems.length).toBe(1);
+    expect(el('tab-panel-monitoring').classList.contains('hidden')).toBe(false);
+    expect(el('tab-panel-logs').classList.contains('hidden')).toBe(true);
+    expect(el('tab-panel-plugins').classList.contains('hidden')).toBe(true);
+    expect(el('tab-panel-settings').classList.contains('hidden')).toBe(true);
   });
 
-  it('scrolls to target setting on a tree item click without instantly highlighting, letting scroll handle the switch', async () => {
+  it('switches tab panels when top-bar buttons are clicked', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
     await tick();
     await tick();
 
-    const lobbiesEl = el('setting-lobbies');
-    lobbiesEl.scrollIntoView = vi.fn();
-
-    // Clicking does not instantly switch active highlight or title
-    document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').click();
+    // Click Logs tab
+    document.querySelector('.top-tab-btn[data-tab="logs"]').click();
     await tick();
+    expect(document.querySelector('.top-tab-btn[data-tab="logs"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.top-tab-btn[data-tab="monitoring"]').classList.contains('active')).toBe(false);
+    expect(el('tab-panel-logs').classList.contains('hidden')).toBe(false);
+    expect(el('tab-panel-monitoring').classList.contains('hidden')).toBe(true);
 
-    expect(lobbiesEl.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
-    expect(el('panel-title').textContent).toBe('System Overview');
-    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(true);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').classList.contains('active')).toBe(false);
+    // Click Plugins tab
+    document.querySelector('.top-tab-btn[data-tab="plugins"]').click();
+    await tick();
+    expect(document.querySelector('.top-tab-btn[data-tab="plugins"]').classList.contains('active')).toBe(true);
+    expect(el('tab-panel-plugins').classList.contains('hidden')).toBe(false);
+    expect(el('tab-panel-logs').classList.contains('hidden')).toBe(true);
 
-    // When scrolling reaches the card, scrollspy handles activating it
-    for (const card of document.querySelectorAll('.setting-card')) {
-      card.getBoundingClientRect = () => ({ top: 1000, bottom: 1400, height: 400 });
-    }
-    el('setting-overview').getBoundingClientRect = () => ({ top: -600, bottom: -200, height: 400 });
-    lobbiesEl.getBoundingClientRect = () => ({ top: 80, bottom: 480, height: 400 });
-
-    admin.updateScrollspy();
-
-    expect(el('panel-title').textContent).toBe('Active Lobbies');
-    expect(document.querySelector('.tree-item[data-setting-id="setting-lobbies"]').classList.contains('active')).toBe(true);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(false);
-    expect(window.location.hash).toBe('#lobbies');
+    // Click Settings tab
+    document.querySelector('.top-tab-btn[data-tab="settings"]').click();
+    await tick();
+    expect(document.querySelector('.top-tab-btn[data-tab="settings"]').classList.contains('active')).toBe(true);
+    expect(el('tab-panel-settings').classList.contains('hidden')).toBe(false);
+    expect(el('tab-panel-plugins').classList.contains('hidden')).toBe(true);
   });
 
-  it('honours the fragment on load', async () => {
-    window.location.hash = '#games';
+  it('cross-tab links from Plugins to Update Schedule in Settings with pulse highlight', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
     await tick();
     await tick();
+
+    // Go to Plugins tab first
+    admin.selectTopTab('plugins');
+    await tick();
+    expect(el('tab-panel-plugins').classList.contains('hidden')).toBe(false);
+    expect(el('tab-panel-settings').classList.contains('hidden')).toBe(true);
+
+    const scheduleCard = el('setting-schedule');
+    scheduleCard.scrollIntoView = vi.fn();
+
+    // Click "Manage Update Schedule in Settings →" cross-tab jump link
+    const jumpLink = el('goto-schedule-link');
+    jumpLink.click();
     await tick();
 
-    expect(el('panel-title').textContent).toBe('Game Catalog');
-    expect(document.querySelector('.tree-item[data-setting-id="setting-games"]').classList.contains('active')).toBe(true);
+    // Should now be on the Settings top tab
+    expect(document.querySelector('.top-tab-btn[data-tab="settings"]').classList.contains('active')).toBe(true);
+    expect(el('tab-panel-settings').classList.contains('hidden')).toBe(false);
+    expect(el('tab-panel-plugins').classList.contains('hidden')).toBe(true);
+
+    // Schedule setting should be active and scrolled
+    expect(scheduleCard.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+    expect(document.querySelector('.tree-item[data-setting-id="setting-schedule"]').classList.contains('active')).toBe(true);
+    expect(window.location.hash).toBe('#schedule');
   });
 
-  it('toggles tree groups on group header click', async () => {
+  it('honours top tab and setting fragments on load', async () => {
+    window.location.hash = '#plugins';
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
     await tick();
+    await tick();
 
-    const group = document.querySelector('.tree-group[data-group-id="games"]');
+    expect(document.querySelector('.top-tab-btn[data-tab="plugins"]').classList.contains('active')).toBe(true);
+    expect(el('tab-panel-plugins').classList.contains('hidden')).toBe(false);
+
+    // Deep setting fragment
+    admin.selectSetting('setting-webhooks');
+    await tick();
+    expect(document.querySelector('.top-tab-btn[data-tab="settings"]').classList.contains('active')).toBe(true);
+    expect(el('tab-panel-settings').classList.contains('hidden')).toBe(false);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-webhooks"]').classList.contains('active')).toBe(true);
+  });
+});
+
+describe('settings sidebar tree navigation & search', () => {
+  it('toggles tree groups on group header click in Settings tab', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    admin.selectTopTab('settings');
+    await tick();
+
+    const group = document.querySelector('.tree-group[data-group-id="platform"]');
     const header = group.querySelector('.tree-group-header');
 
     expect(header.getAttribute('aria-expanded')).toBe('true');
@@ -458,6 +501,10 @@ describe('tree navigation & settings search', () => {
     await importAdmin();
     admin.bootstrap();
     await tick();
+    await tick();
+
+    admin.selectTopTab('settings');
+    await tick();
 
     const searchInput = el('settings-search-input');
     const clearBtn = el('settings-search-clear');
@@ -470,9 +517,9 @@ describe('tree navigation & settings search', () => {
 
     expect(clearBtn.classList.contains('hidden')).toBe(false);
     expect(el('setting-limits').classList.contains('search-hidden')).toBe(false);
-    expect(el('setting-overview').classList.contains('search-hidden')).toBe(true);
+    expect(el('setting-maintenance').classList.contains('search-hidden')).toBe(true);
     expect(document.querySelector('.tree-item[data-setting-id="setting-limits"]').classList.contains('search-hidden')).toBe(false);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('search-hidden')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-maintenance"]').classList.contains('search-hidden')).toBe(true);
     expect(el('settings-search-empty').classList.contains('hidden')).toBe(true);
 
     // Search for nonexistent term
@@ -488,68 +535,45 @@ describe('tree navigation & settings search', () => {
 
     expect(searchInput.value).toBe('');
     expect(clearBtn.classList.contains('hidden')).toBe(true);
-    expect(el('setting-overview').classList.contains('search-hidden')).toBe(false);
+    expect(el('setting-maintenance').classList.contains('search-hidden')).toBe(false);
     expect(el('setting-limits').classList.contains('search-hidden')).toBe(false);
     expect(el('settings-search-empty').classList.contains('hidden')).toBe(true);
   });
 
-  it('polls only the visible tab', async () => {
-    vi.useFakeTimers();
-    fake = installFakeFetch(authedRoutes());
-    await importAdmin();
-    admin.bootstrap();
-    await vi.advanceTimersByTimeAsync(1);
-
-    const pathsBefore = new Set(fake.calls.map((c) => c.path));
-    expect(pathsBefore.has('/admin/api/system/status')).toBe(true);
-    expect(pathsBefore.has('/admin/api/lobbies')).toBe(false);
-    expect(pathsBefore.has('/admin/api/games')).toBe(false);
-    expect(pathsBefore.has('/admin/api/marketplace/catalog')).toBe(false);
-    expect(pathsBefore.has('/admin/api/packages/jobs')).toBe(false);
-
-    const before = fake.calls.length;
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(fake.calls.length).toBeGreaterThan(before);
-    expect(fake.calls.some((c) => c.path === '/admin/api/lobbies')).toBe(false);
-    expect(fake.calls.some((c) => c.path === '/admin/api/packages/jobs')).toBe(false);
-  });
-
-  it('has a tree item, group section, and setting card for every registered setting', async () => {
-    const { SETTINGS_GROUPS, ALL_SETTINGS } = await import('../admin/admin-core.js');
-
-    for (const group of SETTINGS_GROUPS) {
-      expect(document.querySelector(`.tree-group[data-group-id="${group.id}"]`)).not.toBeNull();
-      expect(document.querySelector(`.settings-group-section[data-group-id="${group.id}"]`)).not.toBeNull();
-    }
+  it('has setting cards for every registered setting', async () => {
+    const { ALL_SETTINGS } = await import('../admin/admin-core.js');
 
     for (const setting of ALL_SETTINGS) {
-      expect(document.querySelector(`.tree-item[data-setting-id="${setting.id}"]`)).not.toBeNull();
       expect(document.querySelector(`.setting-card[data-setting-id="${setting.id}"]`)).not.toBeNull();
     }
   });
 
-  it('updates active setting and centers sidebar item via scrollspy as user scrolls down the page', async () => {
+  it('updates active setting and centers sidebar item via scrollspy in settings tab', async () => {
     fake = installFakeFetch(authedRoutes());
     await importAdmin();
     admin.bootstrap();
+    await tick();
+    await tick();
+
+    admin.selectTopTab('settings');
     await tick();
 
     const tree = el('sidebar-tree');
     tree.scrollTo = vi.fn();
 
     // Default all cards to be below the activation line in jsdom
-    for (const card of document.querySelectorAll('.setting-card')) {
+    for (const card of document.querySelectorAll('#tab-panel-settings .setting-card')) {
       card.getBoundingClientRect = () => ({ top: 1000, bottom: 1400, height: 400 });
     }
 
-    el('setting-overview').getBoundingClientRect = () => ({ top: -600, bottom: -200, height: 400 });
-    el('setting-games').getBoundingClientRect = () => ({ top: 80, bottom: 480, height: 400 });
+    el('setting-maintenance').getBoundingClientRect = () => ({ top: -600, bottom: -200, height: 400 });
+    el('setting-schedule').getBoundingClientRect = () => ({ top: 80, bottom: 480, height: 400 });
 
     admin.updateScrollspy();
 
-    expect(document.querySelector('.tree-item[data-setting-id="setting-games"]').classList.contains('active')).toBe(true);
-    expect(document.querySelector('.tree-item[data-setting-id="setting-overview"]').classList.contains('active')).toBe(false);
-    expect(el('panel-title').textContent).toBe('Game Catalog');
+    expect(document.querySelector('.tree-item[data-setting-id="setting-schedule"]').classList.contains('active')).toBe(true);
+    expect(document.querySelector('.tree-item[data-setting-id="setting-maintenance"]').classList.contains('active')).toBe(false);
+    expect(el('panel-title').textContent).toBe('Update Schedule');
     expect(tree.scrollTo).toHaveBeenCalled();
   });
 
@@ -627,6 +651,29 @@ describe('lobby directory', () => {
     expect(rows[0].textContent).toContain('Grace');
     // A member inside the reconnect grace window is marked rather than hidden — they are still a member.
     expect(rows[0].querySelector('.member-dropped')).not.toBeNull();
+  });
+
+  it('keeps polling the lobby table while Monitoring is open', async () => {
+    // The four top tabs each render several of the old tabs at once, and the poll used to refresh only
+    // the one `activeTab` named — so Monitoring fetched this table once on arrival and then never
+    // again, which is a frozen list for the operator hunting the lobby they came here to close.
+    vi.useFakeTimers();
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await vi.advanceTimersByTimeAsync(1);
+    admin.selectTab('monitoring');
+    await vi.advanceTimersByTimeAsync(1);
+
+    const lobbyCalls = () => fake.calls.filter((c) => c.path === '/admin/api/lobbies').length;
+    const statusCalls = () => fake.calls.filter((c) => c.path === '/admin/api/system/status').length;
+    const lobbiesOnEntry = lobbyCalls();
+
+    await vi.advanceTimersByTimeAsync(11000);
+
+    // Both halves of the panel, not one of them.
+    expect(lobbyCalls()).toBeGreaterThan(lobbiesOnEntry);
+    expect(statusCalls()).toBeGreaterThan(1);
   });
 
   it('badges a stale lobby differently from a healthy one', async () => {
@@ -724,8 +771,8 @@ describe('game catalog', () => {
 
   it('renders a card per game with its disk breakdown and live counts', async () => {
     await openGames();
-    const cards = el('games-list').querySelectorAll('.game-card');
-    expect(cards).toHaveLength(2);
+    const cards = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card');
+    expect(cards).toHaveLength(3);
     expect(cards[0].textContent).toContain('Tic-Tac-Toe');
     expect(cards[0].textContent).toContain('12 KB');   // total
     expect(cards[0].textContent).toContain('7.6 KB');  // files
@@ -734,15 +781,15 @@ describe('game catalog', () => {
 
   it('shows the availability each game is actually in', async () => {
     await openGames();
-    const selects = el('games-list').querySelectorAll('select');
+    const selects = (el('plugins-list') || el('games-list')).querySelectorAll('.plugin-availability');
     expect(selects[0].value).toBe('available');
     expect(selects[1].value).toBe('disabled');
   });
 
   it('disables Delete and says why when the deployment forbids it', async () => {
     await openGames();
-    const wordRush = el('games-list').querySelectorAll('.game-card')[1];
-    const remove = [...wordRush.querySelectorAll('button')].find((b) => b.textContent === 'Delete');
+    const wordRush = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[1];
+    const remove = [...wordRush.querySelectorAll('button')].find((b) => b.textContent === 'Delete' || b.textContent === 'Uninstall');
 
     // Offering a button that always fails on a read-only games mount is worse than not offering it.
     expect(remove.disabled).toBe(true);
@@ -752,7 +799,7 @@ describe('game catalog', () => {
 
   it('confirms before hiding a game that has players in it, and says what survives', async () => {
     await openGames({ 'POST /admin/api/games/tictactoe/availability': { body: { success: true } } });
-    const select = el('games-list').querySelector('select');   // tictactoe, 1 running lobby
+    const select = (el('plugins-list') || el('games-list')).querySelector('.plugin-availability');   // tictactoe, 1 running lobby
     select.value = 'staged';
     select.dispatchEvent(new Event('change', { bubbles: true }));
 
@@ -771,7 +818,7 @@ describe('game catalog', () => {
 
   it('changes a game with nobody playing it without stopping to ask', async () => {
     await openGames({ 'POST /admin/api/games/word-rush/availability': { body: { success: true } } });
-    const select = el('games-list').querySelectorAll('select')[1];  // word-rush, 0 running lobbies
+    const select = (el('plugins-list') || el('games-list')).querySelectorAll('.plugin-availability')[1];  // word-rush, 0 running lobbies
     select.value = 'available';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     await tick();
@@ -789,7 +836,7 @@ describe('game catalog', () => {
         body: { success: true, warning: 'The change is active now but could not be saved, so it will be lost on restart.' },
       },
     });
-    const select = el('games-list').querySelector('select');
+    const select = (el('plugins-list') || el('games-list')).querySelector('.plugin-availability');
     select.value = 'disabled';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     el('confirm-ok').click();   // tictactoe has a running lobby, so this asks first
@@ -803,7 +850,7 @@ describe('game catalog', () => {
 
   it('confirms a delete before sending it', async () => {
     await openGames({ 'POST /admin/api/games/tictactoe/delete': { body: { success: true, detail: 'Deleted.' } } });
-    const remove = [...el('games-list').querySelectorAll('.game-card')[0].querySelectorAll('button')]
+    const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
       .find((b) => b.textContent === 'Delete');
     remove.click();
 
@@ -815,6 +862,44 @@ describe('game catalog', () => {
     await tick();
 
     expect(fake.calls.find((c) => c.method === 'POST').path).toBe('/admin/api/games/tictactoe/delete');
+  });
+
+  it('renders an Export button on each game card and triggers export', async () => {
+    await openGames();
+    const exportBtn = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelector('.game-export');
+    expect(exportBtn).not.toBeNull();
+    expect(exportBtn.textContent).toBe('Export');
+
+    const appendChildSpy = vi.spyOn(document.body, 'appendChild');
+    exportBtn.click();
+
+    expect(appendChildSpy).toHaveBeenCalled();
+    const anchor = appendChildSpy.mock.calls.find(([node]) => node.tagName === 'A')?.[0];
+    expect(anchor).toBeDefined();
+    expect(anchor.href).toContain('/admin/api/games/tictactoe/export');
+  });
+
+  it('warns that nothing can re-supply an unoffered plugin, and offers an export, before deleting', async () => {
+    await openGames();
+    const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
+      .find((b) => b.textContent === 'Delete');
+    remove.click();
+
+    expect(el('confirm-warning').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-warning').textContent).toBe(
+      'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.');
+    expect(el('confirm-export').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-export').textContent).toBe('Export');
+
+    const appendChildSpy = vi.spyOn(document.body, 'appendChild');
+    el('confirm-export').click();
+
+    expect(appendChildSpy).toHaveBeenCalled();
+    const anchor = appendChildSpy.mock.calls.find(([node]) => node.tagName === 'A')?.[0];
+    expect(anchor).toBeDefined();
+    expect(anchor.href).toContain('/admin/api/games/tictactoe/export');
+    // The modal remains open after clicking Export
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(false);
   });
 });
 

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using KnockBox.Server.Games;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Webhooks;
 
@@ -47,6 +48,13 @@ public enum GameAvailability
 /// cannot live in <c>Sources</c>: that list is the <em>extra</em> marketplaces, and the official one is
 /// built from <c>MarketplaceOptions</c> rather than stored.
 /// </param>
+/// <param name="Authority">
+/// The operator's overrides of the runtime-editable server-authority knobs (the concurrent-lobby cap and
+/// the parsed-module idle window). Null when untouched, the same record-by-absence convention
+/// <see cref="Limits"/> follows. Deliberately its OWN key rather than fields inside <c>Limits</c>: that
+/// object means "<c>ServerLimits</c> overrides", and the two lobby caps it would collide with are
+/// different caps read from different config keys.
+/// </param>
 /// <param name="Schedule">
 /// When the scheduled update check runs. Null means the configured default
 /// (<c>KnockBox:MarketplaceUpdate*</c>), the same record-by-absence convention <see cref="Limits"/>
@@ -63,7 +71,8 @@ public sealed record AdminSettings(
     PlatformAnnouncement? Announcement = null,
     IReadOnlyList<WebhookEndpoint>? Webhooks = null,
     bool OfficialSourceDisabled = false,
-    UpdateSchedule? Schedule = null);
+    UpdateSchedule? Schedule = null,
+    OperatorAuthorityOptions? Authority = null);
 
 /// <summary>
 /// An outbound endpoint the operator registered, and which events it wants (spec §4.2).

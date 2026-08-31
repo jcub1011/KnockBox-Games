@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using KnockBox.Contracts;
@@ -11,6 +11,9 @@ using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using KnockBox.Server.Serialization;
 using KnockBox.Server.Webhooks;
+// Aliased, not imported: the namespace also carries a SameSiteMode that collides with
+// Microsoft.AspNetCore.Http.SameSiteMode, which the session cookie below uses.
+using ContentDispositionHeaderValue = Microsoft.Net.Http.Headers.ContentDispositionHeaderValue;
 
 namespace KnockBox.Server.Hosting;
 
@@ -69,6 +72,9 @@ internal static class AdminApi
         MetricHistory History,
         int MetricSampleSeconds,
         LimitsProvider Limits,
+        // The server-authority half of the same form. Named AuthorityLimits rather than Authority because
+        // that name is already taken above by AuthorityMetrics, which is a different thing entirely.
+        AuthorityOptionsProvider AuthorityLimits,
         // Null when KnockBox:WebhooksEnabled is false — the same nullable-when-disabled precedent as
         // Marketplace. Registered endpoints are still listed; the mutating routes refuse with 409.
         WebhookDispatcher? Webhooks,
@@ -121,6 +127,8 @@ internal static class AdminApi
                 RequireSession(options, ctx => MetricHistoryFeed(ctx, options)));
             routes.MapGet("/admin/api/lobbies", RequireSession(options, ctx => Lobbies(ctx, options)));
             routes.MapGet("/admin/api/games", RequireSession(options, ctx => Games(ctx, options)));
+            routes.MapGet("/admin/api/games/{id}/export",
+                RequireSession(options, ctx => ExportGame(ctx, options)));
             routes.MapGet("/admin/api/logs", RequireSession(options, ctx => Logs(ctx, options)));
             routes.MapGet("/admin/api/logs/files", RequireSession(options, ctx => LogFiles(ctx, options)));
             routes.MapGet("/admin/api/logs/files/{name}",
@@ -566,6 +574,37 @@ internal static class AdminApi
         return null;
     }
 
+    private static async Task ExportGame(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (!options.Catalog.GameLocations.TryGetValue(id, out var location))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No installed game with id '{id}'.");
+            return;
+        }
+
+        try
+        {
+            // Opened before a single header is written: everything that can fail — the walk, a per-file
+            // read, building the archive — fails here, where a clean refusal is still possible. Setting
+            // the headers first meant a mid-stream IOException logged a warning and handed the operator a
+            // truncated archive under HTTP 200.
+            await using var export = await GamePackageExporter.OpenAsync(location, options.Paths, ctx.RequestAborted);
+            ctx.Response.StatusCode = StatusCodes.Status200OK;
+            ctx.Response.ContentType = export.ContentType;
+            // Known, so a short read is something the browser reports rather than saves.
+            ctx.Response.ContentLength = export.Length;
+            ctx.Response.Headers.ContentDisposition = Attachment(export.FileName);
+            await export.Content.CopyToAsync(ctx.Response.Body, ctx.RequestAborted);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            if (!ctx.Response.HasStarted)
+                await Refuse(ctx, StatusCodes.Status500InternalServerError, $"Could not export game '{id}' ({ex.Message}).");
+            options.Logger.LogWarning(ex, "Admin export of game {GameId} failed.", id);
+        }
+    }
+
     private static Task Logs(HttpContext ctx, Options options)
     {
         var query = ctx.Request.Query;
@@ -669,7 +708,7 @@ internal static class AdminApi
                 FileShare.ReadWrite | FileShare.Delete);
             ctx.Response.StatusCode = StatusCodes.Status200OK;
             ctx.Response.ContentType = "text/plain; charset=utf-8";
-            ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{Path.GetFileName(resolved)}\"";
+            ctx.Response.Headers.ContentDisposition = Attachment(Path.GetFileName(resolved));
             await stream.CopyToAsync(ctx.Response.Body, ctx.RequestAborted);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -1476,10 +1515,13 @@ internal static class AdminApi
         var provider = options.Limits;
         var overrides = provider.Overrides;
         var startup = provider.Configured;
+        // Two providers behind one flat response: the connection limits and the server-authority knobs are
+        // different records enforced in different places, but they are one form on the operator's screen.
+        var authority = options.AuthorityLimits;
         return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminLimitsResponse, new AdminLimitsResponse(
-            Defaults: Values(startup),
-            Effective: Values(provider.Current),
-            Overridden: OverriddenKeys(overrides),
+            Defaults: Values(startup, authority.Configured),
+            Effective: Values(provider.Current, authority.Current),
+            Overridden: OverriddenKeys(overrides, authority.Overrides),
             // Reported read-only. The portal shows them greyed with the reason rather than omitting them:
             // an operator looking for "handshake timeout" and not finding it assumes the portal is
             // incomplete, where a disabled field with "set in configuration" answers the question.
@@ -1488,17 +1530,23 @@ internal static class AdminApi
             AdminLoginAttemptsPerMinute: startup.AdminLoginAttemptsPerMinute,
             AdminLoginAttemptsPerMinuteGlobal: startup.AdminLoginAttemptsPerMinuteGlobal,
             ActiveLobbies: options.Lobbies.Count,
-            ConnectedPlayers: options.Connections.ControlCount));
+            ConnectedPlayers: options.Connections.ControlCount,
+            // Zero when server-authority is switched off entirely: Authorities is a metric, not a
+            // dependency, and a portal that failed to render because nobody ships an authority game would
+            // be a worse answer than two honest zeroes.
+            AuthorityModulesCached: options.Authorities?.CachedModules ?? 0,
+            AuthorityModulesEvicted: options.Authorities?.EvictedModules ?? 0));
 
-        static AdminLimitValues Values(ServerLimits limits) => new(
+        static AdminLimitValues Values(ServerLimits limits, AuthorityOptions authority) => new(
             limits.GameMessagesPerSecond, limits.GameMessagesBurst,
             limits.ControlMessagesPerSecond, limits.ControlMessagesBurst,
             limits.LobbyCreatesPerMinute, limits.MaxConnectionsPerIp,
-            limits.MaxLobbies, limits.MaxLobbiesPerGame);
+            limits.MaxLobbies, limits.MaxLobbiesPerGame,
+            authority.MaxLobbies, (int)authority.ModuleCacheIdle.TotalMinutes);
 
-        static IReadOnlyList<string> OverriddenKeys(OperatorLimits o)
+        static IReadOnlyList<string> OverriddenKeys(OperatorLimits o, OperatorAuthorityOptions a)
         {
-            var keys = new List<string>(8);
+            var keys = new List<string>(10);
             if (o.GameMessagesPerSecond is not null) keys.Add("gameMessagesPerSecond");
             if (o.GameMessagesBurst is not null) keys.Add("gameMessagesBurst");
             if (o.ControlMessagesPerSecond is not null) keys.Add("controlMessagesPerSecond");
@@ -1507,6 +1555,8 @@ internal static class AdminApi
             if (o.MaxConnectionsPerIp is not null) keys.Add("maxConnectionsPerIp");
             if (o.MaxLobbies is not null) keys.Add("maxLobbies");
             if (o.MaxLobbiesPerGame is not null) keys.Add("maxLobbiesPerGame");
+            if (a.MaxLobbies is not null) keys.Add("authorityMaxLobbies");
+            if (a.ModuleCacheIdleMinutes is not null) keys.Add("authorityModuleCacheIdleMinutes");
             return keys;
         }
     }
@@ -1520,36 +1570,59 @@ internal static class AdminApi
             body.ControlMessagesPerSecond, body.ControlMessagesBurst,
             body.LobbyCreatesPerMinute, body.MaxConnectionsPerIp,
             body.MaxLobbies, body.MaxLobbiesPerGame);
+        var authorityOverrides = new OperatorAuthorityOptions(
+            body.AuthorityMaxLobbies, body.AuthorityModuleCacheIdleMinutes);
 
         // 400, not 409: an out-of-range number or a burst that would refuse every message is a bad
         // request, not a state conflict. The message names the field and the range, matching how the
         // availability and update-policy routes enumerate their legal values.
+        //
+        // BOTH are validated before EITHER is persisted. One form posts one body, so a bad server-authority
+        // value must not leave the connection limits half-applied with nothing on screen saying so.
         if (overrides.Validate(options.Limits.Configured) is { } error)
         {
             await Refuse(ctx, StatusCodes.Status400BadRequest, error);
+            return;
+        }
+        if (authorityOverrides.Validate() is { } authorityError)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, authorityError);
             return;
         }
 
         // Persist first, then publish — both happen regardless of whether the write succeeded, which is
         // the store's contract: a change is in effect even when it can't be saved.
         var warning = options.Settings.SetLimits(overrides);
+        var authorityWarning = options.Settings.SetAuthorityLimits(authorityOverrides);
         options.Limits.Apply(overrides);
+        options.AuthorityLimits.Apply(authorityOverrides);
 
         var effective = options.Limits.Current;
-        var detail = overrides.IsEmpty
+        var detail = overrides.IsEmpty && authorityOverrides.IsEmpty
             ? "Every limit is back to its default."
-            : Applied(effective, options.Lobbies);
-        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: detail));
+            : Applied(effective, options.AuthorityLimits.Current, options.Lobbies, options.Authorities);
+        // Both setters write the same file, so at most one of them has anything new to report.
+        await WriteAction(ctx, new AdminActionResponse(
+            true, Warning: warning ?? authorityWarning, Detail: detail));
 
         // What the operator most needs told: the change reached sockets that were already open (that is
         // the whole point), but a lowered cap never tears anything down — it refuses the next one.
-        static string Applied(ServerLimits effective, LobbyManager lobbies)
+        static string Applied(
+            ServerLimits effective, AuthorityOptions authority, LobbyManager lobbies,
+            ServerAuthorityManager? authorities)
         {
             var note = "In force now, including for connections that are already open.";
             if (effective.MaxLobbies > 0 && lobbies.Count > effective.MaxLobbies)
                 note += $" {lobbies.Count} lobbies are already running, above the new cap of " +
                         $"{effective.MaxLobbies} — they continue until they finish; no new ones start " +
                         "until the count falls below it.";
+            // Says "server-authority lobbies" throughout, so it can never be read as the platform cap above
+            // it: the two count different things and both can be over at the same time.
+            if (authority.MaxLobbies > 0 && authorities is not null &&
+                authorities.ActorCount > authority.MaxLobbies)
+                note += $" {authorities.ActorCount} server-authority lobbies are already running, above " +
+                        $"the new cap of {authority.MaxLobbies} — same rule: they finish, and no new ones " +
+                        "start until the count falls below it.";
             return note;
         }
     }
@@ -2152,6 +2225,22 @@ internal static class AdminApi
 
     private static Task Accept(HttpContext ctx) =>
         WriteJson(ctx, KnockBoxProtocolContext.Default.AdminApiResponse, new AdminApiResponse(true));
+
+    /// <summary>
+    /// Builds an <c>attachment</c> Content-Disposition for a download.
+    /// </summary>
+    /// <remarks>
+    /// Through <see cref="ContentDispositionHeaderValue"/> rather than string interpolation, which is what
+    /// both download routes did: a game id is the folder name on disk, and on Linux that may contain a
+    /// double quote, which truncated the header at the quote. SetHttpFileName emits both the quoted ASCII
+    /// <c>filename</c> and the encoded <c>filename*</c>.
+    /// </remarks>
+    private static string Attachment(string fileName)
+    {
+        var disposition = new ContentDispositionHeaderValue("attachment");
+        disposition.SetHttpFileName(fileName);
+        return disposition.ToString();
+    }
 
     private static Task Refuse(HttpContext ctx, int status, string error) =>
         WriteJson(ctx, KnockBoxProtocolContext.Default.AdminApiResponse, new AdminApiResponse(false, error), status);

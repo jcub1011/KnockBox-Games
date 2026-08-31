@@ -134,19 +134,19 @@ public static class MarketplaceProjection
             }
         }
 
-        // Managed games nothing offers. Listed because they are still updatable and rollback-able from
-        // the portal — leaving them out would make an uploaded game invisible on the only page that can
-        // act on it.
-        foreach (var id in managedIds)
+        // Installed games nothing offers (both managed packages and folder installations). Listed
+        // because they are still updatable/manageable from the portal — leaving them out would make an
+        // uploaded or folder-installed game invisible on the marketplace page.
+        foreach (var (id, location) in installed)
         {
-            if (claimed.ContainsKey(id) || !installed.TryGetValue(id, out var location)) continue;
+            if (claimed.ContainsKey(id)) continue;
             rows.Add(new MarketplaceEntry(
                 location.Manifest.Id,
                 location.Manifest.Name,
                 Description: null, Author: null, Tags: null,
                 // No catalog entry to read, so these come from the installed manifest itself. Homepage
                 // and Bugs stay null because GameManifest has no equivalent — they exist only in a
-                // catalog entry, so an uploaded game genuinely has none to show.
+                // catalog entry, so an uploaded or folder game genuinely has none to show.
                 License: location.Manifest.License,
                 Homepage: null,
                 Bugs: null,
@@ -159,7 +159,7 @@ public static class MarketplaceProjection
                 Reason: "No registered marketplace offers this game.",
                 SizeBytes: null, PublishedAt: null, MinAppVersion: null, MaxAppVersion: null,
                 SourceId: "", SourceName: null, ShadowedBy: null,
-                Managed: true, Installed: true));
+                Managed: managedIds.Contains(id), Installed: true));
         }
 
         rows.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));

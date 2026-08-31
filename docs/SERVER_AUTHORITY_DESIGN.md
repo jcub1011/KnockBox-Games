@@ -406,7 +406,8 @@ Two new files under `KnockBox.Server/Games/`:
 **`ServerAuthorityManager`** — DI singleton (registered with the others in `Program.cs`), a
 `ConcurrentDictionary<string /*lobbyId*/, ServerAuthority>`:
 - `bool TryStart(Lobby lobby, GameManifest manifest, out string? error)` — reads + loads the
-  module, constructs the actor, starts its drain task. Enforces `AuthorityMaxLobbies`.
+  module, constructs the actor, starts its drain task. Enforces `AuthorityMaxLobbies`, read live off
+  `AuthorityOptionsProvider` so a portal edit applies to the next lobby rather than the next restart.
 - `bool TryGet(string lobbyId, out ServerAuthority auth)` / `void Stop(string lobbyId)` /
   `void StopAll()` (hooked to `ApplicationStopping`, the existing timer-disposal pattern).
 
@@ -485,10 +486,25 @@ New `AuthorityOptions` record (`ServerLimits.FromConfiguration` pattern), all un
 | `AuthorityMaxScriptBytes` | 1048576 (1 MB) | Max module file size (checked at discovery and load). |
 | `AuthorityMaxWordFileBytes` | 33554432 (32 MB) | Max size of a single `authorityWords` dictionary file (checked at discovery). Larger than the module cap because dictionaries are the big blobs; they live on the shared CLR heap, not in a per-invocation budget. |
 | `AuthorityQueueCapacity` | 256 | Actor inbound channel bound (two-tier: intents drop-oldest, ticks coalesce, roster work never dropped — §6). |
-| `AuthorityMaxLobbies` | 100 | Cap on concurrent server-authority lobbies (`0` = unlimited). |
+| `AuthorityMaxLobbies` | 0 (unlimited) | Cap on concurrent server-authority lobbies. Off by default: a refusal nobody configured is worse than letting the host bound it. **Runtime-editable** from the portal and persisted. |
+| `AuthorityModuleCacheIdleMinutes` | 30 | How long a game's shared prepared module is kept once no lobby is using it (`0` = process lifetime). **Runtime-editable** from the portal and persisted. |
 
 CPU fairness note: each call is budgeted, ticks are clamped, and `AuthorityMaxLobbies` bounds the
-aggregate — that is the v1 answer to a hot module; a shared scheduler is future work.
+aggregate **once an operator sets it** — that is the v1 answer to a hot module; a shared scheduler is
+future work. The cap ships at `0`, so out of the box the per-call budgets and the host are the only
+bounds.
+
+**Two knobs are runtime-editable, and the split is deliberate.** `AuthorityMaxLobbies` and
+`AuthorityModuleCacheIdleMinutes` are read live through `Games/AuthorityOptionsProvider.cs` — the
+`LimitsProvider`/`OperatorLimits` pattern, mirrored rather than extended because `ApplyTo` targets a
+different record and because `ServerLimits.MaxLobbies` and `AuthorityMaxLobbies` are different caps that
+must never merge. Everything else stays startup-only for a reason worth recording: the four per-call
+constraints are baked into `new Engine(...)`, so an "edit" reaching only later lobbies would be a knob
+that lies about when it applies; `MaxScriptBytes`/`MaxWordFileBytes` are captured by `GameCatalog`'s
+constructor and enforced at discovery; `Enabled`, `TickHzMax` and `QueueCapacity` are read at
+lobby/actor construction. `ServerAuthorityManager.TryStart` therefore snapshots the live record once at
+the top and hands *that* to the runtime and actor, so a running lobby's budgets never change underneath
+it.
 
 Memory honesty note: Jint's `LimitMemory` is a **per-invocation allocation budget** (per-thread
 `GC.GetAllocatedBytesForCurrentThread`, re-baselined each call; the check self-skips if a call
@@ -497,8 +513,10 @@ grow its heap by up to the budget every invocation. The v1 threat model makes th
 authority modules are **operator-installed** (dropped into `games/` by whoever runs the server),
 so the sandbox is defense-in-depth against buggy or compromised games, not against arbitrary
 hostile uploads. Partial backstops that exist anyway: an oversized `snapshot()` fails the actor's
-outbound size check, and `AuthorityMaxLobbies` bounds the blast radius. Sizing note: 100 lobbies ×
-32 MB is a ~3.2 GB theoretical per-call ceiling — lower both knobs on small hosts.
+outbound size check, and `AuthorityMaxLobbies` bounds the blast radius **when it is set**. Sizing note:
+the cap defaults to `0`, so there is no server-side ceiling until an operator chooses one — set it and
+`MaxLobbies × MaxMemoryBytes` becomes the theoretical per-call ceiling (100 × 32 MB ≈ 3.2 GB). On a small
+host, set both.
 
 Steady-state footprint (as-built): each lobby holds one long-lived engine, so RSS scales with
 concurrent authority lobbies. Two mitigations keep the per-lobby cost down:
@@ -507,9 +525,22 @@ concurrent authority lobbies. Two mitigations keep the per-lobby cost down:
   prepared module is registered on each lobby engine with `ModuleBuilder.AddModule`, keyed by file
   path with mtime/length freshness. So N lobbies of one game share a single parsed AST instead of
   re-reading and re-parsing per lobby. The cache is pruned on `GameCatalog.Discovered` (like the word
-  service) so a removed game's parsed AST doesn't linger for the process lifetime. The per-engine
-  **realm baseline** (ECMAScript intrinsics) still can't be shared for isolated untrusted state and
-  dominates when many lobbies run.
+  service) so a removed game's parsed AST doesn't linger for the process lifetime — **and idle-evicted**
+  by `AuthorityModuleCache.EvictIdle`, driven once a minute from
+  `ServerAuthorityManager.SweepModuleCache`, so a game that merely stopped being played releases its AST
+  too. The sweep takes the set of module paths currently in use (read off the actor map, which is why the
+  path rides on the actor entry rather than in a second dictionary) and **refreshes** their idle stamp
+  rather than skipping them: `Get` runs once per lobby at `Initialize`, so fifty live lobbies otherwise
+  look exactly like zero and the busiest game on the server would be the first evicted. The sweep cadence
+  is fixed while the window is read live — deriving one from the other is the trap
+  `DisconnectGraceSeconds` fell into, and this window has to stay portal-editable.
+
+  **Eviction is not disposal, and the docs should not imply it is.** `Prepared<Module>` is not
+  `IDisposable`; eviction removes a dictionary entry. The AST becomes GC-*eligible* only once no live
+  runtime references it, the bytes return at the next gen2 collection, and RSS falls behind that — the
+  same honesty the memory note above applies. It is also a **small** win: a few-kilobyte module has a
+  tens-of-kilobyte AST. The per-engine **realm baseline** (ECMAScript intrinsics) still can't be shared
+  for isolated untrusted state and is what dominates when many lobbies run.
 - **GC footprint** (`KnockBox.Server.csproj`): Server GC stays (relay throughput) with **DATAS**
   (heap-count adaptation, on by default since .NET 8) doing the footprint work — it grows/shrinks
   heaps with load, so no fixed `System.GC.HeapCount` is set (that would disable DATAS). Only

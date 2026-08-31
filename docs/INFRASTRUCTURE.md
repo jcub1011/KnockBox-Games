@@ -477,7 +477,8 @@ into `games/` and it appears within a second or two — no restart.
 | `AuthorityMaxScriptBytes` | `1048576` (1 MB) | Max authority-module file size; checked at discovery (oversize ⇒ the game is skipped) and at load. |
 | `AuthorityMaxWordFileBytes` | `33554432` (32 MB) | Max size of a single `authorityWords` dictionary file; checked at discovery (oversize ⇒ the game is skipped). Dictionaries load once into a shared CLR structure (not a per-lobby budget), so this cap is generous. |
 | `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
-| `AuthorityMaxLobbies` | `100` | Cap on concurrent server-authority lobbies; creation past it fails. `0` = unlimited. Bounds aggregate CPU/memory blast radius. |
+| `AuthorityMaxLobbies` | `0` (unlimited) | Cap on concurrent server-authority lobbies; creation past it fails. Each such lobby holds a Jint engine, so this is the one lobby count with a real memory cost — but it is **off by default**, because a refusal nobody configured is worse than letting the host (in Docker, `mem_limit`) be the bound. Set it when you want the server to refuse *before* the GC starts fighting. Also editable at runtime from the admin portal, which persists an override — this is the value a deployment starts from. |
+| `AuthorityModuleCacheIdleMinutes` | `30` | How long a game's shared parsed authority module is kept after the last lobby using it ends; `0` keeps it for the process lifetime. Swept once a minute, so expiry lands in `[window, window + 60s)`. Costs one re-parse when the game is next played, and never affects a running lobby (each engine holds its own reference). Also editable at runtime from the admin portal. |
 | `MaxLobbies` | `0` (unlimited) | Cap on simultaneous lobbies across every game. Also editable at runtime from the admin portal, which persists an override — this is the value a deployment starts from. Enforced in `HandleCreateLobby` before the player is moved out of any lobby they were already in, so a refusal never costs them their current game. |
 | `MaxLobbiesPerGame` | `0` (unlimited) | Same, per game, so one popular title can't consume every remaining slot. |
 | `MetricSampleSeconds` | `15` | How often the server samples counters into `Admin/MetricHistory.cs` for the dashboard's graphs. Sampled server-side so the history belongs to the SERVER, not to one open browser tab. `0` = no history and no graphs. |
@@ -507,11 +508,20 @@ into `games/` and it appears within a second or two — no restart.
 Each server-authority lobby runs one sandboxed **Jint engine** for the lobby's lifetime; footprint
 scales with concurrent authority lobbies. Two things keep it in check:
 
-- **Shared parsed module** — a game's `authority.js` is parsed once and the reusable parsed module is
-  shared across every lobby engine of that game (`Games/AuthorityModuleCache.cs`), so N lobbies of
-  one game don't hold N copies of the parsed AST. (The per-engine ECMAScript realm baseline is still
-  per lobby — it can't be shared for isolated untrusted state.) `AuthorityMaxMemoryBytes` bounds only
-  a single *invocation's* allocation, not what an engine retains.
+- **Shared parsed module** — a game's `authority.js` is parsed once, lazily on the first lobby that needs
+  it, and the reusable parsed module is shared across every lobby engine of that game
+  (`Games/AuthorityModuleCache.cs`), so N lobbies of one game don't hold N copies of the parsed AST. (The
+  per-engine ECMAScript realm baseline is still per lobby — it can't be shared for isolated untrusted
+  state.) `AuthorityMaxMemoryBytes` bounds only a single *invocation's* allocation, not what an engine
+  retains. A game that stops being played releases its parsed module after
+  `AuthorityModuleCacheIdleMinutes` (default 30; `0` disables). Read that as "stops holding it", not
+  "frees N MB at time T": it is a GC-eligibility change, the bytes come back at the next gen2 collection,
+  and RSS falls behind that again. A lobby that is running is never affected — its engine holds its own
+  reference — so the only cost of a short window is one re-parse when the game is next started.
+  **This is a small number.** A typical `authority.js` is a few kilobytes and its AST tens of kilobytes;
+  the whole cache is bounded by (distinct authority games x a few MB) even at the 1 MB
+  `AuthorityMaxScriptBytes` ceiling. What actually scales with load is the per-lobby engine below, and
+  `AuthorityMaxLobbies` is the knob that bounds *that*.
 - **GC tuning** — the server runs **Server GC** (throughput for the WebSocket relay) with **DATAS**
   (Dynamic Adaptation To Application Sizes, on by default since .NET 8) doing the footprint work:
   DATAS grows and shrinks the heap count with actual load, which is exactly the "RSS climbs and stays
@@ -521,5 +531,40 @@ scales with concurrent authority lobbies. Two things keep it in check:
   in `docker-compose.yml`) so DATAS/GC size and collect against the cgroup budget — the single biggest
   lever on steady-state RSS. Only pin `DOTNET_GCHeapCount` as a runtime override if you have a specific
   reason (**foot-gun:** it is **hex**, and setting it turns DATAS off).
+
+#### What it actually measures (2026-08-28, `dotnet run` on Windows, JIT + Server GC)
+
+Taken with `KnockBox__MemoryLogSeconds=5` against `games/tictactoe-server`, reading the log's own
+`workingSet / managedHeap / gcCommitted` triple. **A `dotnet run` build is not the container**: it carries
+CoreCLR, the JIT and ~100 mapped framework assemblies that the Native-AOT image does not, so treat the
+baseline as an upper bound and the *deltas* as the transferable part.
+
+| Stage | Working set | Managed heap | GC committed |
+| :--- | ---: | ---: | ---: |
+| Idle, before any engine exists | 59 MB | 2 MB | 4 MB |
+| First authority lobby | 68 MB | 2 MB | 5 MB |
+| 25 concurrent authority lobbies | 72 MB | 6 MB | 5 MB |
+| Sustained churn (2 025 engines created and dropped) | 115 MB | 13 MB | 42 MB |
+
+Three things to read off that, because each answers a question people actually ask:
+
+- **The first engine costs ~9 MB of working set and *nothing* on the managed heap.** That step is the
+  runtime materialising the Jint interpreter — JIT'd code and type metadata, paid once. Under Native AOT
+  it is resident image pages instead, and `TrimmerRootAssembly Include="Jint"` means the whole 2.4 MB
+  assembly is compiled in, so the cost does not disappear there, it just moves.
+- **The marginal cost of an authority lobby is ~125 KB of managed heap** (6 MB − 3 MB over 24 extra
+  lobbies), and `word-rush` — which declares an `authorityWords` dictionary — measured the same, which is
+  the shared word pool doing its job. At that rate 100 concurrent authority lobbies is single-digit MB.
+  **Jint engines are not what makes this process large.**
+- **A working set of ~115 MB under load is normal and is not a leak.** The proof is in the collection
+  counters: heap climbed to 37 MB with `gc(g0/g1/g2)` still at `8/2/1`, and after the *second* gen2 it
+  fell to **13 MB while 800 further engines were being created and dropped**. Nothing retains per lobby;
+  what grows is uncollected garbage plus committed-but-unused Server GC segments (`gcCommitted` 42 MB),
+  which DATAS sizes against the memory limit it is given. If you want that number smaller, the lever is
+  the container `mem_limit`, not the authority knobs.
+
+To repeat the measurement, watch `authorityActors` in the same log line: it must return to `0` after the
+reconnect grace elapses. If it does not, that is a lifecycle bug and no memory reading means anything until
+it is fixed.
 
 Deployment (Docker, desktop publish, reverse proxies) is covered in **[HOSTING.md](./HOSTING.md)**.

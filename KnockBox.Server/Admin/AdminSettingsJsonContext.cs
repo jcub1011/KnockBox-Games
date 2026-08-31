@@ -22,6 +22,7 @@ namespace KnockBox.Server.Admin;
 [JsonSerializable(typeof(RegisteredMarketplace))]
 [JsonSerializable(typeof(IReadOnlyList<RegisteredMarketplace>))]
 [JsonSerializable(typeof(Networking.OperatorLimits))]
+[JsonSerializable(typeof(Games.OperatorAuthorityOptions))]
 [JsonSerializable(typeof(BannedRoomCodes))]
 [JsonSerializable(typeof(PlatformAnnouncement))]
 [JsonSerializable(typeof(WebhookEndpoint))]

@@ -8,6 +8,12 @@ namespace KnockBox.Server.Tests;
 /// with <c>UnauthorizedAccessException</c> out of <c>File.Move(..., overwrite: true)</c> once in ~50 full
 /// test runs on Windows + Defender, discarding a fully verified package that the next attempt would have
 /// placed.
+///
+/// And its much louder sibling, which is why the directory form exists: the installer's swap
+/// (<c>Directory.Move(staging, target)</c>, over a tree it had finished writing microseconds earlier)
+/// failed the same way on roughly one full test run in two, on a different package each time. A
+/// directory is the worse case, not the milder one — Windows denies the rename while ANY file beneath
+/// it is held open without share-delete, so every file just written is another chance to lose.
 /// </summary>
 /// <remarks>
 /// Split deliberately into two halves. The portable half drives
@@ -172,6 +178,20 @@ public class AtomicFileTests : IDisposable
         Assert.False(File.Exists(source));
     }
 
+    [Fact]
+    public void A_directory_move_relocates_the_whole_tree()
+    {
+        var source = Path.Combine(_dir, $"srcdir-{Guid.NewGuid():N}");
+        var destination = Path.Combine(_dir, $"dstdir-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(source, "assets"));
+        File.WriteAllText(Path.Combine(source, "assets", "data.txt"), "new");
+
+        AtomicFile.MoveDirectoryWithRetry(source, destination);
+
+        Assert.Equal("new", File.ReadAllText(Path.Combine(destination, "assets", "data.txt")));
+        Assert.False(Directory.Exists(source));
+    }
+
     // ── A REAL sharing violation is in the retried set (Windows only) ─────────────────────────────
 
     [Fact]
@@ -222,6 +242,68 @@ public class AtomicFileTests : IDisposable
         holder.Dispose();
         Assert.True(File.Exists(source));
         Assert.Equal("old", File.ReadAllText(destination));
+    }
+
+    [Fact]
+    public void A_directory_whose_inner_file_is_freed_between_attempts_is_moved_successfully()
+    {
+        if (!OperatingSystem.IsWindows()) return; // rename(2) ignores open handles; nothing to retry
+
+        var (source, destination, inner) = DirectoryPair();
+        using var holder = new FileStream(inner, FileMode.Open, FileAccess.Read, FileShare.None);
+        if (!LockDeniesReaders(inner)) return;
+
+        var tries = 0;
+        AtomicFile.Retry(
+            () =>
+            {
+                // The handle is on a file INSIDE the directory, not on the directory — which is exactly
+                // the shape of the real failure: a scanner reading an asset the extractor just wrote.
+                if (++tries == 2) holder.Dispose();
+                Directory.Move(source, destination);
+            },
+            attempts: 4, delayMs: 1);
+
+        Assert.Equal(2, tries);
+        Assert.Equal("new", File.ReadAllText(Path.Combine(destination, "asset.bin")));
+        Assert.False(Directory.Exists(source));
+    }
+
+    [Fact]
+    public void A_directory_held_past_the_budget_still_surfaces_the_original_error()
+    {
+        if (!OperatingSystem.IsWindows()) return; // rename(2) ignores open handles; nothing to retry
+
+        var (source, destination, inner) = DirectoryPair();
+        using var holder = new FileStream(inner, FileMode.Open, FileAccess.Read, FileShare.None);
+        if (!LockDeniesReaders(inner)) return;
+
+        var thrown = Assert.ThrowsAny<Exception>(() =>
+            AtomicFile.MoveDirectoryWithRetry(source, destination, attempts: 3, delayMs: 1));
+
+        // The type check is what proves a real Windows directory-rename denial lands in IsTransient. It
+        // names the SOURCE directory, which is how the installer's log line pointed at .staging/<id>.
+        Assert.True(thrown is IOException or UnauthorizedAccessException, thrown.GetType().Name);
+        Assert.Contains(source, thrown.Message, StringComparison.Ordinal);
+
+        holder.Dispose();
+        Assert.True(Directory.Exists(source));
+        Assert.False(Directory.Exists(destination));
+    }
+
+    /// <summary>A source directory holding one file, and a destination path that does not exist yet.</summary>
+    /// <remarks>
+    /// No pre-existing destination, unlike <see cref="Pair"/>: <see cref="Directory.Move"/> has no
+    /// overwrite form, which is why the installer moves the live folder aside instead of replacing it.
+    /// </remarks>
+    private (string Source, string Destination, string Inner) DirectoryPair()
+    {
+        var source = Path.Combine(_dir, $"srcdir-{Guid.NewGuid():N}");
+        var destination = Path.Combine(_dir, $"dstdir-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        var inner = Path.Combine(source, "asset.bin");
+        File.WriteAllText(inner, "new");
+        return (source, destination, inner);
     }
 
     /// <summary>

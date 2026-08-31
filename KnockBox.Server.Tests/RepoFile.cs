@@ -31,7 +31,7 @@ internal static class RepoFile
     public static string? Read(string relativePath)
     {
         var full = Path_(relativePath);
-        return full is not null && File.Exists(full) ? File.ReadAllText(full) : null;
+        return full is not null && File.Exists(full) ? File.ReadAllText(full).Replace("\r\n", "\n") : null;
     }
 
     /// <summary>True when the path exists in the checkout. False outside a checkout.</summary>

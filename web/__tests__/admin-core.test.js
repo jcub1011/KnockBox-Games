@@ -3,17 +3,55 @@
 // kb-core.test.js, and the reason admin-core.js exists as a module of its own.
 import { describe, it, expect } from 'vitest';
 import {
-  AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS, UPDATE_MODES,
+  AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS,
+  TOP_TABS, TAB_MAPPING,
+  UPDATE_MODES,
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
-  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterSettings, formatBytes,
+  cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
   formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
-  jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, noLimitOverrides,
-  pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash, tabFromHash, uploadGuard,
+  jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
+  playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
+  tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge,
 } from '../admin/admin-core.js';
+
+describe('topTabFromHash & TOP_TABS', () => {
+  it('defines the 4 top-bar tabs', () => {
+    expect(TOP_TABS).toEqual(['monitoring', 'logs', 'plugins', 'settings']);
+  });
+
+  it('maps hashes and setting keys to the correct top tab', () => {
+    expect(topTabFromHash('#monitoring')).toBe('monitoring');
+    expect(topTabFromHash('#overview')).toBe('monitoring');
+    expect(topTabFromHash('#lobbies')).toBe('monitoring');
+    expect(topTabFromHash('#history')).toBe('monitoring');
+    expect(topTabFromHash('#cost')).toBe('monitoring');
+
+    expect(topTabFromHash('#logs')).toBe('logs');
+
+    expect(topTabFromHash('#plugins')).toBe('plugins');
+    expect(topTabFromHash('#games')).toBe('plugins');
+    expect(topTabFromHash('#marketplace')).toBe('plugins');
+
+    expect(topTabFromHash('#settings')).toBe('settings');
+    expect(topTabFromHash('#platform')).toBe('settings');
+    expect(topTabFromHash('#maintenance')).toBe('settings');
+    expect(topTabFromHash('#schedule')).toBe('settings');
+    expect(topTabFromHash('#limits')).toBe('settings');
+    expect(topTabFromHash('#room-codes')).toBe('settings');
+    expect(topTabFromHash('#webhooks')).toBe('settings');
+    expect(topTabFromHash('#startup-config')).toBe('settings');
+  });
+
+  it('falls back to monitoring for unknown or empty hashes', () => {
+    expect(topTabFromHash('')).toBe('monitoring');
+    expect(topTabFromHash('#')).toBe('monitoring');
+    expect(topTabFromHash('#unknown-random-123')).toBe('monitoring');
+  });
+});
 
 describe('tabFromHash', () => {
   it('selects the tab a fragment names', () => {
@@ -56,7 +94,7 @@ describe('settingFromHash', () => {
 describe('SETTINGS_GROUPS and ALL_SETTINGS', () => {
   it('defines the 3 logical groups with unique ids and settings', () => {
     expect(SETTINGS_GROUPS.map((g) => g.id)).toEqual(['monitoring', 'games', 'platform']);
-    expect(ALL_SETTINGS.length).toBe(14);
+    expect(ALL_SETTINGS.length).toBe(13);
     for (const setting of ALL_SETTINGS) {
       expect(setting.id).toMatch(/^setting-/);
       expect(setting.label).toBeTruthy();
@@ -378,7 +416,9 @@ describe('availability metadata', () => {
 
 describe('lifecycle', () => {
   it('renders nothing for the ordinary state', () => {
-    // 'ready' is what almost every game is almost all the time; a badge saying "fine" is noise.
+    // 'idle' (and legacy 'ready') is what almost every game is almost all the time; a badge saying "fine" is noise.
+    expect(lifecycleLabel('idle')).toBe('');
+    expect(isBusyLifecycle('idle')).toBe(false);
     expect(lifecycleLabel('ready')).toBe('');
     expect(isBusyLifecycle('ready')).toBe(false);
     expect(isBusyLifecycle(undefined)).toBe(false);
@@ -725,10 +765,12 @@ describe('uploadGuard', () => {
 });
 
 describe('platform limit fields', () => {
-  it('covers exactly the eight limits the server lets an operator change', () => {
-    // Pinned against AdminLimitValues / OperatorLimits. A knob added on one side only shows up here,
-    // rather than as a field that silently never saves.
+  it('covers exactly the ten limits the server lets an operator change', () => {
+    // Pinned against AdminLimitValues, which is flat across TWO server-side records: the first eight are
+    // OperatorLimits/ServerLimits, the last two OperatorAuthorityOptions/AuthorityOptions. A knob added on
+    // one side only shows up here, rather than as a field that silently never saves.
     expect(LIMIT_FIELDS.map((f) => f.key).sort()).toEqual([
+      'authorityMaxLobbies', 'authorityModuleCacheIdleMinutes',
       'controlMessagesBurst', 'controlMessagesPerSecond', 'gameMessagesBurst', 'gameMessagesPerSecond',
       'lobbyCreatesPerMinute', 'maxConnectionsPerIp', 'maxLobbies', 'maxLobbiesPerGame',
     ]);
@@ -736,6 +778,26 @@ describe('platform limit fields', () => {
       expect(field.label).toBeTruthy();
       expect(field.hint).toBeTruthy();
     }
+  });
+
+  it('keeps the platform lobby cap and the server-authority lobby cap distinguishable', () => {
+    // These are different caps from different config keys, enforced in different places, and they sit on
+    // one card. Nothing but the label and hint stops an operator reading them as one setting shown twice,
+    // so both are pinned: a rename that collapses them has to fail here.
+    const platform = LIMIT_FIELDS.find((f) => f.key === 'maxLobbies');
+    const authority = LIMIT_FIELDS.find((f) => f.key === 'authorityMaxLobbies');
+    expect(platform).toBeTruthy();
+    expect(authority).toBeTruthy();
+
+    expect(platform.label).not.toBe(authority.label);
+    expect(platform.label.includes(authority.label)).toBe(false);
+    expect(authority.label.includes(platform.label)).toBe(false);
+
+    // Each hint has to say which population it counts, or the labels are doing the work alone.
+    expect(platform.hint).toMatch(/every game|platform|across/i);
+    expect(authority.hint).toMatch(/server-side|server-authority/i);
+    // And the authority one must say what leaving it empty means, because its default is "no cap at all".
+    expect(authority.hint).toMatch(/unlimited/i);
   });
 
   it('lists the startup-only limits, which are deliberately NOT editable', () => {
@@ -1069,3 +1131,118 @@ describe('sdkBadge', () => {
     expect(badge.title).toContain('godot 0.1.0, web 0.2.0');
   });
 });
+
+describe('playerRange', () => {
+  it('formats range when min and max are different', () => {
+    expect(playerRange({ minPlayers: 2, maxPlayers: 8 })).toBe('2–8');
+  });
+
+  it('formats single number when min and max are identical', () => {
+    expect(playerRange({ minPlayers: 4, maxPlayers: 4 })).toBe('4');
+  });
+
+  it('formats max only as up to N', () => {
+    expect(playerRange({ maxPlayers: 8 })).toBe('up to 8');
+  });
+
+  it('formats min only as N+', () => {
+    expect(playerRange({ minPlayers: 2 })).toBe('2+');
+  });
+
+  it('returns empty string when neither is declared', () => {
+    expect(playerRange({})).toBe('');
+    expect(playerRange(null)).toBe('');
+  });
+});
+
+describe('pluginRestoreWarning', () => {
+  const OFFERED = { id: 'word-rush', sourceId: 'official', status: 'upToDate', availableVersion: '1.2.0' };
+  const warning = 'No marketplace source offers this plugin, so it cannot be re-downloaded — export a copy first.';
+
+  it('says nothing when a source can re-supply the plugin', () => {
+    expect(pluginRestoreWarning(OFFERED)).toBeNull();
+    expect(pluginRestoreWarning({ ...OFFERED, status: 'updateAvailable' })).toBeNull();
+  });
+
+  it('warns for a plugin no catalog offers, however it got here', () => {
+    // A folder game, a hand-dropped .kbg and an uploaded one differ in how they arrived and not at all
+    // in what matters here: the copy on disk is the only copy.
+    expect(pluginRestoreWarning({ ...OFFERED, sourceId: 'games', availableVersion: null })).toBe(warning);
+    expect(pluginRestoreWarning({ ...OFFERED, sourceId: 'upload', availableVersion: null })).toBe(warning);
+    expect(pluginRestoreWarning({ ...OFFERED, status: 'installedOnly' })).toBe(warning);
+    expect(pluginRestoreWarning({ ...OFFERED, availableVersion: null })).toBe(warning);
+  });
+
+  it('warns rather than staying silent on an entry it cannot read', () => {
+    expect(pluginRestoreWarning(null)).toBe(warning);
+    expect(pluginRestoreWarning({})).toBe(warning);
+  });
+});
+
+describe('mergePluginEntries', () => {
+  const games = [
+    { id: 'tictactoe', name: 'Tic-Tac-Toe', root: 'games', version: '1.0.0', availability: 'available', diskBytes: 12000 },
+    { id: 'word-rush', name: 'Word Rush', root: 'packages', packageRoot: 'managed', version: '1.2.0', availability: 'available', diskBytes: 50000 },
+  ];
+
+  const catalog = [
+    { id: 'word-rush', name: 'Word Rush', sourceId: 'official', sourceName: 'Official Marketplace', availableVersion: '1.3.0', installedVersion: '1.2.0', status: 'updateAvailable', installed: true },
+    { id: 'alpha-chain', name: 'Alpha Chain', sourceId: 'official', sourceName: 'Official Marketplace', availableVersion: '2.0.0', status: 'notInstalled', installed: false, description: 'Word chain game' },
+    { id: 'custom-card', name: 'Custom Card Game', sourceId: 'community', sourceName: 'Community Repo', availableVersion: '1.0.0', status: 'notInstalled', installed: false },
+  ];
+
+  it('places installed plugins on top (alphabetical) and uninstalled below (alphabetical)', () => {
+    const merged = mergePluginEntries(games, catalog);
+    expect(merged).toHaveLength(4);
+    // Installed: Tic-Tac-Toe (games), Word Rush (managed)
+    expect(merged[0].id).toBe('tictactoe');
+    expect(merged[0].installed).toBe(true);
+    expect(merged[0].sourceKind).toBe('games');
+    expect(merged[0].sourceName).toBe('Games Folder');
+
+    expect(merged[1].id).toBe('word-rush');
+    expect(merged[1].installed).toBe(true);
+    expect(merged[1].sourceKind).toBe('official');
+    expect(merged[1].status).toBe('updateAvailable');
+
+    // Not installed: Alpha Chain, Custom Card Game
+    expect(merged[2].id).toBe('alpha-chain');
+    expect(merged[2].installed).toBe(false);
+
+    expect(merged[3].id).toBe('custom-card');
+    expect(merged[3].installed).toBe(false);
+  });
+});
+
+describe('filterPlugins', () => {
+  const entries = [
+    { id: 'tictactoe', name: 'Tic-Tac-Toe', sourceKind: 'games', sourceId: 'games', installed: true, status: 'installedOnly', tags: ['classic', 'board'] },
+    { id: 'word-rush', name: 'Word Rush', sourceKind: 'official', sourceId: 'official', installed: true, status: 'updateAvailable', tags: ['party', 'words'], description: 'Fast word game', author: 'Author A' },
+    { id: 'alpha-chain', name: 'Alpha Chain', sourceKind: 'official', sourceId: 'official', installed: false, status: 'notInstalled', tags: ['words'], author: 'Author B' },
+    { id: 'broken-game', name: 'Broken Game', sourceKind: 'official', sourceId: 'official', installed: false, status: 'incompatible', tags: ['puzzle'] },
+    { id: 'manual-pkg', name: 'Manual Plugin', sourceKind: 'upload', sourceId: 'upload', installed: true, status: 'installedOnly', tags: ['tools'] },
+  ];
+
+  it('filters by source', () => {
+    expect(filterPlugins(entries, { source: 'all' })).toHaveLength(5);
+    expect(filterPlugins(entries, { source: 'games' })).toEqual([entries[0]]);
+    expect(filterPlugins(entries, { source: 'upload' })).toEqual([entries[4]]);
+    expect(filterPlugins(entries, { source: 'official' })).toEqual([entries[1], entries[2], entries[3]]);
+  });
+
+  it('filters by status', () => {
+    expect(filterPlugins(entries, { status: 'installed' })).toEqual([entries[0], entries[1], entries[4]]);
+    expect(filterPlugins(entries, { status: 'notInstalled' })).toEqual([entries[2], entries[3]]);
+    expect(filterPlugins(entries, { status: 'updateAvailable' })).toEqual([entries[1]]);
+    expect(filterPlugins(entries, { status: 'problem' })).toEqual([entries[3]]);
+  });
+
+  it('filters by search query matching name, id, tags, author, description', () => {
+    expect(filterPlugins(entries, { q: 'tic' })).toEqual([entries[0]]);
+    expect(filterPlugins(entries, { q: 'party' })).toEqual([entries[1]]);
+    expect(filterPlugins(entries, { q: 'Author B' })).toEqual([entries[2]]);
+    expect(filterPlugins(entries, { q: 'Fast word' })).toEqual([entries[1]]);
+    expect(filterPlugins(entries, { q: 'words' })).toEqual([entries[1], entries[2]]);
+  });
+});
+
