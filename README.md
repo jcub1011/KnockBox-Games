@@ -75,6 +75,44 @@ every image update**, so any of those four that is not an explicit mount is disc
 update — and losing `data` means the portal reverts to unclaimed and every policy decision is
 forgotten. See [docs/HOSTING.md](docs/HOSTING.md) → “Updating KnockBox”.
 
+### HTTPS & Reverse Proxies (TrueNAS, Cloudflare, Nginx, Traefik, Caddy)
+
+KnockBox runs games inside an iframe on a **separate origin** to isolate untrusted game code from the shell's auth tokens, session storage, and sockets.
+
+When serving over HTTPS, browsers block insecure `http://` or `ws://` iframes and sockets (**Mixed Content**). Configure one of the two options below:
+
+#### Option 1: Subdomain Mode (Recommended)
+Route both the shell and game traffic through the same container port (`8080`) under two subdomains. KnockBox inspects the incoming `Host` header to route requests internally.
+
+- **Why choose this:** Only one public/container port (`8080`) needs to be proxied or opened, and both hostnames share the same TLS endpoint.
+- **Proxy Setup:**
+  - `https://play.example.com` $\rightarrow$ proxy to container port `8080` (with WebSocket upgrade enabled)
+  - `https://games.example.com` $\rightarrow$ proxy to container port `8080` (with WebSocket upgrade enabled)
+- **Container Environment Variables:**
+  ```yaml
+  environment:
+    KnockBox__ForwardedHeaders: "true"                          # trusts X-Forwarded-* headers from proxy
+    KnockBox__GamesHost: "games.example.com"                    # hostname only (no https://, no slash)
+    KnockBox__AllowedOrigins__0: "https://play.example.com"     # shell origin (with https://, no slash)
+    KnockBox__AllowedOrigins__1: "https://games.example.com"    # games origin (with https://, no slash)
+  ```
+
+#### Option 2: Dedicated HTTPS Port Mode
+Serve the shell on the default HTTPS port and games on a dedicated HTTPS port (e.g. `8081`).
+
+- **Why choose this:** Useful if you cannot allocate a second subdomain and must route using dedicated ports.
+- **Proxy Setup:**
+  - `https://play.example.com` $\rightarrow$ proxy to container port `8080`
+  - `https://play.example.com:8081` $\rightarrow$ proxy to container port `8081` (with TLS/SSL certificate configured on port 8081)
+- **Container Environment Variables:**
+  ```yaml
+  environment:
+    KnockBox__ForwardedHeaders: "true"
+    KnockBox__GamesOrigin: "https://play.example.com:8081"      # full origin with https:// (no slash)
+    KnockBox__AllowedOrigins__0: "https://play.example.com"
+    KnockBox__AllowedOrigins__1: "https://play.example.com:8081"
+  ```
+
 ### Or download it
 
 Every stable release also ships prebuilt on its
