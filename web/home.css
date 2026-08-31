@@ -1414,7 +1414,7 @@ body.in-game::after {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 22px;
+    gap: 38px;
     max-width: min(340px, calc(100vw - 32px));
     text-align: center;
 }
@@ -1621,7 +1621,7 @@ body.in-game::after {
     .rc-modal-card { padding: 24px 32px; gap: 16px; }
     /* The tile is the biggest thing on the launch stage — tighten around it, not the copy. Its own
        height cap (67.5vh, and the flight's equivalent) already keeps it in frame. */
-    .launch-stage { gap: 14px; }
+    .launch-stage { gap: 24px; }
     .launch-status { gap: 10px; }
 }
 
