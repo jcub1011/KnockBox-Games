@@ -1034,8 +1034,11 @@ export function showLaunchOverlay(gameName, artUrl, sourceEl) {
   initHeroTileDrag();
   overlay.classList.remove('is-leaving');
   el('launch-title').textContent = launchMessage(gameName);
-  el('launch-hint').hidden = true;
-  el('launch-cancel').hidden = true;
+  if (el('launch-hint')) el('launch-hint').hidden = true;
+  if (el('launch-cancel')) {
+    el('launch-cancel').hidden = false;
+    el('launch-cancel').classList.remove('is-highlighted');
+  }
   overlay.hidden = false;
   restartLaunchRise();
   setLaunchArt(artUrl);
@@ -1044,12 +1047,12 @@ export function showLaunchOverlay(gameName, artUrl, sourceEl) {
   // leaves the home view rendered at opacity 0, which looks like a dead app.
   const home = el('lobby-view');
   if (home) home.classList.add('is-launching');
-  // Say so once it's clearly slow, and offer a way out: the overlay covers the in-game header, so
+  // Say so once it's clearly slow, and highlight the escape hatch: the overlay covers the in-game header, so
   // this button is the only exit from a launch that never finishes.
   launchTimers.push(setTimeout(() => {
     if (seq !== launchSeq) return;
-    el('launch-hint').hidden = false;
-    el('launch-cancel').hidden = false;
+    if (el('launch-hint')) el('launch-hint').hidden = false;
+    if (el('launch-cancel')) el('launch-cancel').classList.add('is-highlighted');
   }, LAUNCH_SLOW_MS));
   launchTimers.push(setTimeout(() => { if (seq === launchSeq) hideLaunchOverlay(); }, LAUNCH_MAX_MS));
 }
@@ -1306,6 +1309,12 @@ function teardownLaunchOverlay() {
     tile.style.removeProperty('--launch-shadow-color');
   }
   unveilGameView();   // belt and braces: the overlay must never leave the game veiled behind it
+  if (el('launch-cancel')) {
+    el('launch-cancel').classList.remove('is-highlighted');
+  }
+  if (el('launch-hint')) {
+    el('launch-hint').hidden = true;
+  }
   restoreLaunchSource();
   clearLaunchingClass();
 }

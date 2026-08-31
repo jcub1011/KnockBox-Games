@@ -1558,7 +1558,23 @@ body.in-game::after {
     overflow-wrap: anywhere; /* a long game name must not blow the stage out */
 }
 
-.launch-hint { margin: 0; font-size: 0.9rem; color: var(--ink-soft); }
+.launch-hint {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    animation: launch-hint-slide 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes launch-hint-slide {
+    from {
+        opacity: 0;
+        transform: translateY(12px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
 
 .launch-hint[hidden], .launch-cancel[hidden] { display: none; }
 
@@ -1570,24 +1586,53 @@ body.in-game::after {
     transition: opacity 0.2s ease-out;
 }
 
-/* The overlay covers the header, so this is the only way out of a launch that never finishes. */
+/* The overlay covers the header, so this is the exit from a launch at any time, smoothly highlighting
+   once loading takes longer than usual. */
 .launch-cancel {
     min-height: 44px;
     padding: 0 18px;
     border-radius: 10px;
-    background: none;
-    border: 2px solid var(--accent-color);
+    background: rgba(255, 255, 255, 0.04);
+    border: 2px solid rgba(244, 236, 228, 0.22);
     cursor: pointer;
     touch-action: manipulation;
-    color: var(--ink);
+    color: var(--ink-soft);
     font-family: var(--font-primary);
     font-size: 0.95rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    transition: color 0.4s ease, border-color 0.4s ease, background-color 0.4s ease, box-shadow 0.4s ease, transform 0.12s ease;
 }
 
-.launch-cancel:hover { background: var(--accent-color); color: #fff; }
+.launch-cancel:hover {
+    border-color: rgba(244, 236, 228, 0.45);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--ink);
+}
+
+.launch-cancel:active {
+    transform: translateY(1px);
+}
+
+.launch-cancel.is-highlighted {
+    border-color: var(--accent-color);
+    color: var(--ink);
+    background: rgba(255, 0, 85, 0.12);
+    box-shadow: 0 0 14px rgba(255, 0, 85, 0.35);
+}
+
+.launch-cancel.is-highlighted:hover {
+    background: var(--accent-color);
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(255, 0, 85, 0.5);
+    transform: translateY(-1px);
+}
+
+.launch-cancel.is-highlighted:active {
+    transform: translateY(1px);
+}
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
@@ -1636,6 +1681,7 @@ body.in-game::after {
     .game-body,
     .launch-stage,
     .launch-status,
+    .launch-hint,
     .launch-tile.is-popping,
     .launch-tile.is-dancing {
         animation: none;

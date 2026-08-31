@@ -1015,17 +1015,19 @@ describe('launch overlay', () => {
       expect(el('launch-title').textContent).toBe('Starting Tic Tac Toe…');
     });
 
-    it('escalates to a hint and an escape hatch once the launch is clearly slow', async () => {
+    it('escalates to a hint and highlights the escape hatch once the launch is clearly slow', async () => {
       await importShell();
       await bootWithGames();
       shell.createLobby('ttt');
 
       expect(el('launch-hint').hidden).toBe(true);
-      expect(el('launch-cancel').hidden).toBe(true);
+      expect(el('launch-cancel').hidden).toBe(false);
+      expect(el('launch-cancel').classList.contains('is-highlighted')).toBe(false);
 
       vi.advanceTimersByTime(LAUNCH_SLOW_MS);
       expect(el('launch-hint').hidden).toBe(false);
       expect(el('launch-cancel').hidden).toBe(false);
+      expect(el('launch-cancel').classList.contains('is-highlighted')).toBe(true);
       expect(el('launch-overlay').hidden).toBe(false); // escalated, not dismissed
     });
 
