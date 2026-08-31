@@ -1129,6 +1129,68 @@ describe('launch overlay', () => {
       expect(art.getAttribute('src')).toBe('/games/ttt/tile.png');
       expect(el('launch-tile').hidden).toBe(false);
     });
+
+    it('supports dragging the hero tile with momentum and rubber-banding back on release', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      expect(tile.hidden).toBe(false);
+
+      // Pointer down starts dragging
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      // Pointer move updates target
+      tile.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 200, clientY: 150 }));
+      vi.advanceTimersByTime(60);
+      expect(tile.style.transform).toContain('translate(');
+
+      // Pointer up releases and triggers rubber-band back to center
+      tile.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, clientX: 200, clientY: 150 }));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+
+      // Advance timers until the spring settles
+      vi.advanceTimersByTime(800);
+      expect(tile.style.transform).toBe('');
+    });
+
+    it('expands fullscreen morph from the current dragged position if load completes mid-drag', async () => {
+      await importShell();
+      const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      const frame = await launchWithTile(ws);
+      const morph = stubMorphAnimation();
+      const tile = el('launch-tile');
+
+      // Drag tile off-center
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      tile.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 250, clientY: 200 }));
+      tile.getBoundingClientRect = () => ({ left: 250, top: 150, width: 400, height: 200 });
+
+      // Frame load arrives while dragged
+      frame.dispatchEvent(new Event('load'));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+      expect(morph.calls.length).toBe(1);
+      const { keyframes } = morph.calls[0];
+      expect(keyframes[0].transform).toBe('translate(250px, 150px) scale(0.4, 0.25)');
+    });
+
+    it('resets drag state and clears is-dragging when launch is aborted', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      shell.abortLaunch();
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+      expect(tile.style.transform).toBe('');
+    });
   });
 
   it('does not appear when no name has been entered', async () => {

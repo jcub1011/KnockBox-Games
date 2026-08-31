@@ -1433,27 +1433,35 @@ body.in-game::after {
     border: 5px solid #000;
     border-radius: 16px;
     background-color: #000;
-    /* shell.js copies the clicked tile's --tile-shadow-hover onto this element, so the tile that
-       lands keeps the colour of the tile that was clicked — the grid cycles three of them. The
-       fallback is the first cycle step, for a launch with no source tile to fly from (join-by-code,
-       a rejoin, a reconnect). */
-    box-shadow: 8px 8px 0 var(--launch-shadow-color, rgba(255, 0, 85, 0.65));
-    transition: transform 0.42s cubic-bezier(0.16, 1, 0.3, 1);
+    /* The drop shadow fades out as the tile lands in the centre so it rests as just the clean tile. */
+    box-shadow: 0 0 0 transparent;
+    cursor: grab;
+    touch-action: none;
+    transition: transform 0.42s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.42s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .launch-tile[hidden] { display: none; }
 
+.launch-tile.is-dragging {
+    cursor: grabbing;
+    user-select: none;
+}
+
 /* Holds the FLIP's first frame still: without it the inline start transform would animate INTO place
-   from wherever the tile last was, instead of being the place it starts from. */
-.launch-tile.no-transition { transition: none; }
+   from wherever the tile last was, instead of being the place it starts from. Also initializes the
+   source tile's drop shadow so it fades out during flight. */
+.launch-tile.no-transition {
+    transition: none;
+    box-shadow: 8px 8px 0 var(--launch-shadow-color, rgba(255, 0, 85, 0.65));
+}
 
 /* No source rect to fly from — join-by-code (the game is unknown until EnterGame), a rejoin, or a
    reconnect. Same destination, arrived at in place. */
 .launch-tile.is-popping { animation: launch-pop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
 @keyframes launch-pop {
-    from { opacity: 0; transform: scale(0.92); }
-    to   { opacity: 1; transform: none; }
+    from { opacity: 0; transform: scale(0.92); box-shadow: 8px 8px 0 var(--launch-shadow-color, rgba(255, 0, 85, 0.65)); }
+    to   { opacity: 1; transform: none; box-shadow: 0 0 0 transparent; }
 }
 
 .launch-art {

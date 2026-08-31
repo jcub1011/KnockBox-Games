@@ -23,6 +23,8 @@ import {
   rosterAdd,
   rosterRemove,
   rotationFromMatrix,
+  stepSpring1D,
+  calculateDragTilt,
   appendPlayLog,
   PLAY_LOG_MAX,
   PLAY_LOG_STANDARD_KEYS,
@@ -496,6 +498,46 @@ describe('rotationFromMatrix', () => {
     expect(rotationFromMatrix(null)).toBe(0);
     expect(rotationFromMatrix(undefined)).toBe(0);
     expect(rotationFromMatrix('matrix(nonsense)')).toBe(0);
+  });
+});
+
+describe('stepSpring1D', () => {
+  it('accelerates toward the target from rest', () => {
+    const next = stepSpring1D(100, 0, 0, { stiffness: 200, damping: 20 }, 1 / 60);
+    // Force is negative (-200 * 100 = -20000), so velocity becomes negative and position decreases
+    expect(next.vel).toBeLessThan(0);
+    expect(next.pos).toBeLessThan(100);
+  });
+
+  it('damps down existing velocity', () => {
+    // When pos == target, only damping force acts
+    const next = stepSpring1D(0, 0, 100, { stiffness: 200, damping: 20 }, 1 / 60);
+    expect(next.vel).toBeLessThan(100);
+    expect(next.vel).toBeGreaterThan(0);
+  });
+
+  it('converges to target after multiple iterations', () => {
+    let pos = 150;
+    let vel = 0;
+    for (let i = 0; i < 120; i++) {
+      const next = stepSpring1D(pos, 0, vel, { stiffness: 220, damping: 20 }, 1 / 60);
+      pos = next.pos;
+      vel = next.vel;
+    }
+    expect(Math.abs(pos)).toBeLessThan(0.5);
+    expect(Math.abs(vel)).toBeLessThan(0.5);
+  });
+});
+
+describe('calculateDragTilt', () => {
+  it('calculates dynamic rotation based on velocity and displacement', () => {
+    expect(calculateDragTilt(100, 50)).toBeCloseTo(100 * 0.035 + 50 * 0.015, 4);
+    expect(calculateDragTilt(-100, -50)).toBeCloseTo(-100 * 0.035 + -50 * 0.015, 4);
+  });
+
+  it('clamps to the maximum tilt bound', () => {
+    expect(calculateDragTilt(1000, 1000, 15)).toBe(15);
+    expect(calculateDragTilt(-1000, -1000, 15)).toBe(-15);
   });
 });
 

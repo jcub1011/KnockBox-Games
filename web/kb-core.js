@@ -235,6 +235,23 @@ export function rotationFromMatrix(transform) {
   return Math.atan2(n[1], n[0]) * 180 / Math.PI;
 }
 
+// 1D spring-damper step using semi-implicit Euler integration for smooth, stable physics simulation.
+// Used for dragging follow-through and rubber-band return to center.
+export function stepSpring1D(pos, target, vel, { stiffness = 220, damping = 20, mass = 1 } = {}, dt = 1 / 60) {
+  const force = -stiffness * (pos - target) - damping * vel;
+  const acc = force / (mass || 1);
+  const nextVel = vel + acc * dt;
+  const nextPos = pos + nextVel * dt;
+  return { pos: nextPos, vel: nextVel };
+}
+
+// Dynamic tilt (in degrees) when dragging the hero tile: moving it sideways tilts the card with
+// velocity and offset, giving it a playful, physical feel.
+export function calculateDragTilt(velX = 0, posX = 0, maxTilt = 15) {
+  const tilt = velX * 0.035 + posX * 0.015;
+  return Math.max(-maxTilt, Math.min(maxTilt, tilt));
+}
+
 // ── Play Log ────────────────────────────────────────────────────────────────────
 // Games push play-log entries via KnockBox.logPlay(metadata); the server stamps gameId/timestamp/
 // isHost and forwards them to the shell, which persists the most-recent few in the browser and

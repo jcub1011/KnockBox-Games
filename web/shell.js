@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, debounce, dominantColorFromPixels, filterAndSortGames, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -799,6 +799,198 @@ let launchSource = null;
 let gameMorph = null;
 let morphTimer = null;
 
+// ── Interactive hero tile dragging & momentum physics ─────────────────────────
+// Users can grab and drag the hero tile around while waiting for a game to launch.
+// As it moves, the tile exhibits momentum (following with smooth spring inertia,
+// dynamic velocity-based tilt, and a slight lift). On release, it rubber-bands
+// back to center with underdamped spring physics.
+let dragActive = false;
+let dragPointerId = null;
+let dragStartPointerX = 0;
+let dragStartPointerY = 0;
+let dragStartTileX = 0;
+let dragStartTileY = 0;
+let dragPosX = 0;
+let dragPosY = 0;
+let dragVelX = 0;
+let dragVelY = 0;
+let dragTargetX = 0;
+let dragTargetY = 0;
+let dragRot = 0;
+let dragVelRot = 0;
+let dragScale = 1;
+let dragRaf = null;
+let dragLastTime = 0;
+let dragListenersInstalled = false;
+
+function initHeroTileDrag() {
+  const tile = el('launch-tile');
+  if (!tile || dragListenersInstalled) return;
+  dragListenersInstalled = true;
+
+  tile.addEventListener('pointerdown', onHeroPointerDown);
+  tile.addEventListener('pointermove', onHeroPointerMove);
+  tile.addEventListener('pointerup', onHeroPointerUp);
+  tile.addEventListener('pointercancel', onHeroPointerUp);
+}
+
+function onHeroPointerDown(e) {
+  if (e.button !== 0) return;
+  const tile = el('launch-tile');
+  if (!tile || tile.hidden) return;
+
+  try {
+    if (typeof tile.setPointerCapture === 'function') {
+      tile.setPointerCapture(e.pointerId);
+    }
+  } catch (_) {}
+
+  dragActive = true;
+  dragPointerId = e.pointerId;
+  tile.classList.add('is-dragging');
+  tile.classList.remove('is-popping', 'no-transition');
+  tile.style.transition = 'none';
+
+  dragStartPointerX = e.clientX;
+  dragStartPointerY = e.clientY;
+  dragStartTileX = dragPosX;
+  dragStartTileY = dragPosY;
+  dragTargetX = dragPosX;
+  dragTargetY = dragPosY;
+
+  dragLastTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  if (!dragRaf) {
+    dragRaf = requestAnimationFrame(updateHeroDragPhysics);
+  }
+}
+
+function onHeroPointerMove(e) {
+  if (!dragActive || (dragPointerId !== null && e.pointerId !== dragPointerId)) return;
+  const dx = e.clientX - dragStartPointerX;
+  const dy = e.clientY - dragStartPointerY;
+  dragTargetX = dragStartTileX + dx;
+  dragTargetY = dragStartTileY + dy;
+}
+
+function onHeroPointerUp(e) {
+  if (!dragActive || (dragPointerId !== null && e.pointerId !== dragPointerId)) return;
+  const tile = el('launch-tile');
+  if (tile) {
+    try {
+      if (typeof tile.hasPointerCapture === 'function' && tile.hasPointerCapture(e.pointerId)) {
+        tile.releasePointerCapture(e.pointerId);
+      }
+    } catch (_) {}
+    tile.classList.remove('is-dragging');
+  }
+  dragActive = false;
+  dragPointerId = null;
+  dragTargetX = 0;
+  dragTargetY = 0;
+
+  if (prefersReducedMotion()) {
+    resetHeroDragState();
+    return;
+  }
+
+  if (!dragRaf) {
+    dragLastTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    dragRaf = requestAnimationFrame(updateHeroDragPhysics);
+  }
+}
+
+function updateHeroDragPhysics(currentTime) {
+  dragRaf = null;
+  const tile = el('launch-tile');
+  if (!tile || tile.hidden) {
+    resetHeroDragState();
+    return;
+  }
+
+  const now = currentTime || (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const dt = Math.min(Math.max((now - dragLastTime) / 1000, 0.001), 0.05);
+  dragLastTime = now;
+
+  if (dragActive) {
+    // Follow pointer with momentum and perceptible mass
+    const stepX = stepSpring1D(dragPosX, dragTargetX, dragVelX, { stiffness: 380, damping: 28 }, dt);
+    dragPosX = stepX.pos;
+    dragVelX = stepX.vel;
+
+    const stepY = stepSpring1D(dragPosY, dragTargetY, dragVelY, { stiffness: 380, damping: 28 }, dt);
+    dragPosY = stepY.pos;
+    dragVelY = stepY.vel;
+
+    // Dynamic tilt based on velocity and displacement
+    const targetRot = calculateDragTilt(dragVelX, dragPosX, 15);
+    const stepRot = stepSpring1D(dragRot, targetRot, dragVelRot, { stiffness: 300, damping: 24 }, dt);
+    dragRot = stepRot.pos;
+    dragVelRot = stepRot.vel;
+
+    // Subtle lift scale
+    const stepScale = stepSpring1D(dragScale, 1.04, 0, { stiffness: 200, damping: 20 }, dt);
+    dragScale = stepScale.pos;
+  } else {
+    // Rubber-band return to center (0, 0)
+    const stepX = stepSpring1D(dragPosX, 0, dragVelX, { stiffness: 220, damping: 20 }, dt);
+    dragPosX = stepX.pos;
+    dragVelX = stepX.vel;
+
+    const stepY = stepSpring1D(dragPosY, 0, dragVelY, { stiffness: 220, damping: 20 }, dt);
+    dragPosY = stepY.pos;
+    dragVelY = stepY.vel;
+
+    // Return rotation to 0
+    const stepRot = stepSpring1D(dragRot, 0, dragVelRot, { stiffness: 180, damping: 18 }, dt);
+    dragRot = stepRot.pos;
+    dragVelRot = stepRot.vel;
+
+    // Return scale to 1
+    const stepScale = stepSpring1D(dragScale, 1, 0, { stiffness: 200, damping: 20 }, dt);
+    dragScale = stepScale.pos;
+
+    // Settling condition: snap cleanly when motion is negligible
+    if (
+      Math.hypot(dragPosX, dragPosY) < 0.2 &&
+      Math.hypot(dragVelX, dragVelY) < 0.2 &&
+      Math.abs(dragRot) < 0.1 &&
+      Math.abs(dragScale - 1) < 0.005
+    ) {
+      resetHeroDragState();
+      return;
+    }
+  }
+
+  tile.style.transform = `translate(${dragPosX.toFixed(2)}px, ${dragPosY.toFixed(2)}px) rotate(${dragRot.toFixed(2)}deg) scale(${dragScale.toFixed(3)})`;
+
+  dragRaf = requestAnimationFrame(updateHeroDragPhysics);
+}
+
+function resetHeroDragState() {
+  if (dragRaf) {
+    cancelAnimationFrame(dragRaf);
+    dragRaf = null;
+  }
+  dragActive = false;
+  dragPointerId = null;
+  dragPosX = 0;
+  dragPosY = 0;
+  dragVelX = 0;
+  dragVelY = 0;
+  dragTargetX = 0;
+  dragTargetY = 0;
+  dragRot = 0;
+  dragVelRot = 0;
+  dragScale = 1;
+
+  const tile = el('launch-tile');
+  if (tile) {
+    tile.classList.remove('is-dragging');
+    tile.style.transition = '';
+    tile.style.transform = '';
+  }
+}
+
 function clearLaunchTimers() {
   for (const t of launchTimers) clearTimeout(t);
   launchTimers = [];
@@ -821,6 +1013,8 @@ export function showLaunchOverlay(gameName, artUrl, sourceEl) {
   clearLaunchTimers();
   clearGameMorph();               // a relaunch during a morph must not inherit its half-done geometry
   restoreLaunchSource();          // a re-launch before teardown must not leave the last tile hidden
+  resetHeroDragState();
+  initHeroTileDrag();
   overlay.classList.remove('is-leaving');
   el('launch-title').textContent = launchMessage(gameName);
   el('launch-hint').hidden = true;
@@ -850,6 +1044,7 @@ function flyLaunchTile(sourceEl) {
   const tile = el('launch-tile');
   if (!tile) { launchSource = null; return; }
   // Reset before the hidden check too, so a relaunch can't inherit the previous launch's entrance.
+  resetHeroDragState();
   tile.classList.remove('is-popping', 'no-transition');
   tile.style.transform = '';
   tile.style.width = '';
@@ -1068,6 +1263,7 @@ function endGameMorph() {
 }
 
 function teardownLaunchOverlay() {
+  resetHeroDragState();
   const overlay = el('launch-overlay');
   if (overlay) {
     overlay.hidden = true;
@@ -1093,6 +1289,7 @@ function clearLaunchingClass() {
 // Give up on the launch in flight: take the overlay down AND invalidate it, so a reply that lands
 // afterwards stands down instead of dragging the player into a session they backed out of.
 export function abortLaunch() {
+  resetHeroDragState();
   launchAbortSeq++;
   hideLaunchOverlay();
 }
@@ -1422,6 +1619,7 @@ el('announcement-dismiss').addEventListener('click', () => {
 applyGate();
 renderAnnouncement();
 renderPlayLog(); // home view is shown by default on load — populate the Play Log from storage
+initHeroTileDrag();
 
 // Start the control socket. On a real page load index.html imports this module and calls bootstrap();
 // importing the module on its own no longer opens a socket, so the test suite can drive the exported
