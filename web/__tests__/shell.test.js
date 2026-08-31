@@ -1142,6 +1142,7 @@ describe('launch overlay', () => {
       // Pointer down starts dragging
       tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
       expect(tile.classList.contains('is-dragging')).toBe(true);
+      expect(tile.classList.contains('is-dancing')).toBe(false);
 
       // Pointer move updates target
       tile.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 200, clientY: 150 }));
@@ -1155,6 +1156,20 @@ describe('launch overlay', () => {
       // Advance timers until the spring settles
       vi.advanceTimersByTime(800);
       expect(tile.style.transform).toBe('');
+      expect(tile.classList.contains('is-dancing')).toBe(true);
+    });
+
+    it('dances when at rest and synchronizes after entrance flight', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      expect(tile.classList.contains('is-dancing')).toBe(false);
+
+      vi.advanceTimersByTime(450);
+      expect(tile.classList.contains('is-dancing')).toBe(true);
     });
 
     it('expands fullscreen morph from the current dragged position if load completes mid-drag', async () => {

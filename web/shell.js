@@ -848,7 +848,7 @@ function onHeroPointerDown(e) {
   dragActive = true;
   dragPointerId = e.pointerId;
   tile.classList.add('is-dragging');
-  tile.classList.remove('is-popping', 'no-transition');
+  tile.classList.remove('is-popping', 'no-transition', 'is-dancing');
   tile.style.transition = 'none';
 
   dragStartPointerX = e.clientX;
@@ -889,7 +889,7 @@ function onHeroPointerUp(e) {
   dragTargetY = 0;
 
   if (prefersReducedMotion()) {
-    resetHeroDragState();
+    resetHeroDragState(true);
     return;
   }
 
@@ -903,7 +903,7 @@ function updateHeroDragPhysics(currentTime) {
   dragRaf = null;
   const tile = el('launch-tile');
   if (!tile || tile.hidden) {
-    resetHeroDragState();
+    resetHeroDragState(false);
     return;
   }
 
@@ -956,7 +956,7 @@ function updateHeroDragPhysics(currentTime) {
       Math.abs(dragRot) < 0.1 &&
       Math.abs(dragScale - 1) < 0.005
     ) {
-      resetHeroDragState();
+      resetHeroDragState(true);
       return;
     }
   }
@@ -966,7 +966,7 @@ function updateHeroDragPhysics(currentTime) {
   dragRaf = requestAnimationFrame(updateHeroDragPhysics);
 }
 
-function resetHeroDragState() {
+function resetHeroDragState(resumeDance = false) {
   if (dragRaf) {
     cancelAnimationFrame(dragRaf);
     dragRaf = null;
@@ -988,6 +988,11 @@ function resetHeroDragState() {
     tile.classList.remove('is-dragging');
     tile.style.transition = '';
     tile.style.transform = '';
+    if (resumeDance && launchOverlayUp() && !tile.hidden) {
+      tile.classList.add('is-dancing');
+    } else if (!resumeDance) {
+      tile.classList.remove('is-dancing');
+    }
   }
 }
 
@@ -1013,7 +1018,7 @@ export function showLaunchOverlay(gameName, artUrl, sourceEl) {
   clearLaunchTimers();
   clearGameMorph();               // a relaunch during a morph must not inherit its half-done geometry
   restoreLaunchSource();          // a re-launch before teardown must not leave the last tile hidden
-  resetHeroDragState();
+  resetHeroDragState(false);
   initHeroTileDrag();
   overlay.classList.remove('is-leaving');
   el('launch-title').textContent = launchMessage(gameName);
@@ -1044,8 +1049,8 @@ function flyLaunchTile(sourceEl) {
   const tile = el('launch-tile');
   if (!tile) { launchSource = null; return; }
   // Reset before the hidden check too, so a relaunch can't inherit the previous launch's entrance.
-  resetHeroDragState();
-  tile.classList.remove('is-popping', 'no-transition');
+  resetHeroDragState(false);
+  tile.classList.remove('is-popping', 'no-transition', 'is-dancing');
   tile.style.transform = '';
   tile.style.width = '';
   if (tile.hidden) { launchSource = null; return; }
@@ -1056,6 +1061,7 @@ function flyLaunchTile(sourceEl) {
   // of the flight — which is the one frame this whole transition exists to make continuous.
   adoptLaunchShadow(sourceEl, tile);
   const flip = src ? launchFlipFrom(src, tile.getBoundingClientRect()) : null;
+  const seq = launchSeq;
   if (!flip) {
     // No usable source rect: no click to fly from, a tile scrolled out of view, or jsdom (where every
     // rect is zero). Arrive in place. The reflow flushes the class removal above, so re-launching
@@ -1063,6 +1069,11 @@ function flyLaunchTile(sourceEl) {
     void tile.offsetWidth;
     tile.classList.add('is-popping');
     launchSource = null;
+    launchTimers.push(setTimeout(() => {
+      if (seq === launchSeq && !dragActive && launchOverlayUp() && tile && !tile.hidden) {
+        tile.classList.add('is-dancing');
+      }
+    }, 280));
     return;
   }
   // Start at the source tile's own nth-child angle and settle to square — picking a sticker up off
@@ -1074,6 +1085,12 @@ function flyLaunchTile(sourceEl) {
   void tile.offsetWidth;   // flush the start state before the transition is re-enabled
   tile.classList.remove('no-transition');
   tile.style.transform = '';
+  // Start synchronized dance bounce once the flight transition has settled.
+  launchTimers.push(setTimeout(() => {
+    if (seq === launchSeq && !dragActive && launchOverlayUp() && tile && !tile.hidden) {
+      tile.classList.add('is-dancing');
+    }
+  }, 420));
   // Hide the original so it doesn't double-image beneath the flying copy. The flying tile is exactly
   // on top of it at this instant, so the swap itself is invisible.
   launchSource = sourceEl;
@@ -1271,7 +1288,7 @@ function teardownLaunchOverlay() {
   }
   const tile = el('launch-tile');
   if (tile) {
-    tile.classList.remove('is-popping', 'no-transition');
+    tile.classList.remove('is-popping', 'no-transition', 'is-dancing');
     tile.style.transform = '';
     tile.style.width = '';
     tile.style.removeProperty('--launch-shadow-color');

@@ -1447,6 +1447,30 @@ body.in-game::after {
     user-select: none;
 }
 
+/* Parabolic bouncing animation with gravity ballistics: hang time at apex and crisp weighted bounce on sides */
+.launch-tile.is-dancing {
+    animation: launch-tile-dance 1.05s linear infinite;
+}
+
+@keyframes launch-tile-dance {
+    0%, 100% { transform: translate(0.00px, 0.00px) rotate(0.00deg); }
+    6.25%    { transform: translate(2.88px, 0.59px) rotate(0.70deg); }
+    12.5%    { transform: translate(5.75px, 2.38px) rotate(1.40deg); }
+    18.75%   { transform: translate(8.63px, 5.34px) rotate(2.10deg); }
+    25%      { transform: translate(11.50px, 9.50px) rotate(2.80deg); }
+    31.25%   { transform: translate(8.63px, 5.34px) rotate(2.10deg); }
+    37.5%    { transform: translate(5.75px, 2.38px) rotate(1.40deg); }
+    43.75%   { transform: translate(2.88px, 0.59px) rotate(0.70deg); }
+    50%      { transform: translate(0.00px, 0.00px) rotate(0.00deg); }
+    56.25%   { transform: translate(-2.88px, 0.59px) rotate(-0.70deg); }
+    62.5%    { transform: translate(-5.75px, 2.38px) rotate(-1.40deg); }
+    68.75%   { transform: translate(-8.63px, 5.34px) rotate(-2.10deg); }
+    75%      { transform: translate(-11.50px, 9.50px) rotate(-2.80deg); }
+    81.25%   { transform: translate(-8.63px, 5.34px) rotate(-2.10deg); }
+    87.5%    { transform: translate(-5.75px, 2.38px) rotate(-1.40deg); }
+    93.75%   { transform: translate(-2.88px, 0.59px) rotate(-0.70deg); }
+}
+
 /* Holds the FLIP's first frame still: without it the inline start transform would animate INTO place
    from wherever the tile last was, instead of being the place it starts from. Also initializes the
    source tile's drop shadow so it fades out during flight. */
@@ -1612,7 +1636,8 @@ body.in-game::after {
     .game-body,
     .launch-stage,
     .launch-status,
-    .launch-tile.is-popping {
+    .launch-tile.is-popping,
+    .launch-tile.is-dancing {
         animation: none;
         opacity: 1;
         transform: none;
