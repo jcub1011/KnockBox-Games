@@ -100,7 +100,7 @@ public static class GamePackageExporter
                     var entryName = relative.Replace('\\', '/');
                     var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
                     var stamp = File.GetLastWriteTimeUtc(filePath);
-                    entry.LastWriteTime = stamp.Year < 1980 ? ZipEpoch : new DateTimeOffset(stamp, TimeSpan.Zero);
+                    entry.LastWriteTime = stamp.Year is < 1980 or > 2107 ? ZipEpoch : new DateTimeOffset(stamp, TimeSpan.Zero);
 
                     await using var fileStream = new FileStream(
                         filePath,

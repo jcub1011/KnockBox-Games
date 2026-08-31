@@ -1206,6 +1206,45 @@ describe('launch overlay', () => {
       expect(tile.classList.contains('is-dragging')).toBe(false);
       expect(tile.style.transform).toBe('');
     });
+
+    it('resets drag state when window blurs or visibility is hidden', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      window.dispatchEvent(new Event('blur'));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+
+      // Drag again and test visibilitychange
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+
+      // Reset document.hidden
+      Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    });
+
+    it('resets drag state on lostpointercapture', async () => {
+      await importShell();
+      await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
+      stubLayout();
+      el('games').querySelector('.game-tile').click();
+
+      const tile = el('launch-tile');
+      tile.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      expect(tile.classList.contains('is-dragging')).toBe(true);
+
+      tile.dispatchEvent(new PointerEvent('lostpointercapture', { bubbles: true, pointerId: 1 }));
+      expect(tile.classList.contains('is-dragging')).toBe(false);
+    });
   });
 
   it('does not appear when no name has been entered', async () => {

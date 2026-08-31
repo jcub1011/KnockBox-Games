@@ -157,6 +157,30 @@ public sealed class GamePackageExporterTests : IDisposable
     }
 
     [Fact]
+    public async Task File_Stamped_After_The_Zip_MaxYear_Still_Exports()
+    {
+        var gameId = "future-game";
+        var gameDir = Path.Combine(_paths.GamesRoot, gameId);
+        Directory.CreateDirectory(gameDir);
+
+        var file = Path.Combine(gameDir, "index.html");
+        await File.WriteAllTextAsync(file, "<!doctype html>");
+        File.SetLastWriteTimeUtc(file, new DateTime(2150, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var location = new GameCatalog.GameLocation(
+            new GameManifest(gameId, "Future Game", "index.html", null, 4),
+            gameDir);
+
+        await using var export = await GamePackageExporter.OpenAsync(location, _paths);
+        using var memory = new MemoryStream(await ReadAll(export.Content));
+        using var zip = new ZipArchive(memory, ZipArchiveMode.Read);
+
+        var entry = zip.GetEntry("index.html");
+        Assert.NotNull(entry);
+        Assert.Equal(1980, entry.LastWriteTime.Year);
+    }
+
+    [Fact]
     public async Task Export_Leaves_No_Temp_File_Behind()
     {
         var gameId = "tidy-game";

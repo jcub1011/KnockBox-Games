@@ -832,6 +832,18 @@ function initHeroTileDrag() {
   tile.addEventListener('pointermove', onHeroPointerMove);
   tile.addEventListener('pointerup', onHeroPointerUp);
   tile.addEventListener('pointercancel', onHeroPointerUp);
+  tile.addEventListener('lostpointercapture', onHeroPointerUp);
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('blur', () => {
+      if (dragActive) resetHeroDragState(true);
+    });
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && dragActive) resetHeroDragState(true);
+    });
+  }
 }
 
 function onHeroPointerDown(e) {
