@@ -1501,6 +1501,8 @@ body.in-game::after {
 /* Rises into place under the tile, staggered behind it so the two moves read as one gesture rather
    than a crowd. It lands before the tile does, so nothing is still travelling at the end. */
 .launch-status {
+    position: relative;
+    width: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1559,9 +1561,14 @@ body.in-game::after {
 }
 
 .launch-hint {
-    margin: 0;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    margin-top: 14px;
     font-size: 0.9rem;
     color: var(--ink-soft);
+    pointer-events: none;
     animation: launch-hint-slide 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -1668,6 +1675,7 @@ body.in-game::after {
        height cap (67.5vh, and the flight's equivalent) already keeps it in frame. */
     .launch-stage { gap: 24px; }
     .launch-status { gap: 10px; }
+    .launch-hint { margin-top: 10px; }
 }
 
 /* ── Reduced motion ──────────────────────────────────────────────────────── */
