@@ -1447,28 +1447,28 @@ body.in-game::after {
     user-select: none;
 }
 
-/* Parabolic bouncing animation with gravity ballistics: hang time at apex and crisp weighted bounce on sides */
+/* Parabolic bouncing animation with higher apex, gravity ballistics, and subtle corner squish */
 .launch-tile.is-dancing {
-    animation: launch-tile-dance 1.05s linear infinite;
+    animation: launch-tile-dance 1.1s linear infinite;
 }
 
 @keyframes launch-tile-dance {
-    0%, 100% { transform: translate(0.00px, 0.00px) rotate(0.00deg); }
-    6.25%    { transform: translate(2.88px, 0.59px) rotate(0.70deg); }
-    12.5%    { transform: translate(5.75px, 2.38px) rotate(1.40deg); }
-    18.75%   { transform: translate(8.63px, 5.34px) rotate(2.10deg); }
-    25%      { transform: translate(11.50px, 9.50px) rotate(2.80deg); }
-    31.25%   { transform: translate(8.63px, 5.34px) rotate(2.10deg); }
-    37.5%    { transform: translate(5.75px, 2.38px) rotate(1.40deg); }
-    43.75%   { transform: translate(2.88px, 0.59px) rotate(0.70deg); }
-    50%      { transform: translate(0.00px, 0.00px) rotate(0.00deg); }
-    56.25%   { transform: translate(-2.88px, 0.59px) rotate(-0.70deg); }
-    62.5%    { transform: translate(-5.75px, 2.38px) rotate(-1.40deg); }
-    68.75%   { transform: translate(-8.63px, 5.34px) rotate(-2.10deg); }
-    75%      { transform: translate(-11.50px, 9.50px) rotate(-2.80deg); }
-    81.25%   { transform: translate(-8.63px, 5.34px) rotate(-2.10deg); }
-    87.5%    { transform: translate(-5.75px, 2.38px) rotate(-1.40deg); }
-    93.75%   { transform: translate(-2.88px, 0.59px) rotate(-0.70deg); }
+    0%, 100% { transform: translate(0.00px, 0.00px) rotate(0.00deg) scale(1, 1); }
+    6.25%    { transform: translate(3.75px, 1.38px) rotate(0.90deg) scale(1, 1); }
+    12.5%    { transform: translate(7.50px, 5.50px) rotate(1.80deg) scale(1, 1); }
+    18.75%   { transform: translate(11.25px, 12.38px) rotate(2.70deg) scale(1.01, 0.99); }
+    25%      { transform: translate(15.00px, 22.00px) rotate(3.60deg) scale(1.025, 0.97); }
+    31.25%   { transform: translate(11.25px, 12.38px) rotate(2.70deg) scale(1.01, 0.99); }
+    37.5%    { transform: translate(7.50px, 5.50px) rotate(1.80deg) scale(1, 1); }
+    43.75%   { transform: translate(3.75px, 1.38px) rotate(0.90deg) scale(1, 1); }
+    50%      { transform: translate(0.00px, 0.00px) rotate(0.00deg) scale(1, 1); }
+    56.25%   { transform: translate(-3.75px, 1.38px) rotate(-0.90deg) scale(1, 1); }
+    62.5%    { transform: translate(-7.50px, 5.50px) rotate(-1.80deg) scale(1, 1); }
+    68.75%   { transform: translate(-11.25px, 12.38px) rotate(-2.70deg) scale(1.01, 0.99); }
+    75%      { transform: translate(-15.00px, 22.00px) rotate(-3.60deg) scale(1.025, 0.97); }
+    81.25%   { transform: translate(-11.25px, 12.38px) rotate(-2.70deg) scale(1.01, 0.99); }
+    87.5%    { transform: translate(-7.50px, 5.50px) rotate(-1.80deg) scale(1, 1); }
+    93.75%   { transform: translate(-3.75px, 1.38px) rotate(-0.90deg) scale(1, 1); }
 }
 
 /* Holds the FLIP's first frame still: without it the inline start transform would animate INTO place
