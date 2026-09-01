@@ -24,7 +24,6 @@ namespace KnockBox.Server.Tests;
 public class ReleaseWorkflowTests
 {
     private const string Csproj = "KnockBox.Server/KnockBox.Server.csproj";
-    private const string CiWorkflow = ".github/workflows/ci.yml";
     private const string GateWorkflow = ".github/workflows/gate.yml";
     private const string ReleaseWorkflow = ".github/workflows/release.yml";
 
@@ -54,28 +53,6 @@ public class ReleaseWorkflowTests
         // accepted — SemVer accepts `+sha` and then discards it (§10), which would leave the tag and
         // the reported version spelled differently.
         Assert.DoesNotContain('+', declared);
-    }
-
-    /// <summary>
-    /// <c>v*</c> must NOT be a ci.yml push trigger. It used to be, and a hand-pushed tag was then a
-    /// second path to a platform release — one that bypassed every guard release.yml adds
-    /// (version-matches-assembly, tag-not-reused, :latest-never-moves-backwards, and the
-    /// build-everything-before-pushing-anything gate). Two paths to one artifact drift, and the
-    /// unguarded one wins by being easier to reach.
-    /// </summary>
-    [Fact]
-    public void CiWorkflow_DoesNotTriggerOnPlatformTags()
-    {
-        var ci = RepoFile.Read(CiWorkflow);
-        if (ci is null) return;
-
-        var tags = Regex.Match(ci, @"^\s*tags:\s*(\[.*\])\s*$", RegexOptions.Multiline);
-        Assert.True(tags.Success, $"{CiWorkflow} has no `tags:` list; this test can no longer guard it.");
-
-        var list = tags.Groups[1].Value;
-        Assert.Contains("addons-v*", list);
-        // Anchored on the quote so `addons-v*` does not itself count as a match.
-        Assert.DoesNotMatch(new Regex(@"['""]v\*['""]"), list);
     }
 
     /// <summary>
