@@ -995,6 +995,7 @@ describe('session expiry', () => {
     await tick();
     await tick();
     expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(false);
 
     // The session goes away — an expiry, or the password file changing, which revokes every session.
     authenticated = false;
@@ -1003,6 +1004,71 @@ describe('session expiry', () => {
 
     expect(el('login-view').classList.contains('hidden')).toBe(false);
     expect(el('dashboard-view').classList.contains('hidden')).toBe(true);
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(true);
+  });
+});
+
+describe('top-bar tab navigation visibility with auth state', () => {
+  it('hides top-bar tabs when unconfigured (setup view)', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } } });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('setup-view').classList.contains('hidden')).toBe(false);
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(true);
+    expect(el('logout-btn').classList.contains('hidden')).toBe(true);
+  });
+
+  it('hides top-bar tabs when logged out (login view)', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: true, authenticated: false } } });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('login-view').classList.contains('hidden')).toBe(false);
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(true);
+    expect(el('logout-btn').classList.contains('hidden')).toBe(true);
+  });
+
+  it('shows top-bar tabs when authenticated (dashboard view)', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(false);
+    expect(el('logout-btn').classList.contains('hidden')).toBe(false);
+  });
+
+  it('hides top-bar tabs on logout', async () => {
+    let authenticated = true;
+    fake = installFakeFetch({
+      ...authedRoutes(),
+      'GET /admin/api/auth/status': () => ({ body: { configured: true, authenticated } }),
+      'POST /admin/api/auth/logout': () => {
+        authenticated = false;
+        return { body: { success: true } };
+      },
+    });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(false);
+
+    el('logout-btn').click();
+    await tick();
+    await tick();
+
+    expect(el('login-view').classList.contains('hidden')).toBe(false);
+    expect(el('admin-top-tabs').classList.contains('hidden')).toBe(true);
+    expect(el('logout-btn').classList.contains('hidden')).toBe(true);
   });
 });
 
@@ -1217,6 +1283,24 @@ describe('sidebar navigation and collapse state', () => {
 
     admin.toggleSidebarCollapsed();
     expect(dashboardView.classList.contains('sidebar-collapsed')).toBe(false);
+  });
+
+  it('updates active setting and label on tree item click', async () => {
+    fake = installFakeFetch(authedRoutes());
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+    await tick();
+
+    const mobileLabel = el('sidebar-mobile-label');
+    const panelTitle = el('panel-title');
+
+    // Selecting a setting updates active setting and label
+    const treeItem = document.querySelector('.tree-item[data-setting-id="setting-webhooks"]');
+    treeItem.click();
+    expect(mobileLabel.textContent).toBe('Webhooks & Alerts');
+    expect(panelTitle.textContent).toBe('Webhooks & Alerts');
+    expect(treeItem.classList.contains('active')).toBe(true);
   });
 });
 

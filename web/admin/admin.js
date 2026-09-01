@@ -244,6 +244,8 @@ export async function checkAuthStatus() {
     const res = await fetch('/admin/api/auth/status');
     if (!res.ok) {
       showErrorStatus('Server unreachable on admin port');
+      el('admin-top-tabs')?.classList.add('hidden');
+      el('logout-btn')?.classList.add('hidden');
       return;
     }
     const data = await res.json();
@@ -251,19 +253,24 @@ export async function checkAuthStatus() {
 
     if (!data.configured) {
       showView('setup-view');
+      el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn').classList.add('hidden');
       stopPolling();
     } else if (!data.authenticated) {
       showView('login-view');
+      el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn').classList.add('hidden');
       stopPolling();
     } else {
       showView('dashboard-view');
+      el('admin-top-tabs')?.classList.remove('hidden');
       el('logout-btn').classList.remove('hidden');
       selectSetting(settingFromHash(location.hash), { replaceHash: false, scroll: Boolean(location.hash) });
     }
   } catch (err) {
     showErrorStatus('Network Error');
+    el('admin-top-tabs')?.classList.add('hidden');
+    el('logout-btn')?.classList.add('hidden');
     console.error('Failed to check auth status:', err);
   }
 }
@@ -308,6 +315,29 @@ export function toggleSidebarCollapsed() {
   const dashboardView = el('dashboard-view');
   const isCollapsed = dashboardView ? dashboardView.classList.contains('sidebar-collapsed') : false;
   setSidebarCollapsed(!isCollapsed);
+}
+
+export function setMobileSidebarOpen(open) {
+  const sidebarNav = el('sidebar-nav');
+  const toggleBtn = el('sidebar-toggle');
+  if (!sidebarNav) return;
+  const isOpen = Boolean(open);
+  sidebarNav.classList.toggle('mobile-open', isOpen);
+  if (toggleBtn && typeof window !== 'undefined' && window.innerWidth <= 860) {
+    toggleBtn.setAttribute('aria-expanded', String(isOpen));
+    toggleBtn.setAttribute('aria-label', isOpen ? 'Close settings navigation' : 'Open settings navigation');
+    toggleBtn.setAttribute('title', isOpen ? 'Close settings navigation' : 'Open settings navigation');
+  }
+}
+
+export function toggleMobileSidebar() {
+  const sidebarNav = el('sidebar-nav');
+  const isOpen = sidebarNav ? sidebarNav.classList.contains('mobile-open') : false;
+  setMobileSidebarOpen(!isOpen);
+}
+
+export function closeMobileSidebar() {
+  setMobileSidebarOpen(false);
 }
 
 export function updateSidebarScrollIndicators() {
@@ -490,6 +520,9 @@ export function selectSetting(settingKey, { replaceHash = true, scroll = false }
   const panelTitle = el('panel-title');
   if (panelTitle) panelTitle.textContent = setting.label;
 
+  const mobileLabel = el('sidebar-mobile-label');
+  if (mobileLabel) mobileLabel.textContent = setting.label;
+
   // Highlight active tree item & nav items
   for (const item of document.querySelectorAll('.tree-item')) {
     item.classList.toggle('active', item.dataset.settingId === activeSettingId);
@@ -651,6 +684,8 @@ export function updateScrollspy() {
       if (setting) {
         activeTab = setting.legacyTab || 'overview';
         el('panel-title').textContent = setting.label;
+        const mobileLabel = el('sidebar-mobile-label');
+        if (mobileLabel) mobileLabel.textContent = setting.label;
         for (const item of document.querySelectorAll('.tree-item')) {
           item.classList.toggle('active', item.dataset.settingId === activeSettingId);
         }
@@ -2902,10 +2937,10 @@ function wire() {
     item.addEventListener('click', (e) => {
       e.preventDefault();
       const settingId = item.dataset.settingId;
-      const targetEl = el(settingId);
-      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
-        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (settingId) {
+        selectSetting(settingId, { replaceHash: true, scroll: true });
       }
+      closeMobileSidebar();
     });
   }
 
@@ -2913,12 +2948,34 @@ function wire() {
     button.addEventListener('click', (e) => {
       e.preventDefault();
       const settingId = settingFromHash(button.dataset.tab);
-      const targetEl = el(settingId);
-      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
-        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (settingId) {
+        selectSetting(settingId, { replaceHash: true, scroll: true });
       }
+      closeMobileSidebar();
     });
   }
+
+  // Click outside to close mobile sidebar dropdown
+  document.addEventListener('click', (e) => {
+    const sidebarNav = el('sidebar-nav');
+    if (sidebarNav?.classList.contains('mobile-open') && !sidebarNav.contains(e.target)) {
+      closeMobileSidebar();
+    }
+  });
+
+  // Escape key closes mobile sidebar dropdown
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && el('sidebar-nav')?.classList.contains('mobile-open')) {
+      closeMobileSidebar();
+    }
+  });
+
+  // Close mobile dropdown when expanding to desktop width
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 860 && el('sidebar-nav')?.classList.contains('mobile-open')) {
+      closeMobileSidebar();
+    }
+  }, { passive: true });
 
   // Settings Search
   const searchInput = el('settings-search-input');

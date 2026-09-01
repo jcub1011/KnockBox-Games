@@ -20,7 +20,7 @@
       </div>
 
       <!-- Top Bar Tabs Navigation -->
-      <nav class="admin-top-tabs" id="admin-top-tabs" aria-label="Admin Navigation Tabs">
+      <nav class="admin-top-tabs hidden" id="admin-top-tabs" aria-label="Admin Navigation Tabs">
         <button type="button" class="top-tab-btn active" data-tab="monitoring" id="tab-btn-monitoring">
           <svg class="top-tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
@@ -357,10 +357,16 @@
             <aside class="sidebar-nav" id="sidebar-nav" aria-label="Admin Navigation">
               <div class="sidebar-sticky-top" id="sidebar-sticky-top">
                 <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
-                  <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><path d="M15 9l-3 3 3 3"></path></svg>
-                  <span class="sidebar-toggle-label">Collapse</span>
+                  <div class="sidebar-toggle-main">
+                    <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><path d="M15 9l-3 3 3 3"></path></svg>
+                    <span class="sidebar-toggle-label">Collapse</span>
+                    <span class="sidebar-mobile-label" id="sidebar-mobile-label">Platform Policies & Security</span>
+                  </div>
+                  <svg class="sidebar-dropdown-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
                 </button>
+              </div>
 
+              <div class="sidebar-dropdown-content" id="sidebar-dropdown-content">
                 <!-- Settings Search Bar (Visual Studio style) -->
                 <div class="sidebar-search-container" id="settings-search-container">
                   <div class="sidebar-search-wrapper">
@@ -377,58 +383,58 @@
                     </button>
                   </div>
                 </div>
-              </div>
 
-              <!-- Tree View Navigation Wrapper with Scroll Indicators -->
-              <div class="sidebar-tree-wrapper" id="sidebar-tree-wrapper">
-                <button type="button" class="sidebar-scroll-btn scroll-up" id="sidebar-scroll-up" aria-label="Scroll sidebar up" title="Scroll up" disabled>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                </button>
+                <!-- Tree View Navigation Wrapper with Scroll Indicators -->
+                <div class="sidebar-tree-wrapper" id="sidebar-tree-wrapper">
+                  <button type="button" class="sidebar-scroll-btn scroll-up" id="sidebar-scroll-up" aria-label="Scroll sidebar up" title="Scroll up" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
+                  </button>
 
-                <!-- Tree View Navigation -->
-                <nav class="sidebar-tree" id="sidebar-tree" aria-label="Settings Tree Navigation">
-                  <!-- Group 3: Platform Policies & Security -->
-                  <div class="tree-group" data-group-id="platform">
-                    <button type="button" class="tree-group-header" aria-expanded="true" data-group-toggle="platform" title="Platform Policies & Security">
-                      <svg class="tree-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
-                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                      <span class="tree-group-label">Platform & Security</span>
-                    </button>
-                    <div class="tree-group-children">
-                      <a href="#setting-maintenance" class="tree-item active nav-item" data-setting-id="setting-maintenance" data-tab="platform" title="Maintenance Mode">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                        <span class="tree-item-label">Maintenance Mode</span>
-                      </a>
-                      <a href="#setting-announcement" class="tree-item nav-item" data-setting-id="setting-announcement" data-tab="platform" title="Player Announcement">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
-                        <span class="tree-item-label">Player Announcement</span>
-                      </a>
-                      <a href="#setting-limits" class="tree-item nav-item" data-setting-id="setting-limits" data-tab="platform" title="Limits & Capacity">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
-                        <span class="tree-item-label">Limits & Capacity</span>
-                      </a>
-                      <a href="#setting-schedule" class="tree-item nav-item" data-setting-id="setting-schedule" data-tab="platform" title="Update Schedule">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                        <span class="tree-item-label">Update Schedule</span>
-                      </a>
-                      <a href="#setting-room-codes" class="tree-item nav-item" data-setting-id="setting-room-codes" data-tab="platform" title="Banned Room Codes">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="9" x2="20" y2="9"></line><line x1="4" y1="15" x2="20" y2="15"></line><line x1="10" y1="3" x2="8" y2="21"></line><line x1="16" y1="3" x2="14" y2="21"></line></svg>
-                        <span class="tree-item-label">Banned Room Codes</span>
-                      </a>
-                      <a href="#setting-webhooks" class="tree-item nav-item" data-setting-id="setting-webhooks" data-tab="platform" title="Webhooks & Alerts">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
-                        <span class="tree-item-label">Webhooks & Alerts</span>
-                      </a>
-                      <a href="#setting-startup-config" class="tree-item nav-item" data-setting-id="setting-startup-config" data-tab="platform" title="Startup Configuration">
-                        <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                        <span class="tree-item-label">Startup Configuration</span>
-                      </a>
+                  <!-- Tree View Navigation -->
+                  <nav class="sidebar-tree" id="sidebar-tree" aria-label="Settings Tree Navigation">
+                    <!-- Group 3: Platform Policies & Security -->
+                    <div class="tree-group" data-group-id="platform">
+                      <button type="button" class="tree-group-header" aria-expanded="true" data-group-toggle="platform" title="Platform Policies & Security">
+                        <svg class="tree-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
+                        <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                        <span class="tree-group-label">Platform & Security</span>
+                      </button>
+                      <div class="tree-group-children">
+                        <a href="#setting-maintenance" class="tree-item active nav-item" data-setting-id="setting-maintenance" data-tab="platform" title="Maintenance Mode">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                          <span class="tree-item-label">Maintenance Mode</span>
+                        </a>
+                        <a href="#setting-announcement" class="tree-item nav-item" data-setting-id="setting-announcement" data-tab="platform" title="Player Announcement">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+                          <span class="tree-item-label">Player Announcement</span>
+                        </a>
+                        <a href="#setting-limits" class="tree-item nav-item" data-setting-id="setting-limits" data-tab="platform" title="Limits & Capacity">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+                          <span class="tree-item-label">Limits & Capacity</span>
+                        </a>
+                        <a href="#setting-schedule" class="tree-item nav-item" data-setting-id="setting-schedule" data-tab="platform" title="Update Schedule">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                          <span class="tree-item-label">Update Schedule</span>
+                        </a>
+                        <a href="#setting-room-codes" class="tree-item nav-item" data-setting-id="setting-room-codes" data-tab="platform" title="Banned Room Codes">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="9" x2="20" y2="9"></line><line x1="4" y1="15" x2="20" y2="15"></line><line x1="10" y1="3" x2="8" y2="21"></line><line x1="16" y1="3" x2="14" y2="21"></line></svg>
+                          <span class="tree-item-label">Banned Room Codes</span>
+                        </a>
+                        <a href="#setting-webhooks" class="tree-item nav-item" data-setting-id="setting-webhooks" data-tab="platform" title="Webhooks & Alerts">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                          <span class="tree-item-label">Webhooks & Alerts</span>
+                        </a>
+                        <a href="#setting-startup-config" class="tree-item nav-item" data-setting-id="setting-startup-config" data-tab="platform" title="Startup Configuration">
+                          <svg class="tree-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                          <span class="tree-item-label">Startup Configuration</span>
+                        </a>
+                      </div>
                     </div>
-                  </div>
-                </nav>
-                <button type="button" class="sidebar-scroll-btn scroll-down" id="sidebar-scroll-down" aria-label="Scroll sidebar down" title="Scroll down" disabled>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                </button>
+                  </nav>
+                  <button type="button" class="sidebar-scroll-btn scroll-down" id="sidebar-scroll-down" aria-label="Scroll sidebar down" title="Scroll down" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                  </button>
+                </div>
               </div>
             </aside>
 

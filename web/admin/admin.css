@@ -184,6 +184,15 @@ code, pre {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: 0.25rem;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.admin-top-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .top-tab-btn {
@@ -202,6 +211,7 @@ code, pre {
   transition: all 0.12s ease;
   user-select: none;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .top-tab-btn:hover {
@@ -716,6 +726,7 @@ code, pre {
 .sidebar-toggle {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.75rem;
   padding: 0.5rem 0.75rem;
   border-radius: var(--radius-sm);
@@ -738,6 +749,13 @@ code, pre {
   border-color: var(--border-default);
 }
 
+.sidebar-toggle-main {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
 .sidebar-toggle-icon {
   width: 18px;
   height: 18px;
@@ -749,6 +767,23 @@ code, pre {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.sidebar-mobile-label {
+  display: none;
+}
+
+.sidebar-dropdown-chevron {
+  display: none;
+}
+
+.sidebar-dropdown-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
 }
 
 /* ── Settings Search Bar (Visual Studio style) ───────────────────────────── */
@@ -2252,124 +2287,202 @@ code, pre {
 
 @media (max-width: 860px) {
   html, body, #app {
-    height: auto;
-    max-height: none;
-    overflow-y: auto;
+    height: 100%;
+    height: 100dvh;
+    max-height: 100vh;
+    max-height: 100dvh;
+    overflow: hidden;
   }
 
   #app {
-    display: block;
-  }
-
-  .admin-container {
-    height: auto;
-    min-height: auto;
-    overflow: visible;
-    display: block;
-    margin: 0;
-    padding: 0;
-  }
-
-  .dashboard-view,
-  .dashboard-grid,
-  .dashboard-view.sidebar-collapsed,
-  .dashboard-grid.sidebar-collapsed,
-  .sidebar-collapsed {
     display: flex;
     flex-direction: column;
-    height: auto;
-    min-height: auto;
-    overflow: visible;
-    gap: 0;
-  }
-
-  .sidebar-nav {
-    position: static;
     width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    height: auto;
-    max-height: none;
-    overflow: visible;
-    padding: 1.25rem 1rem;
-    border-right: none;
-    border-bottom: 1px solid var(--border-default);
-    border-radius: 0;
+    height: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
   }
-
-  .dashboard-panel {
-    height: auto;
-    max-height: none;
-    overflow: visible;
-    padding: 1.25rem 1rem;
-  }
-
-  .sidebar-tree-wrapper {
-    max-height: 320px;
-  }
-
-  .sidebar-toggle {
-    display: none;
-  }
-
-  .sidebar-scroll-btn {
-    display: none !important;
-  }
-
-  .sidebar-collapsed .nav-item,
-  .dashboard-view.sidebar-collapsed .nav-item,
-  .dashboard-grid.sidebar-collapsed .nav-item {
-    justify-content: flex-start;
-    padding: 0.65rem 0.85rem;
-  }
-
-  .sidebar-collapsed .nav-item .nav-label,
-  .dashboard-view.sidebar-collapsed .nav-item .nav-label,
-  .dashboard-grid.sidebar-collapsed .nav-item .nav-label {
-    display: inline;
-  }
-
-  .sidebar-collapsed .tree-group-header .tree-group-label,
-  .sidebar-collapsed .tree-group-header .tree-chevron,
-  .dashboard-view.sidebar-collapsed .tree-group-header .tree-group-label,
-  .dashboard-view.sidebar-collapsed .tree-group-header .tree-chevron,
-  .dashboard-grid.sidebar-collapsed .tree-group-header .tree-group-label,
-  .dashboard-grid.sidebar-collapsed .tree-group-header .tree-chevron {
-    display: inline;
-  }
-
-  .sidebar-collapsed .tree-item .tree-item-label,
-  .dashboard-view.sidebar-collapsed .tree-item .tree-item-label,
-  .dashboard-grid.sidebar-collapsed .tree-item .tree-item-label {
-    display: inline;
-  }
-
-  .sidebar-collapsed .sidebar-search-container,
-  .dashboard-view.sidebar-collapsed .sidebar-search-container,
-  .dashboard-grid.sidebar-collapsed .sidebar-search-container {
-    display: block;
-  }
-
-  .sidebar-collapsed .nav-count,
-  .dashboard-view.sidebar-collapsed .nav-count,
-  .dashboard-grid.sidebar-collapsed .nav-count {
-    position: static;
-    margin-left: auto;
-    min-width: 1.35rem;
-    height: 1.35rem;
-    font-size: 0.7rem;
-    padding: 0 0.35rem;
-    line-height: 1.35rem;
-  }
-
-  .log-line { grid-template-columns: 4.5rem 2.2rem minmax(0, 1fr); }
-  .log-category { display: none; }
 
   .admin-header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    flex-shrink: 0;
     flex-wrap: wrap;
     gap: 0.6rem;
     padding: 0.75rem 1rem;
   }
+
+  .header-brand {
+    order: 1;
+  }
+
+  .header-actions {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .admin-top-tabs {
+    order: 3;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .admin-container {
+    flex: 1 1 0;
+    min-height: 0;
+    height: 100%;
+    max-height: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  .view-card {
+    margin: auto 1rem;
+    padding: 1.5rem 1.25rem;
+    max-width: 480px;
+    width: calc(100% - 2rem);
+    max-height: 90%;
+    overflow-y: auto;
+  }
+
+  .dashboard-view,
+  .dashboard-grid {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    width: 100%;
+    gap: 0;
+  }
+
+  .tab-panel-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    width: 100%;
+  }
+
+  .tab-panel-content.hidden {
+    display: none !important;
+  }
+
+  .tab-scroll-container {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding: 1.25rem 1rem;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .monitoring-scroll-container,
+  .plugins-scroll-container {
+    max-width: 100%;
+  }
+
+  .logs-container-wrapper {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding: 1.25rem 1rem;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    gap: 0.75rem;
+  }
+
+  .logs-panel-card {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    margin: 0;
+    overflow: hidden;
+    width: 100%;
+  }
+
+  .logs-panel-card .log-stream {
+    flex: 1 1 0;
+    min-height: 0;
+    height: auto;
+    max-height: none;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .settings-view-grid {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    width: 100%;
+  }
+
+  .sidebar-nav {
+    display: none !important;
+  }
+
+  .dashboard-panel {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding: 1.25rem 1rem;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .cross-tab-banner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+  }
+
+  .cross-tab-banner .cross-tab-link {
+    align-self: flex-start;
+    width: auto;
+  }
+
+  .log-line { grid-template-columns: 4.5rem 2.2rem minmax(0, 1fr); }
+  .log-category { display: none; }
 
   .status-pill { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
   .brand-title { font-size: 1.15rem; }
