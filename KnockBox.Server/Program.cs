@@ -960,6 +960,8 @@ app.UseWebSockets();
 // back to an empty provider so the server still starts (the LogError above tells the admin why).
 IFileProvider webFiles = Directory.Exists(webRoot) ? new PhysicalFileProvider(webRoot) : new NullFileProvider();
 IFileProvider adminWebFiles = Directory.Exists(adminWebRoot) ? new PhysicalFileProvider(adminWebRoot) : new NullFileProvider();
+var faviconsWebRoot = Path.Combine(webRoot, "favicons");
+IFileProvider faviconsWebFiles = Directory.Exists(faviconsWebRoot) ? new PhysicalFileProvider(faviconsWebRoot) : new NullFileProvider();
 // Games are served from the games folder first and the unpacked-package cache second — the same
 // precedence GameCatalog applies, so the manifest a request resolves through and the assets it fetches
 // always come from the same place. CompositeFileProvider returns the first provider whose file exists,
@@ -1150,6 +1152,12 @@ app.MapWhen(
             adminApp.UseStaticFiles(new StaticFileOptions
             {
                 FileProvider = adminWebFiles,
+                OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate"
+            });
+            adminApp.UseStaticFiles(new StaticFileOptions
+            {
+                FileProvider = faviconsWebFiles,
+                RequestPath = "/favicons",
                 OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate"
             });
         }

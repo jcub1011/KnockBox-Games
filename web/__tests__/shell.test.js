@@ -8,7 +8,7 @@
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, stubClipboard, tick } from './helpers.js';
-import { FAVICONS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
+import { ADMIN_FAVICON, FAVICONS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -119,13 +119,15 @@ describe('handshake & identity', () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it('sets the favicon to one of the cat icons on bootstrap', async () => {
+  it('sets the favicon to one of the user-facing cat icons (not sketch) on bootstrap', async () => {
     await importShell();
     shell.bootstrap();
     const link = document.head.querySelector('link[rel="icon"]');
     expect(link).not.toBeNull();
-    // jsdom resolves href to an absolute URL; assert the pathname matches a known favicon.
-    expect(FAVICONS).toContain(new URL(link.href).pathname);
+    // jsdom resolves href to an absolute URL; assert the pathname matches a known user-facing favicon.
+    const pathname = new URL(link.href).pathname;
+    expect(FAVICONS).toContain(pathname);
+    expect(pathname).not.toBe(ADMIN_FAVICON);
   });
 });
 

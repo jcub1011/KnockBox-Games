@@ -30,6 +30,7 @@ import {
   PLAY_LOG_STANDARD_KEYS,
   partitionPlayLogMetadata,
   ordinal,
+  ADMIN_FAVICON,
   FAVICONS,
   pickRandomFavicon,
   shouldShowAnnouncement,
@@ -171,6 +172,19 @@ describe('debounce', () => {
   });
 });
 
+describe('favicons', () => {
+  it('excludes the sketch variant from public FAVICONS and reserves it in ADMIN_FAVICON', () => {
+    expect(ADMIN_FAVICON).toBe('/favicons/cat-sketch.png');
+    expect(FAVICONS).not.toContain('/favicons/cat-sketch.png');
+    expect(FAVICONS).toEqual([
+      '/favicons/cat-orange.png',
+      '/favicons/cat-brown.png',
+      '/favicons/cat-cream.png',
+      '/favicons/cat-gray.png',
+    ]);
+  });
+});
+
 describe('pickRandomFavicon', () => {
   it('maps the random value across the list (0 → first, ~1 → last)', () => {
     expect(pickRandomFavicon(FAVICONS, () => 0)).toBe(FAVICONS[0]);
@@ -181,6 +195,7 @@ describe('pickRandomFavicon', () => {
     for (let i = 0; i < FAVICONS.length; i++) {
       const picked = pickRandomFavicon(FAVICONS, () => i / FAVICONS.length);
       expect(FAVICONS).toContain(picked);
+      expect(picked).not.toBe(ADMIN_FAVICON);
     }
   });
 

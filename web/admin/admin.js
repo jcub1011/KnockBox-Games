@@ -8,7 +8,7 @@
 // display names are untrusted input.
 
 import {
-  AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
+  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
@@ -3141,8 +3141,20 @@ async function onLogout() {
   await checkAuthStatus();
 }
 
+function applyAdminFavicon() {
+  let link = document.head.querySelector('link[rel="icon"]');
+  if (!link) {
+    link = document.createElement('link');
+    link.rel = 'icon';
+    link.type = 'image/png';
+    document.head.appendChild(link);
+  }
+  link.href = ADMIN_FAVICON;
+}
+
 /** Wires the page and runs the first auth check. Called from index.html. */
 export function bootstrap() {
+  applyAdminFavicon();
   wire();
   checkAuthStatus();
 }

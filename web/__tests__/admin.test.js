@@ -9,6 +9,7 @@
 // imports the module fresh. Assertions read rendered DOM text and the recorded fetch calls.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { installFakeFetch, loadAdminDom, tick } from './helpers.js';
+import { ADMIN_FAVICON } from '../admin/admin-core.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -210,6 +211,18 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('bootstrap favicon', () => {
+  it('sets the favicon to the sketch cat icon on bootstrap', async () => {
+    fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: true, authenticated: false } } });
+    await importAdmin();
+    admin.bootstrap();
+    const link = document.head.querySelector('link[rel="icon"]');
+    expect(link).not.toBeNull();
+    expect(new URL(link.href).pathname).toBe(ADMIN_FAVICON);
+    expect(new URL(link.href).pathname).toBe('/favicons/cat-sketch.png');
+  });
 });
 
 describe('auth state selects the view', () => {

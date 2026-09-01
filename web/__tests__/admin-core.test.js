@@ -3,7 +3,7 @@
 // kb-core.test.js, and the reason admin-core.js exists as a module of its own.
 import { describe, it, expect } from 'vitest';
 import {
-  AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS,
+  ADMIN_FAVICON, AVAILABILITY, LIFECYCLE, LIMIT_FIELDS, PLUGIN_STATUS, STARTUP_LIMITS, TABS,
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES,
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
@@ -1245,4 +1245,11 @@ describe('filterPlugins', () => {
     expect(filterPlugins(entries, { q: 'words' })).toEqual([entries[1], entries[2]]);
   });
 });
+
+describe('ADMIN_FAVICON', () => {
+  it('points exclusively to the cat-sketch variant', () => {
+    expect(ADMIN_FAVICON).toBe('/favicons/cat-sketch.png');
+  });
+});
+
 

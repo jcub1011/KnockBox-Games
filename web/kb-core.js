@@ -37,14 +37,16 @@ export function debounce(fn, ms) {
 
 // The shell picks one of these cat icons at random on each page load (ported from the legacy
 // server's per-render favicon pick). Paths are relative to the shell origin root; the files live
-// under web/favicons/ and are served by the shell origin's static middleware.
+// under web/favicons/ and are served by the shell origin's static middleware. The sketch variant
+// is reserved exclusively for the admin portal.
 export const FAVICONS = [
   '/favicons/cat-orange.png',
   '/favicons/cat-brown.png',
   '/favicons/cat-cream.png',
   '/favicons/cat-gray.png',
-  '/favicons/cat-sketch.png',
 ];
+
+export const ADMIN_FAVICON = '/favicons/cat-sketch.png';
 
 // Pure (testable) random pick. rand defaults to Math.random so tests can inject a deterministic stub.
 export function pickRandomFavicon(favicons = FAVICONS, rand = Math.random) {

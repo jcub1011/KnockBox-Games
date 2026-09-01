@@ -3,6 +3,9 @@
 // here touches the DOM, fetch or timers, so it is unit-tested in the plain Node environment while
 // admin.js (which does all three) is tested under jsdom.
 
+// The admin portal exclusively uses the sketch cat favicon variant.
+export const ADMIN_FAVICON = '/favicons/cat-sketch.png';
+
 // ── Settings Registry & Logical Groups ────────────────────────────────────────
 
 /**
