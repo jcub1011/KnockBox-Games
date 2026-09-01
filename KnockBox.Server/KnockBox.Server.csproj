@@ -85,7 +85,7 @@
        gate via NuGet audit. Don't re-add it without an endpoint that needs it. (Dropping it also
        retired the direct Microsoft.OpenApi override that used to sit here purely to patch it.) -->
   <ItemGroup>
-    <PackageReference Include="Jint" Version="4.11.0" />
+    <PackageReference Include="Jint" Version="4.16.1" />
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
   </ItemGroup>
