@@ -261,7 +261,7 @@ major, unknown properties are ignored.
 $EDITOR clients/addons.manifest.json      # "sdkVersion": "1.1.0"
 
 # 2. Verify.
-dotnet test KnockBox-Games.slnx --nologo
+dotnet test --solution KnockBox-Games.slnx
 
 # 3. Optional: build the archives locally and eyeball them (CI does this on every PR anyway).
 node tools/build-addons.mjs

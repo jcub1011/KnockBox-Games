@@ -18,8 +18,8 @@ Solution file is `KnockBox-Games.slnx` (modern `.slnx`, not legacy `.sln`). All 
 - Build: `dotnet build KnockBox-Games.slnx`
 - Run (dev): `dotnet run --project KnockBox.Server --launch-profile http`
   — shell at http://localhost:5114, games origin at http://localhost:5115
-- All .NET tests (xUnit): `dotnet test KnockBox-Games.slnx --nologo`
-- Single .NET test: `dotnet test KnockBox.Server.Tests --filter "Name~SomeTestName"`
+- All .NET tests (xUnit): `dotnet test --solution KnockBox-Games.slnx`
+- Single .NET test: `dotnet test --project KnockBox.Server.Tests --filter "Name~SomeTestName"`
   (or `--filter "FullyQualifiedName~Namespace.Class.Method"`)
 - Web tests (Vitest, from `web/`): `npm ci && npm test` (watch: `npm run test:watch`)
 - Phaser client tests (from `clients/phaser/`): `npm ci && npm run lint && npm test`

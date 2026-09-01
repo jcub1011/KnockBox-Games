@@ -346,7 +346,7 @@ $EDITOR clients/godot/addons/knockbox/kb_net.gd      # or clients/phaser/..., or
 $EDITOR clients/addons.manifest.json                 # "sdkVersion": "1.1.0"
 
 # 3. Verify.
-dotnet test KnockBox-Games.slnx --nologo             # version consistency + client parity
+dotnet test --solution KnockBox-Games.slnx             # version consistency + client parity
 cd tools/pack-game && npm test
 
 # 4. Optional: build the archives and inspect them (CI does this on every PR anyway).

@@ -21,7 +21,7 @@ namespace KnockBox.Server.Tests;
 ///
 /// Run it with:
 ///   $env:KNOCKBOX_MARKETPLACE_LIVE=1
-///   dotnet test KnockBox.Server.Tests --filter "FullyQualifiedName~MarketplaceLive"
+///   dotnet test --project KnockBox.Server.Tests --filter "FullyQualifiedName~MarketplaceLive"
 /// </remarks>
 public class MarketplaceLiveTests : IDisposable
 {
