@@ -10,6 +10,7 @@
  * invocation keeps working unchanged.
  */
 
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -213,7 +214,16 @@ export async function main(argv = process.argv.slice(2)) {
 
 export { DEFAULT_INDEX_URL, HELP };
 
+function isMain(metaUrl) {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(metaUrl);
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(metaUrl);
+  }
+}
+
 // Run only when invoked directly, not when imported by tests.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   main();
 }

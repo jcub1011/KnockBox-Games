@@ -33,7 +33,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_QUALITY, KbgError, packKbg, readKbg } from "./kbg.mjs";
@@ -576,7 +576,16 @@ export async function runPack(argv = process.argv.slice(2)) {
   }
 }
 
+function isMain(metaUrl) {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(metaUrl);
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(metaUrl);
+  }
+}
+
 // Run only when invoked directly, not when imported by tests or by knockbox.mjs.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   runPack();
 }
