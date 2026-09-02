@@ -26,6 +26,10 @@ Solution file is `KnockBox-Games.slnx` (modern `.slnx`, not legacy `.sln`). All 
 - CLI tests (from `tools/pack-game/`): `npm ci && npm test`
 - Build the addon release archives + index: `node tools/build-addons.mjs` (writes `.addons/`)
 - Desktop publish (self-contained win-x64 exe): `dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop`
+- Bench a server-authority module against the real engine (no listener, exits non-zero on an overrun):
+  `dotnet run --project KnockBox.Server -- --authority-bench <game-dir> [--script steps.json]`
+  — see `Games/AuthorityBench.cs`. This is the only way to see a module's real per-call cost: a
+  browser runs the same code JIT-compiled, so solo play cannot tell you whether it fits.
 
 The `web/` frontend is plain ES modules — **no build step**; it is served directly and baked
 into publish/Docker output. Unit-tested under `web/__tests__/`: `web/kb-core.js` (pure protocol
@@ -966,8 +970,9 @@ compares **canonical** paths on both sides via `Hosting/GameAssetPath.cs` (the o
 pre-compressed negotiation): raw string equality denied `…/authority.js` but waved through
 `…//authority.js`, which `PhysicalFileProvider` then resolved to the very same file.
 On lobby creation `ServerAuthorityManager` loads the module into a per-lobby sandboxed **Jint**
-engine (`JsAuthorityRuntime` behind `IAuthorityRuntime`; `Date` deleted, no CLR, memory/timeout/
-statement/recursion budgets — AOT-clean via `TrimmerRootAssembly`) wrapped in a `ServerAuthority`
+engine (`JsAuthorityRuntime` behind `IAuthorityRuntime`; `Date` deleted, no CLR, memory + wall-clock
+budgets and `StackOverflowGuard`, with the statement and recursion limits **opt-in and off** —
+AOT-clean via `TrimmerRootAssembly`) wrapped in a `ServerAuthority`
 actor: one drain task over a bounded `Channel` (two-tier overflow — intents drop, ticks coalesce,
 roster never dropped). `WebSocketHandler.HandleGameMessage` diverts `to:"host"` to the actor
 instead of a client and enforces the `_kb` envelope both ways (§5d — clients can't publish
@@ -977,9 +982,25 @@ instead of a client and enforces the `_kb` envelope both ways (§5d — clients 
 not built). **Owner ≠ authority**: every client is `isHost:false`; `Lobby.HostId` (now mutable,
 lock-guarded) is the owner holding kick/open powers, reassignable by the module via `kb.setOwner`
 (`OwnerChanged`/`GameOwnerChanged` events, so the session survives the creator leaving). Errors:
-a module throw is contained (drop + re-broadcast snapshot; 5 in a row → fatal), a constraint
-violation is fatal (`LobbyClosed`, sockets aborted). See `docs/SERVER_AUTHORITY_DESIGN.md` and
-GAME_DEVELOPER_GUIDE §5b. Knobs: `Authority*` (§Configuration).
+a module throw is contained (drop + re-broadcast snapshot; 5 in a row → fatal); a **timeout or
+statement overrun on a tick** is likewise contained (drop the tick + re-broadcast;
+`AuthorityMaxConsecutiveOverruns`, default 3, in a row → fatal), because ticks coalesce and are
+droppable by design; every other constraint violation is fatal on the first occurrence
+(`LobbyClosed`, sockets aborted). One call reaching `AuthoritySlowCallWarnFraction` of its budget
+logs a warning naming the game — the signal a game developer cannot get from a browser. See
+`docs/SERVER_AUTHORITY_DESIGN.md` and GAME_DEVELOPER_GUIDE §5b. Knobs: `Authority*` (§Configuration).
+
+**The engine constraint set is a measured performance decision, not a checklist.** Jint 4.16 splits
+constraints into *amortizable* (checked every N statements — a countdown decrement) and *exact*
+(checked before every single statement), and its own docs note that an exact constraint "can
+additionally disable the interpreter's tight-loop lane, which costs every loop in the program".
+`TimeoutInterval` is amortizable; `MaxStatements` and `LimitMemory` are documented as never
+amortizable. The server used to arm both exact ones, which measured **4.4x slower** on a real module
+(2,500 ticks of Alpha Chain, identical deterministic workload, median of 5 runs: 224 ms armed, 51 ms
+with statements + recursion dropped for `StackOverflowGuard`). That factor is the difference between
+a game fitting its call budget and its lobbies being killed, and every hosted game paid it. Both are
+now off by default and one config key away. If you re-arm them, expect every authority game on the
+server to slow down by roughly that factor.
 
 **Nothing in `JsAuthorityRuntime` compiles a source string any more**, and each removal used a host API
 verified against Jint 4.11 rather than assumed: `JsValue.IsCallable()` replaces a compiled
@@ -1011,9 +1032,17 @@ cap, and requiring `serverAuthority`). `Games/Words/AuthorityWordService.cs` (DI
 file **once** into a shared, length-bucketed packed-ASCII structure (`WordPool`/`WordPoolSet`, adapted
 from the sibling `KnockBox.WordService` repo) shared by every lobby engine of the game and deduped
 across games by content hash (byte-identical files share one structure regardless of name/path) — so a large dictionary costs one copy, never a per-lobby copy or a
-raised memory cap. The module queries it via `kb.words.has/count/pick/countOfLength/pickOfLength`
+raised memory cap. The module queries it via `kb.words.has/count/pick/countOfLength/pickOfLength` plus
+`rangeOfPrefix(dict, len, prefix)` → `[start, end)` and `pickRange(dict, len, start, count)` → `string[]`
 (`ClrFunction`s over the shared pool — the dictionary never enters the JS heap; guarded, so unknown
-key / out-of-range → `false`/`0`/`null`). The word files are denied on the game origin
+key / out-of-range → `false`/`0`/`null`). **The last two exist because every word game was writing them
+in JavaScript**: the pool is sorted ordinal within a length, so same-prefix words are contiguous and a
+game only needs the bounds — but through `pickOfLength` alone that binary search runs in the sandbox,
+one interpreted iteration and one marshalled string per probe. Measured on a shipped module, resolving
+all 26 starting letters across 14 lengths cost 3,298 crossings and 4.4 ms that way, and 364 crossings
+and 1.0 ms through `rangeOfPrefix`. `pickRange` is capped by `AuthorityMaxWordsPerCall`.
+A module can also read `kb.budgetRemainingMs()` — how much of the current call's wall-clock budget is
+left — so open-ended work can stop cleanly on its own terms instead of being killed part-way. The word files are denied on the game origin
 (`GameOriginAssetGate`, server-side/secret) and skipped by the precompressor; `knockbox-local.js`
 emulates `kb.words` with server-identical `pick` ordering. GAME_DEVELOPER_GUIDE §5b walks a
 worked example; the docker CI job synthesizes one to prove the files 404 on the game origin.
@@ -1141,4 +1170,6 @@ the portal overrides it and persists — and extra catalogs),
 default 60; `0` = immediate), the rate-limit knobs (`*MessagesPerSecond/Burst`,
 `MaxConnectionsPerIp`, `LobbyCreatesPerMinute`, `AdminLoginAttemptsPerMinute`/`…Global`), and the server-authority knobs (`AuthorityEnabled`
 master switch, `AuthorityMax{MemoryBytes,Statements,ScriptBytes,WordFileBytes,Lobbies}`,
-`AuthorityCallTimeoutMs`, `AuthorityRecursionLimit`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).
+`AuthorityCallTimeoutMs` (+ per-game `AuthorityCallTimeoutMsByGame:<id>`), `AuthorityRecursionLimit`
+(off), `AuthorityMaxArrayLength`, `AuthoritySlowCallWarnFraction`, `AuthorityMaxConsecutiveOverruns`,
+`AuthorityMaxWordsPerCall`, `AuthorityTickHzMax`, `AuthorityQueueCapacity`).

@@ -401,7 +401,9 @@ internal static class AdminApi
                 Math.Round(authority?.CpuSeconds ?? 0, 3),
                 Math.Round(authority?.AverageCallMs ?? 0, 3),
                 Math.Round(authority?.MaxCallMs ?? 0, 3),
-                authority?.Errors ?? 0));
+                authority?.Errors ?? 0,
+                authority?.NearBudgetCalls ?? 0,
+                authority?.Overruns ?? 0));
         }
 
         // Server-wide outbound totals across BOTH planes: the control sockets carry lobby events too, and

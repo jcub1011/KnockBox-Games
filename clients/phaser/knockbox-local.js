@@ -471,6 +471,10 @@
     return { order: order, perLength: perLength, set: new Set(order), caseInsensitive: caseInsensitive };
   }
 
+  // Mirrors AuthorityOptions.DefaultMaxWordsPerCall. Kept as a named constant on both sides because a
+  // silent disagreement here is the worst kind: the module works in the tab and truncates on the server.
+  var maxWordsPerCall = 512;
+
   function makeWordsCapability(pools) {
     function pool(dict) { return Object.prototype.hasOwnProperty.call(pools, dict) ? pools[dict] : null; }
     function norm(p, word) {
@@ -498,6 +502,43 @@
         var arr = p.perLength[idx(len)]; if (!arr) return null;
         var i = idx(index);
         return (i >= 0 && i < arr.length) ? arr[i] : null;
+      },
+      // [start, end) of the words of `len` beginning with `prefix`. Server-side this is two binary
+      // searches over the packed buffer; locally the bucket is a sorted array, so the same two bounds
+      // come out of the same two searches. Emulated rather than skipped because a game that only ever
+      // ran locally would otherwise write against a capability that is absent in the tab and present
+      // on the server — the exact asymmetry this file exists to prevent.
+      rangeOfPrefix: function (dict, len, prefix) {
+        var p = pool(dict); if (!p) return null;
+        if (typeof prefix !== 'string') return null;
+        var arr = p.perLength[idx(len)]; if (!arr) return [0, 0];
+        if (prefix.length === 0) return [0, arr.length];          // every word has the empty prefix
+        if (prefix.length > idx(len) || !isAsciiWord(prefix)) return [0, 0];
+        var q = p.caseInsensitive ? prefix.toLowerCase() : prefix;
+        var n = q.length;
+        function bound(inclusive) {
+          var lo = 0, hi = arr.length;
+          while (lo < hi) {
+            var mid = (lo + hi) >> 1;
+            var head = arr[mid].slice(0, n);
+            // `inclusive` picks which side an exact prefix match falls on, which is what turns one
+            // search into the lower bound and the other into the upper.
+            if (head < q || (inclusive && head === q)) lo = mid + 1; else hi = mid;
+          }
+          return lo;
+        }
+        var start = bound(false);
+        return [start, Math.max(start, bound(true))];
+      },
+      // A slice of a length bucket in one call. `maxWordsPerCall` mirrors the server's cap so a module
+      // tuned locally cannot discover the truncation only in production.
+      pickRange: function (dict, len, start, count) {
+        var p = pool(dict); if (!p) return null;
+        var arr = p.perLength[idx(len)]; if (!arr) return [];
+        var s = idx(start), c = idx(count);
+        if (!(s >= 0) || s >= arr.length || !(c > 0)) return [];
+        c = Math.min(c, maxWordsPerCall, arr.length - s);
+        return arr.slice(s, s + c);
       },
     });
   }
@@ -532,6 +573,11 @@
     var self = this;
     var kb = Object.freeze({
       now: function () { return RealDate.now(); },
+      // Locally there is no Jint and no per-call timeout, so the honest emulation is "you have the
+      // server's default budget and nothing is counting it down". A module that paces itself with this
+      // then behaves in the tab as it would on a server it is comfortably inside — which is the point.
+      // What it CANNOT do is let the tab tell you whether you fit; only the server can answer that.
+      budgetRemainingMs: function () { return 250; },
       setOwner: function (playerId) { self._pendingOwner = playerId; }, // deferred, like the server
       setLobbyOpen: function (open) {
         console.info('[KnockBox authority] setLobbyOpen(' + !!open + ') — no-op locally (no join gate)');

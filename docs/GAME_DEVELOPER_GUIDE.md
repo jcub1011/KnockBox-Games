@@ -448,7 +448,8 @@ emotes) is untouched.
 | `kb.setOwner(playerId)` | **Owner-migration primitive** (see below). |
 | `kb.now()` | Milliseconds since epoch, **server clock**. There is **no `Date`** in the sandbox — `kb.now()` is the only time source. |
 | `kb.log.info/warn/error/debug(msg)` | Server-side logging under `KnockBox.Authority`. |
-| `kb.words.*` | Shared, immutable word dictionaries (validate a word, pick one by index). See **Word dictionaries** below. |
+| `kb.words.*` | Shared, immutable word dictionaries (validate a word, pick one by index, or take a whole prefix range). See **Word dictionaries** below. |
+| `kb.budgetRemainingMs()` | Milliseconds left in **this call's** wall-clock budget. See **Staying inside your budget** below. |
 
 ### Word dictionaries (`kb.words`)
 
@@ -485,11 +486,104 @@ Your module queries it through `kb.words`, keyed by the dictionary key you chose
 | `kb.words.pick(key, index)` | `string \| null` — the word at a global index, or `null` if out of range |
 | `kb.words.countOfLength(key, len)` | `number` — words of a given length |
 | `kb.words.pickOfLength(key, len, index)` | `string \| null` — the `index`-th word of that length |
+| `kb.words.rangeOfPrefix(key, len, prefix)` | `[start, end)` — the index range of the words of `len` starting with `prefix`, or `null` for a bad key/prefix |
+| `kb.words.pickRange(key, len, start, count)` | `string[]` — that many words of `len` from `start`, in one call (clamped to the bucket and to `AuthorityMaxWordsPerCall`, default 512) |
 
 Use `count` to size the dictionary before indexing — e.g. draw a random word with
 `kb.words.pick(key, Math.floor(Math.random() * kb.words.count(key)))`. An unknown key or an
 out-of-range index is safe (`false`/`0`/`null`), never a crash. Words are ordered length-bucket by
 length (ascending), ordinal within a length, so `pick` is stable and identical in local emulation.
+
+**Reach for `rangeOfPrefix` before you write a loop.** Because words are ordinal within a length,
+every word starting with a given prefix occupies one contiguous run, and `rangeOfPrefix` hands you its
+bounds. Nearly every word game wants exactly that — "words of length 6 starting with the succession
+letter" — and the tempting alternative is a binary search written in your module over `pickOfLength`.
+Do not: that search runs **inside the sandbox**, so each probe is an interpreted loop iteration plus a
+string marshalled across the boundary, and it is the single most expensive thing word games do here.
+Resolving all 26 starting letters across 14 lengths costs ~3,300 boundary crossings hand-rolled and
+~360 through `rangeOfPrefix`. Then take the words with `pickRange` rather than a `pickOfLength` per
+index:
+
+```js
+// Every 6-letter word starting with "s", in two calls instead of hundreds.
+const [start, end] = kb.words.rangeOfPrefix('en', 6, 's');
+const candidates = kb.words.pickRange('en', 6, start, end - start);   // capped at 512
+
+// A random one, without materialising anything:
+const pick = kb.words.pickOfLength('en', 6, start + Math.floor(Math.random() * (end - start)));
+```
+
+`pickRange` returns fewer than you asked for when the range runs out or the cap bites — the array's
+own `length` is the honest answer, so iterate it rather than the count you requested.
+
+### Staying inside your budget
+
+**Every call into your module is bounded by a wall clock** (`AuthorityCallTimeoutMs`, 250 ms by
+default) — `init`, `applyIntent`, each `tick`, every roster hook. Blow it and the call is killed;
+blow it repeatedly and the lobby is closed with everyone in it.
+
+**Your browser will not warn you about this, and that is the trap.** In solo/local mode your module
+runs in the browser's JIT-compiled JavaScript engine over an in-memory array. On the server it runs
+*interpreted*, in Jint, and every `kb.words` call crosses a boundary into the host. The same turn that
+felt instant in a tab can be one to two orders of magnitude slower here. A game that plays perfectly
+solo can still close its lobbies in server mode on its very first match.
+
+Two things to do about it:
+
+1. **Bound your own loops.** Anything open-ended — scanning candidates, searching, simulating — needs
+   a ceiling that does not depend on the dictionary's size. Prefer `rangeOfPrefix` over scanning, and
+   cap how many candidates you will examine per call.
+2. **Ask how much budget is left.** `kb.budgetRemainingMs()` returns the milliseconds remaining in the
+   current call (0 outside one). Use it to stop cleanly with a partial-but-consistent result instead of
+   being killed part-way through:
+
+   ```js
+   const found = [];
+   for (let i = start; i < end; i++) {
+     if (found.length >= 5) break;
+     if (kb.budgetRemainingMs() < 40) break;   // leave room to finish the turn properly
+     const w = kb.words.pickOfLength('en', 6, i);
+     if (isPlayable(w)) found.push(w);
+   }
+   ```
+
+   Locally it reports a flat 250 ms and never counts down — there is no interpreter budget in a tab to
+   count. It lets you *write* budget-aware code locally; it cannot tell you whether you fit. Only a
+   real server run can.
+
+**Measure it before you ship: `--authority-bench`.** The server itself will run your module under the
+real engine and tell you how close you are, without starting a listener or a lobby:
+
+```bash
+# Ticks only — enough for a game that does work every frame.
+dotnet run --project KnockBox.Server -- --authority-bench ./games/my-game
+
+# Most games idle until a match starts, so drive the intents that get you into the interesting states.
+dotnet run --project KnockBox.Server -- --authority-bench ./games/my-game --script bench.json
+```
+
+`bench.json` is an array of steps, each an optional intent and a number of ticks to run after it:
+
+```json
+[{ "intent": { "kind": "startMatch", "settings": {} }, "from": "p0", "ticks": 3000 }]
+```
+
+It prints p50/p90/p99/max per export, the percentage of budget the worst call used, and how many
+`kb.words` queries each export made — the last one tells you whether your cost is boundary crossings
+or interpreted work, which have different fixes. It **exits non-zero** when a call blows the budget,
+so it works as a CI gate, and warns when you are under 2x headroom: a real host is busier than your
+laptop, a GC pause counts against the budget, and the worst turn a player reaches is rarely the worst
+turn a bench happened to generate.
+
+**Watch the server log.** When one call reaches `AuthoritySlowCallWarnFraction` of its budget (half, by
+default) the server logs a warning naming your game, the export, and the percentage — on each new
+worst. If you see that during development, act on it: it is the only warning you get before players
+start being disconnected. If your game genuinely needs more room, an operator can raise it for that
+game alone with `KnockBox:AuthorityCallTimeoutMsByGame:<your-game-id>`.
+
+A `tick` that overruns is dropped and the lobby survives (up to `AuthorityMaxConsecutiveOverruns`, 3
+by default, in a row). An overrun in `applyIntent` or a roster hook is fatal on the first occurrence —
+there is no safe way to half-apply someone's move.
 
 ### Owner ≠ authority
 

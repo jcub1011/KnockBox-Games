@@ -92,4 +92,7 @@ public sealed class WordPoolSet : IWordPool
 
     public bool Contains(ReadOnlySpan<char> word)
         => _byLength.TryGetValue(word.Length, out var pool) && pool.Contains(word);
+
+    public (int Start, int End) RangeOfPrefix(int length, ReadOnlySpan<char> prefix)
+        => _byLength.TryGetValue(length, out var pool) ? pool.RangeOfPrefix(prefix) : (0, 0);
 }

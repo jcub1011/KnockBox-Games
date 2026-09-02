@@ -136,7 +136,7 @@ public sealed class ServerAuthorityManager(
             return false;
         }
 
-        var runtime = new JsAuthorityRuntime(modulePath, _modules, live, time, wordPools);
+        var runtime = new JsAuthorityRuntime(modulePath, _modules, live, time, wordPools, manifest.Id);
         try
         {
             runtime.Initialize(JsonSerializer.Serialize(lobby.Players, KnockBoxProtocolContext.Default.IReadOnlyListPlayer));

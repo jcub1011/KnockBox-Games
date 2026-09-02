@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Jint;
 using Jint.Native;
@@ -29,11 +30,21 @@ public sealed class JsAuthorityRuntime(
     AuthorityModuleCache modules,
     AuthorityOptions options,
     TimeProvider time,
-    IReadOnlyDictionary<string, IWordPool> wordPools) : IAuthorityRuntime
+    IReadOnlyDictionary<string, IWordPool> wordPools,
+    string gameId = "") : IAuthorityRuntime
 {
     private static readonly string[] RequiredHooks = ["init", "applyIntent", "snapshot"];
     private static readonly string[] OptionalHooks =
         ["onPlayerJoined", "onPlayerLeft", "onPlayerDisconnected", "onPlayerConnected", "tick"];
+
+    /// <summary>This engine's per-call wall-clock budget, resolved once (a per-game override, else the
+    /// server-wide one). Also what <c>kb.budgetRemainingMs()</c> counts down from.</summary>
+    private readonly TimeSpan _callTimeout = options.CallTimeoutFor(gameId);
+
+    /// <summary>Stopwatch timestamp at which the in-flight call runs out of budget, or 0 between calls.
+    /// Written by <see cref="Invoke"/> around the one engine entry, read by the kb.budgetRemainingMs
+    /// ClrFunction. Single-threaded by the actor contract, so a plain field is enough.</summary>
+    private long _callDeadline;
 
     private Engine? _engine;
     private ObjectInstance? _instance;
@@ -62,19 +73,44 @@ public sealed class JsAuthorityRuntime(
                 throw new AuthorityLoadException(
                     $"Authority module is {info.Length} bytes (max {options.MaxScriptBytes}).");
 
-            var engine = new Engine(o => o
-                .Strict()
-                .LimitMemory(options.MaxMemoryBytes)
-                .TimeoutInterval(options.CallTimeout)
-                // Jint's own default here is TEN SECONDS, against a 250ms call budget. TimeoutInterval is
-                // checked BETWEEN statements, so it cannot interrupt a single Regex.IsMatch: without this
-                // line one catastrophically-backtracking regex in a module owns the lobby's drain task for
-                // 40x the budget while its bounded channel backs up behind it. (The resulting
-                // RegexMatchTimeoutException derives from TimeoutException, so Invoke below already
-                // classifies it as a constraint trip — only the duration was wrong.)
-                .RegexTimeoutInterval(options.CallTimeout)
-                .MaxStatements(options.MaxStatements)
-                .LimitRecursion(options.RecursionLimit));
+            // CONSTRAINT SET, and the shape of it is a measured performance decision — see
+            // AuthorityOptions.MaxStatements for the numbers. Jint 4.16 partitions constraints into
+            // amortizable (checked every N statements) and exact (checked before every single one), and an
+            // exact constraint also disarms the interpreter's tight-loop lanes, which costs every loop in
+            // every module the server hosts. TimeoutInterval is amortizable; MaxStatements and LimitMemory
+            // are not. Arming the pair by default cost a 4.4x interpreter slowdown to re-guard what the
+            // wall clock already bounds, so both are now opt-in and off.
+            var engine = new Engine(o =>
+            {
+                o.Strict()
+                    .LimitMemory(options.MaxMemoryBytes)
+                    .TimeoutInterval(_callTimeout)
+                    // Jint's own default here is TEN SECONDS, against a 250ms call budget. TimeoutInterval is
+                    // checked BETWEEN statements, so it cannot interrupt a single Regex.IsMatch: without this
+                    // line one catastrophically-backtracking regex in a module owns the lobby's drain task for
+                    // 40x the budget while its bounded channel backs up behind it. (The resulting
+                    // RegexMatchTimeoutException derives from TimeoutException, so Invoke below already
+                    // classifies it as a constraint trip — only the duration was wrong.)
+                    .RegexTimeoutInterval(_callTimeout);
+
+                // Both off by default. Jint treats a value that cannot express a real limit as "remove the
+                // constraint", so guarding on > 0 is also what keeps a configured 0 from registering a
+                // constraint that can never fail and yet still costs every statement.
+                if (options.MaxStatements > 0) o.MaxStatements(options.MaxStatements);
+                if (options.RecursionLimit > 0) o.LimitRecursion(options.RecursionLimit);
+
+                // The wider, cheaper replacement for LimitRecursion: it measures the remaining native stack
+                // at every entry into an interpreted function, so `new`, accessors, coercions, Proxy traps
+                // and host callbacks are all covered, where LimitRecursion is probed at the call expression
+                // alone. Without either, unbounded recursion ends the PROCESS with a native stack overflow
+                // that no catch sees. Jint gives MaxRecursionDepth precedence when both are set, so an
+                // operator who arms RecursionLimit knowingly narrows this back down.
+                o.Constraints.StackOverflowGuard = true;
+
+                // Structural allocation bound that survives MaxStatements being off: one statement can ask
+                // for billions of array slots, and a wall clock is poor at catching that.
+                o.Constraints.MaxArraySize = options.MaxArrayLength;
+            });
             _engine = engine;
             _parser = new JsonParser(engine);
             _serializer = new JsonSerializer(engine);
@@ -87,7 +123,7 @@ public sealed class JsAuthorityRuntime(
             // Register the SHARED prepared module (parsed once, reused across every lobby engine of
             // this game) rather than re-reading and re-parsing the file per lobby. The size cap was
             // already enforced above; the cache only parses/caches.
-            engine.Modules.Add("authority", b => b.AddModule(modules.Get(scriptPath, options.CallTimeout)));
+            engine.Modules.Add("authority", b => b.AddModule(modules.Get(scriptPath, _callTimeout)));
             var ns = engine.Modules.Import("authority");
 
             // JsValueExtensions.IsCallable is exactly `typeof v === 'function'` for everything that can turn
@@ -140,6 +176,10 @@ public sealed class JsAuthorityRuntime(
         // structure with a back-reference is an ordinary game-logic bug — exactly the contained,
         // five-strikes case. Left outside, that throw reached the actor unclassified and closed the
         // lobby for everyone on the very first occurrence.
+        // Armed around the one engine entry so kb.budgetRemainingMs() can answer during the call and
+        // reads zero outside it. Cleared in a finally: a module that is told it has budget left after the
+        // call that granted it has already unwound would be worse than having no capability at all.
+        _callDeadline = Stopwatch.GetTimestamp() + (long)(_callTimeout.TotalSeconds * Stopwatch.Frequency);
         try
         {
             var result = engine.Call(fn, instance, args);
@@ -151,7 +191,7 @@ public sealed class JsAuthorityRuntime(
         catch (Exception ex) when (ex is MemoryLimitExceededException or StatementsCountOverflowException
             or RecursionDepthOverflowException or ExecutionCanceledException or TimeoutException)
         {
-            throw new AuthorityConstraintException($"{export}: {ex.Message}", ex);
+            throw new AuthorityConstraintException($"{export}: {ex.Message}", Classify(ex), ex);
         }
         catch (JavaScriptException ex) // the module threw — contained, engine unwound one call
         {
@@ -159,9 +199,25 @@ public sealed class JsAuthorityRuntime(
         }
         catch (JintException ex) // unclassified engine failure — state untrustworthy, treat as fatal
         {
-            throw new AuthorityConstraintException($"{export}: {ex.Message}", ex);
+            throw new AuthorityConstraintException($"{export}: {ex.Message}", AuthorityConstraintKind.Unclassified, ex);
+        }
+        finally
+        {
+            _callDeadline = 0;
         }
     }
+
+    /// <summary>Names the budget a constraint trip blew. RegexMatchTimeoutException derives from
+    /// TimeoutException and so lands on Timeout, which is correct: it is the same wall-clock budget.</summary>
+    private static AuthorityConstraintKind Classify(Exception ex) => ex switch
+    {
+        MemoryLimitExceededException => AuthorityConstraintKind.Memory,
+        StatementsCountOverflowException => AuthorityConstraintKind.Statements,
+        RecursionDepthOverflowException => AuthorityConstraintKind.Recursion,
+        ExecutionCanceledException => AuthorityConstraintKind.Cancelled,
+        TimeoutException => AuthorityConstraintKind.Timeout,
+        _ => AuthorityConstraintKind.Unclassified,
+    };
 
     public AuthorityEffects DrainEffects()
     {
@@ -207,6 +263,21 @@ public sealed class JsAuthorityRuntime(
         AddLog(log, "warn", LogLevel.Warning);
         AddLog(log, "error", LogLevel.Error);
         kb.Set("log", log);
+
+        // How much of THIS call's wall-clock budget is left, in milliseconds.
+        //
+        // The capability exists because the alternative is guessing. A module doing open-ended work — a
+        // dictionary scan, a search, a simulation step — has no way to know how expensive it is on this
+        // host, so it either hard-codes a budget tuned on someone else's machine or gets killed. With this
+        // it can stop cleanly on its own terms and return a partial-but-consistent result, which is always
+        // a better outcome for players than the lobby being torn down. Reads 0 outside a call, and never
+        // reports more than the budget.
+        kb.Set("budgetRemainingMs", new ClrFunction(engine, "budgetRemainingMs", (_, _) =>
+        {
+            if (_callDeadline == 0) return 0d;
+            var remaining = _callDeadline - Stopwatch.GetTimestamp();
+            return remaining <= 0 ? 0d : remaining * 1000d / Stopwatch.Frequency;
+        }));
 
         var words = BuildWords(engine);
         kb.Set("words", words);
@@ -286,6 +357,58 @@ public sealed class JsAuthorityRuntime(
             int len = (int)lenN, index = (int)idxN;
             if (index < 0 || index >= pool.GetWordCount(len)) return JsValue.Null;
             return Encoding.ASCII.GetString(pool.GetWord(len, index));
+        }));
+
+        // rangeOfPrefix(dictKey, length, prefix) -> [start, end] | null
+        //
+        // The bounds of the words of `length` that start with `prefix`. Two binary searches, run on the
+        // side of the boundary that holds the bytes. Every word game needs this shape — "words of length
+        // L starting with the succession letter" — and without it each one re-implements the search in
+        // JavaScript over pickOfLength: an interpreted loop plus a marshalled string per probe. On the
+        // shipped Alpha Chain module, resolving all 26 letters across 14 lengths cost 3,298 crossings and
+        // 4.4 ms that way, and 364 crossings and 1.0 ms through this.
+        //
+        // Returns a two-element array so the JS side reads `const [start, end] = ...`; null for an unknown
+        // dictionary or a non-string prefix, matching the guarded style of the rest of this surface.
+        words.Set("rangeOfPrefix", new ClrFunction(engine, "rangeOfPrefix", (_, args) =>
+        {
+            if (args.Length < 3 || !args[0].IsString() || !args[1].IsNumber() || !args[2].IsString())
+                return JsValue.Null;
+            if (!wordPools.TryGetValue(args[0].AsString(), out var pool)) return JsValue.Null;
+            var lenN = args[1].AsNumber();
+            if (!double.IsFinite(lenN)) return JsValue.Null;
+            var (start, end) = pool.RangeOfPrefix((int)lenN, args[2].AsString());
+            return engine.Intrinsics.Array.Construct([start, end]);
+        }));
+
+        // pickRange(dictKey, length, start, count) -> string[] | null
+        //
+        // A slice of a length bucket in ONE crossing instead of `count` of them. Measured at ~0.09 us per
+        // word against ~0.56 us for a pickOfLength each — but the crossing is not really the point: what
+        // it removes is `count` iterations of an interpreted loop, which is where the time actually goes.
+        //
+        // Clamped to the bucket and capped at MaxWordsPerCall, so a module cannot conjure a 386k-element
+        // array (or ask the host to allocate 386k strings) in a single call. A truncated result is not
+        // silently wrong for the caller: the array's own length says how many words came back.
+        words.Set("pickRange", new ClrFunction(engine, "pickRange", (_, args) =>
+        {
+            if (args.Length < 4 || !args[0].IsString() || !args[1].IsNumber()
+                || !args[2].IsNumber() || !args[3].IsNumber()) return JsValue.Null;
+            if (!wordPools.TryGetValue(args[0].AsString(), out var pool)) return JsValue.Null;
+            double lenN = args[1].AsNumber(), startN = args[2].AsNumber(), countN = args[3].AsNumber();
+            if (!double.IsFinite(lenN) || !double.IsFinite(startN) || !double.IsFinite(countN))
+                return JsValue.Null;
+
+            int len = (int)lenN, start = (int)startN, count = (int)countN;
+            var available = pool.GetWordCount(len);
+            if (start < 0 || start >= available || count <= 0)
+                return engine.Intrinsics.Array.Construct([]);
+            count = Math.Min(Math.Min(count, options.MaxWordsPerCall), available - start);
+
+            var items = new JsValue[count];
+            for (var i = 0; i < count; i++)
+                items[i] = Encoding.ASCII.GetString(pool.GetWord(len, start + i));
+            return engine.Intrinsics.Array.Construct(items);
         }));
 
         return words;

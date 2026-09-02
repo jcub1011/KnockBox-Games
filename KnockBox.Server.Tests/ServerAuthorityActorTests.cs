@@ -5,6 +5,7 @@ using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Serialization;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -137,6 +138,7 @@ public class ServerAuthorityActorTests : IDisposable
         public required ConnectionManager Connections;
         public required Dictionary<string, Member> Members;
         public required RecordingTimeProvider Time;
+        public required RecordingLoggerFactory Logs;
 
         public async Task<Dictionary<string, (List<IMessage?> ctrl, List<IMessage?> game)>> StopAndFlushAsync()
         {
@@ -159,8 +161,9 @@ public class ServerAuthorityActorTests : IDisposable
         var connections = new ConnectionManager();
         var lobbies = new LobbyManager();
         var time = new RecordingTimeProvider(Now);
+        var logs = new RecordingLoggerFactory();
         var manager = TestAuthorities.Manager(connections, lobbies, gamesRoot: _root,
-            config: ConfigFactory.FromPairs(config), time: time);
+            config: ConfigFactory.FromPairs(config), time: time, loggerFactory: logs);
 
         Assert.True(lobbies.TryCreate(gameId, memberIds[0], 8, out var lobby, isServerAuthority: true));
         foreach (var id in memberIds) Assert.True(lobby.TryAdd(new Player(id, id)));
@@ -175,7 +178,11 @@ public class ServerAuthorityActorTests : IDisposable
 
         Assert.True(manager.TryStart(lobby, manifest, out var error), error);
         Assert.True(manager.TryGet(lobby.Id, out var actor));
-        return new Rig { Lobby = lobby, Actor = actor, Manager = manager, Connections = connections, Members = members, Time = time };
+        return new Rig
+        {
+            Lobby = lobby, Actor = actor, Manager = manager, Connections = connections,
+            Members = members, Time = time, Logs = logs,
+        };
     }
 
     private const string CounterModule = """
@@ -405,5 +412,157 @@ public class ServerAuthorityActorTests : IDisposable
 
         Assert.Empty(ServerFrames(frames["p1"].game));
         Assert.True(rig.Manager.TryGet(rig.Lobby.Id, out _)); // dropped, not fatal
+    }
+
+    // ── Per-call budget overruns ─────────────────────────────────────────────────────
+    //
+    // A tick that blows the wall-clock budget used to close the lobby on the FIRST occurrence, which
+    // made a game that was merely too slow on its worst turn indistinguishable from a game that was
+    // broken — and disconnected everybody either way. Ticks are the one work item the actor already
+    // treats as droppable (they coalesce, and RequestTick discards one outright when the channel is
+    // full), so a single slow one is a hitch. A module that cannot get through a tick at all still dies.
+
+    /// <summary>Overruns on its first N ticks, then behaves. The counter is bumped BEFORE the stall, so
+    /// the test also shows the module's own state surviving a call that was killed part-way.</summary>
+    private const string SlowTickModule = """
+        export function createAuthority(kb) {
+          let ticks = 0;
+          const slowFor = SLOW_FOR;
+          return {
+            init() {},
+            applyIntent() { return null; },
+            snapshot() { return { ticks }; },
+            tick(dtMs) {
+              ticks += 1;
+              if (ticks <= slowFor) { for (;;) {} }
+              return { ticks };
+            },
+          };
+        }
+        export const config = { tickHz: 20 };
+        """;
+
+    private static string SlowTicks(int n) => SlowTickModule.Replace("SLOW_FOR", n.ToString());
+
+    [Fact]
+    public async Task One_tick_over_budget_is_dropped_and_the_lobby_survives()
+    {
+        var rig = Start(SlowTicks(1), ["p1"],
+            ("KnockBox:AuthorityCallTimeoutMs", "120"),
+            ("KnockBox:AuthorityTickHzMax", "20"));
+
+        rig.Actor.RequestTick();                       // overruns and is dropped
+        await Task.Delay(400, _cts.Token);             // comfortably past the 120 ms budget
+        Assert.False(rig.Actor.Completion.IsCompleted, "the lobby should have survived one overrun");
+
+        rig.Actor.RequestTick();                       // the engine is still usable
+        await Task.Delay(200, _cts.Token);
+        var frames = await rig.StopAndFlushAsync();
+
+        var server = ServerFrames(frames["p1"].game);
+        // The dropped tick re-broadcasts state to converge every client on whatever the module now
+        // believes — its counter DID advance before the stall, which is exactly the partial state the
+        // re-broadcast exists to publish. Then the next tick's delta shows the engine still alive.
+        Assert.Equal("state", server[0].Payload.GetProperty("_kb").GetString());
+        Assert.Equal(1, server[0].Payload.GetProperty("state").GetProperty("ticks").GetInt32());
+        Assert.Equal("delta", server[^1].Payload.GetProperty("_kb").GetString());
+        Assert.Equal(2, server[^1].Payload.GetProperty("patch").GetProperty("ticks").GetInt32());
+    }
+
+    [Fact]
+    public async Task Consecutive_overruns_still_close_the_lobby()
+    {
+        // Tolerating one is not tolerating forever: a module that cannot finish a tick is broken, and
+        // the actor must stop feeding it work rather than burning a core on it every 50 ms.
+        var rig = Start(SlowTicks(99), ["p1"],
+            ("KnockBox:AuthorityCallTimeoutMs", "80"),
+            ("KnockBox:AuthorityMaxConsecutiveOverruns", "3"),
+            ("KnockBox:AuthorityTickHzMax", "20"));
+
+        // RequestTick coalesces, so ask repeatedly rather than three times in a row and assume.
+        for (var i = 0; i < 40 && !rig.Actor.Completion.IsCompleted; i++)
+        {
+            rig.Actor.RequestTick();
+            await Task.Delay(50, _cts.Token);
+        }
+
+        await rig.Actor.Completion;                    // the fatal path breaks the loop without Stop()
+        Assert.False(rig.Manager.TryGet(rig.Lobby.Id, out _));
+        Assert.Contains(rig.Logs.At(LogLevel.Error),
+            m => m.Contains("times in a row", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_call_that_nears_its_budget_is_warned_about_before_anything_breaks()
+    {
+        // The signal whose absence let a fatal overrun ship. A game developer cannot see Jint cost from
+        // a browser, so without this the first news that a module was near its budget was the lobby
+        // closing. Warn below the budget, name the game, and say what the consequence is.
+        var rig = Start("""
+            export function createAuthority(kb) {
+              return {
+                init() {},
+                applyIntent() { return null; },
+                snapshot() { return {}; },
+                tick(dtMs) {
+                  // Real interpreted work, not a clock spin: kb.now() reads the injected TimeProvider,
+                  // which this rig freezes so ticks are deterministic — a module waiting on it would
+                  // wait forever. The warning measures wall time, so the tick has to actually spend it.
+                  let n = 0;
+                  for (let i = 0; i < 300000; i++) n += i;
+                  return { ok: true, n };
+                },
+              };
+            }
+            export const config = { tickHz: 20 };
+            """, ["p1"],
+            // A budget far above what the tick needs, and a threshold far below it: the assertion is
+            // about the warning firing at a FRACTION of budget, not about the tick being near failure.
+            ("KnockBox:AuthorityCallTimeoutMs", "5000"),
+            ("KnockBox:AuthoritySlowCallWarnFraction", "0.001"),
+            ("KnockBox:AuthorityTickHzMax", "20"));
+
+        rig.Actor.RequestTick();
+        await Task.Delay(400, _cts.Token);
+        await rig.StopAndFlushAsync();
+
+        var warning = Assert.Single(rig.Logs.At(LogLevel.Warning),
+            m => m.Contains("per-call budget", StringComparison.Ordinal));
+        Assert.Contains("Exceeding it closes the lobby", warning, StringComparison.Ordinal);
+        Assert.Contains(rig.Lobby.GameId, warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_near_budget_warning_fires_on_each_new_worst_rather_than_every_call()
+    {
+        // A module that sits above the threshold every tick would otherwise emit 20 warnings a second at
+        // the default tick rate, which buries the one line that mattered.
+        var rig = Start("""
+            export function createAuthority(kb) {
+              return {
+                init() {},
+                applyIntent() { return null; },
+                snapshot() { return {}; },
+                tick(dtMs) { let n = 0; for (let i = 0; i < 300000; i++) n += i; return { ok: true, n }; },
+              };
+            }
+            export const config = { tickHz: 20 };
+            """, ["p1"],
+            ("KnockBox:AuthorityCallTimeoutMs", "5000"),
+            ("KnockBox:AuthoritySlowCallWarnFraction", "0.001"),
+            ("KnockBox:AuthorityTickHzMax", "20"));
+
+        for (var i = 0; i < 5; i++)
+        {
+            rig.Actor.RequestTick();
+            await Task.Delay(120, _cts.Token);
+        }
+        await rig.StopAndFlushAsync();
+
+        // Five slow ticks of roughly equal cost: the first is a new worst, the rest are not. Jitter can
+        // make a later one marginally worse, so this pins "not one per call" rather than exactly one.
+        var warnings = rig.Logs.At(LogLevel.Warning)
+            .Count(m => m.Contains("per-call budget", StringComparison.Ordinal));
+        Assert.InRange(warnings, 1, 3);
     }
 }

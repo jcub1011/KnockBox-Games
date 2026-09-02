@@ -23,10 +23,35 @@ public sealed record AuthorityOptions(
     bool Enabled,
     long MaxMemoryBytes,
     // Wall-clock budget per module invocation. A blunt fatal trigger (a GC pause inside the call
-    // counts against it), so the default leaves headroom; MaxStatements is the deterministic
-    // runaway guard.
+    // counts against it), so the default leaves headroom. It is also the ONLY runaway guard armed by
+    // default now — see MaxStatements for the measurement that made that the right trade.
     TimeSpan CallTimeout,
+    // DEFAULTS TO 0 (OFF), and that is a performance decision with a measured number behind it.
+    //
+    // Jint 4.16 splits execution constraints into "amortizable" (checked every N statements — a
+    // countdown decrement and branch) and "exact" (checked before EVERY statement). TimeoutInterval is
+    // amortizable; MaxStatements and LimitMemory are documented as never amortizable, and Jint's own
+    // docs note that an exact constraint "can additionally disable the interpreter's tight-loop lane,
+    // which costs every loop in the program".
+    //
+    // Measured on a real authority module (Alpha Chain, 2,500 ticks, identical deterministic workload,
+    // median of 5 runs): the old default set — timeout + statements + memory + recursion — ran 224 ms.
+    // Dropping MaxStatements alone: 67 ms, a 3.3x speedup. Also dropping the recursion limit in favour
+    // of StackOverflowGuard: 51 ms, 4.4x. That factor is not a micro-optimisation; it is the difference
+    // between a game fitting in CallTimeout and its lobby being killed, and every hosted game paid it.
+    //
+    // What is lost: MaxStatements was the DETERMINISTIC runaway guard, so a runaway loop is now caught
+    // by the wall clock instead, which is load-sensitive (a GC pause counts against it). The lobby dies
+    // either way; only the exact moment becomes less reproducible. Set a non-zero value to arm it again
+    // — and expect roughly a 3x interpreter slowdown for every authority game on the server when you do.
     int MaxStatements,
+    // DEFAULTS TO 0 (OFF) in favour of ConstraintOptions.StackOverflowGuard, which is both cheaper and
+    // strictly wider. Per Jint's docs LimitRecursion "is probed at the call expression only", so `new`,
+    // getters/setters, valueOf/toString coercions, Proxy traps and host callbacks all reach a function
+    // body without passing it; the guard measures the remaining native stack instead and so covers every
+    // route, at a documented 1.7-2.3% cost on recursion-heavy code. Jint gives MaxRecursionDepth
+    // precedence when both are set, so a non-zero value here disarms the wider guard — set it only to
+    // reproduce old behaviour.
     int RecursionLimit,
     // Clamp on a module's requested config.tickHz.
     double TickHzMax,
@@ -46,17 +71,54 @@ public sealed record AuthorityOptions(
     // (0 = keep for the process lifetime). Defaulted rather than required so the one test that builds this
     // record by hand keeps compiling; FromConfiguration is the only caller with a policy to state.
     // Also read live — see AuthorityModuleCache.EvictIdle and ServerAuthorityManager.SweepModuleCache.
-    TimeSpan ModuleCacheIdle = default)
+    TimeSpan ModuleCacheIdle = default,
+    // Structural bound on `new Array(n)` and array growth, which is the one allocation shape a wall clock
+    // is bad at catching: a single statement can ask for billions of slots. Cheap because it is checked
+    // at the array operation rather than per statement, so it is the part of the memory story that
+    // survives MaxStatements being off.
+    uint MaxArrayLength = AuthorityOptions.DefaultMaxArrayLength,
+    // Fraction of CallTimeout a single module call may reach before the server logs a warning naming the
+    // game. THE POINT OF THIS KNOB: a game developer cannot measure Jint cost from a browser — solo play
+    // runs the same code in V8 over an in-memory array under a JIT — so the first signal that a module is
+    // near its budget used to be the lobby dying. 0 disables the warning.
+    double SlowCallWarnFraction = AuthorityOptions.DefaultSlowCallWarnFraction,
+    // How many CONSECUTIVE recoverable overruns (a timeout or statement trip on a coalesced tick) are
+    // tolerated before the lobby is torn down. See ServerAuthority: a tick is droppable by design, so one
+    // slow one is a hitch rather than a reason to end everybody's game; a module that cannot get through
+    // a tick at all still dies, just after N tries instead of one.
+    int MaxConsecutiveOverruns = AuthorityOptions.DefaultMaxConsecutiveOverruns,
+    // Cap on how many words a single kb.words.pickRange call may return. Bounds both the JS array a
+    // module can conjure in one crossing and the strings the host allocates to fill it.
+    int MaxWordsPerCall = AuthorityOptions.DefaultMaxWordsPerCall,
+    // Per-game CallTimeout overrides, keyed by game id (KnockBox:AuthorityCallTimeoutMsByGame:<id>).
+    // Read at engine construction like every other per-call constraint, so a change applies to lobbies
+    // started afterwards — which is why this is configuration and not a portal knob (see
+    // OperatorAuthorityOptions on knobs that would lie about when they take effect).
+    IReadOnlyDictionary<string, int>? CallTimeoutMsByGame = null)
 {
     public const long DefaultMaxScriptBytes = 1_048_576;
     public const long DefaultMaxWordFileBytes = 33_554_432;
+    public const uint DefaultMaxArrayLength = 10_000_000;
+    public const double DefaultSlowCallWarnFraction = 0.5;
+    public const int DefaultMaxConsecutiveOverruns = 3;
+    public const int DefaultMaxWordsPerCall = 512;
+
+    /// <summary>The wall-clock budget one call of <paramref name="gameId"/>'s module gets: its own
+    /// override when an operator configured one, otherwise the server-wide <see cref="CallTimeout"/>.</summary>
+    public TimeSpan CallTimeoutFor(string gameId) =>
+        CallTimeoutMsByGame is { } map && map.TryGetValue(gameId, out var ms) && ms > 0
+            ? TimeSpan.FromMilliseconds(ms)
+            : CallTimeout;
 
     public static AuthorityOptions FromConfiguration(IConfiguration config) => new(
         config.GetValue("KnockBox:AuthorityEnabled", true),
         config.GetValue("KnockBox:AuthorityMaxMemoryBytes", 33_554_432L),
         TimeSpan.FromMilliseconds(config.GetValue("KnockBox:AuthorityCallTimeoutMs", 250)),
-        config.GetValue("KnockBox:AuthorityMaxStatements", 1_000_000),
-        config.GetValue("KnockBox:AuthorityRecursionLimit", 64),
+        // Both default to 0 = off. See the members for the measurement; the short version is that the
+        // pair cost a 4.4x interpreter slowdown for every authority game to re-guard what the amortized
+        // wall-clock timeout and StackOverflowGuard already cover.
+        config.GetValue("KnockBox:AuthorityMaxStatements", 0),
+        config.GetValue("KnockBox:AuthorityRecursionLimit", 0),
         config.GetValue("KnockBox:AuthorityTickHzMax", 20.0),
         config.GetValue("KnockBox:AuthorityMaxScriptBytes", DefaultMaxScriptBytes),
         config.GetValue("KnockBox:AuthorityMaxWordFileBytes", DefaultMaxWordFileBytes),
@@ -64,5 +126,25 @@ public sealed record AuthorityOptions(
         // 0 = unlimited. See the sizing note above: the host (and the container's memory limit) is the
         // bound by default, and an operator who wants a hard refusal sets this from the portal.
         config.GetValue("KnockBox:AuthorityMaxLobbies", 0),
-        TimeSpan.FromMinutes(config.GetValue("KnockBox:AuthorityModuleCacheIdleMinutes", 30)));
+        TimeSpan.FromMinutes(config.GetValue("KnockBox:AuthorityModuleCacheIdleMinutes", 30)),
+        config.GetValue("KnockBox:AuthorityMaxArrayLength", DefaultMaxArrayLength),
+        config.GetValue("KnockBox:AuthoritySlowCallWarnFraction", DefaultSlowCallWarnFraction),
+        config.GetValue("KnockBox:AuthorityMaxConsecutiveOverruns", DefaultMaxConsecutiveOverruns),
+        config.GetValue("KnockBox:AuthorityMaxWordsPerCall", DefaultMaxWordsPerCall),
+        ReadCallTimeoutOverrides(config));
+
+    /// <summary>Reads the per-game timeout overrides. An absent section yields null rather than an empty
+    /// map, so the common case carries no dictionary at all.</summary>
+    private static IReadOnlyDictionary<string, int>? ReadCallTimeoutOverrides(IConfiguration config)
+    {
+        var section = config.GetSection("KnockBox:AuthorityCallTimeoutMsByGame");
+        if (!section.Exists()) return null;
+        Dictionary<string, int>? map = null;
+        foreach (var child in section.GetChildren())
+        {
+            if (!int.TryParse(child.Value, out var ms) || ms <= 0) continue;
+            (map ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase))[child.Key] = ms;
+        }
+        return map;
+    }
 }

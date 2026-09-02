@@ -17,6 +17,16 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 using Serilog;
 
+// `--authority-bench <game-dir>` runs a game's authority module under the real Jint runtime, reports
+// how close each export gets to its per-call budget, and exits — no listener, no lobbies. It lives
+// here because the budget only means something inside this process's engine and constraint set; a
+// game developer has no other way to measure it, and its absence is how a module that could not fit
+// its budget reached real players. Non-zero exit on an overrun, so CI can gate on it.
+// Environment.Exit rather than `return benchExit`: top-level statements infer their return type from
+// the whole file, so returning a value here would make the entry point int-returning and demand one
+// from every other path — including after app.Run().
+if (AuthorityBench.TryRun(args, out var benchExit)) Environment.Exit(benchExit);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Where web/, games/, and logs/ live: explicit config wins, else repo discovery (dev), else the

@@ -48,11 +48,25 @@ public sealed class ServerAuthority
     // who never opens the dashboard pays nothing for it.
     private readonly AuthorityMetrics? _metrics;
 
+    /// <summary>This lobby's per-call wall-clock budget and the fraction of it that earns a warning.
+    /// Held here rather than read from options each time because the drain loop touches them per call.</summary>
+    private readonly TimeSpan _callBudget;
+    private readonly long _slowCallWarnTicks;   // 0 = warnings disabled
+    private readonly int _maxConsecutiveOverruns;
+
     private readonly Channel<AuthorityWork> _channel;
     private ITimer? _tickTimer;
     private int _tickPending;
     private DateTimeOffset _lastTick;
     private int _consecutiveFailures;
+    /// <summary>Consecutive recoverable overruns (see AuthorityConstraintException.IsRecoverable).
+    /// Separate from _consecutiveFailures because they mean different things: a module that THROWS is
+    /// buggy, a module that overruns is too slow, and a lobby can be some of one without being any of
+    /// the other. Reset by any call that completes.</summary>
+    private int _consecutiveOverruns;
+    /// <summary>Slowest call seen, so the near-budget warning fires on each NEW worst rather than on
+    /// every call once a module is generally slow — a per-call log line at 20 Hz is its own outage.</summary>
+    private long _worstCallTicks;
 
     public Lobby Lobby => _lobby;
 
@@ -80,6 +94,12 @@ public sealed class ServerAuthority
         _authorityLogger = authorityLogger;
         _relayContainedErrors = relayContainedErrors;
         _onFatal = onFatal;
+
+        _callBudget = options.CallTimeoutFor(lobby.GameId);
+        _maxConsecutiveOverruns = Math.Max(1, options.MaxConsecutiveOverruns);
+        _slowCallWarnTicks = options.SlowCallWarnFraction > 0
+            ? (long)(_callBudget.TotalSeconds * options.SlowCallWarnFraction * Stopwatch.Frequency)
+            : 0;
 
         _channel = Channel.CreateBounded<AuthorityWork>(new BoundedChannelOptions(options.QueueCapacity)
         {
@@ -159,8 +179,12 @@ public sealed class ServerAuthority
                 try
                 {
                     Process(work);
-                    _metrics?.RecordCall(_lobby.GameId, Stopwatch.GetTimestamp() - started);
+                    var elapsed = Stopwatch.GetTimestamp() - started;
+                    _metrics?.RecordCall(_lobby.GameId, elapsed,
+                        nearBudget: _slowCallWarnTicks > 0 && elapsed >= _slowCallWarnTicks);
+                    WarnIfNearBudget(work, elapsed);
                     _consecutiveFailures = 0;
+                    _consecutiveOverruns = 0;
                 }
                 catch (AuthorityScriptException ex)
                 {
@@ -168,6 +192,11 @@ public sealed class ServerAuthority
                     // the point of throwing. Excluding it would understate a module that mostly fails.
                     _metrics?.RecordCall(_lobby.GameId, Stopwatch.GetTimestamp() - started, failed: true);
                     if (!HandleContainedFailure(work, ex)) break; // escalated to fatal
+                }
+                catch (AuthorityConstraintException ex) when (ex.IsRecoverable && work is TickWork)
+                {
+                    _metrics?.RecordCall(_lobby.GameId, Stopwatch.GetTimestamp() - started, failed: true);
+                    if (!HandleOverrun(ex)) break; // escalated to fatal
                 }
                 catch (Exception ex) // AuthorityConstraintException or anything unexpected
                 {
@@ -184,6 +213,66 @@ public sealed class ServerAuthority
             _tickTimer = null;
             _runtime.Dispose(); // the engine is single-threaded: dispose HERE, on the drain task
         }
+    }
+
+    /// <summary>Logs when one call reaches a configured fraction of its budget, on each new worst.
+    ///
+    /// This is the signal whose absence let a fatal overrun ship. A game developer runs their module in a
+    /// browser, where it is JIT-compiled V8 over an in-memory dictionary and a turn costs microseconds;
+    /// the same call here is interpreted, and the first time anyone learned it was near 250 ms was when
+    /// the lobby died mid-match. Naming the game and the export makes the warning actionable from a log
+    /// nobody was watching for it.</summary>
+    private void WarnIfNearBudget(AuthorityWork work, long elapsedTicks)
+    {
+        if (_slowCallWarnTicks == 0 || elapsedTicks < _slowCallWarnTicks) return;
+        // Only a NEW worst is worth a line: a module that sits at 60% of budget every tick would
+        // otherwise emit 20 identical warnings a second, which buries the one that matters.
+        if (elapsedTicks <= _worstCallTicks) return;
+        _worstCallTicks = elapsedTicks;
+
+        var ms = elapsedTicks * 1000d / Stopwatch.Frequency;
+        _logger.LogWarning(
+            "Authority for game {GameId} (lobby {LobbyId}) spent {ElapsedMs:F1} ms on {Work} — {Percent:F0}% of its "
+            + "{BudgetMs:F0} ms per-call budget. Exceeding it closes the lobby. Browser timings do not predict this: "
+            + "the module runs interpreted here, with every kb.words query crossing the sandbox boundary.",
+            _lobby.GameId, _lobby.Id, ms, work.GetType().Name, ms * 100 / _callBudget.TotalMilliseconds,
+            _callBudget.TotalMilliseconds);
+    }
+
+    /// <summary>A tick blew its budget. Drop it and keep the lobby, until that stops being defensible.
+    ///
+    /// Ticks are the one work item the actor already treats as droppable — they coalesce, and RequestTick
+    /// discards one outright when the channel is full — so a single slow one is a hitch, not a reason to
+    /// end everybody's game. Being killed by the FIRST one is what made a game that was merely too slow
+    /// on its worst turn indistinguishable from a game that was broken. A module that cannot get through
+    /// a tick at all still dies, just after MaxConsecutiveOverruns of them.
+    ///
+    /// The engine survives this the same way it survives a module throw: Jint unwound the call and its
+    /// own state is consistent. What may be partial is the MODULE's state, so the response is the
+    /// contained path's — discard the call's effects and re-broadcast, converging every client on
+    /// whatever the module now believes. Returns false when escalating to fatal.</summary>
+    private bool HandleOverrun(AuthorityConstraintException ex)
+    {
+        _metrics?.RecordOverrun(_lobby.GameId);
+        _runtime.DrainEffects(); // a failed call's partial effects must not leak into the next one
+
+        if (++_consecutiveOverruns >= _maxConsecutiveOverruns)
+        {
+            _logger.LogError(ex,
+                "Authority for lobby {LobbyId} (game {GameId}) exceeded its {BudgetMs:F0} ms per-call budget "
+                + "{Count} times in a row — closing the lobby",
+                _lobby.Id, _lobby.GameId, _callBudget.TotalMilliseconds, _consecutiveOverruns);
+            _onFatal(this, "authority-failed");
+            return false;
+        }
+
+        _logger.LogWarning(ex,
+            "Authority for game {GameId} (lobby {LobbyId}) exceeded its {BudgetMs:F0} ms per-call budget on a tick "
+            + "({Count} of {Max} before the lobby closes) — dropping the tick. The module is doing too much work in "
+            + "one call; kb.budgetRemainingMs() lets it stop on its own terms instead.",
+            _lobby.GameId, _lobby.Id, _callBudget.TotalMilliseconds, _consecutiveOverruns, _maxConsecutiveOverruns);
+        BroadcastState();
+        return true;
     }
 
     // The §7 contained path: the module threw inside one call — engine state is still consistent.

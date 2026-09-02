@@ -133,6 +133,30 @@ public class WordPoolTests
     }
 
     [Fact]
+    public void Shared_prefix_fixture_matches_the_local_emulation()
+    {
+        // SHARED FIXTURE — must stay byte-identical to the JS parity test in
+        // clients/phaser/__tests__/knockbox-local-words.test.js ("local kb.words — prefix ranges").
+        // Two length buckets, each with a run inside a run, so an off-by-one in either bound shows up.
+        //
+        // The parity matters more here than for `pick`: a game resolves its draw bounds through
+        // rangeOfPrefix and then indexes with pickOfLength, so a local emulation that disagreed by one
+        // would hand the developer a working game in the tab and an off-by-one one on the server.
+        string[] fixture = ["cat", "cow", "cub", "ant", "zip", "cake", "calm", "cart", "chip", "able"];
+        var set = WordPoolSet.Build(fixture);
+
+        // len 3 sorted: ant cat cow cub zip     len 4 sorted: able cake calm cart chip
+        Assert.Equal((0, 5), set.RangeOfPrefix(3, ""));
+        Assert.Equal((1, 4), set.RangeOfPrefix(3, "c"));
+        Assert.Equal((1, 2), set.RangeOfPrefix(3, "ca"));
+        Assert.Equal((4, 5), set.RangeOfPrefix(3, "z"));
+        Assert.Equal((1, 5), set.RangeOfPrefix(4, "c"));
+        Assert.Equal((1, 4), set.RangeOfPrefix(4, "ca"));
+        Assert.Equal((4, 5), set.RangeOfPrefix(4, "ch"));
+        Assert.Equal((0, 1), set.RangeOfPrefix(4, "able"));
+    }
+
+    [Fact]
     public void Set_global_index_throws_out_of_range()
     {
         var set = WordPoolSet.Build(["ax", "be"]);

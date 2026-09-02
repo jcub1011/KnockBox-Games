@@ -82,7 +82,12 @@ public sealed record AdminGameRelayMetrics(
     double AuthorityCpuSeconds,
     double AuthorityAverageMs,
     double AuthorityMaxMs,
-    long AuthorityErrors
+    long AuthorityErrors,
+    // How close this game runs to its per-call budget, which the other four numbers cannot answer:
+    // an average hides a spike, and a max cannot say whether it happened once or every turn. Non-zero
+    // AuthorityOverruns means players have already felt it.
+    long AuthorityNearBudget,
+    long AuthorityOverruns
 );
 
 // ── Metric history (§5.2) ────────────────────────────────────────────────────

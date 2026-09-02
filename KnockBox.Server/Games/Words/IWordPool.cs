@@ -51,4 +51,18 @@ public interface IWordPool
     /// build time; non-ASCII queries always return false.
     /// </summary>
     bool Contains(ReadOnlySpan<char> word);
+
+    /// <summary>
+    /// The half-open index range <c>[Start, End)</c> within length bucket <paramref name="length"/> of
+    /// the words beginning with <paramref name="prefix"/> — the bounds a game needs to sample or walk
+    /// "words of length L starting with P" without ever scanning. Empty when the bucket or the prefix
+    /// has no words; an empty prefix is the whole bucket.
+    /// </summary>
+    /// <remarks>
+    /// Indices address the same space as <see cref="GetWord(int, int)"/>, so a range is directly usable
+    /// as draw bounds. It is on the interface rather than left to callers because the search belongs on
+    /// this side of the sandbox boundary: a module doing it through <c>pickOfLength</c> pays an
+    /// interpreted loop and a marshalled string per probe.
+    /// </remarks>
+    (int Start, int End) RangeOfPrefix(int length, ReadOnlySpan<char> prefix);
 }

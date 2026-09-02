@@ -20,7 +20,11 @@ internal static class TestAuthorities
         ConnectionManager connections, LobbyManager lobbies,
         string? gamesRoot = null, IConfiguration? config = null,
         TimeProvider? time = null, bool isDevelopment = false,
-        IAuthorityWordService? words = null, LobbyCloser? closer = null) =>
+        IAuthorityWordService? words = null, LobbyCloser? closer = null,
+        // Optional so every existing caller stays unchanged. Supplied by the tests that assert on the
+        // actor's own diagnostics — the near-budget warning has no other observable effect, and a
+        // warning nobody can prove fires is a warning that can silently stop firing.
+        ILoggerFactory? loggerFactory = null) =>
         // The manager resolves a game's folder through a delegate (the catalog does it for real, since
         // a packaged game lives under the unpacked-package root); tests keep the simple layout.
         // It tears lobbies down through a LobbyCloser rather than the LobbyManager directly (that
@@ -32,7 +36,52 @@ internal static class TestAuthorities
             closer ?? new LobbyCloser(lobbies, connections, NullLogger<LobbyCloser>.Instance),
             time ?? TimeProvider.System,
             words ?? new AuthorityWordService(NullLogger<AuthorityWordService>.Instance),
-            isDevelopment, NullLoggerFactory.Instance);
+            isDevelopment, loggerFactory ?? NullLoggerFactory.Instance);
+}
+
+/// <summary>
+/// An <see cref="ILoggerFactory"/> that records every line from every category, so a test can assert on
+/// diagnostics the way an operator would read them.
+/// </summary>
+/// <remarks>
+/// The sibling of <see cref="RecordingLogger{T}"/> for the components that are handed a FACTORY rather
+/// than a logger — <c>ServerAuthorityManager</c> builds its own per-lobby loggers, so there is no single
+/// instance to inject. Renders through the supplied formatter for the same reason: a test then sees
+/// exactly the string that reaches the log.
+/// </remarks>
+internal sealed class RecordingLoggerFactory : ILoggerFactory
+{
+    private readonly List<(string Category, LogLevel Level, string Message)> _lines = [];
+
+    /// <summary>A snapshot copy — the authority actor logs from its own drain task, so a caller
+    /// enumerating the live list could race a write.</summary>
+    public IReadOnlyList<(string Category, LogLevel Level, string Message)> Lines
+    {
+        get { lock (_lines) return _lines.ToList(); }
+    }
+
+    public IEnumerable<string> At(LogLevel level) =>
+        Lines.Where(l => l.Level == level).Select(l => l.Message);
+
+    public ILogger CreateLogger(string categoryName) => new Sink(this, categoryName);
+    public void AddProvider(ILoggerProvider provider) { }
+    public void Dispose() { }
+
+    private void Record(string category, LogLevel level, string message)
+    {
+        lock (_lines) _lines.Add((category, level, message));
+    }
+
+    private sealed class Sink(RecordingLoggerFactory owner, string category) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        // True for every level, matching RecordingLogger: a test asking whether something was logged at
+        // Warning rather than Information needs the component to have been willing to log both.
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            owner.Record(category, logLevel, formatter(state, exception));
+    }
 }
 
 /// <summary>A TimeProvider whose "now" can be set/advanced, for deterministic expiry tests.</summary>

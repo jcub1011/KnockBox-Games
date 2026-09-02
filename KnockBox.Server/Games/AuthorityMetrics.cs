@@ -29,6 +29,8 @@ public sealed class AuthorityMetrics
         public long Ticks;       // stopwatch ticks, converted on read
         public long Errors;
         public long MaxCallTicks;
+        public long NearBudget;  // calls that reached the warn fraction of their budget
+        public long Overruns;    // calls that blew it outright
     }
 
     private readonly ConcurrentDictionary<string, Counters> _byGame = new(StringComparer.OrdinalIgnoreCase);
@@ -38,12 +40,20 @@ public sealed class AuthorityMetrics
     /// <param name="CpuSeconds">Total time spent inside them. See the class remarks on what this measures.</param>
     /// <param name="MaxCallMs">The slowest single call — the number that catches a module that occasionally
     /// stalls, which an average over thousands of cheap ticks hides completely.</param>
+    /// <param name="NearBudgetCalls">Calls that reached the configured warn fraction of the per-call
+    /// budget. The leading indicator: a module that is occasionally close is one bad turn — or one busier
+    /// host — away from having its lobbies closed, and neither the average nor the max says how OFTEN
+    /// that happens.</param>
+    /// <param name="Overruns">Calls that blew the budget outright. Non-zero means players have already
+    /// been affected: a dropped tick at best, a closed lobby once they stack up.</param>
     public readonly record struct GameAuthority(
         string GameId,
         long Calls,
         double CpuSeconds,
         long Errors,
-        double MaxCallMs)
+        double MaxCallMs,
+        long NearBudgetCalls,
+        long Overruns)
     {
         /// <summary>Mean call cost in milliseconds, or 0 when nothing has run.</summary>
         public double AverageCallMs => Calls == 0 ? 0 : CpuSeconds * 1000 / Calls;
@@ -51,12 +61,15 @@ public sealed class AuthorityMetrics
 
     /// <summary>Records one completed module call.</summary>
     /// <param name="elapsedTicks">A <see cref="Stopwatch"/> tick count, not a <see cref="TimeSpan"/> tick count.</param>
-    public void RecordCall(string gameId, long elapsedTicks, bool failed = false)
+    /// <param name="failed">The call threw or tripped a constraint.</param>
+    /// <param name="nearBudget">The call reached the configured warn fraction of its per-call budget.</param>
+    public void RecordCall(string gameId, long elapsedTicks, bool failed = false, bool nearBudget = false)
     {
         var counters = _byGame.GetOrAdd(gameId, static _ => new Counters());
         Interlocked.Increment(ref counters.Calls);
         Interlocked.Add(ref counters.Ticks, elapsedTicks);
         if (failed) Interlocked.Increment(ref counters.Errors);
+        if (nearBudget) Interlocked.Increment(ref counters.NearBudget);
 
         // Compare-exchange loop rather than a lock: contention is per game and this is off the hot path of
         // everything except a very busy authority game.
@@ -68,6 +81,13 @@ public sealed class AuthorityMetrics
             observed = previous;
         }
     }
+
+    /// <summary>Records one call that exceeded its per-call budget rather than merely approaching it.</summary>
+    /// <remarks>Separate from the <c>failed</c> flag on <see cref="RecordCall"/>, which also counts a
+    /// module that threw: "your game is buggy" and "your game is too slow for this server" are different
+    /// problems with different fixes, and a single error count cannot tell an operator which they have.</remarks>
+    public void RecordOverrun(string gameId) =>
+        Interlocked.Increment(ref _byGame.GetOrAdd(gameId, static _ => new Counters()).Overruns);
 
     /// <summary>Point-in-time snapshot, busiest game first. Allocates a list per call; the dashboard's rate.</summary>
     public IReadOnlyList<GameAuthority> Snapshot()
@@ -81,7 +101,9 @@ public sealed class AuthorityMetrics
                 Volatile.Read(ref c.Calls),
                 (double)ticks / Stopwatch.Frequency,
                 Volatile.Read(ref c.Errors),
-                (double)Volatile.Read(ref c.MaxCallTicks) * 1000 / Stopwatch.Frequency));
+                (double)Volatile.Read(ref c.MaxCallTicks) * 1000 / Stopwatch.Frequency,
+                Volatile.Read(ref c.NearBudget),
+                Volatile.Read(ref c.Overruns)));
         }
         rows.Sort((a, b) => b.CpuSeconds.CompareTo(a.CpuSeconds));
         return rows;
@@ -93,7 +115,9 @@ public sealed class AuthorityMetrics
             ? new GameAuthority(gameId, Volatile.Read(ref c.Calls),
                 (double)Volatile.Read(ref c.Ticks) / Stopwatch.Frequency,
                 Volatile.Read(ref c.Errors),
-                (double)Volatile.Read(ref c.MaxCallTicks) * 1000 / Stopwatch.Frequency)
+                (double)Volatile.Read(ref c.MaxCallTicks) * 1000 / Stopwatch.Frequency,
+                Volatile.Read(ref c.NearBudget),
+                Volatile.Read(ref c.Overruns))
             : null;
 
     /// <summary>

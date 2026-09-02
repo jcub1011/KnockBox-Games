@@ -14,6 +14,87 @@ beforeEach(() => _resetLocalHubs());
 const FIXTURE = ['Dog', 'be', 'CAT', 'ax', 'dog', 'eel', 'café'];
 const EXPECTED_ORDER = ['ax', 'be', 'cat', 'dog', 'eel']; // length asc, ordinal within
 
+// SHARED FIXTURE for the range primitives — must stay byte-identical to the C# test
+// KnockBox.Server.Tests/WordPoolTests.Shared_prefix_fixture_matches_the_local_emulation.
+// Two length buckets, each with a run inside a run, so an off-by-one in either bound shows up.
+const RANGE_FIXTURE = ['cat', 'cow', 'cub', 'ant', 'zip', 'cake', 'calm', 'cart', 'chip', 'able'];
+
+describe('local kb.words — prefix ranges', () => {
+  // len 3 sorted: ant cat cow cub zip     len 4 sorted: able cake calm cart chip
+  const CASES = [
+    [3, '', [0, 5]],
+    [3, 'c', [1, 4]],
+    [3, 'ca', [1, 2]],
+    [3, 'z', [4, 5]],
+    [4, 'c', [1, 5]],
+    [4, 'ca', [1, 4]],
+    [4, 'ch', [4, 5]],
+    [4, 'able', [0, 1]],
+  ];
+
+  it('brackets the same words the server does (shared fixture)', () => {
+    const w = _buildLocalWords({ en: RANGE_FIXTURE });
+    for (const [len, prefix, expected] of CASES) {
+      expect(w.rangeOfPrefix('en', len, prefix), `len ${len} prefix "${prefix}"`).toEqual(expected);
+    }
+  });
+
+  it('agrees with walking the bucket by hand', () => {
+    // The property a subtle binary-search bug breaks: the bounds are exactly the words a linear
+    // scan would have accepted, in the same order.
+    const w = _buildLocalWords({ en: RANGE_FIXTURE });
+    for (const len of [3, 4]) {
+      const all = [];
+      for (let i = 0; i < w.countOfLength('en', len); i++) all.push(w.pickOfLength('en', len, i));
+      for (const prefix of ['a', 'c', 'ca', 'ch', 'z', 'q', '']) {
+        const [start, end] = w.rangeOfPrefix('en', len, prefix);
+        expect(all.slice(start, end)).toEqual(all.filter((x) => x.startsWith(prefix)));
+      }
+    }
+  });
+
+  it('reports an empty range rather than a wrong one for a prefix with no words', () => {
+    // Empty is start === end, not [0, 0]: a prefix that sorts between two runs lands at its
+    // insertion point. Callers rely on `for (let i = start; i < end; i++)`, which is correct either way.
+    const w = _buildLocalWords({ en: RANGE_FIXTURE });
+    for (const [len, prefix] of [[3, 'q'], [9, 'c'], [3, 'cats'], [3, 'é']]) {
+      const [start, end] = w.rangeOfPrefix('en', len, prefix);
+      expect(start, `len ${len} prefix "${prefix}"`).toBe(end);
+    }
+  });
+
+  it('folds case exactly as has() does', () => {
+    expect(_buildLocalWords({ en: RANGE_FIXTURE }).rangeOfPrefix('en', 4, 'CA')).toEqual([1, 4]);
+    const sensitive = _buildLocalWords({ en: { words: RANGE_FIXTURE, caseInsensitive: false } });
+    const [start, end] = sensitive.rangeOfPrefix('en', 4, 'CA');
+    expect(start).toBe(end);
+  });
+
+  it('returns null for an unknown dictionary or a non-string prefix, like the server', () => {
+    const w = _buildLocalWords({ en: RANGE_FIXTURE });
+    expect(w.rangeOfPrefix('nope', 3, 'c')).toBeNull();
+    expect(w.rangeOfPrefix('en', 3, 42)).toBeNull();
+  });
+});
+
+describe('local kb.words — pickRange', () => {
+  it('returns the slice and clamps to the bucket', () => {
+    const w = _buildLocalWords({ en: RANGE_FIXTURE });
+    expect(w.pickRange('en', 4, 1, 3)).toEqual(['cake', 'calm', 'cart']);
+    expect(w.pickRange('en', 4, 3, 99)).toEqual(['cart', 'chip']); // past the end yields what exists
+    expect(w.pickRange('en', 4, 99, 5)).toEqual([]);
+    expect(w.pickRange('en', 4, 0, 0)).toEqual([]);
+    expect(w.pickRange('en', 9, 0, 5)).toEqual([]);               // no such length
+    expect(w.pickRange('nope', 4, 0, 1)).toBeNull();
+  });
+
+  it('composes with rangeOfPrefix the way a module would use them', () => {
+    const w = _buildLocalWords({ en: RANGE_FIXTURE });
+    const [start, end] = w.rangeOfPrefix('en', 4, 'ca');
+    expect(w.pickRange('en', 4, start, end - start)).toEqual(['cake', 'calm', 'cart']);
+  });
+});
+
 describe('local kb.words — capability', () => {
   it('pick sequence matches the server (shared fixture)', () => {
     const w = _buildLocalWords({ en: FIXTURE });

@@ -479,9 +479,14 @@ New `AuthorityOptions` record (`ServerLimits.FromConfiguration` pattern), all un
 |---|---|---|
 | `AuthorityEnabled` | `true` | Master switch. When `false`, creating a lobby for a `serverAuthority` game fails with a clear error (no silent host-mode downgrade). |
 | `AuthorityMaxMemoryBytes` | 33554432 (32 MB) | Per-engine memory limit (Jint `LimitMemory` / WASM store limit). |
-| `AuthorityCallTimeoutMs` | 250 | Wall-clock budget per module invocation. Wall-clock is a blunt fatal trigger (a GC pause or thread-pool stall inside the call counts against it), so the default leaves headroom; `AuthorityMaxStatements` is the deterministic runaway guard. |
-| `AuthorityMaxStatements` | 1000000 | Statement/fuel budget per invocation. |
-| `AuthorityRecursionLimit` | 64 | Call-depth limit (Jint). |
+| `AuthorityCallTimeoutMs` | 250 | Wall-clock budget per module invocation, and the only runaway guard armed by default. A blunt fatal trigger (a GC pause or thread-pool stall inside the call counts against it), so the default leaves headroom. |
+| `AuthorityMaxStatements` | 0 (off) | Statement/fuel budget per invocation. Opt-in: Jint 4.16 checks *exact* (non-amortizable) constraints before every statement and disarms its tight-loop lanes while two are registered; `MaxStatements` and `LimitMemory` are both exact, `TimeoutInterval` is not. Arming the pair measured **4.4x slower** on a real module (2,500 ticks, identical deterministic workload, median of 5 runs: 224 ms armed vs 51 ms not), to re-guard runaway CPU that the wall clock already bounds. |
+| `AuthorityRecursionLimit` | 0 (off) | Call-depth limit (Jint), superseded by `StackOverflowGuard`. Setting it narrows the guard back to call expressions only. |
+| `AuthorityMaxArrayLength` | 10000000 | Structural bound on array size — what a wall clock cannot catch in a single statement. |
+| `AuthoritySlowCallWarnFraction` | 0.5 | Warn when one call reaches this fraction of its budget. `0` disables. |
+| `AuthorityMaxConsecutiveOverruns` | 3 | Consecutive tick overruns tolerated before the lobby closes. |
+| `AuthorityMaxWordsPerCall` | 512 | Cap on `kb.words.pickRange` results. |
+| `AuthorityCallTimeoutMsByGame:<gameId>` | — | Per-game override of the call budget; applies to lobbies started after the change. |
 | `AuthorityTickHzMax` | 20 | Clamp on a module's requested `config.tickHz`. |
 | `AuthorityMaxScriptBytes` | 1048576 (1 MB) | Max module file size (checked at discovery and load). |
 | `AuthorityMaxWordFileBytes` | 33554432 (32 MB) | Max size of a single `authorityWords` dictionary file (checked at discovery). Larger than the module cap because dictionaries are the big blobs; they live on the shared CLR heap, not in a per-invocation budget. |
