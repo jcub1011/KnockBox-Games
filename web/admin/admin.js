@@ -2223,6 +2223,19 @@ function resetLogStream() {
   refreshLogs();
 }
 
+export function openTerminalWindow() {
+  const width = Math.min(1100, Math.floor(window.screen?.availWidth ? window.screen.availWidth * 0.85 : 1100));
+  const height = Math.min(750, Math.floor(window.screen?.availHeight ? window.screen.availHeight * 0.8 : 750));
+  const left = Math.max(0, Math.floor(((window.screen?.availWidth || 1200) - width) / 2));
+  const top = Math.max(0, Math.floor(((window.screen?.availHeight || 800) - height) / 2));
+  const features = `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`;
+  const win = window.open('terminal.html', 'KnockBoxLogsTerminal', features);
+  if (win) {
+    win.focus();
+  }
+  return win;
+}
+
 async function openLogFiles() {
   const data = await getJson('/admin/api/logs/files');
   if (!data) return;
@@ -3362,6 +3375,7 @@ function wire() {
   el('log-filter-q')?.addEventListener('input', resetLogStream);
   el('log-follow')?.addEventListener('change', () => { if (el('log-follow').checked) refreshLogs(); });
   el('log-files-btn')?.addEventListener('click', openLogFiles);
+  el('log-popout-btn')?.addEventListener('click', openTerminalWindow);
   el('files-close')?.addEventListener('click', () => el('files-backdrop').classList.add('hidden'));
 
   el('confirm-ok')?.addEventListener('click', () => settleConfirm(true));

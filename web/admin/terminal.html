@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KnockBox Logs Terminal</title>
+  <link rel="icon" type="image/png" href="/favicons/cat-sketch.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Outfit:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="/admin.css" />
+  <style>
+    /* Dedicated Terminal Window Styles */
+    :root {
+      --terminal-header-height: 48px;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      height: 100dvh;
+      overflow: hidden;
+      background-color: #07060c;
+      color: var(--text-main);
+      font-family: var(--font-body);
+    }
+
+    #terminal-app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      height: 100dvh;
+      width: 100%;
+      overflow: hidden;
+    }
+
+    /* Terminal Header Bar */
+    .terminal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      padding: 0.45rem 1rem;
+      background-color: var(--bg-surface);
+      border-bottom: 1px solid var(--border-default);
+      flex-shrink: 0;
+      z-index: 10;
+      min-height: var(--terminal-header-height);
+      box-sizing: border-box;
+    }
+
+    .terminal-brand-group {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .terminal-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--accent-mint);
+      letter-spacing: 0.05em;
+    }
+
+    .terminal-badge svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .terminal-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      padding: 0.2rem 0.55rem;
+      border-radius: var(--radius-pill);
+      background-color: var(--accent-mint-bg);
+      border: 1px solid var(--accent-mint-border);
+      color: var(--accent-mint);
+      letter-spacing: 0.06em;
+    }
+
+    .terminal-status-badge.disconnected {
+      background-color: var(--accent-magenta-bg);
+      border-color: var(--accent-magenta-border);
+      color: var(--accent-magenta);
+    }
+
+    .terminal-status-badge.paused {
+      background-color: var(--accent-amber-bg);
+      border-color: var(--accent-amber-border);
+      color: var(--accent-amber-text);
+    }
+
+    .terminal-status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: currentColor;
+    }
+
+    .terminal-status-badge.live .terminal-status-dot {
+      animation: pulse-dot 1.8s ease-in-out infinite;
+      box-shadow: 0 0 6px var(--accent-mint);
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    .terminal-metrics {
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--text-dim);
+    }
+
+    .terminal-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .terminal-controls .text-input {
+      background-color: var(--bg-well);
+      border: 1px solid var(--border-default);
+      color: var(--text-main);
+      font-size: 0.8rem;
+      padding: 0.35rem 0.6rem;
+      border-radius: var(--radius-sm);
+    }
+
+    .terminal-controls .filter-narrow {
+      width: 9.5rem;
+    }
+
+    .terminal-controls .btn {
+      padding: 0.35rem 0.75rem;
+      font-size: 0.8rem;
+    }
+
+    /* Terminal Console Body */
+    .terminal-body {
+      flex: 1 1 0;
+      min-height: 0;
+      height: calc(100vh - var(--terminal-header-height));
+      height: calc(100dvh - var(--terminal-header-height));
+      overflow-y: auto;
+      background-color: #06050a;
+      padding: 0.5rem 0.85rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.65;
+      box-sizing: border-box;
+      position: relative;
+    }
+
+    .terminal-body .log-line {
+      display: grid;
+      grid-template-columns: 5.6rem 2.8rem 10rem minmax(0, 1fr);
+      gap: 0.65rem;
+      padding: 0.18rem 0.45rem;
+      border-radius: var(--radius-xs);
+      border-left: 2px solid transparent;
+    }
+
+    .terminal-body .log-line:hover {
+      background-color: rgba(255, 255, 255, 0.035);
+    }
+
+    .terminal-body .log-info { border-left-color: rgba(0, 229, 163, 0.4); }
+    .terminal-body .log-warning { border-left-color: rgba(245, 158, 11, 0.5); }
+    .terminal-body .log-error { border-left-color: rgba(255, 0, 85, 0.6); }
+    .terminal-body .log-fatal { border-left-color: var(--accent-magenta); background-color: var(--accent-magenta-bg); }
+
+    .terminal-empty {
+      padding: 3rem 1rem;
+      text-align: center;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+    }
+
+    /* Terminal Login Overlay */
+    .terminal-login-overlay {
+      position: fixed;
+      inset: 0;
+      background-color: rgba(6, 5, 10, 0.88);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      padding: 1.5rem;
+    }
+
+    .terminal-login-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 2rem;
+      max-width: 400px;
+      width: 100%;
+      box-shadow: var(--shadow-modal);
+    }
+
+    .terminal-login-card h2 {
+      font-family: var(--font-display);
+      font-size: 1.3rem;
+      margin-bottom: 0.5rem;
+      color: var(--text-main);
+    }
+
+    .terminal-login-card p {
+      font-size: 0.86rem;
+      color: var(--text-muted);
+      margin-bottom: 1.25rem;
+    }
+
+    @media (max-width: 800px) {
+      .terminal-body .log-line {
+        grid-template-columns: 4.8rem 2.2rem minmax(0, 1fr);
+      }
+      .terminal-body .log-category {
+        display: none;
+      }
+      .terminal-controls .filter-narrow {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal-app">
+    <!-- Header / Controls Bar -->
+    <header class="terminal-header">
+      <div class="terminal-brand-group">
+        <div class="terminal-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          KNOCKBOX // TERMINAL
+        </div>
+        <div class="terminal-status-badge live" id="terminal-status-pill">
+          <span class="terminal-status-dot"></span>
+          <span id="terminal-status-text">LIVE</span>
+        </div>
+        <span class="terminal-metrics" id="terminal-metrics">Connecting...</span>
+      </div>
+
+      <div class="terminal-controls">
+        <select id="term-filter-level" class="text-input filter-narrow" aria-label="Log Level">
+          <option value="">All levels</option>
+          <option value="Information">Info and above</option>
+          <option value="Warning">Warnings and above</option>
+          <option value="Error">Errors and above</option>
+        </select>
+        <input type="search" id="term-filter-category" class="text-input filter-narrow"
+               placeholder="Subsystem (e.g. GameLog)" aria-label="Subsystem filter" />
+        <input type="search" id="term-filter-q" class="text-input"
+               placeholder="Search messages" aria-label="Message search" />
+        <label class="checkbox-label" style="display:inline-flex;align-items:center;gap:0.35rem;font-size:0.8rem;cursor:pointer;user-select:none;">
+          <input type="checkbox" id="term-follow" checked /> Follow
+        </label>
+        <button type="button" class="btn btn-secondary" id="term-clear-btn" title="Clear visible logs">Clear</button>
+        <button type="button" class="btn btn-secondary" id="term-files-btn" title="Download raw log files">Download&hellip;</button>
+      </div>
+    </header>
+
+    <!-- Terminal Stream Output -->
+    <main class="terminal-body" id="terminal-stream" role="log" aria-live="polite">
+    </main>
+    <div id="terminal-empty" class="terminal-empty hidden">No log entries match the active filter.</div>
+
+    <!-- Login Modal (if unauthenticated) -->
+    <div id="terminal-login-overlay" class="terminal-login-overlay hidden">
+      <div class="terminal-login-card">
+        <h2>Terminal Authentication</h2>
+        <p>Enter the admin password to unlock the live log stream.</p>
+        <form id="terminal-login-form" class="auth-form">
+          <div class="form-group">
+            <label for="term-password">Admin Password</label>
+            <input type="password" id="term-password" required placeholder="Enter password" autocomplete="current-password" />
+          </div>
+          <div id="term-login-error" class="error-banner hidden"></div>
+          <button type="submit" class="btn btn-primary">Authenticate</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Log Files Download Modal -->
+    <div class="modal-backdrop hidden" id="term-files-backdrop">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="term-files-title">
+        <h3 id="term-files-title">Download a log file</h3>
+        <p class="modal-intro" id="term-files-note"></p>
+        <div class="files-list" id="term-files-list"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="term-files-close">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/terminal.js"></script>
+</body>
+</html>

@@ -88,6 +88,14 @@ export function loadAdminDom() {
     .replace(/<\/html>\s*$/i, '');
 }
 
+const TERMINAL_HTML = readFileSync(resolve(process.cwd(), 'admin/terminal.html'), 'utf8');
+
+export function loadTerminalDom() {
+  document.documentElement.innerHTML = TERMINAL_HTML
+    .replace(/^[\s\S]*?<html[^>]*>/i, '')
+    .replace(/<\/html>\s*$/i, '');
+}
+
 /**
  * Installs a fake `fetch` that answers from a route table, and records what was asked for.
  *

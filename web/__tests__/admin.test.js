@@ -980,6 +980,19 @@ describe('log stream', () => {
     expect(row.getAttribute('href')).toBe('/admin/api/logs/files/knockbox-20260812.log');
     expect(row.download).toBe('knockbox-20260812.log');
   });
+
+  it('opens terminal view in a separate window when terminal button is clicked', async () => {
+    await openLogs();
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => ({ focus: vi.fn() }));
+    el('log-popout-btn').click();
+    expect(openSpy).toHaveBeenCalled();
+    const [url, target, features] = openSpy.mock.calls[0];
+    expect(url).toBe('terminal.html');
+    expect(target).toBe('KnockBoxLogsTerminal');
+    expect(features).toContain('width=');
+    expect(features).toContain('height=');
+    openSpy.mockRestore();
+  });
 });
 
 describe('session expiry', () => {
