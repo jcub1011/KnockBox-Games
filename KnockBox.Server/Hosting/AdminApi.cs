@@ -136,6 +136,8 @@ internal static class AdminApi
             routes.MapGet("/admin/api/packages/jobs", RequireSession(options, ctx => Jobs(ctx, options)));
             routes.MapGet("/admin/api/packages/jobs/{jobId}", RequireSession(options, ctx => Job(ctx, options)));
             routes.MapGet("/admin/api/marketplace/catalog", RequireSession(options, ctx => Catalog(ctx, options)));
+            routes.MapGet("/admin/api/marketplace/plugins/{id}/versions",
+                RequireSession(options, ctx => GetPluginVersions(ctx, options)));
             routes.MapGet("/admin/api/limits", RequireSession(options, ctx => Limits(ctx, options)));
             routes.MapGet("/admin/api/room-codes", RequireSession(options, ctx => RoomCodes(ctx, options)));
             routes.MapGet("/admin/api/announcement", RequireSession(options, ctx => Announcement(ctx, options)));
@@ -1023,6 +1025,61 @@ internal static class AdminApi
                 options.Paths.GamesManagedRoot));
     }
 
+    private static async Task GetPluginVersions(HttpContext ctx, Options options)
+    {
+        var id = ctx.GetRouteValue("id") as string ?? "";
+        if (options.Marketplace is not { } registry)
+        {
+            await Refuse(ctx, StatusCodes.Status409Conflict,
+                "The marketplace is disabled (KnockBox:MarketplaceEnabled=false).");
+            return;
+        }
+
+        var forceRefresh = ctx.Request.Query.ContainsKey("refresh");
+        var fetched = await registry.FetchAllAsync(false, ctx.RequestAborted);
+        MarketplacePlugin? plugin = null;
+        MarketplaceClient? client = null;
+        foreach (var source in fetched)
+        {
+            if (source.Catalog?.Plugins?.FirstOrDefault(
+                    p => string.Equals(p?.Id, id, StringComparison.OrdinalIgnoreCase)) is not { } match) continue;
+            plugin = match;
+            client = registry.For(source.Source.Id);
+            break;
+        }
+
+        if (plugin is null || client is null || plugin.Source?.Repo is not { Length: > 0 } repo)
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound, $"No marketplace entry with id '{id}'.");
+            return;
+        }
+
+        try
+        {
+            var releases = await client.GetRepoReleasesAsync(repo, plugin.Id ?? id, forceRefresh, ctx.RequestAborted);
+            var response = new AdminPluginVersionsResponse(
+                plugin.Id ?? id,
+                plugin.Name ?? id,
+                repo,
+                plugin.Version,
+                releases.Select(r => new AdminPluginVersionItem(
+                    r.Version,
+                    r.Tag,
+                    r.Asset,
+                    r.SizeBytes,
+                    r.Sha256,
+                    r.PublishedAt?.UtcDateTime.ToString("O"),
+                    string.Equals(r.Version, plugin.Version, StringComparison.OrdinalIgnoreCase)
+                )).ToList());
+
+            await WriteJson(ctx, KnockBoxProtocolContext.Default.AdminPluginVersionsResponse, response);
+        }
+        catch (MarketplaceException ex)
+        {
+            await Refuse(ctx, StatusCodes.Status502BadGateway, ex.Message);
+        }
+    }
+
     private static async Task InstallFromMarketplace(HttpContext ctx, Options options)
     {
         var id = ctx.GetRouteValue("id") as string ?? "";
@@ -1062,6 +1119,49 @@ internal static class AdminApi
                 $"No marketplace entry with id '{id}'" +
                 (body.SourceId is { Length: > 0 } s ? $" in source '{s}'." : "."));
             return;
+        }
+
+        if (body.Version is { Length: > 0 } requestedVersion
+            && !string.Equals(plugin.Version, requestedVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            if (plugin.Source?.Repo is not { Length: > 0 } repo)
+            {
+                await Refuse(ctx, StatusCodes.Status400BadRequest,
+                    $"Marketplace entry '{id}' has no repository configured to fetch releases from.");
+                return;
+            }
+
+            try
+            {
+                var releases = await client.GetRepoReleasesAsync(repo, plugin.Id ?? id, false, ctx.RequestAborted);
+                var target = releases.FirstOrDefault(r =>
+                    string.Equals(r.Version, requestedVersion, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(r.Tag, requestedVersion, StringComparison.OrdinalIgnoreCase));
+
+                if (target is null)
+                {
+                    await Refuse(ctx, StatusCodes.Status404NotFound,
+                        $"Version '{requestedVersion}' was not found in the releases for '{id}'.");
+                    return;
+                }
+
+                plugin = plugin with
+                {
+                    Version = target.Version,
+                    Source = plugin.Source with
+                    {
+                        Tag = target.Tag,
+                        Asset = target.Asset,
+                        Sha256 = target.Sha256 ?? plugin.Source.Sha256,
+                        Size = target.SizeBytes > 0 ? target.SizeBytes : plugin.Source.Size
+                    }
+                };
+            }
+            catch (MarketplaceException ex)
+            {
+                await Refuse(ctx, StatusCodes.Status502BadGateway, ex.Message);
+                return;
+            }
         }
 
         // "Install anyways" is the operator overriding a min/maxAppVersion bound, and the override has to

@@ -707,6 +707,7 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       installed: true,
       installedVersion: game.version || entry?.installedVersion || null,
       availableVersion: entry?.availableVersion || null,
+      availableVersions: entry?.availableVersions || null,
       status: entry?.status || (game.availability === 'disabled' ? 'disabled' : 'installedOnly'),
       availability: game.availability || 'available',
       lifecycle: game.lifecycle || 'ready',
@@ -759,6 +760,7 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
         installed: true,
         installedVersion: entry.installedVersion || null,
         availableVersion: entry.availableVersion || null,
+        availableVersions: entry.availableVersions || null,
         status: entry.status || 'installedOnly',
         availability: 'available',
         lifecycle: 'ready',
@@ -810,6 +812,7 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       installed: false,
       installedVersion: null,
       availableVersion: entry.availableVersion || null,
+      availableVersions: entry.availableVersions || null,
       status: entry.status || 'notInstalled',
       availability: null,
       lifecycle: 'ready',
@@ -999,7 +1002,39 @@ export function jobProgress(job) {
  * opposite of what was asked for. Kind and version together are unique by construction, because that
  * pair is exactly what versionOptions deduplicates on.
  */
+export function compareSemVer(a, b) {
+  if (a === b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+
+  const parse = (v) => {
+    const text = String(v).trim().replace(/^v/i, '');
+    const [main, prerelease] = text.split('-', 2);
+    const parts = main.split('.').map((p) => parseInt(p, 10) || 0);
+    return {
+      major: parts[0] ?? 0,
+      minor: parts[1] ?? 0,
+      patch: parts[2] ?? 0,
+      prerelease: prerelease ?? null,
+    };
+  };
+
+  const pa = parse(a);
+  const pb = parse(b);
+
+  if (pa.major !== pb.major) return pa.major - pb.major;
+  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+  if (pa.patch !== pb.patch) return pa.patch - pb.patch;
+
+  if (pa.prerelease === null && pb.prerelease !== null) return 1;
+  if (pa.prerelease !== null && pb.prerelease === null) return -1;
+  if (pa.prerelease && pb.prerelease) return pa.prerelease.localeCompare(pb.prerelease);
+
+  return 0;
+}
+
 export function versionOptionValue(option) {
+  if (option?.kind === 'loadMore') return 'load:more';
   return `${option?.kind ?? ''}:${option?.version ?? ''}`;
 }
 
@@ -1013,9 +1048,21 @@ export function versionOptions(entry) {
     options.push({ version: version ?? null, kind });
   };
 
-  if (entry?.availableVersion) add(entry.availableVersion, 'available');
+  if (entry?.availableVersions && entry.availableVersions.length > 0) {
+    for (const v of entry.availableVersions) {
+      if (v) add(v, 'available');
+    }
+  } else if (entry?.availableVersion) {
+    add(entry.availableVersion, 'available');
+  }
+
   if (entry?.installed) add(entry.installedVersion ?? null, 'installed');
   for (const backup of entry?.backups || []) add(backup.version ?? null, 'backup');
+
+  if (entry?.sourceId && entry?.sourceKind !== 'upload' && !entry?.versionsLoaded) {
+    options.push({ version: null, kind: 'loadMore' });
+  }
+
   return options;
 }
 
@@ -1051,8 +1098,13 @@ export function versionAction(entry, selected, installBlocked = null) {
     };
   }
 
+  if (selected === 'load:more' || (typeof selected === 'object' && selected?.kind === 'loadMore')) {
+    return { kind: 'load_more', label: 'Load older versions…', danger: false, blockedReason: null };
+  }
+
   const options = versionOptions(entry);
   const target = options.find((o) => versionOptionValue(o) === String(selected ?? ''))
+    ?? options.find((o) => o.version === String(selected ?? ''))
     ?? options[0]
     ?? { version: entry.availableVersion ?? null, kind: 'available' };
   // Every branch reports the version it resolved, so the caller never has to re-derive it from the
@@ -1085,9 +1137,23 @@ export function versionAction(entry, selected, installBlocked = null) {
     }
     return at({ kind: 'reinstall', label: 'Reinstall', danger: false, blockedReason: null });
   }
+
+  const isDowngrade = Boolean(entry.installedVersion && compareSemVer(target.version, entry.installedVersion) < 0);
+
   if (entry.status === 'incompatible') {
-    return at({ kind: 'update', label: 'Install Anyways', danger: true, blockedReason: null, incompatible: true });
+    return at({
+      kind: isDowngrade ? 'downgrade' : 'update',
+      label: 'Install Anyways',
+      danger: true,
+      blockedReason: null,
+      incompatible: true,
+    });
   }
+
+  if (isDowngrade) {
+    return at({ kind: 'downgrade', label: 'Downgrade', danger: true, blockedReason: null });
+  }
+
   return at({ kind: 'update', label: 'Update', danger: false, blockedReason: null });
 }
 

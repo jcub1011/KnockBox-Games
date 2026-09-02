@@ -12,10 +12,10 @@ import {
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
   playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
   tabFromHash, topTabFromHash, uploadGuard,
-  validateLimits, versionAction, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
+  validateLimits, versionAction, versionOptionValue, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
-  SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge,
+  SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge, compareSemVer,
 } from '../admin/admin-core.js';
 
 describe('topTabFromHash & TOP_TABS', () => {
@@ -573,6 +573,23 @@ describe('isTerminalJob', () => {
   });
 });
 
+describe('compareSemVer', () => {
+  it('correctly compares semantic versions', () => {
+    expect(compareSemVer('1.2.0', '1.1.0')).toBeGreaterThan(0);
+    expect(compareSemVer('0.1.0', '1.0.0')).toBeLessThan(0);
+    expect(compareSemVer('1.0.0', '1.0.0')).toBe(0);
+    expect(compareSemVer('v1.0.0', '1.0.0')).toBe(0);
+    expect(compareSemVer('2.0.0', '1.9.9')).toBeGreaterThan(0);
+  });
+
+  it('handles nulls and prereleases', () => {
+    expect(compareSemVer(null, '1.0.0')).toBeLessThan(0);
+    expect(compareSemVer('1.0.0', null)).toBeGreaterThan(0);
+    expect(compareSemVer('1.0.0-beta', '1.0.0')).toBeLessThan(0);
+    expect(compareSemVer('1.0.0', '1.0.0-beta')).toBeGreaterThan(0);
+  });
+});
+
 describe('versionOptions', () => {
   it('offers available, then installed, then each backup', () => {
     const options = versionOptions({
@@ -587,6 +604,38 @@ describe('versionOptions', () => {
       { version: '1.2.0', kind: 'installed' },
       { version: '1.1.0', kind: 'backup' },
       { version: '1.0.0', kind: 'backup' },
+    ]);
+  });
+
+  it('includes multiple available versions when availableVersions is populated', () => {
+    const options = versionOptions({
+      installed: true,
+      installedVersion: '1.0.0',
+      availableVersions: ['2.0.0', '1.0.0', '0.1.0'],
+      backups: [],
+      versionsLoaded: true,
+    });
+
+    expect(options).toEqual([
+      { version: '2.0.0', kind: 'available' },
+      { version: '1.0.0', kind: 'available' },
+      { version: '0.1.0', kind: 'available' },
+      { version: '1.0.0', kind: 'installed' },
+    ]);
+  });
+
+  it('offers loadMore for unexpanded marketplace plugins', () => {
+    const options = versionOptions({
+      installed: false,
+      availableVersion: '1.0.0',
+      sourceId: 'official',
+      sourceKind: 'official',
+      versionsLoaded: false,
+    });
+
+    expect(options).toEqual([
+      { version: '1.0.0', kind: 'available' },
+      { version: null, kind: 'loadMore' },
     ]);
   });
 
@@ -619,7 +668,25 @@ describe('versionAction', () => {
   });
 
   it('updates when a newer version is selected', () => {
-    expect(versionAction(installed, 'available:1.3.0')).toMatchObject({ kind: 'update', label: 'Update' });
+    expect(versionAction(installed, 'available:1.3.0')).toMatchObject({ kind: 'update', label: 'Update', danger: false });
+  });
+
+  it('downgrades with danger styling when an older available version is selected', () => {
+    const withOlder = { ...installed, availableVersions: ['1.3.0', '1.2.0', '1.0.0'] };
+    expect(versionAction(withOlder, 'available:1.0.0')).toMatchObject({
+      kind: 'downgrade',
+      label: 'Downgrade',
+      danger: true,
+      version: '1.0.0',
+    });
+  });
+
+  it('returns load_more when load:more option is selected', () => {
+    expect(versionAction(installed, 'load:more')).toMatchObject({
+      kind: 'load_more',
+      label: 'Load older versions…',
+      danger: false,
+    });
   });
 
   it('reinstalls when the running version is selected', () => {

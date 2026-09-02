@@ -396,6 +396,26 @@ public sealed record AdminMarketplaceResponse(
     string ManagedRoot
 );
 
+/// <summary>Discovered repository releases for a marketplace plugin.</summary>
+public sealed record AdminPluginVersionsResponse(
+    string Id,
+    string Name,
+    string Repo,
+    string? CurrentVersion,
+    IReadOnlyList<AdminPluginVersionItem> Versions
+);
+
+/// <summary>One discovered release version from a plugin's repository.</summary>
+public sealed record AdminPluginVersionItem(
+    string Version,
+    string Tag,
+    string Asset,
+    long SizeBytes,
+    string? Sha256,
+    string? PublishedAt,
+    bool IsCurrent
+);
+
 // ── Platform limits ──────────────────────────────────────────────────────────
 
 /// <summary>
@@ -581,7 +601,9 @@ public sealed record AdminMaintenanceRequest(bool Enabled = false, string? Messa
 public sealed record AdminRollbackRequest(string? Version = null, string? Mode = null);
 
 /// <param name="SourceId">Which marketplace to take it from; null uses whichever offered it first.</param>
-public sealed record AdminInstallRequest(string? SourceId = null, string? Mode = null);
+/// <param name="Mode">"auto", "drain" or "force". Defaults to "drain".</param>
+/// <param name="Version">Target version to install; null defaults to the latest catalog entry.</param>
+public sealed record AdminInstallRequest(string? SourceId = null, string? Mode = null, string? Version = null);
 
 /// <param name="Policy">"manual", "auto", "drain" or "force" — what the scheduled check may do unattended.</param>
 public sealed record AdminUpdatePolicyRequest(string? Policy = null);

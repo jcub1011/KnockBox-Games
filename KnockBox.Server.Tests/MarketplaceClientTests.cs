@@ -453,6 +453,101 @@ public class MarketplaceClientTests : IDisposable
         Assert.Equal(2, Directory.GetFiles(_dir).Length);
     }
 
+    // ---- repository releases fetching --------------------------------------------------------
+
+    [Fact]
+    public void ParseRepoReleases_extracts_all_versions_and_filters_drafts_and_assets()
+    {
+        var json = """
+        [
+          {
+            "tag_name": "v1.0.0",
+            "draft": false,
+            "published_at": "2026-09-02T15:00:00Z",
+            "assets": [
+              {
+                "name": "demo.kbg",
+                "size": 2500000,
+                "digest": "sha256:32e2ca3f35954dc9416664494b8e1ce7e5260a0217378cd03e73d3013b1329df"
+              }
+            ]
+          },
+          {
+            "tag_name": "v0.9.0-draft",
+            "draft": true,
+            "assets": [
+              {
+                "name": "demo.kbg",
+                "size": 1000
+              }
+            ]
+          },
+          {
+            "tag_name": "v0.1.0",
+            "draft": false,
+            "published_at": "2026-08-11T12:00:00Z",
+            "assets": [
+              {
+                "name": "GAME.json",
+                "size": 500
+              },
+              {
+                "name": "demo.kbg",
+                "size": 2000000,
+                "digest": "sha256:76f72e5079494e883c0717e7501367f830c42fbed0127b0eb9326aca0a618f4c"
+              }
+            ]
+          }
+        ]
+        """;
+
+        var releases = MarketplaceClient.ParseRepoReleases(Encoding.UTF8.GetBytes(json), "demo");
+        Assert.Equal(2, releases.Count);
+
+        var first = releases[0];
+        Assert.Equal("1.0.0", first.Version);
+        Assert.Equal("v1.0.0", first.Tag);
+        Assert.Equal("demo.kbg", first.Asset);
+        Assert.Equal(2500000, first.SizeBytes);
+        Assert.Equal("32e2ca3f35954dc9416664494b8e1ce7e5260a0217378cd03e73d3013b1329df", first.Sha256);
+
+        var second = releases[1];
+        Assert.Equal("0.1.0", second.Version);
+        Assert.Equal("v0.1.0", second.Tag);
+        Assert.Equal("demo.kbg", second.Asset);
+        Assert.Equal("76f72e5079494e883c0717e7501367f830c42fbed0127b0eb9326aca0a618f4c", second.Sha256);
+    }
+
+    [Fact]
+    public async Task GetRepoReleasesAsync_fetches_and_caches_releases_from_repo()
+    {
+        var json = """
+        [
+          {
+            "tag_name": "v1.0.0",
+            "draft": false,
+            "assets": [
+              { "name": "alpha.kbg", "size": 1234, "digest": "sha256:1111222233334444555566667777888811112222333344445555666677778888" }
+            ]
+          }
+        ]
+        """;
+        var client = New();
+        var url = $"{MarketplaceFixture.DownloadBase}/repos/owner/alpha/releases";
+        _http.Map(url, json);
+
+        var releases = await client.GetRepoReleasesAsync("owner/alpha", "alpha");
+        Assert.Single(releases);
+        Assert.Equal("1.0.0", releases[0].Version);
+        Assert.Single(_http.Requests);
+
+        // Second call hits cache without calling HTTP again
+        var cached = await client.GetRepoReleasesAsync("owner/alpha", "alpha");
+        Assert.Single(cached);
+        Assert.Equal("1.0.0", cached[0].Version);
+        Assert.Single(_http.Requests);
+    }
+
     /// <summary>No partial file, no stray <c>.part</c> — a rejected download leaves the directory clean.</summary>
     private void AssertNothingLeftBehind()
     {

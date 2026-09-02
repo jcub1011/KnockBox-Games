@@ -15,6 +15,15 @@ namespace KnockBox.Server.Marketplace;
 /// <summary>Raised for any marketplace problem an operator could act on. The message is operator-facing.</summary>
 public sealed class MarketplaceException(string message, Exception? inner = null) : Exception(message, inner);
 
+/// <summary>A release discovered dynamically from a plugin's repository.</summary>
+public sealed record MarketplaceRepoRelease(
+    string Version,
+    string Tag,
+    string Asset,
+    long SizeBytes,
+    string? Sha256,
+    DateTimeOffset? PublishedAt);
+
 /// <summary>A verified <c>.kbg</c> on disk. Deleting the file is the owner's job — hence IDisposable.</summary>
 /// <remarks>
 /// A class rather than a record: it owns a file and tracks whether that file has been deleted, and
@@ -84,6 +93,9 @@ public sealed partial class MarketplaceClient
     private readonly SemaphoreSlim _catalogLock = new(1, 1);
     private string? _catalogETag;
     private MarketplaceCatalog? _catalogSnapshot;
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset CachedAt, IReadOnlyList<MarketplaceRepoRelease> Releases)> _repoReleasesCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan ReleasesCacheDuration = TimeSpan.FromMinutes(5);
 
     public MarketplaceClient(
         HttpClient http, MarketplaceOptions options, GamePackageLimits limits, ILogger<MarketplaceClient> logger)
@@ -287,6 +299,144 @@ public sealed partial class MarketplaceClient
         }
 
         return catalog;
+    }
+
+    /// <summary>
+    /// Fetches all published releases for <paramref name="repo"/> that provide a package for <paramref name="gameId"/>.
+    /// Results are cached in memory for 5 minutes.
+    /// </summary>
+    public async Task<IReadOnlyList<MarketplaceRepoRelease>> GetRepoReleasesAsync(
+        string repo, string gameId, bool forceRefresh = false, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(repo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(gameId);
+
+        if (!RepoPattern().IsMatch(repo))
+            throw new MarketplaceException($"Repository '{repo}' is not a valid 'owner/repo' name.");
+
+        var cacheKey = $"{repo}:{gameId}";
+        var now = DateTimeOffset.UtcNow;
+        if (!forceRefresh && _repoReleasesCache.TryGetValue(cacheKey, out var cached)
+            && now - cached.CachedAt < ReleasesCacheDuration)
+        {
+            return cached.Releases;
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_options.CatalogTimeout);
+
+        var uri = ReleasesUri(repo);
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+        if (Environment.GetEnvironmentVariable("GITHUB_TOKEN") is { Length: > 0 } token)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        }
+
+        using var response = await SendAsync(request, $"releases for repository '{repo}'", timeout.Token)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new MarketplaceException(
+                $"Fetching releases for '{repo}' at {uri} returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}).");
+        }
+
+        var body = await ReadCappedAsync(
+            response, _options.MaxCatalogBytes, $"releases for '{repo}'",
+            "KnockBox:MarketplaceMaxCatalogBytes", timeout.Token).ConfigureAwait(false);
+
+        var releases = ParseRepoReleases(body, gameId);
+        _repoReleasesCache[cacheKey] = (now, releases);
+        return releases;
+    }
+
+    /// <summary>
+    /// Parses a repository releases JSON document and extracts available game packages.
+    /// </summary>
+    public static IReadOnlyList<MarketplaceRepoRelease> ParseRepoReleases(byte[] utf8Json, string gameId)
+    {
+        using var doc = JsonDocument.Parse(utf8Json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            return [];
+
+        var results = new List<MarketplaceRepoRelease>();
+        var seenVersions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var release in doc.RootElement.EnumerateArray())
+        {
+            if (release.TryGetProperty("draft", out var draft) && draft.GetBoolean())
+                continue;
+
+            var tag = release.TryGetProperty("tag_name", out var tagProp) ? tagProp.GetString() : null;
+            if (string.IsNullOrWhiteSpace(tag)) continue;
+
+            var versionStr = tag.TrimStart('v', 'V');
+            if (!SemVer.TryParse(versionStr, out _))
+            {
+                if (release.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { Length: > 0 } name)
+                {
+                    var nameVer = name.TrimStart('v', 'V');
+                    if (SemVer.TryParse(nameVer, out _)) versionStr = nameVer;
+                }
+            }
+
+            if (!seenVersions.Add(versionStr)) continue;
+
+            if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
+                continue;
+
+            JsonElement? matchingAsset = null;
+            foreach (var asset in assets.EnumerateArray())
+            {
+                var assetName = asset.TryGetProperty("name", out var an) ? an.GetString() : null;
+                if (string.IsNullOrWhiteSpace(assetName)) continue;
+
+                if (string.Equals(assetName, $"{gameId}{GamePackage.Extension}", StringComparison.OrdinalIgnoreCase))
+                {
+                    matchingAsset = asset;
+                    break;
+                }
+                if (assetName.EndsWith(GamePackage.Extension, StringComparison.OrdinalIgnoreCase) && matchingAsset is null)
+                {
+                    matchingAsset = asset;
+                }
+            }
+
+            if (matchingAsset is null) continue;
+
+            var chosen = matchingAsset.Value;
+            var chosenName = chosen.GetProperty("name").GetString()!;
+            var size = chosen.TryGetProperty("size", out var s) ? s.GetInt64() : 0L;
+            string? sha256 = null;
+            if (chosen.TryGetProperty("digest", out var d) && d.GetString() is { Length: > 0 } digestStr)
+            {
+                if (digestStr.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+                    sha256 = digestStr[7..].Trim();
+                else if (digestStr.Length == 64)
+                    sha256 = digestStr.Trim();
+            }
+
+            DateTimeOffset? publishedAt = null;
+            if (release.TryGetProperty("published_at", out var pub) && pub.TryGetDateTimeOffset(out var dt))
+            {
+                publishedAt = dt;
+            }
+
+            results.Add(new MarketplaceRepoRelease(versionStr, tag, chosenName, size, sha256, publishedAt));
+        }
+
+        results.Sort((a, b) =>
+        {
+            var sa = SemVer.TryParse(a.Version, out var va);
+            var sb = SemVer.TryParse(b.Version, out var vb);
+            if (sa && sb) return vb.CompareTo(va);
+            if (sa) return -1;
+            if (sb) return 1;
+            return string.Compare(b.Version, a.Version, StringComparison.OrdinalIgnoreCase);
+        });
+
+        return results;
     }
 
     /// <summary>
@@ -542,6 +692,27 @@ public sealed partial class MarketplaceClient
         {
             throw new MarketplaceException(
                 $"KnockBox:MarketplaceDownloadBaseUrl ('{_options.DownloadBaseUrl}') does not form an https URL.");
+        }
+        return uri;
+    }
+
+    private Uri ReleasesUri(string repo)
+    {
+        string url;
+        if (Uri.TryCreate(_options.DownloadBaseUrl, UriKind.Absolute, out var baseUri)
+            && baseUri.Host.EndsWith("github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            url = $"https://api.github.com/repos/{repo}/releases";
+        }
+        else
+        {
+            url = $"{_options.DownloadBaseUrl}/repos/{repo}/releases";
+        }
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsAllowedScheme(uri))
+        {
+            throw new MarketplaceException(
+                $"KnockBox:MarketplaceDownloadBaseUrl ('{_options.DownloadBaseUrl}') does not form a valid releases URL.");
         }
         return uri;
     }

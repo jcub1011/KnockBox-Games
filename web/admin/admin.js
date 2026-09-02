@@ -11,7 +11,7 @@ import {
   ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
-  checkCodeEntry, checkWebhook, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
+  checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
   filterPlugins, filterSettings, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
@@ -1142,16 +1142,41 @@ function setNavCount(tab, count) {
 
 // ── Plugins & Games ───────────────────────────────────────────────────────────
 
-async function refreshGames() {
+// Session caches for dynamically discovered repo releases and user-selected versions.
+// Prevents poll-driven refreshes from blowing away discovered releases or user-selected versions.
+const pluginDiscoveredVersions = new Map();
+const pluginSelectedVersions = new Map();
+let lastGamesSummary = null;
+let lastSourceFilterSources = null;
+let renderPendingOnBlur = false;
+
+function summarizeGames(games = []) {
+  return (games || []).map((g) => `${g.id}:${g.version}:${g.availability}:${g.lifecycle}:${g.activeLobbies}:${g.activePlayers}`).join('|');
+}
+
+export function resetPluginStateForTests() {
+  pluginDiscoveredVersions.clear();
+  pluginSelectedVersions.clear();
+  lastGamesSummary = null;
+  lastSourceFilterSources = null;
+  renderPendingOnBlur = false;
+}
+
+async function refreshGames({ force = false } = {}) {
   const data = await getJson('/admin/api/games');
   if (!data) return;
   gameData = data;
-  renderPlugins();
+  const summary = summarizeGames(data.games);
+  const changed = force || summary !== lastGamesSummary;
+  lastGamesSummary = summary;
+  if (changed) {
+    renderPlugins();
+  }
 }
 
 export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
   await Promise.all([
-    refreshGames(),
+    refreshGames({ force: true }),
     refreshCatalog({ refresh: refreshCatalogNow }),
     refreshJobs(),
   ]);
@@ -1161,9 +1186,37 @@ export function renderPlugins() {
   renderSourceFilter();
   const host = el('plugins-list') || el('mkt-list') || el('games-list');
   if (!host) return;
-  host.innerHTML = '';
+
+  // If the user has focus on any control within the plugins list (e.g. open select, active tap),
+  // do NOT interrupt them. Defer rendering until they blur.
+  if (host.contains(document.activeElement)) {
+    renderPendingOnBlur = true;
+    return;
+  }
+  renderPendingOnBlur = false;
+
+  if (!host._focusoutBound) {
+    host._focusoutBound = true;
+    host.addEventListener('focusout', () => {
+      setTimeout(() => {
+        if (!host.contains(document.activeElement) && renderPendingOnBlur) {
+          renderPlugins();
+        }
+      }, 50);
+    });
+  }
 
   const allEntries = mergePluginEntries(gameData?.games || [], catalogData?.entries || []);
+
+  // Restore discovered releases from session cache
+  for (const entry of allEntries) {
+    const discovered = pluginDiscoveredVersions.get(entry.id);
+    if (discovered) {
+      entry.availableVersions = discovered.availableVersions;
+      entry.repoReleases = discovered.repoReleases;
+      entry.versionsLoaded = true;
+    }
+  }
 
   const q = (el('plugins-filter-q') || el('mkt-filter-q') || el('game-filter-q'))?.value || '';
   const source = (el('plugins-filter-source') || el('mkt-filter-source'))?.value || '';
@@ -1180,8 +1233,30 @@ export function renderPlugins() {
     emptyEl.classList.toggle('hidden', filtered.length > 0);
   }
 
+  // Preserve any card currently containing user focus (e.g. open select, active tap)
+  const existingCards = new Map();
+  for (const child of host.children) {
+    if (child.dataset?.id) {
+      existingCards.set(child.dataset.id, child);
+    }
+  }
+
+  const newCards = [];
   for (const entry of filtered) {
-    host.appendChild(pluginCard(entry));
+    const existing = existingCards.get(entry.id);
+    if (existing && existing.contains(document.activeElement)) {
+      newCards.push(existing);
+    } else {
+      newCards.push(pluginCard(entry));
+    }
+  }
+
+  const currentChildren = Array.from(host.children);
+  const isIdentical = currentChildren.length === newCards.length
+    && currentChildren.every((c, i) => c === newCards[i]);
+
+  if (!isIdentical) {
+    host.replaceChildren(...newCards);
   }
 
   const disabledBanner = el('mkt-disabled');
@@ -1378,13 +1453,26 @@ export function pluginCard(entry) {
   // Version selection dropdown
   const versionSelect = document.createElement('select');
   versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
-  for (const option of versionOptions(entry)) {
-    const opt = document.createElement('option');
-    opt.value = versionOptionValue(option);
-    opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
-    versionSelect.appendChild(opt);
-  }
-  if (versionSelect.options.length === 0) versionSelect.disabled = true;
+  const populateVersionSelect = (preferredValue = null) => {
+    versionSelect.innerHTML = '';
+    for (const option of versionOptions(entry)) {
+      const opt = document.createElement('option');
+      opt.value = versionOptionValue(option);
+      opt.textContent = option.kind === 'loadMore'
+        ? 'Load older versions from repo…'
+        : `${formatVersion(option.version)} — ${option.kind}`;
+      versionSelect.appendChild(opt);
+    }
+    if (versionSelect.options.length === 0) {
+      versionSelect.disabled = true;
+    } else {
+      const saved = preferredValue ?? pluginSelectedVersions.get(entry.id);
+      if (saved && Array.from(versionSelect.options).some((o) => o.value === saved)) {
+        versionSelect.value = saved;
+      }
+    }
+  };
+  populateVersionSelect();
   actions.appendChild(versionSelect);
 
   // Status selection dropdown (hidden when not installed)
@@ -1436,7 +1524,39 @@ export function pluginCard(entry) {
     actionBtn.title = decided.blockedReason || '';
     actionBtn.onclick = () => runPackageAction(entry, decided, modeSelect.value);
   };
-  versionSelect.onchange = refreshAction;
+  versionSelect.onchange = async () => {
+    if (versionSelect.value === 'load:more') {
+      versionSelect.disabled = true;
+      try {
+        const res = await getJson(`/admin/api/marketplace/plugins/${encodeURIComponent(entry.id)}/versions`);
+        if (res?.versions?.length > 0) {
+          const versions = res.versions.map((v) => v.version);
+          entry.availableVersions = versions;
+          entry.repoReleases = res.versions;
+          pluginDiscoveredVersions.set(entry.id, {
+            availableVersions: versions,
+            repoReleases: res.versions,
+          });
+        }
+      } catch (err) {
+        showToast(err.message || 'Could not load older versions.', 'error');
+      } finally {
+        entry.versionsLoaded = true;
+        versionSelect.disabled = false;
+        if (entry.availableVersions?.length > 1) {
+          const nextVal = `available:${entry.availableVersions[1]}`;
+          pluginSelectedVersions.set(entry.id, nextVal);
+          populateVersionSelect(nextVal);
+        } else {
+          populateVersionSelect();
+          pluginSelectedVersions.set(entry.id, versionSelect.value);
+        }
+      }
+    } else {
+      pluginSelectedVersions.set(entry.id, versionSelect.value);
+    }
+    refreshAction();
+  };
   refreshAction();
   actions.appendChild(actionBtn);
 
@@ -1682,10 +1802,112 @@ export function openPluginDetails(entry) {
       secBackups.appendChild(tableWrap);
       body.appendChild(secBackups);
     }
+
+    // Section 6: Repository Releases
+    if (entry.sourceId && entry.sourceKind !== 'upload') {
+      const secReleases = document.createElement('div');
+      secReleases.className = 'details-section';
+      const hReleases = document.createElement('h4');
+      hReleases.className = 'details-section-title';
+      hReleases.textContent = 'Repository Releases';
+      secReleases.appendChild(hReleases);
+
+      const renderReleasesTable = (releases) => {
+        const tableWrap = document.createElement('div');
+        tableWrap.className = 'table-scroll';
+        const table = document.createElement('table');
+        table.className = 'data-table';
+        table.innerHTML = '<thead><tr><th>Version</th><th>Tag</th><th>Size</th><th>Released Date</th><th>Action</th></tr></thead>';
+        const tbody = document.createElement('tbody');
+        for (const rel of releases) {
+          const tr = document.createElement('tr');
+          const tdVer = document.createElement('td');
+          tdVer.textContent = formatVersion(rel.version);
+          const tdTag = document.createElement('td');
+          const codeTag = document.createElement('code');
+          codeTag.textContent = rel.tag || '';
+          tdTag.appendChild(codeTag);
+          const tdSize = document.createElement('td');
+          tdSize.textContent = formatBytes(rel.sizeBytes);
+          const tdDate = document.createElement('td');
+          tdDate.textContent = rel.publishedAt ? formatDateTime(rel.publishedAt) : '--';
+
+          const tdAction = document.createElement('td');
+          if (entry.installed && rel.version === entry.installedVersion) {
+            const currentBadge = document.createElement('span');
+            currentBadge.className = 'badge badge-ok';
+            currentBadge.textContent = 'Installed';
+            tdAction.appendChild(currentBadge);
+          } else {
+            const relBtn = document.createElement('button');
+            relBtn.type = 'button';
+            const isDown = entry.installed && compareSemVer(rel.version, entry.installedVersion) < 0;
+            const btnLabel = !entry.installed ? 'Install' : (isDown ? 'Downgrade' : 'Update');
+            relBtn.className = `btn btn-small ${isDown ? 'btn-danger' : 'btn-primary'}`;
+            relBtn.textContent = btnLabel;
+            relBtn.onclick = () => {
+              const act = versionAction(entry, `available:${rel.version}`);
+              pluginSelectedVersions.set(entry.id, `available:${rel.version}`);
+              runPackageAction(entry, act, 'drain');
+              modal.classList.add('hidden');
+            };
+            tdAction.appendChild(relBtn);
+          }
+
+          tr.append(tdVer, tdTag, tdSize, tdDate, tdAction);
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        tableWrap.appendChild(table);
+        secReleases.appendChild(tableWrap);
+      };
+
+      const cached = pluginDiscoveredVersions.get(entry.id);
+      if (cached?.repoReleases?.length > 0) {
+        entry.availableVersions = cached.availableVersions;
+        entry.repoReleases = cached.repoReleases;
+        entry.versionsLoaded = true;
+        renderReleasesTable(cached.repoReleases);
+        body.appendChild(secReleases);
+      } else {
+        const statusP = document.createElement('p');
+        statusP.className = 'mkt-desc';
+        statusP.textContent = 'Loading releases from repository…';
+        secReleases.appendChild(statusP);
+        body.appendChild(secReleases);
+
+        getJson(`/admin/api/marketplace/plugins/${encodeURIComponent(entry.id)}/versions`).then((res) => {
+          if (!res?.versions || res.versions.length === 0) {
+            statusP.textContent = 'No repository releases found.';
+            return;
+          }
+          statusP.remove();
+          const versions = res.versions.map((v) => v.version);
+          entry.availableVersions = versions;
+          entry.repoReleases = res.versions;
+          entry.versionsLoaded = true;
+          pluginDiscoveredVersions.set(entry.id, {
+            availableVersions: versions,
+            repoReleases: res.versions,
+          });
+
+          renderReleasesTable(res.versions);
+
+          if (typeof populateModalVersionSelect === 'function') {
+            populateModalVersionSelect();
+            if (typeof refreshModalAction === 'function') refreshModalAction();
+          }
+        }).catch(() => {
+          statusP.textContent = 'Could not load releases from repository.';
+        });
+      }
+    }
   }
 
   // Populate Actions in footer
   const actionsHost = el('plugin-details-actions');
+  let populateModalVersionSelect = null;
+  let refreshModalAction = null;
   if (actionsHost) {
     actionsHost.innerHTML = '';
 
@@ -1693,13 +1915,26 @@ export function openPluginDetails(entry) {
 
     const versionSelect = document.createElement('select');
     versionSelect.className = 'text-input filter-narrow mkt-version';
-    for (const option of versionOptions(entry)) {
-      const opt = document.createElement('option');
-      opt.value = versionOptionValue(option);
-      opt.textContent = `${formatVersion(option.version)} — ${option.kind}`;
-      versionSelect.appendChild(opt);
-    }
-    if (versionSelect.options.length === 0) versionSelect.disabled = true;
+    populateModalVersionSelect = (preferredValue = null) => {
+      versionSelect.innerHTML = '';
+      for (const option of versionOptions(entry)) {
+        const opt = document.createElement('option');
+        opt.value = versionOptionValue(option);
+        opt.textContent = option.kind === 'loadMore'
+          ? 'Load older versions from repo…'
+          : `${formatVersion(option.version)} — ${option.kind}`;
+        versionSelect.appendChild(opt);
+      }
+      if (versionSelect.options.length === 0) {
+        versionSelect.disabled = true;
+      } else {
+        const saved = preferredValue ?? pluginSelectedVersions.get(entry.id);
+        if (saved && Array.from(versionSelect.options).some((o) => o.value === saved)) {
+          versionSelect.value = saved;
+        }
+      }
+    };
+    populateModalVersionSelect();
     actionsHost.appendChild(versionSelect);
 
     if (entry.installed) {
@@ -1732,7 +1967,7 @@ export function openPluginDetails(entry) {
     const actionBtn = document.createElement('button');
     actionBtn.type = 'button';
     actionBtn.className = 'btn mkt-action';
-    const refreshModalAction = () => {
+    refreshModalAction = () => {
       const decided = versionAction(entry, versionSelect.value,
         catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
       actionBtn.textContent = decided.label;
@@ -1740,11 +1975,19 @@ export function openPluginDetails(entry) {
       actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
       actionBtn.title = decided.blockedReason || '';
       actionBtn.onclick = () => {
+        if (versionSelect.value !== 'load:more') {
+          pluginSelectedVersions.set(entry.id, versionSelect.value);
+        }
         runPackageAction(entry, decided, modeSelect.value);
         modal.classList.add('hidden');
       };
     };
-    versionSelect.onchange = refreshModalAction;
+    versionSelect.onchange = () => {
+      if (versionSelect.value !== 'load:more') {
+        pluginSelectedVersions.set(entry.id, versionSelect.value);
+      }
+      refreshModalAction();
+    };
     refreshModalAction();
     actionsHost.appendChild(actionBtn);
 
@@ -2076,6 +2319,13 @@ function updatesAvailable() {
 function renderSourceFilter() {
   const select = el('plugins-filter-source') || el('mkt-filter-source');
   if (!select) return;
+  if (select.contains(document.activeElement)) return;
+
+  const sources = catalogData?.sources || [];
+  const sourcesKey = sources.map((s) => `${s.id}:${s.name || ''}`).join('|');
+  if (select.options.length > 0 && sourcesKey === lastSourceFilterSources) return;
+  lastSourceFilterSources = sourcesKey;
+
   const current = select.value;
   select.innerHTML = '';
   const any = document.createElement('option');
@@ -2093,7 +2343,7 @@ function renderSourceFilter() {
   uploadOpt.textContent = 'Manual Upload';
   select.appendChild(uploadOpt);
 
-  for (const source of catalogData?.sources || []) {
+  for (const source of sources) {
     const opt = document.createElement('option');
     opt.value = source.id;
     opt.textContent = source.name || source.id;
@@ -2123,13 +2373,25 @@ async function runPackageAction(entry, decided, mode) {
     return;
   }
 
+  if (decided.kind === 'downgrade') {
+    const runningDesc = entry.activeLobbies > 0 ? ` ${describeMode(mode, entry.activeLobbies)}` : '';
+    if (!await confirmAction(
+      `Downgrade ${name} from ${formatVersion(entry.installedVersion)} to ${formatVersion(version)}?`
+      + ` This replaces the installed version with an older release from the marketplace.${runningDesc}`,
+      'Downgrade', { danger: true })) return;
+
+    if (await postJson(`/admin/api/marketplace/install/${encodeURIComponent(entry.id)}`,
+      { version: version || null, sourceId: entry.sourceId || null, mode })) refreshJobs();
+    return;
+  }
+
   if (decided.incompatible) {
     const runningDesc = entry.activeLobbies > 0 ? ` ${describeMode(mode, entry.activeLobbies)}` : '';
     const reasonText = entry.reason ? ` (${entry.reason})` : '';
     // An update REPLACES a version that is presumably working, which the old wording never said — it read
     // identically whether this was a first install or an overwrite of a running game. And the server
     // stages the result either way, so say that here rather than letting it arrive as a surprise.
-    const replaces = decided.kind === 'update'
+    const replaces = (decided.kind === 'update' || decided.kind === 'downgrade')
       ? ` This replaces the installed ${formatVersion(entry.installedVersion)}.`
       : '';
     if (!await confirmAction(
@@ -2139,7 +2401,7 @@ async function runPackageAction(entry, decided, mode) {
       'Install Anyways')) return;
 
     if (await postJson(`/admin/api/marketplace/install/${encodeURIComponent(entry.id)}`,
-      { sourceId: entry.sourceId || null, mode })) refreshJobs();
+      { version: version || null, sourceId: entry.sourceId || null, mode })) refreshJobs();
     return;
   }
 
@@ -2147,7 +2409,7 @@ async function runPackageAction(entry, decided, mode) {
     `${decided.label} ${name}? ${describeMode(mode, entry.activeLobbies)}`, decided.label)) return;
 
   if (await postJson(`/admin/api/marketplace/install/${encodeURIComponent(entry.id)}`,
-    { sourceId: entry.sourceId || null, mode })) refreshJobs();
+    { version: version || null, sourceId: entry.sourceId || null, mode })) refreshJobs();
 }
 
 function describeMode(mode, running) {

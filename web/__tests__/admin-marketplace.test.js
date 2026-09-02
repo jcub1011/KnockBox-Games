@@ -132,6 +132,7 @@ afterEach(() => {
   // timeout is the same trap one tick further out.
   admin?.stopPolling();
   admin?.stopScrollSettle();
+  admin?.resetPluginStateForTests?.();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -486,6 +487,81 @@ describe('marketplace actions', () => {
 
     const post = fake.calls.find((c) => c.path === '/admin/api/packages/word-rush/rollback');
     expect(post.body.version).toBe('1.1.0');
+  });
+
+  it('loads older versions dynamically when load:more is selected', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/plugins/word-rush/versions': {
+        body: {
+          id: 'word-rush',
+          name: 'Word Rush',
+          repo: 'owner/word-rush',
+          currentVersion: '1.3.0',
+          versions: [
+            { version: '1.3.0', tag: 'v1.3.0', sizeBytes: 2_000_000, publishedAt: null, isCurrent: true },
+            { version: '1.0.0', tag: 'v1.0.0', sizeBytes: 1_800_000, publishedAt: null, isCurrent: false },
+          ],
+        },
+      },
+    });
+
+    const wordRush = card('word-rush');
+    const version = wordRush.querySelector('.mkt-version');
+    expect(Array.from(version.options).some((o) => o.value === 'load:more')).toBe(true);
+
+    version.value = 'load:more';
+    version.dispatchEvent(new Event('change'));
+    await tick();
+    await tick();
+
+    // Versions dropdown now has available:1.0.0
+    expect(Array.from(version.options).some((o) => o.value === 'available:1.0.0')).toBe(true);
+    // And action button turns into Downgrade
+    const action = wordRush.querySelector('.mkt-action');
+    expect(action.textContent).toBe('Downgrade');
+    expect(action.classList.contains('btn-danger')).toBe(true);
+  });
+
+  it('confirms a downgrade and POSTs with the target version', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/plugins/word-rush/versions': {
+        body: {
+          id: 'word-rush',
+          name: 'Word Rush',
+          repo: 'owner/word-rush',
+          currentVersion: '1.3.0',
+          versions: [
+            { version: '1.3.0', tag: 'v1.3.0', sizeBytes: 2_000_000, publishedAt: null, isCurrent: true },
+            { version: '1.0.0', tag: 'v1.0.0', sizeBytes: 1_800_000, publishedAt: null, isCurrent: false },
+          ],
+        },
+      },
+      '* /admin/api/marketplace/install/word-rush': { status: 202, body: { success: true, jobId: 'j2', detail: 'Downloading.' } },
+    });
+
+    const wordRush = card('word-rush');
+    const version = wordRush.querySelector('.mkt-version');
+    version.value = 'load:more';
+    version.dispatchEvent(new Event('change'));
+    await tick();
+    await tick();
+
+    wordRush.querySelector('.mkt-action').click();
+    await tick();
+
+    expect(el('confirm-backdrop').classList.contains('hidden')).toBe(false);
+    expect(el('confirm-body').textContent).toContain('v1.2.0');
+    expect(el('confirm-body').textContent).toContain('v1.0.0');
+    expect(el('confirm-body').textContent).toContain('replaces');
+
+    el('confirm-ok').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.path === '/admin/api/marketplace/install/word-rush');
+    expect(post).toBeTruthy();
+    expect(post.body.version).toBe('1.0.0');
+    expect(post.body.sourceId).toBe('official');
   });
 
   it('uninstalls through the package route, not the games delete route', async () => {
@@ -1011,6 +1087,94 @@ describe('combined plugins tile and metadata dialog', () => {
     expect(modal.classList.contains('hidden')).toBe(false);
     el('plugin-details-close-x').click();
     expect(modal.classList.contains('hidden')).toBe(true);
+  });
+
+  it('fetches and renders repository releases in the details dialog', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/plugins/word-rush/versions': {
+        body: {
+          id: 'word-rush',
+          name: 'Word Rush',
+          repo: 'owner/word-rush',
+          currentVersion: '1.3.0',
+          versions: [
+            { version: '1.3.0', tag: 'v1.3.0', sizeBytes: 2_000_000, publishedAt: '2026-09-02T15:00:00Z', isCurrent: true },
+            { version: '1.0.0', tag: 'v1.0.0', sizeBytes: 1_800_000, publishedAt: '2026-08-01T10:00:00Z', isCurrent: false },
+          ],
+        },
+      },
+    });
+
+    const wordRush = card('word-rush');
+    const dotsBtn = wordRush.querySelector('.plugin-details-btn');
+    dotsBtn.click();
+    await tick();
+    await tick();
+
+    const body = el('plugin-details-body');
+    expect(body.textContent).toContain('Repository Releases');
+    expect(body.textContent).toContain('v1.3.0');
+    expect(body.textContent).toContain('v1.0.0');
+    expect(body.textContent).toContain('Installed');
+    expect(body.textContent).toContain('Downgrade');
+
+    el('plugin-details-close').click();
+  });
+});
+
+describe('plugin stability & dropdown state preservation', () => {
+  it('does not destroy a focused plugin card or close its select on subsequent renderPlugins', async () => {
+    await openMarketplace();
+
+    const wordRush = card('word-rush');
+    const versionSelect = wordRush.querySelector('.mkt-version');
+    versionSelect.focus();
+    expect(document.activeElement).toBe(versionSelect);
+
+    // Trigger renderPlugins while the dropdown is focused
+    admin.renderPlugins();
+
+    // The focused card is preserved in-place; the select element is not destroyed or blurred
+    const currentWordRush = card('word-rush');
+    expect(currentWordRush).toBe(wordRush);
+    expect(document.activeElement).toBe(versionSelect);
+  });
+
+  it('remembers chosen version and discovered releases across renderPlugins', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/plugins/word-rush/versions': {
+        body: {
+          id: 'word-rush',
+          name: 'Word Rush',
+          repo: 'owner/word-rush',
+          currentVersion: '1.3.0',
+          versions: [
+            { version: '1.3.0', tag: 'v1.3.0', sizeBytes: 2_000_000, publishedAt: null, isCurrent: true },
+            { version: '1.0.0', tag: 'v1.0.0', sizeBytes: 1_800_000, publishedAt: null, isCurrent: false },
+          ],
+        },
+      },
+    });
+
+    const wordRush = card('word-rush');
+    const versionSelect = wordRush.querySelector('.mkt-version');
+    versionSelect.value = 'load:more';
+    versionSelect.dispatchEvent(new Event('change'));
+    await tick();
+    await tick();
+
+    // Dropdown now has available:1.0.0 selected (first older release)
+    expect(versionSelect.value).toBe('available:1.0.0');
+
+    // Manually trigger renderPlugins (as would happen on search filter input, tab refresh, etc.)
+    admin.renderPlugins();
+
+    // The newly rendered card must still remember the discovered versions and user selection!
+    const updatedCard = card('word-rush');
+    const updatedSelect = updatedCard.querySelector('.mkt-version');
+    expect(updatedSelect.value).toBe('available:1.0.0');
+    expect(Array.from(updatedSelect.options).some((o) => o.value === 'available:1.0.0')).toBe(true);
+    expect(updatedCard.querySelector('.mkt-action').textContent).toBe('Downgrade');
   });
 });
 
