@@ -15,7 +15,7 @@
          it back off the assembly at runtime; marketplace catalog entries declare minAppVersion /
          maxAppVersion against it, so a game that needs a newer server is never offered to an older
          one. Bump this when releasing. -->
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
     <PublishAot>True</PublishAot>
     <!-- GC: keep Server GC (best throughput for the WebSocket relay), but rein in its footprint.
          Server GC allocates a heap per logical CPU and retains memory aggressively, which on a
