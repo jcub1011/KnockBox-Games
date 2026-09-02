@@ -982,11 +982,32 @@ var gameContentTypes = new FileExtensionContentTypeProvider();
 gameContentTypes.Mappings[".pck"] = "application/octet-stream";
 gameContentTypes.Mappings[".data"] = "application/octet-stream";
 
+static void ApplyGameCacheHeaders(IHeaderDictionary headers, string path)
+{
+    // HTML entry points and metadata manifests must never be cached by browsers or CDNs; an update
+    // changes bundle hashes in index.html, and a stale cached HTML would try to load deleted chunks (404).
+    if (path.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+    {
+        headers.CacheControl = "no-cache, no-store, must-revalidate";
+        headers.Pragma = "no-cache";
+    }
+    // Bundled assets with content-hashed filenames (/assets/...) are immutable and safe to cache long-term.
+    else if (path.Contains("/assets/", StringComparison.OrdinalIgnoreCase))
+    {
+        headers.CacheControl = "public, max-age=31536000, immutable";
+    }
+    // Other assets (audio, wasm, unhashed textures, thumbnails): revalidate with ETag.
+    else
+    {
+        headers.CacheControl = "public, max-age=0, must-revalidate";
+    }
+}
+
 // Shared options for serving game folders (used on both the game origin and the shell origin):
 //   • ServeUnknownFileTypes + octet-stream default → no future engine asset 404s (zero-edit hosting).
-//   • Cache-Control public/must-revalidate → caches store assets and revalidate via the ETag that
-//     UseStaticFiles already emits, so unchanged builds (esp. the large .wasm) return 304 — safe
-//     even with hot-reload because filenames aren't content-hashed.
+//   • Differentiated Cache-Control: no-store for HTML/manifests (instant updates), immutable for
+//     content-hashed assets under /assets/, and ETag-revalidated for everything else.
 StaticFileOptions GamesStaticOptions() => new()
 {
     FileProvider = gamesFiles,
@@ -995,7 +1016,7 @@ StaticFileOptions GamesStaticOptions() => new()
     ServeUnknownFileTypes = true,
     DefaultContentType = "application/octet-stream",
     OnPrepareResponse = ctx =>
-        ctx.Context.Response.Headers.CacheControl = "public, max-age=0, must-revalidate",
+        ApplyGameCacheHeaders(ctx.Context.Response.Headers, ctx.Context.Request.Path.Value ?? ""),
 };
 
 // Serves a pre-compressed variant after GameAssetNegotiation.Negotiate has rewritten the path to the
@@ -1013,7 +1034,7 @@ StaticFileOptions GamesCompressedStaticOptions() => new()
     OnPrepareResponse = ctx =>
     {
         var headers = ctx.Context.Response.Headers;
-        headers.CacheControl = "public, max-age=0, must-revalidate";
+        ApplyGameCacheHeaders(headers, ctx.Context.Request.Path.Value ?? "");
         headers.Vary = "Accept-Encoding";
         if (ctx.Context.Items[GameAssetNegotiation.EncodingItem] is string enc)
             headers.ContentEncoding = enc;

@@ -96,7 +96,9 @@ export function sanitizeGameOrigin(value) {
 }
 
 // Builds the iframe src for an embedded game, with credentials in the fragment (see parseLaunchParams).
-export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
+// Optional `version` and `updatedAt` append cache-busting query parameters so browser/proxy caches
+// pick up newly published releases and same-version overwrites immediately without a manual refresh.
+export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint, version, updatedAt) {
   // The origin is server-supplied; reject anything that isn't a real http(s) origin so the iframe
   // src can never become a javascript:/data: navigation or point off to an arbitrary host.
   const safeOrigin = sanitizeGameOrigin(gameOrigin);
@@ -106,7 +108,16 @@ export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint) {
   // legitimately contain '/', so encode each segment rather than the whole string.)
   const safeGameId = encodeURIComponent(gameId);
   const safeEntry = entry.split('/').map(encodeURIComponent).join('/');
-  const base = `${safeOrigin}/games/${safeGameId}/${safeEntry}`;
+  const queryParts = [];
+  if (version && typeof version === 'string' && version.trim()) {
+    queryParts.push(`v=${encodeURIComponent(version.trim())}`);
+  }
+  if (updatedAt) {
+    const epoch = typeof updatedAt === 'number' ? updatedAt : Date.parse(updatedAt);
+    if (Number.isFinite(epoch) && epoch > 0) queryParts.push(`t=${epoch}`);
+  }
+  const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+  const base = `${safeOrigin}/games/${safeGameId}/${safeEntry}${query}`;
   const frag = `kbTicket=${encodeURIComponent(ticket)}&kbEndpoint=${encodeURIComponent(wsEndpoint)}`;
   return `${base}#${frag}`;
 }

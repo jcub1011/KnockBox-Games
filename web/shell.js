@@ -642,7 +642,15 @@ export async function enterGame(starting) {
   // Credentials go in the URL fragment (not the query string) so they never leak via Referer/logs.
   let src;
   try {
-    src = buildGameSrc(gameOrigin, starting.gameId, entry, reply.ticket, gameWsEndpoint(gameOrigin));
+    src = buildGameSrc(
+      gameOrigin,
+      starting.gameId,
+      entry,
+      reply.ticket,
+      gameWsEndpoint(gameOrigin),
+      manifest?.version,
+      manifest?.updatedAt || manifest?.createdAt,
+    );
   } catch {
     // gameOrigin is sanitized at the source (Welcome), so this is defensive: surface it like every
     // other enterGame failure rather than letting the rejection escape.

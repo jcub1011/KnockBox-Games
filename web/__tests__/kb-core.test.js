@@ -281,12 +281,31 @@ describe('buildGameSrc', () => {
   it('puts the ticket in the fragment, not the query string', () => {
     const src = buildGameSrc('http://localhost:5115', 'ttt', 'index.html', 'tok+/=', 'ws://localhost:5115/ws');
     expect(src.startsWith('http://localhost:5115/games/ttt/index.html#')).toBe(true);
-    expect(src.includes('?')).toBe(false); // never a query string — that would leak via Referer/logs
+    expect(src.includes('?')).toBe(false); // no query when version/timestamp are omitted
     // The ticket is URL-encoded in the fragment.
     const frag = src.split('#')[1];
     const params = new URLSearchParams(frag);
     expect(params.get('kbTicket')).toBe('tok+/=');
     expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
+  });
+
+  it('appends version and timestamp query parameters for cache-busting while preserving fragment credentials', () => {
+    const src = buildGameSrc(
+      'http://localhost:5115',
+      'ttt',
+      'index.html',
+      'tok+/=',
+      'ws://localhost:5115/ws',
+      '1.2.0',
+      '2026-09-02T10:00:00Z',
+    );
+    const [urlPart, fragPart] = src.split('#');
+    expect(urlPart).toBe('http://localhost:5115/games/ttt/index.html?v=1.2.0&t=1788343200000');
+    const params = new URLSearchParams(fragPart);
+    expect(params.get('kbTicket')).toBe('tok+/=');
+    expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
+    // Ensure credentials never leak into query string
+    expect(urlPart.includes('tok')).toBe(false);
   });
 
   it('percent-encodes the gameId so a hostile id cannot inject path/scheme', () => {
