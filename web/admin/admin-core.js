@@ -1235,6 +1235,36 @@ export const LIMIT_FIELDS = [
     hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. '
       + 'Costs one re-parse when someone next plays it. 0 keeps it until the server restarts.',
   },
+  // The blob-store caps, from a THIRD provider (BlobOptionsProvider). Same flat wire, same rule: a knob
+  // is one entry here and nothing else client-side. These are sizes in bytes rather than rates, and the
+  // hints have to say what a full quota does — an upload refused with 507 is the only symptom, and it
+  // reaches the operator as "a player says their map will not load".
+  {
+    key: 'blobMaxBytes', label: 'Max blob size (bytes)', integer: true,
+    hint: 'Largest single file a game may upload for its session to share — a map image, a sound. '
+      + 'Enforced while streaming, not on the declared length. 0 means no limit.',
+  },
+  {
+    key: 'blobLobbyQuotaBytes', label: 'Blob quota per session (bytes)', integer: true,
+    hint: 'Total a single lobby’s blobs may occupy. Identical files are stored once and charged once, '
+      + 'however many names reference them. Per-game overrides live on the Games tab. 0 means no limit.',
+  },
+  {
+    key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide (bytes)', integer: true,
+    hint: 'The aggregate cap, and the one that actually bounds disk use — without it the per-session '
+      + 'figure is only that times the number of sessions. Full means new uploads are refused; nothing '
+      + 'already registered is deleted. 0 means no limit.',
+  },
+  {
+    key: 'blobGraceMinutes', label: 'Blob grace window (min)', integer: true,
+    hint: 'How long freshly uploaded bytes are protected before the game claims them. Covers the round '
+      + 'trip between upload and register; nothing else. Lower it only if abandoned uploads are a problem.',
+  },
+  {
+    key: 'blobMaxUploadsPerLobby', label: 'Concurrent uploads per session', integer: true,
+    hint: 'Bounds how many uploads one lobby may have open at once, which is what stops an abandoned '
+      + 'upload being used to churn the store. 0 means unlimited.',
+  },
 ];
 
 /** The startup-only limits, with why each one is not editable here. */
@@ -1243,6 +1273,10 @@ export const STARTUP_LIMITS = [
   { key: 'disconnectGraceSeconds', label: 'Reconnect grace (s)' },
   { key: 'adminLoginAttemptsPerMinute', label: 'Admin login attempts / minute (per IP)' },
   { key: 'adminLoginAttemptsPerMinuteGlobal', label: 'Admin login attempts / minute (server-wide)' },
+  // The blob sweep cadence is startup-only while its window (blobGraceMinutes, above) is editable. That
+  // split is the house rule a cadence follows: deriving the interval from the window is what forced the
+  // reconnect grace to stay startup-only too.
+  { key: 'blobSweepSeconds', label: 'Blob sweep interval (s)' },
 ];
 
 /**

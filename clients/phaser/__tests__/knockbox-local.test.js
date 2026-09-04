@@ -171,3 +171,63 @@ describe('solo transport', () => {
     expect(msgs).toEqual([{ from: 'solo', payload: { tick: 1 } }]);
   });
 });
+
+describe('blob sharing locally', () => {
+  it('registers and unregisters blobs in KnockBoxLocalPeer', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['local-blob-content'], { type: 'text/plain' });
+
+    expect(p.blobUrl('map')).toBeNull();
+    const url = await p.registerBlob('map', blob);
+    expect(typeof url).toBe('string');
+    expect(url.length).toBeGreaterThan(0);
+    expect(p.blobUrl('map')).toBe(url);
+
+    await p.unregisterBlob('map');
+    expect(p.blobUrl('map')).toBeNull();
+  });
+
+  it('rejects invalid arguments to registerBlob and unregisterBlob', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    await expect(p.registerBlob('', new Blob(['x']))).rejects.toThrow(TypeError);
+    await expect(p.registerBlob('map', null)).rejects.toThrow(TypeError);
+    await expect(p.unregisterBlob('')).rejects.toThrow(TypeError);
+  });
+
+  it('clears and revokes blobs on destroy', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['local-blob-content']);
+    const url = await p.registerBlob('map', blob);
+    expect(p.blobUrl('map')).toBe(url);
+
+    p.destroy();
+    expect(p.blobUrl('map')).toBeNull();
+  });
+
+  it('re-registering identical blob for same logicalId is idempotent', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['same-content']);
+    const url1 = await p.registerBlob('map', blob);
+    const url2 = await p.registerBlob('map', blob);
+    expect(url2).toBe(url1);
+    expect(p.blobUrl('map')).toBe(url1);
+  });
+
+  it('two logical ids for identical content release independently (R6)', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['shared-map-bytes']);
+
+    const urlA = await p.registerBlob('map-a', blob);
+    const urlB = await p.registerBlob('map-b', blob);
+
+    expect(p.blobUrl('map-a')).toBe(urlA);
+    expect(p.blobUrl('map-b')).toBe(urlB);
+
+    await p.unregisterBlob('map-a');
+    expect(p.blobUrl('map-a')).toBeNull();
+    expect(p.blobUrl('map-b')).toBe(urlB);
+
+    await p.unregisterBlob('map-b');
+    expect(p.blobUrl('map-b')).toBeNull();
+  });
+});

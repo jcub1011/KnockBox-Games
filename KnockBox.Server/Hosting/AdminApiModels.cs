@@ -236,6 +236,8 @@ public sealed record AdminGamesResponse(
     long LogsBytes,
     string ManagedRoot,
     long ManagedRootBytes,
+    string BlobsRoot,
+    long BlobsBytes,
     /// <summary>The SDK version this server shipped with — the yardstick each row's status is judged against.</summary>
     string ServerSdkVersion
 );
@@ -449,7 +451,12 @@ public sealed record AdminLimitValues(
     int MaxLobbies,
     int MaxLobbiesPerGame,
     int AuthorityMaxLobbies,
-    int AuthorityModuleCacheIdleMinutes);
+    int AuthorityModuleCacheIdleMinutes,
+    long BlobMaxBytes,
+    long BlobLobbyQuotaBytes,
+    long BlobTotalQuotaBytes,
+    int BlobGraceMinutes,
+    int BlobMaxUploadsPerLobby);
 
 /// <summary>
 /// The default limits, the ones actually in force, and which of them the operator changed.
@@ -467,6 +474,17 @@ public sealed record AdminLimitValues(
 /// many idle ones it has dropped since startup. Reported here because this is the only screen that shows
 /// the idle window, and "is my window doing anything?" is the only question anyone asks about it.
 /// Cumulative and never reset, like every other counter — a rate needs two samples.</param>
+/// <param name="BlobsEnabled">Whether the blob store is switched on at all. Read-only for the same reason
+/// the handshake timeout is: it gates DI wiring and the bootstrap directory creation, so an edit would
+/// apply only to a restart. Shown greyed with that reason rather than omitted.</param>
+/// <param name="BlobSweepSeconds">The backstop sweep cadence, also read-only — a cadence is fixed for the
+/// process while its window (<c>blobGraceMinutes</c>, which IS editable) is read live.</param>
+/// <param name="BlobBytesUsed">Bytes of distinct blob content held, against
+/// <c>blobTotalQuotaBytes</c>. The one number that says whether the aggregate cap is close to biting,
+/// which is the only question an operator asks about it.</param>
+/// <param name="BlobQuotas">Per-game overrides of the per-lobby quota, in bytes, keyed by game id. Games
+/// on the server-wide default are absent, not listed at their default — so the portal never has to
+/// distinguish "no override" from "an override that happens to match".</param>
 public sealed record AdminLimitsResponse(
     AdminLimitValues Defaults,
     AdminLimitValues Effective,
@@ -478,7 +496,11 @@ public sealed record AdminLimitsResponse(
     int ActiveLobbies,
     int ConnectedPlayers,
     int AuthorityModulesCached,
-    long AuthorityModulesEvicted);
+    long AuthorityModulesEvicted,
+    bool BlobsEnabled,
+    double BlobSweepSeconds,
+    long BlobBytesUsed,
+    IReadOnlyDictionary<string, long> BlobQuotas);
 
 // ── Room codes ───────────────────────────────────────────────────────────────
 
@@ -675,4 +697,23 @@ public sealed record AdminLimitsRequest(
     int? MaxLobbies = null,
     int? MaxLobbiesPerGame = null,
     int? AuthorityMaxLobbies = null,
-    int? AuthorityModuleCacheIdleMinutes = null);
+    int? AuthorityModuleCacheIdleMinutes = null,
+    long? BlobMaxBytes = null,
+    long? BlobLobbyQuotaBytes = null,
+    long? BlobTotalQuotaBytes = null,
+    int? BlobGraceMinutes = null,
+    int? BlobMaxUploadsPerLobby = null);
+
+/// <summary>
+/// Sets or clears one game's per-lobby blob quota.
+/// </summary>
+/// <remarks>
+/// Its own route rather than a map on <see cref="AdminLimitsRequest"/>, because it is per-game policy and
+/// belongs with availability and update policy on the Games tab — the same reasoning that keeps it out of
+/// <c>OperatorBlobOptions</c>. One game per request, like every other per-game route here.
+/// </remarks>
+/// <param name="Bytes">Null (or omitted) clears the override and returns the game to the server-wide
+/// default. A NEGATIVE value means "no per-lobby cap for this game", the convention every other cap in
+/// this server follows; zero is refused, because a quota field somebody typed 0 into far more likely
+/// means "clear this" — which is what omitting it does — than "this game may store nothing".</param>
+public sealed record AdminBlobQuotaRequest(string? GameId = null, long? Bytes = null);

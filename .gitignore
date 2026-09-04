@@ -446,6 +446,11 @@ FodyWeavers.xsd
 /games-unpacked/
 /games-managed
 
+# Media a game uploaded for one session to share, content-addressed by SHA-256. Emptied on every
+# startup, because a blob's lifetime is its lobby's and lobbies do not survive the process -- so a dev
+# checkout grows this directory on every `dotnet run` and it is never worth committing.
+/blobs/
+
 # Addon release archives are build output, uploaded to the GitHub release rather than committed.
 # The generated index (.addons/ADDONS.json) IS committed — it is served from raw.githubusercontent
 # and is the trust root every addon install verifies against.

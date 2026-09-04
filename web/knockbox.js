@@ -34,12 +34,24 @@ import {
   normalizeReady,
   rosterAdd,
   rosterRemove,
+  blobBaseUrl,
+  sha256Hex,
 } from './kb-protocol.js';
 
 (function () {
   const launch = parseLaunchParams(location.hash);
   const ticket = launch.ticket;
   const endpoint = launch.endpoint || defaultEndpoint(location.protocol, location.host);
+  const httpBase = blobBaseUrl(endpoint);
+  const blobUrls = new Map();
+
+  async function responseError(res) {
+    try {
+      const data = await res.json();
+      if (data && data.error) return data.error;
+    } catch {}
+    return res.statusText ? `${res.status} ${res.statusText}` : String(res.status);
+  }
 
   // The ticket/endpoint are now captured in memory; scrub them from the address bar so they don't
   // linger in browser history or stay readable via location.hash by anything that loads later
@@ -118,6 +130,108 @@ import {
       }
       sendLog({ type: 'PlayLog', metadata: bag });
     },
+
+    // Register a blob with a logical ID. Uploads to blob storage if not already present,
+    // and registers with the server under the session ticket. Returns the accessible URL.
+    async registerBlob(logicalId, blob) {
+      if (typeof logicalId !== 'string' || !logicalId.trim()) {
+        throw new TypeError('logicalId must be a non-empty string');
+      }
+      if (!blob || typeof blob.arrayBuffer !== 'function') {
+        throw new TypeError('blob must be a Blob or File');
+      }
+      if (!ticket) {
+        throw new Error('KnockBox is not authenticated (missing ticket)');
+      }
+
+      const sha256 = await sha256Hex(blob);
+
+      const upload = async () => {
+        const putRes = await fetch(`${httpBase}/blob/${sha256}`, {
+          method: 'PUT',
+          headers: {
+            'X-KnockBox-Ticket': ticket,
+            'Content-Type': blob.type || 'application/octet-stream',
+          },
+          body: blob,
+        });
+        if (!putRes.ok) {
+          const err = await responseError(putRes);
+          throw new Error(`Failed to upload blob: ${err}`);
+        }
+      };
+
+      // 1. Probe HEAD ${httpBase}/blob/${sha256}
+      const headRes = await fetch(`${httpBase}/blob/${sha256}`, {
+        method: 'HEAD',
+        headers: { 'X-KnockBox-Ticket': ticket },
+      });
+
+      if (headRes.status === 404) {
+        // 2. Upload PUT ${httpBase}/blob/${sha256}
+        await upload();
+      } else if (!headRes.ok) {
+        throw new Error(`Failed to probe blob: ${headRes.status} ${headRes.statusText}`);
+      }
+
+      // 3. Register POST ${httpBase}/blob/register
+      const postRegister = () => fetch(`${httpBase}/blob/register`, {
+        method: 'POST',
+        headers: {
+          'X-KnockBox-Ticket': ticket,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          logicalId,
+          sha256,
+          contentType: blob.type || null,
+        }),
+      });
+
+      let regRes = await postRegister();
+
+      // If evicted between probe and register (409 Conflict / UnknownHash), upload and retry once.
+      if (regRes.status === 409) {
+        await upload();
+        regRes = await postRegister();
+      }
+
+      if (!regRes.ok) {
+        const err = await responseError(regRes);
+        throw new Error(`Failed to register blob: ${err}`);
+      }
+
+      const data = await regRes.json();
+      if (!data || !data.ok || typeof data.url !== 'string') {
+        throw new Error('Invalid response from blob registration');
+      }
+
+      blobUrls.set(logicalId, data.url);
+      return data.url;
+    },
+
+    // Unregister a previously registered blob by logical ID.
+    async unregisterBlob(logicalId) {
+      if (typeof logicalId !== 'string' || !logicalId.trim()) {
+        throw new TypeError('logicalId must be a non-empty string');
+      }
+      blobUrls.delete(logicalId);
+      if (!ticket) return;
+
+      const res = await fetch(`${httpBase}/blob/register/${encodeURIComponent(logicalId)}`, {
+        method: 'DELETE',
+        headers: { 'X-KnockBox-Ticket': ticket },
+      });
+      if (!res.ok) {
+        const err = await responseError(res);
+        throw new Error(`Failed to unregister blob: ${err}`);
+      }
+    },
+
+    // Get the accessible URL for a registered blob, or null if not registered.
+    blobUrl(logicalId) {
+      return blobUrls.get(logicalId) || null;
+    },
   };
 
   function snapshot() {
@@ -180,6 +294,7 @@ import {
         // The ticket is invalid or our lobby membership ended — retrying is pointless.
         stopped = true;
         pendingLogs.length = 0; // give up — these logs will never send
+        blobUrls.clear();
         console.warn('[KnockBox] data socket closed permanently:', e.reason || e.code);
         return;
       }

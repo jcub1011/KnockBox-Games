@@ -32,11 +32,11 @@ const read = (...parts) => readFileSync(join(repoRoot, ...parts), 'utf8');
 // cannot see `authority`, `ownerId` or `isOwner`. Closing these is the tracked Godot-parity task
 // (docs/SERVER_AUTHORITY_DESIGN.md: "Godot addon gets the same treatment as a parity follow-up").
 // When one lands, delete it from this list — the last test in this file fails if you don't.
-const KNOWN_GODOT_GAPS = ['LOG_LEVELS', 'makeLogger', 'normalizeReady'];
+const KNOWN_GODOT_GAPS = ['LOG_LEVELS', 'blobBaseUrl', 'makeLogger', 'normalizeReady', 'sha256Hex'];
 
 /** `export const NAME` / `export function name(` — the reference surface. */
 function esmExports(source) {
-  return [...source.matchAll(/^export (?:const|function)\s+([A-Za-z0-9_$]+)/gm)].map((m) => m[1]);
+  return [...source.matchAll(/^export (?:const|(?:async\s+)?function)\s+([A-Za-z0-9_$]+)/gm)].map((m) => m[1]);
 }
 
 /**
@@ -76,6 +76,7 @@ describe('web/kb-protocol.js is the reference surface', () => {
       'LOG_LEVELS',
       'PROTOCOL_VERSION',
       'TERMINAL_CLOSE_CODE',
+      'blobBaseUrl',
       'defaultEndpoint',
       'isTerminalClose',
       'makeLogger',
@@ -84,6 +85,7 @@ describe('web/kb-protocol.js is the reference surface', () => {
       'reconnectDelay',
       'rosterAdd',
       'rosterRemove',
+      'sha256Hex',
     ]);
   });
 
