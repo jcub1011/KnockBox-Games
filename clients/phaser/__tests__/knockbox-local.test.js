@@ -203,4 +203,31 @@ describe('blob sharing locally', () => {
     p.destroy();
     expect(p.blobUrl('map')).toBeNull();
   });
+
+  it('re-registering identical blob for same logicalId is idempotent', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['same-content']);
+    const url1 = await p.registerBlob('map', blob);
+    const url2 = await p.registerBlob('map', blob);
+    expect(url2).toBe(url1);
+    expect(p.blobUrl('map')).toBe(url1);
+  });
+
+  it('two logical ids for identical content release independently (R6)', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['shared-map-bytes']);
+
+    const urlA = await p.registerBlob('map-a', blob);
+    const urlB = await p.registerBlob('map-b', blob);
+
+    expect(p.blobUrl('map-a')).toBe(urlA);
+    expect(p.blobUrl('map-b')).toBe(urlB);
+
+    await p.unregisterBlob('map-a');
+    expect(p.blobUrl('map-a')).toBeNull();
+    expect(p.blobUrl('map-b')).toBe(urlB);
+
+    await p.unregisterBlob('map-b');
+    expect(p.blobUrl('map-b')).toBeNull();
+  });
 });

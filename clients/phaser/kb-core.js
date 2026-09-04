@@ -61,7 +61,7 @@
       var url = new URL(endpoint, typeof location !== 'undefined' ? location.href : 'http://localhost');
       if (url.protocol === 'ws:') url.protocol = 'http:';
       if (url.protocol === 'wss:') url.protocol = 'https:';
-      return url.origin;
+      return (url.origin && url.origin !== 'null') ? url.origin : '';
     } catch (e) {
       return '';
     }
@@ -77,7 +77,11 @@
       } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
         return data.arrayBuffer();
       } else if (typeof data === 'string') {
-        return Promise.resolve(new TextEncoder().encode(data).buffer);
+        var encoder = typeof TextEncoder !== 'undefined'
+          ? new TextEncoder()
+          : (typeof globalThis !== 'undefined' && globalThis.TextEncoder ? new globalThis.TextEncoder() : null);
+        if (encoder) return Promise.resolve(encoder.encode(data).buffer);
+        return Promise.reject(new Error('TextEncoder is not available in this environment'));
       } else if (data && typeof data.arrayBuffer === 'function') {
         return data.arrayBuffer();
       }
@@ -85,7 +89,9 @@
     };
 
     var subtle = (typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.subtle)
-      || (typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.webcrypto && globalThis.crypto.webcrypto.subtle);
+      || (typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.webcrypto && globalThis.crypto.webcrypto.subtle)
+      || (typeof window !== 'undefined' && window.crypto && window.crypto.subtle)
+      || (typeof crypto !== 'undefined' && crypto.subtle);
     if (!subtle) {
       return Promise.reject(new Error('Web Crypto API (crypto.subtle) is not available in this environment'));
     }

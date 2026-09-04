@@ -769,6 +769,7 @@
     this._inbox = [];    // inbound messages that arrived before our own ready
     this._blobUrls = new Map();
     this._blobs = new Map();
+    this._blobHashes = new Map();
     this._transport = makeTransport(this);
 
     // There's no server to receive logs locally, so mirror them to the dev console (API parity with
@@ -923,6 +924,7 @@
       this._blobUrls.clear();
     }
     if (this._blobs) this._blobs.clear();
+    if (this._blobHashes) this._blobHashes.clear();
   };
 
   KnockBoxLocalPeer.prototype.registerBlob = function (logicalId, blob) {
@@ -935,9 +937,16 @@
 
     var self = this;
     return KBCore.sha256Hex(blob).then(function (sha256) {
-      var oldUrl = self._blobUrls.get(logicalId);
-      if (oldUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function' && typeof oldUrl === 'string' && oldUrl.indexOf('blob:') === 0) {
-        URL.revokeObjectURL(oldUrl);
+      var existingHash = self._blobHashes ? self._blobHashes.get(logicalId) : null;
+      var existingUrl = self._blobUrls.get(logicalId);
+
+      // Idempotent: re-registering the same logicalId with identical content returns the existing URL
+      if (existingHash === sha256 && existingUrl) {
+        return existingUrl;
+      }
+
+      if (existingUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function' && typeof existingUrl === 'string' && existingUrl.indexOf('blob:') === 0) {
+        URL.revokeObjectURL(existingUrl);
       }
 
       var url;
@@ -953,6 +962,7 @@
 
       self._blobUrls.set(logicalId, url);
       self._blobs.set(logicalId, blob);
+      if (self._blobHashes) self._blobHashes.set(logicalId, sha256);
       return url;
     });
   };
@@ -967,6 +977,7 @@
     }
     this._blobUrls.delete(logicalId);
     this._blobs.delete(logicalId);
+    if (this._blobHashes) this._blobHashes.delete(logicalId);
     return Promise.resolve();
   };
 

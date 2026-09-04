@@ -56,7 +56,7 @@ export function blobBaseUrl(endpoint) {
     const url = new URL(endpoint, typeof location !== 'undefined' ? location.href : 'http://localhost');
     if (url.protocol === 'ws:') url.protocol = 'http:';
     if (url.protocol === 'wss:') url.protocol = 'https:';
-    return url.origin;
+    return (url.origin && url.origin !== 'null') ? url.origin : '';
   } catch {
     return '';
   }
