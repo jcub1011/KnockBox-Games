@@ -384,6 +384,65 @@ describe('blob sharing', () => {
     expect(plugin.blobUrl('temp-map')).toBeNull();
   });
 
+  it('throws when probe, upload, or register fails', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    const blob = new Blob(['fail-test']);
+
+    // Probe failure (e.g. 500)
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 500, ok: false, statusText: 'Server Error' })));
+    await expect(plugin.registerBlob('map', blob)).rejects.toThrow('Failed to probe blob: 500');
+
+    // Upload failure (e.g. 413)
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init.method === 'HEAD') return { status: 404, ok: false };
+      return { status: 413, ok: false, statusText: 'Payload Too Large' };
+    }));
+    await expect(plugin.registerBlob('map', blob)).rejects.toThrow('Failed to upload blob: 413');
+
+    // Register failure (surfacing server JSON error)
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'PUT') return { status: 200, ok: true };
+      return { status: 507, ok: false, statusText: 'Insufficient Storage', json: async () => ({ ok: false, error: 'LobbyQuotaExceeded' }) };
+    }));
+    await expect(plugin.registerBlob('map', blob)).rejects.toThrow('Failed to register blob: LobbyQuotaExceeded');
+  });
+
+  it('retries upload on 409 Conflict during register and succeeds', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    const blob = new Blob(['evicted-content']);
+
+    const methods = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      methods.push(init.method);
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'PUT') return { status: 200, ok: true };
+      if (init.method === 'POST') {
+        if (methods.filter(m => m === 'POST').length === 1) {
+          return { status: 409, ok: false, statusText: 'Conflict', json: async () => ({ ok: false, error: 'UnknownHash' }) };
+        }
+        return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/recovered.dat' }) };
+      }
+      return { status: 500, ok: false };
+    }));
+
+    const url = await plugin.registerBlob('map', blob);
+    expect(url).toBe('/blob/recovered.dat');
+    expect(methods).toEqual(['HEAD', 'POST', 'PUT', 'POST']);
+  });
+
+  it('throws when unregister fails with surfaced error', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 403,
+      ok: false,
+      statusText: 'Forbidden',
+      json: async () => ({ ok: false, error: 'Forbidden' }),
+    })));
+
+    await expect(plugin.unregisterBlob('temp-map')).rejects.toThrow('Failed to unregister blob: Forbidden');
+  });
+
   it('clears registered blob URLs on terminal socket close and destroy', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { plugin, ws } = await makePlugin();

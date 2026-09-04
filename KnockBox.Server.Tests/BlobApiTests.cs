@@ -285,6 +285,26 @@ public class BlobApiTests : IDisposable
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
     }
 
+    [Fact]
+    public async Task An_authenticated_probe_touches_and_extends_grace_window()
+    {
+        var hash = await Store("probe-touched");
+        var path = Path.Combine(_root, hash[..2], hash);
+
+        // Advance time near end of grace
+        _clock.Advance(_options.Current.Grace - TimeSpan.FromMinutes(1));
+
+        // Authenticated probe touches the blob
+        var found = Request("HEAD", $"{BlobApi.RoutePrefix}/{hash}", ticket: Ticket());
+        Assert.False(await Run(found));
+        Assert.Equal(StatusCodes.Status200OK, found.Response.StatusCode);
+
+        // Advance past original grace window
+        _clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.Empty(_store.Sweep());
+        Assert.True(File.Exists(path), "probe should have touched blob to extend grace");
+    }
+
     // ── Uploads ──────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]

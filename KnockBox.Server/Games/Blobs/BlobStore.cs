@@ -233,6 +233,23 @@ public sealed class BlobStore : IBlobStore
         && _content.TryGetValue(sha256!, out var entry)
         && Volatile.Read(ref entry.Published) == 1;
 
+    public bool Touch(string? sha256)
+    {
+        if (!BlobLayout.IsValidHash(sha256)) return false;
+        if (!_content.TryGetValue(sha256!, out var entry) || Volatile.Read(ref entry.Published) == 0)
+            return false;
+
+        lock (_gate)
+        {
+            if (!_content.TryGetValue(sha256!, out entry) || Volatile.Read(ref entry.Published) == 0)
+                return false;
+
+            entry.GraceUntilTicks = Now() + _options.Current.Grace.Ticks;
+            entry.EverReferenced = false;
+            return true;
+        }
+    }
+
     public bool TryResolveToken(string? token, out BlobReadTarget target)
     {
         target = default;
@@ -319,8 +336,10 @@ public sealed class BlobStore : IBlobStore
                     && Volatile.Read(ref existing.Published) == 1)
                 {
                     // Extend the grace window: a client that just learned we have these bytes is about
-                    // to register them, and the register must not race a sweep.
+                    // to register them, and the register must not race a sweep or an unregister by an
+                    // existing holder.
                     existing.GraceUntilTicks = Now() + options.Grace.Ticks;
+                    existing.EverReferenced = false;
                     return new BlobIngestResult(BlobIngestOutcome.AlreadyPresent, existing.Length);
                 }
 

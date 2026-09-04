@@ -124,6 +124,12 @@ public interface IBlobStore
     bool Has(string? sha256);
 
     /// <summary>
+    /// True when the server holds these bytes, and extends their grace window so a subsequent register
+    /// does not race deletion if existing handles are released.
+    /// </summary>
+    bool Touch(string? sha256);
+
+    /// <summary>
     /// The read token for <paramref name="sha256"/> — an unguessable key derived from the hash under a
     /// per-process secret.
     /// </summary>

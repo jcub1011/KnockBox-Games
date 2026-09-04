@@ -431,6 +431,23 @@ public class AdminSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void OperatorBlobOptions_Validate_enforces_1_TiB_cap()
+    {
+        const long maxBytes = 1024L * 1024 * 1024 * 1024;
+        var valid = new OperatorBlobOptions(MaxBlobBytes: maxBytes, LobbyQuotaBytes: maxBytes, TotalQuotaBytes: maxBytes);
+        Assert.Null(valid.Validate());
+
+        var overflowMaxBlob = new OperatorBlobOptions(MaxBlobBytes: maxBytes + 1);
+        Assert.NotNull(overflowMaxBlob.Validate());
+
+        var overflowLobby = new OperatorBlobOptions(LobbyQuotaBytes: maxBytes + 1);
+        Assert.NotNull(overflowLobby.Validate());
+
+        var overflowTotal = new OperatorBlobOptions(TotalQuotaBytes: maxBytes + 1);
+        Assert.NotNull(overflowTotal.Validate());
+    }
+
+    [Fact]
     public void Reverting_every_authority_knob_removes_the_object_rather_than_recording_nulls()
     {
         var store = NewStore();

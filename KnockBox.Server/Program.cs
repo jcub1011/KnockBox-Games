@@ -1169,9 +1169,15 @@ StaticFileOptions BlobStaticOptions() => new()
         // than a bet.
         headers.CacheControl = "public, max-age=31536000, immutable";
         headers["Cross-Origin-Resource-Policy"] = "same-origin";
+        headers["X-Content-Type-Options"] = "nosniff";
 
         if (ctx.Context.Items[BlobApi.ContentTypeItem] is not string type) return;
         ctx.Context.Response.ContentType = type;
+
+        if (type == "image/svg+xml")
+        {
+            headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'";
+        }
 
         // application/octet-stream IS in the response-compression MIME list above, so a blob served
         // under it gets Brotli'd at request time — burning CPU to re-compress an already-compressed

@@ -269,7 +269,8 @@ internal static class BlobApi
         if (await Authorize(ctx, options, writeBody: false) is null) return;
 
         // No body: a HEAD response must not have one, so the answer is entirely in the status.
-        ctx.Response.StatusCode = options.Blobs.Has(hash)
+        // Touch extends the grace window so a subsequent register does not race deletion.
+        ctx.Response.StatusCode = options.Blobs.Touch(hash)
             ? StatusCodes.Status200OK
             : StatusCodes.Status404NotFound;
     }
@@ -308,8 +309,8 @@ internal static class BlobApi
         // said "no" and someone else uploaded the same bytes in between. Rare, so draining the body
         // (below) rather than resetting the stream is the right trade: a reset produces client-visible
         // broken pipes on some stacks, which is the failure class that works in a test and fails
-        // behind a proxy.
-        if (options.Blobs.Has(hash))
+        // behind a proxy. Touch extends the grace window so a subsequent register does not race deletion.
+        if (options.Blobs.Touch(hash))
         {
             await DrainAsync(ctx, limits);
             await Write(ctx, new BlobResponse(true, Bytes: 0), StatusCodes.Status200OK);

@@ -53,6 +53,19 @@
   // disconnected can't grow the queue without bound — and logs never displace queued game frames.
   var MAX_PENDING_LOGS = 100;
 
+  function responseError(res) {
+    var fallback = (res && res.statusText ? res.status + ' ' + res.statusText : String(res ? res.status : ''));
+    if (!res || typeof res.json !== 'function') {
+      return Promise.resolve(fallback);
+    }
+    return res.json().then(function (data) {
+      if (data && data.error) return data.error;
+      return fallback;
+    }).catch(function () {
+      return fallback;
+    });
+  }
+
   // We subclass BasePlugin (global plugin) and emit through an internal EventEmitter so a game can
   // do `this.knockbox.events.on(...)`. Using a dedicated emitter (rather than making the plugin the
   // emitter) keeps the plugin's public API surface clean and matches the Godot addon's signal set.
@@ -198,6 +211,23 @@
     var httpBase = KBCore.blobBaseUrl(this._endpoint);
 
     return KBCore.sha256Hex(blob).then(function (sha256) {
+      var upload = function () {
+        return fetch(httpBase + '/blob/' + sha256, {
+          method: 'PUT',
+          headers: {
+            'X-KnockBox-Ticket': ticket,
+            'Content-Type': blob.type || 'application/octet-stream'
+          },
+          body: blob
+        }).then(function (putRes) {
+          if (!putRes.ok) {
+            return responseError(putRes).then(function (err) {
+              throw new Error('Failed to upload blob: ' + err);
+            });
+          }
+        });
+      };
+
       // 1. Probe HEAD ${httpBase}/blob/${sha256}
       return fetch(httpBase + '/blob/' + sha256, {
         method: 'HEAD',
@@ -205,38 +235,39 @@
       }).then(function (headRes) {
         if (headRes.status === 404) {
           // 2. Upload PUT ${httpBase}/blob/${sha256}
-          return fetch(httpBase + '/blob/' + sha256, {
-            method: 'PUT',
-            headers: {
-              'X-KnockBox-Ticket': ticket,
-              'Content-Type': blob.type || 'application/octet-stream'
-            },
-            body: blob
-          }).then(function (putRes) {
-            if (!putRes.ok) {
-              throw new Error('Failed to upload blob: ' + putRes.status + ' ' + putRes.statusText);
-            }
-          });
+          return upload();
         } else if (!headRes.ok) {
           throw new Error('Failed to probe blob: ' + headRes.status + ' ' + headRes.statusText);
         }
       }).then(function () {
         // 3. Register POST ${httpBase}/blob/register
-        return fetch(httpBase + '/blob/register', {
-          method: 'POST',
-          headers: {
-            'X-KnockBox-Ticket': ticket,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            logicalId: logicalId,
-            sha256: sha256,
-            contentType: blob.type || null
-          })
+        var postRegister = function () {
+          return fetch(httpBase + '/blob/register', {
+            method: 'POST',
+            headers: {
+              'X-KnockBox-Ticket': ticket,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              logicalId: logicalId,
+              sha256: sha256,
+              contentType: blob.type || null
+            })
+          });
+        };
+
+        return postRegister().then(function (regRes) {
+          // If evicted between probe and register (409 Conflict / UnknownHash), upload and retry once.
+          if (regRes.status === 409) {
+            return upload().then(postRegister);
+          }
+          return regRes;
         });
       }).then(function (regRes) {
         if (!regRes.ok) {
-          throw new Error('Failed to register blob: ' + regRes.status + ' ' + regRes.statusText);
+          return responseError(regRes).then(function (err) {
+            throw new Error('Failed to register blob: ' + err);
+          });
         }
         return regRes.json();
       }).then(function (data) {
@@ -265,7 +296,9 @@
       headers: { 'X-KnockBox-Ticket': ticket }
     }).then(function (res) {
       if (!res.ok) {
-        throw new Error('Failed to unregister blob: ' + res.status + ' ' + res.statusText);
+        return responseError(res).then(function (err) {
+          throw new Error('Failed to unregister blob: ' + err);
+        });
       }
     });
   };

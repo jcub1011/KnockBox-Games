@@ -397,12 +397,37 @@ describe('blob sharing', () => {
     }));
     await expect(kb.registerBlob('map', blob)).rejects.toThrow('Failed to upload blob: 413');
 
-    // Register failure (e.g. 409)
+    // Register failure (surfacing server JSON error)
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
       if (init.method === 'HEAD') return { status: 200, ok: true };
-      return { status: 409, ok: false, statusText: 'Conflict' };
+      if (init.method === 'PUT') return { status: 200, ok: true };
+      return { status: 507, ok: false, statusText: 'Insufficient Storage', json: async () => ({ ok: false, error: 'LobbyQuotaExceeded' }) };
     }));
-    await expect(kb.registerBlob('map', blob)).rejects.toThrow('Failed to register blob: 409');
+    await expect(kb.registerBlob('map', blob)).rejects.toThrow('Failed to register blob: LobbyQuotaExceeded');
+  });
+
+  it('retries upload on 409 Conflict during register and succeeds', async () => {
+    const { kb } = await importSdk();
+    const blob = new Blob(['evicted-content']);
+
+    const methods = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      methods.push(init.method);
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'PUT') return { status: 200, ok: true };
+      if (init.method === 'POST') {
+        // First POST returns 409 (evicted after probe); second POST succeeds
+        if (methods.filter(m => m === 'POST').length === 1) {
+          return { status: 409, ok: false, statusText: 'Conflict', json: async () => ({ ok: false, error: 'UnknownHash' }) };
+        }
+        return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/recovered.dat' }) };
+      }
+      return { status: 500, ok: false };
+    }));
+
+    const url = await kb.registerBlob('map', blob);
+    expect(url).toBe('/blob/recovered.dat');
+    expect(methods).toEqual(['HEAD', 'POST', 'PUT', 'POST']);
   });
 
   it('unregisters a blob by logicalId and removes from blobUrl', async () => {
@@ -425,6 +450,18 @@ describe('blob sharing', () => {
       'http://srv/blob/register/temp-map',
       expect.objectContaining({ method: 'DELETE', headers: { 'X-KnockBox-Ticket': 'secret-ticket' } })
     );
+  });
+
+  it('throws when unregister fails with surfaced error', async () => {
+    const { kb } = await importSdk({ hash: '#kbTicket=secret-ticket&kbEndpoint=ws://srv/ws' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 403,
+      ok: false,
+      statusText: 'Forbidden',
+      json: async () => ({ ok: false, error: 'Forbidden' }),
+    })));
+
+    await expect(kb.unregisterBlob('temp-map')).rejects.toThrow('Failed to unregister blob: Forbidden');
   });
 
   it('clears registered blob URLs on terminal socket close', async () => {

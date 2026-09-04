@@ -1633,7 +1633,7 @@ internal static class AdminApi
     /// the operator sets a limit they will never see take effect. (Unlike availability, an existing row
     /// for a game whose files went missing is preserved by <c>Save</c> and not touched here.)
     /// </remarks>
-    private static async Task SetBlobQuota(HttpContext ctx, Options options)
+    internal static async Task SetBlobQuota(HttpContext ctx, Options options)
     {
         var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminBlobQuotaRequest);
         if (body?.GameId is not { Length: > 0 } gameId
@@ -1653,6 +1653,14 @@ internal static class AdminApi
             await Refuse(ctx, StatusCodes.Status400BadRequest,
                 "bytes must not be 0. Omit it to clear the override and use the server-wide default, " +
                 "or send a negative value for no per-lobby cap on this game.");
+            return;
+        }
+
+        const long maxBytes = 1024L * 1024 * 1024 * 1024; // 1 TiB
+        if (body.Bytes > maxBytes)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                $"bytes must be at most {maxBytes} (1 TiB).");
             return;
         }
 

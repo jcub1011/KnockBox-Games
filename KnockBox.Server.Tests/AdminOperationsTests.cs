@@ -4,6 +4,7 @@ using KnockBox.Server.Games;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Networking;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -378,5 +379,70 @@ public class AdminOperationsTests : IDisposable
             File.SetUnixFileMode(_gamesRoot,
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
+    }
+
+    [Fact]
+    public async Task SetBlobQuota_refuses_bytes_exceeding_1_TiB()
+    {
+        WriteGame(_gamesRoot, "dnd-mapper");
+        var catalog = Catalog();
+        catalog.Discover();
+
+        var options = new AdminApi.Options(
+            Auth: null!,
+            Lobbies: _lobbies,
+            Closer: null!,
+            Catalog: catalog,
+            Settings: null!,
+            Lifecycle: null!,
+            Operations: null!,
+            Packages: null!,
+            PackageOptions: null!,
+            PackageLimits: null!,
+            Marketplace: null,
+            Updates: null,
+            Scheduler: null,
+            Logs: null!,
+            Disk: null!,
+            Relay: null!,
+            Authority: null!,
+            History: null!,
+            MetricSampleSeconds: 0,
+            Limits: null!,
+            AuthorityLimits: null!,
+            BlobLimits: null!,
+            Blobs: null,
+            Webhooks: null,
+            WebhookLog: null,
+            WebhookOptions: null!,
+            Connections: null!,
+            Authorities: null,
+            Paths: null!,
+            Diagnostics: null!,
+            Time: _clock,
+            Logger: NullLogger<AdminOperationsTests>.Instance,
+            LoginAttemptsPerMinutePerIp: 0,
+            LoginAttemptsPerMinuteGlobal: 0,
+            CookieAlwaysSecure: false,
+            StaleAfter: TimeSpan.Zero);
+
+        var ctx = new DefaultHttpContext();
+        ctx.Response.Body = new MemoryStream();
+        const long overLimit = 1024L * 1024 * 1024 * 1024 + 1;
+        var req = new AdminBlobQuotaRequest("dnd-mapper", overLimit);
+        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+            req, Serialization.KnockBoxProtocolContext.Default.AdminBlobQuotaRequest);
+        ctx.Request.ContentType = "application/json";
+        ctx.Request.Body = new MemoryStream(bytes);
+
+        await AdminApi.SetBlobQuota(ctx, options);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+        ctx.Response.Body.Position = 0;
+        var response = await System.Text.Json.JsonSerializer.DeserializeAsync(
+            ctx.Response.Body, Serialization.KnockBoxProtocolContext.Default.AdminApiResponse, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.NotNull(response);
+        Assert.False(response.Success);
+        Assert.Contains("1 TiB", response.Error);
     }
 }

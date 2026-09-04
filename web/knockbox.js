@@ -45,6 +45,14 @@ import {
   const httpBase = blobBaseUrl(endpoint);
   const blobUrls = new Map();
 
+  async function responseError(res) {
+    try {
+      const data = await res.json();
+      if (data && data.error) return data.error;
+    } catch {}
+    return res.statusText ? `${res.status} ${res.statusText}` : String(res.status);
+  }
+
   // The ticket/endpoint are now captured in memory; scrub them from the address bar so they don't
   // linger in browser history or stay readable via location.hash by anything that loads later
   // (analytics, third-party scripts). replaceState keeps the fragment out of the history entry.
@@ -138,14 +146,7 @@ import {
 
       const sha256 = await sha256Hex(blob);
 
-      // 1. Probe HEAD ${httpBase}/blob/${sha256}
-      const headRes = await fetch(`${httpBase}/blob/${sha256}`, {
-        method: 'HEAD',
-        headers: { 'X-KnockBox-Ticket': ticket },
-      });
-
-      if (headRes.status === 404) {
-        // 2. Upload PUT ${httpBase}/blob/${sha256}
+      const upload = async () => {
         const putRes = await fetch(`${httpBase}/blob/${sha256}`, {
           method: 'PUT',
           headers: {
@@ -155,14 +156,26 @@ import {
           body: blob,
         });
         if (!putRes.ok) {
-          throw new Error(`Failed to upload blob: ${putRes.status} ${putRes.statusText}`);
+          const err = await responseError(putRes);
+          throw new Error(`Failed to upload blob: ${err}`);
         }
+      };
+
+      // 1. Probe HEAD ${httpBase}/blob/${sha256}
+      const headRes = await fetch(`${httpBase}/blob/${sha256}`, {
+        method: 'HEAD',
+        headers: { 'X-KnockBox-Ticket': ticket },
+      });
+
+      if (headRes.status === 404) {
+        // 2. Upload PUT ${httpBase}/blob/${sha256}
+        await upload();
       } else if (!headRes.ok) {
         throw new Error(`Failed to probe blob: ${headRes.status} ${headRes.statusText}`);
       }
 
       // 3. Register POST ${httpBase}/blob/register
-      const regRes = await fetch(`${httpBase}/blob/register`, {
+      const postRegister = () => fetch(`${httpBase}/blob/register`, {
         method: 'POST',
         headers: {
           'X-KnockBox-Ticket': ticket,
@@ -174,8 +187,18 @@ import {
           contentType: blob.type || null,
         }),
       });
+
+      let regRes = await postRegister();
+
+      // If evicted between probe and register (409 Conflict / UnknownHash), upload and retry once.
+      if (regRes.status === 409) {
+        await upload();
+        regRes = await postRegister();
+      }
+
       if (!regRes.ok) {
-        throw new Error(`Failed to register blob: ${regRes.status} ${regRes.statusText}`);
+        const err = await responseError(regRes);
+        throw new Error(`Failed to register blob: ${err}`);
       }
 
       const data = await regRes.json();
@@ -200,7 +223,8 @@ import {
         headers: { 'X-KnockBox-Ticket': ticket },
       });
       if (!res.ok) {
-        throw new Error(`Failed to unregister blob: ${res.status} ${res.statusText}`);
+        const err = await responseError(res);
+        throw new Error(`Failed to unregister blob: ${err}`);
       }
     },
 

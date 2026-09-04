@@ -217,6 +217,68 @@ public class BlobStoreTests : IDisposable
         Assert.False(File.Exists(path));
     }
 
+    [Fact]
+    public async Task Second_lobby_touching_or_receiving_existing_blob_resets_eviction_when_first_lobby_unregisters()
+    {
+        var hash = await Upload("shared art", lobbyId: "L1");
+        _store.Register("L1", "g", "bg", hash);
+
+        // Lobby 2 uploads identical bytes; ReceiveAsync returns AlreadyPresent and extends grace.
+        var again = await Receive("shared art", lobbyId: "L2");
+        Assert.Equal(BlobIngestOutcome.AlreadyPresent, again.Outcome);
+
+        // Lobby 1 unregisters and releases before Lobby 2 registers.
+        // Because Lobby 2 touched the blob, it must NOT be evicted immediately upon L1 release.
+        _store.ReleaseLobby("L1");
+        var path = Path.Combine(_root, hash[..2], hash);
+        Assert.True(File.Exists(path), "blob must be preserved for Lobby 2 within the grace window");
+
+        // Lobby 2 now claims it.
+        var reg = _store.Register("L2", "g", "bg", hash);
+        Assert.Equal(BlobRegisterOutcome.Registered, reg.Outcome);
+
+        // When Lobby 2 releases, now it is evicted.
+        _store.ReleaseLobby("L2");
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task Touch_extends_grace_window_and_prevents_premature_eviction()
+    {
+        Assert.False(_store.Touch(null));
+        Assert.False(_store.Touch("invalid_hash"));
+        Assert.False(_store.Touch(new string('a', 64))); // nonexistent
+
+        var hash = await Upload("touched content");
+        var path = Path.Combine(_root, hash[..2], hash);
+
+        // Advance close to grace expiry
+        _clock.Advance(Grace - TimeSpan.FromMinutes(1));
+
+        // Touch extends the grace by full Grace from Now
+        Assert.True(_store.Touch(hash));
+
+        // Advancing past original grace window: would have expired without Touch
+        _clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.Empty(_store.Sweep());
+        Assert.True(File.Exists(path), "blob should survive past original grace expiration due to Touch");
+
+        // Register under L1
+        _store.Register("L1", "g", "item", hash);
+
+        // Touch again while referenced
+        Assert.True(_store.Touch(hash));
+
+        // When L1 unregisters, Touch reset EverReferenced, giving it another grace window
+        _store.Unregister("L1", "item");
+        Assert.True(File.Exists(path), "blob should survive L1 unregister due to Touch grace window");
+
+        // Advancing past the new grace window sweeps it
+        _clock.Advance(Grace + TimeSpan.FromTicks(1));
+        Assert.Equal(new[] { hash }, _store.Sweep());
+        Assert.False(File.Exists(path));
+    }
+
     // ── Read tokens ──────────────────────────────────────────────────────────────────────────────────
 
     [Fact]
