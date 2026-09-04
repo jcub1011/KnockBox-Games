@@ -767,6 +767,8 @@
     this._stopped = false;
     this._pending = [];  // outbound sends queued until ready
     this._inbox = [];    // inbound messages that arrived before our own ready
+    this._blobUrls = new Map();
+    this._blobs = new Map();
     this._transport = makeTransport(this);
 
     // There's no server to receive logs locally, so mirror them to the dev console (API parity with
@@ -910,6 +912,66 @@
     if (this._actor) { this._actor.destroy(); this._actor = null; }
     if (this._transport) { this._transport.stop(); this._transport = null; }
     if (this.events) this.events.destroy();
+    if (this._blobUrls) {
+      if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        this._blobUrls.forEach(function (url) {
+          if (url && typeof url === 'string' && url.indexOf('blob:') === 0) {
+            URL.revokeObjectURL(url);
+          }
+        });
+      }
+      this._blobUrls.clear();
+    }
+    if (this._blobs) this._blobs.clear();
+  };
+
+  KnockBoxLocalPeer.prototype.registerBlob = function (logicalId, blob) {
+    if (typeof logicalId !== 'string' || !logicalId.trim()) {
+      return Promise.reject(new TypeError('logicalId must be a non-empty string'));
+    }
+    if (!blob || typeof blob.arrayBuffer !== 'function') {
+      return Promise.reject(new TypeError('blob must be a Blob or File'));
+    }
+
+    var self = this;
+    return KBCore.sha256Hex(blob).then(function (sha256) {
+      var oldUrl = self._blobUrls.get(logicalId);
+      if (oldUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function' && typeof oldUrl === 'string' && oldUrl.indexOf('blob:') === 0) {
+        URL.revokeObjectURL(oldUrl);
+      }
+
+      var url;
+      if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+        try {
+          url = URL.createObjectURL(blob);
+        } catch (e) {
+          url = '/blob/' + sha256;
+        }
+      } else {
+        url = '/blob/' + sha256;
+      }
+
+      self._blobUrls.set(logicalId, url);
+      self._blobs.set(logicalId, blob);
+      return url;
+    });
+  };
+
+  KnockBoxLocalPeer.prototype.unregisterBlob = function (logicalId) {
+    if (typeof logicalId !== 'string' || !logicalId.trim()) {
+      return Promise.reject(new TypeError('logicalId must be a non-empty string'));
+    }
+    var url = this._blobUrls.get(logicalId);
+    if (url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function' && typeof url === 'string' && url.indexOf('blob:') === 0) {
+      URL.revokeObjectURL(url);
+    }
+    this._blobUrls.delete(logicalId);
+    this._blobs.delete(logicalId);
+    return Promise.resolve();
+  };
+
+  KnockBoxLocalPeer.prototype.blobUrl = function (logicalId) {
+    return this._blobUrls.get(logicalId) || null;
   };
 
   KnockBoxLocalPeer.prototype._send = function (to, payload) {
@@ -1034,7 +1096,7 @@
     };
 
     // Forward the send API to the peer.
-    ['sendToHost', 'sendToAll', 'sendTo', 'setLobbyOpen', 'kickPlayer', 'setLaunchParams'].forEach(function (m) {
+    ['sendToHost', 'sendToAll', 'sendTo', 'setLobbyOpen', 'kickPlayer', 'setLaunchParams', 'registerBlob', 'unregisterBlob', 'blobUrl'].forEach(function (m) {
       KnockBoxLocalPlugin.prototype[m] = function () { return this._peer[m].apply(this._peer, arguments); };
     });
     // Mirror the peer's state as read-only properties (log is the peer's console-like logger object).

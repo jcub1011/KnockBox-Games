@@ -13,6 +13,8 @@ export {
   reconnectDelay,
   parseLaunchParams,
   defaultEndpoint,
+  blobBaseUrl,
+  sha256Hex,
   LOG_LEVELS,
   makeLogger,
   normalizeReady,

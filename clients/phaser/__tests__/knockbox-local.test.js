@@ -171,3 +171,36 @@ describe('solo transport', () => {
     expect(msgs).toEqual([{ from: 'solo', payload: { tick: 1 } }]);
   });
 });
+
+describe('blob sharing locally', () => {
+  it('registers and unregisters blobs in KnockBoxLocalPeer', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['local-blob-content'], { type: 'text/plain' });
+
+    expect(p.blobUrl('map')).toBeNull();
+    const url = await p.registerBlob('map', blob);
+    expect(typeof url).toBe('string');
+    expect(url.length).toBeGreaterThan(0);
+    expect(p.blobUrl('map')).toBe(url);
+
+    await p.unregisterBlob('map');
+    expect(p.blobUrl('map')).toBeNull();
+  });
+
+  it('rejects invalid arguments to registerBlob and unregisterBlob', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    await expect(p.registerBlob('', new Blob(['x']))).rejects.toThrow(TypeError);
+    await expect(p.registerBlob('map', null)).rejects.toThrow(TypeError);
+    await expect(p.unregisterBlob('')).rejects.toThrow(TypeError);
+  });
+
+  it('clears and revokes blobs on destroy', async () => {
+    const p = peer({ playerId: 'local-tester' });
+    const blob = new Blob(['local-blob-content']);
+    const url = await p.registerBlob('map', blob);
+    expect(p.blobUrl('map')).toBe(url);
+
+    p.destroy();
+    expect(p.blobUrl('map')).toBeNull();
+  });
+});

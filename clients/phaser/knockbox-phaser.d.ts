@@ -155,6 +155,14 @@ export class KnockBoxPlugin {
   /** Record a Play Log entry on the player's home page ("Recently Played"). Each call
    *  appends one entry; values are coerced to strings and nullish values are dropped. */
   logPlay(metadata?: Record<string, unknown>): void;
+
+  /** Register a blob with a logical ID. Uploads to blob storage if not already present,
+   *  and registers with the server under the session ticket. Returns the accessible URL. */
+  registerBlob(logicalId: string, blob: Blob): Promise<string>;
+  /** Unregister a previously registered blob by logical ID. */
+  unregisterBlob(logicalId: string): Promise<void>;
+  /** Get the accessible URL for a registered blob, or null if not registered locally. */
+  blobUrl(logicalId: string): string | null;
 }
 
 export default KnockBoxPlugin;
@@ -251,6 +259,12 @@ export class KnockBoxLocalPeer {
   setLobbyOpen(open: boolean): void;
   /** No-op locally (credentials are meaningless). */
   setLaunchParams(ticket?: string, endpoint?: string): void;
+  /** Register a blob with a logical ID locally. Returns an accessible URL (e.g. object URL). */
+  registerBlob(logicalId: string, blob: Blob): Promise<string>;
+  /** Unregister a previously registered blob by logical ID. */
+  unregisterBlob(logicalId: string): Promise<void>;
+  /** Get the accessible URL for a registered blob, or null if not registered locally. */
+  blobUrl(logicalId: string): string | null;
 }
 
 /**
@@ -289,6 +303,9 @@ export class KnockBoxLocalPlugin {
   kickPlayer(playerId: string): void;
   setLobbyOpen(open: boolean): void;
   setLaunchParams(ticket?: string, endpoint?: string): void;
+  registerBlob(logicalId: string, blob: Blob): Promise<string>;
+  unregisterBlob(logicalId: string): Promise<void>;
+  blobUrl(logicalId: string): string | null;
 }
 
 /** Throws when `source` contains a top-level `import` / `export … from` (authority modules must

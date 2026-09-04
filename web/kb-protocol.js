@@ -47,6 +47,52 @@ export function defaultEndpoint(protocol, host) {
   return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}/ws`;
 }
 
+// Base HTTP origin for blob-share requests (/blob/…), derived from the WebSocket endpoint.
+// ws://host:port/ws -> http://host:port; wss://host:port/ws -> https://host:port.
+// Empty when endpoint is falsy, falling back to same-origin relative URLs.
+export function blobBaseUrl(endpoint) {
+  if (!endpoint) return '';
+  try {
+    const url = new URL(endpoint, typeof location !== 'undefined' ? location.href : 'http://localhost');
+    if (url.protocol === 'ws:') url.protocol = 'http:';
+    if (url.protocol === 'wss:') url.protocol = 'https:';
+    return url.origin;
+  } catch {
+    return '';
+  }
+}
+
+// Computes SHA-256 lowercase hex (64 chars) for a Blob, ArrayBuffer, Uint8Array, or string.
+export async function sha256Hex(data) {
+  let buffer;
+  if (data instanceof ArrayBuffer) {
+    buffer = data;
+  } else if (ArrayBuffer.isView(data)) {
+    buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    buffer = await data.arrayBuffer();
+  } else if (typeof data === 'string') {
+    buffer = new TextEncoder().encode(data).buffer;
+  } else if (data && typeof data.arrayBuffer === 'function') {
+    buffer = await data.arrayBuffer();
+  } else {
+    throw new TypeError('Expected Blob, ArrayBuffer, Uint8Array, or string');
+  }
+
+  const subtle = globalThis.crypto?.subtle || globalThis.crypto?.webcrypto?.subtle;
+  if (!subtle) {
+    throw new Error('Web Crypto API (crypto.subtle) is not available in this environment');
+  }
+
+  const digest = await subtle.digest('SHA-256', buffer);
+  const bytes = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
 // Game → server logging. Maps the friendly, console-like method names the SDK exposes to the
 // Microsoft.Extensions.Logging.LogLevel NAMES the server's LogMessage expects on the wire (the
 // server parses them case-insensitively). info→Information and warn→Warning match console habits.

@@ -52,6 +52,57 @@
     return (protocol === 'https:' ? 'wss' : 'ws') + '://' + host + '/ws';
   }
 
+  // Base HTTP origin for blob-share requests (/blob/…), derived from the WebSocket endpoint.
+  // ws://host:port/ws -> http://host:port; wss://host:port/ws -> https://host:port.
+  // Empty when endpoint is falsy, falling back to same-origin relative URLs.
+  function blobBaseUrl(endpoint) {
+    if (!endpoint) return '';
+    try {
+      var url = new URL(endpoint, typeof location !== 'undefined' ? location.href : 'http://localhost');
+      if (url.protocol === 'ws:') url.protocol = 'http:';
+      if (url.protocol === 'wss:') url.protocol = 'https:';
+      return url.origin;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // Computes SHA-256 lowercase hex (64 chars) for a Blob, ArrayBuffer, Uint8Array, or string.
+  function sha256Hex(data) {
+    var getBuffer = function () {
+      if (data instanceof ArrayBuffer) {
+        return Promise.resolve(data);
+      } else if (ArrayBuffer.isView(data)) {
+        return Promise.resolve(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+      } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+        return data.arrayBuffer();
+      } else if (typeof data === 'string') {
+        return Promise.resolve(new TextEncoder().encode(data).buffer);
+      } else if (data && typeof data.arrayBuffer === 'function') {
+        return data.arrayBuffer();
+      }
+      return Promise.reject(new TypeError('Expected Blob, ArrayBuffer, Uint8Array, or string'));
+    };
+
+    var subtle = (typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.subtle)
+      || (typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.webcrypto && globalThis.crypto.webcrypto.subtle);
+    if (!subtle) {
+      return Promise.reject(new Error('Web Crypto API (crypto.subtle) is not available in this environment'));
+    }
+
+    return getBuffer().then(function (buffer) {
+      return subtle.digest('SHA-256', buffer);
+    }).then(function (digest) {
+      var bytes = new Uint8Array(digest);
+      var hex = '';
+      for (var i = 0; i < bytes.length; i++) {
+        var b = bytes[i].toString(16);
+        hex += b.length === 1 ? '0' + b : b;
+      }
+      return hex;
+    });
+  }
+
   // Game → server logging. Maps the friendly, console-like method names the client exposes to the
   // Microsoft.Extensions.Logging.LogLevel NAMES the server's LogMessage expects on the wire (the
   // server parses them case-insensitively). info→Information and warn→Warning match console habits.
@@ -118,6 +169,8 @@
     reconnectDelay: reconnectDelay,
     parseLaunchParams: parseLaunchParams,
     defaultEndpoint: defaultEndpoint,
+    blobBaseUrl: blobBaseUrl,
+    sha256Hex: sha256Hex,
     LOG_LEVELS: LOG_LEVELS,
     makeLogger: makeLogger,
     normalizeReady: normalizeReady,
