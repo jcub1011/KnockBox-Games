@@ -29,6 +29,10 @@ const DEFAULTS = {
   maxLobbies: 0, maxLobbiesPerGame: 0,
   // The server-authority pair, which the same flat response carries from a second provider.
   authorityMaxLobbies: 0, authorityModuleCacheIdleMinutes: 30,
+  // And the blob caps, from a third. Bytes, so the numbers are large; the form treats them as any other
+  // integer field.
+  blobMaxBytes: 104857600, blobLobbyQuotaBytes: 1073741824, blobTotalQuotaBytes: 21474836480,
+  blobGraceMinutes: 5, blobMaxUploadsPerLobby: 4,
 };
 
 function limits(overrides = {}, effective = {}) {
@@ -40,6 +44,7 @@ function limits(overrides = {}, effective = {}) {
     adminLoginAttemptsPerMinute: 10, adminLoginAttemptsPerMinuteGlobal: 60,
     activeLobbies: 3, connectedPlayers: 7,
     authorityModulesCached: 0, authorityModulesEvicted: 0,
+    blobsEnabled: true, blobSweepSeconds: 300, blobBytesUsed: 0, blobQuotas: {},
   };
 }
 
@@ -92,6 +97,7 @@ function routes(overrides = {}) {
     '* /admin/api/webhooks/ops/test': { body: { success: true, detail: 'Delivered (204).' } },
     '* /admin/api/announcement': { body: { success: true, affected: 3, detail: 'Posted to 3 connected player(s).' } },
     '* /admin/api/announcement/delete': { body: { success: true, detail: 'Cleared for 3 connected player(s).' } },
+    '* /admin/api/blob-quota': { body: { success: true, detail: 'Set.' } },
     ...overrides,
   };
 }
@@ -142,7 +148,96 @@ describe('limits form', () => {
     expect(limitInput('maxLobbies').value).toBe('40');
     expect(el('limits-badge').hidden).toBe(false);
     expect(el('limits-reset').disabled).toBe(false);
-    expect(el('limits-note').textContent).toContain('1 of 10');
+    expect(el('limits-note').textContent).toContain('1 of 15');
+  });
+
+  it('renders the blob caps from the third provider on the same flat body', async () => {
+    await openPlatform();
+
+    // Five more knobs from BlobOptionsProvider, riding the one flat response exactly as the authority
+    // pair does. If the wire ever nests any of them, these inputs stop existing.
+    for (const key of ['blobMaxBytes', 'blobLobbyQuotaBytes', 'blobTotalQuotaBytes',
+      'blobGraceMinutes', 'blobMaxUploadsPerLobby']) {
+      expect(limitInput(key), key).toBeTruthy();
+    }
+
+    limitInput('blobTotalQuotaBytes').value = '5000000000';
+    el('limits-save').click();
+    await tick();
+    await tick();
+
+    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/limits');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.blobTotalQuotaBytes).toBe(5_000_000_000);
+    // Untouched, so cleared rather than pinned to whatever was showing — same rule as every other field.
+    expect(posts[0].body.blobMaxBytes).toBeNull();
+  });
+
+  it('says how much blob storage is held against the aggregate cap', async () => {
+    // An upload refused for a full quota reaches an operator as "a player says their map will not load",
+    // which is not a clue. This line is the only place the server says how close the cap is to biting.
+    await openPlatform({
+      'GET /admin/api/limits': { body: limits({}, {}) },
+    });
+    expect(el('limits-note').textContent).toMatch(/Blobs: .* held of /);
+  });
+
+  it('lists the per-game blob quota overrides, and hides the table when there are none', async () => {
+    await openPlatform();
+    // Hidden rather than shown empty: the add row above it is the whole UI until an override exists, and
+    // an empty table under it reads as "loading" or "broken".
+    expect(el('blob-quota-table').hidden).toBe(true);
+
+    await openPlatform({
+      'GET /admin/api/limits': {
+        body: { ...limits(), blobQuotas: { 'dnd-mapper': 4294967296, 'sound-board': -1 } },
+      },
+    });
+
+    expect(el('blob-quota-table').hidden).toBe(false);
+    const rows = [...el('blob-quota-body').querySelectorAll('tr')];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].children[0].textContent).toBe('dnd-mapper');
+    // A negative override means "no per-session cap for this game", so showing it as a byte count
+    // (or worse, as "-1 B") would be a lie about the policy in force.
+    expect(rows[1].children[1].textContent).toBe('No cap');
+  });
+
+  it('posts a per-game quota, and clears one by omitting the bytes entirely', async () => {
+    await openPlatform({
+      'GET /admin/api/limits': { body: { ...limits(), blobQuotas: { 'dnd-mapper': 4294967296 } } },
+    });
+
+    el('blob-quota-game').value = 'sound-board';
+    el('blob-quota-bytes').value = '2000000';
+    el('blob-quota-set').click();
+    await tick();
+    await tick();
+
+    let posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toEqual({ gameId: 'sound-board', bytes: 2_000_000 });
+
+    // Clearing sends NO bytes at all. The server refuses a literal 0, because in a quota field a typed
+    // zero reads as "I am clearing this" rather than as this server's usual "no limit".
+    el('blob-quota-body').querySelector('button').click();
+    await tick();
+    await tick();
+
+    posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(posts).toHaveLength(2);
+    expect(posts[1].body).toEqual({ gameId: 'dnd-mapper' });
+  });
+
+  it('refuses a per-game quota of zero before posting it', async () => {
+    await openPlatform();
+
+    el('blob-quota-game').value = 'dnd-mapper';
+    el('blob-quota-bytes').value = '0';
+    el('blob-quota-set').click();
+    await tick();
+
+    expect(fake.calls.filter((c) => c.path === '/admin/api/blob-quota')).toHaveLength(0);
   });
 
   it('reports the startup-only limits read-only rather than hiding them', async () => {

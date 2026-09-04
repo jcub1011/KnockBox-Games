@@ -832,12 +832,15 @@ describe('uploadGuard', () => {
 });
 
 describe('platform limit fields', () => {
-  it('covers exactly the ten limits the server lets an operator change', () => {
-    // Pinned against AdminLimitValues, which is flat across TWO server-side records: the first eight are
-    // OperatorLimits/ServerLimits, the last two OperatorAuthorityOptions/AuthorityOptions. A knob added on
-    // one side only shows up here, rather than as a field that silently never saves.
+  it('covers exactly the fifteen limits the server lets an operator change', () => {
+    // Pinned against AdminLimitValues, which is flat across THREE server-side records: eight are
+    // OperatorLimits/ServerLimits, two OperatorAuthorityOptions/AuthorityOptions, five
+    // OperatorBlobOptions/BlobOptions. A knob added on one side only shows up here, rather than as a
+    // field that silently never saves.
     expect(LIMIT_FIELDS.map((f) => f.key).sort()).toEqual([
       'authorityMaxLobbies', 'authorityModuleCacheIdleMinutes',
+      'blobGraceMinutes', 'blobLobbyQuotaBytes', 'blobMaxBytes', 'blobMaxUploadsPerLobby',
+      'blobTotalQuotaBytes',
       'controlMessagesBurst', 'controlMessagesPerSecond', 'gameMessagesBurst', 'gameMessagesPerSecond',
       'lobbyCreatesPerMinute', 'maxConnectionsPerIp', 'maxLobbies', 'maxLobbiesPerGame',
     ]);
@@ -869,10 +872,13 @@ describe('platform limit fields', () => {
 
   it('lists the startup-only limits, which are deliberately NOT editable', () => {
     // Two are startup-derived (the reaper's interval comes from the grace window); two bound PBKDF2 CPU
-    // for an unauthenticated caller, and a lock that opens from inside the room is not a lock.
+    // for an unauthenticated caller, and a lock that opens from inside the room is not a lock. The blob
+    // sweep is the same shape as the first pair: a cadence stays fixed for the process while its window
+    // (blobGraceMinutes, which IS editable) is read live.
     expect(STARTUP_LIMITS.map((f) => f.key)).toEqual([
       'handshakeTimeoutSeconds', 'disconnectGraceSeconds',
       'adminLoginAttemptsPerMinute', 'adminLoginAttemptsPerMinuteGlobal',
+      'blobSweepSeconds',
     ]);
     // And none of them is also editable — that would be two answers to one question.
     const editable = new Set(LIMIT_FIELDS.map((f) => f.key));

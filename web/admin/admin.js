@@ -2798,6 +2798,16 @@ function renderLimits(data) {
     ? `${data.overridden.length} of ${LIMIT_FIELDS.length} limits are overridden. `
       + `${formatCount(data.activeLobbies)} lobbies and ${formatCount(data.connectedPlayers)} players right now.`
     : 'Every limit is at its default.';
+  // Bytes actually held, against the aggregate cap. The only question anyone asks about a server-wide
+  // quota is whether it is close to biting, and an upload refused with 507 reaches an operator as "a
+  // player says their map will not load" -- which is not a clue.
+  if (data.blobsEnabled) {
+    const cap = data.effective?.blobTotalQuotaBytes;
+    el('limits-note').textContent += ` Blobs: ${formatBytes(data.blobBytesUsed || 0)} held`
+      + `${cap > 0 ? ` of ${formatBytes(cap)}` : ' (no server-wide cap)'}.`;
+  }
+
+  renderBlobQuotas(data.blobQuotas || {});
 
   const startupBody = el('limits-startup-body');
   startupBody.innerHTML = '';
@@ -2806,6 +2816,67 @@ function renderLimits(data) {
     appendCells(row, [field.label, String(data[field.key] ?? '--')]);
     startupBody.appendChild(row);
   }
+}
+
+/**
+ * Draws the per-game blob quota overrides. The table is hidden entirely when there are none, rather than
+ * shown empty: the add row above it is the whole UI until an override exists, and an empty table under it
+ * reads as "loading" or "broken".
+ *
+ * Games at the server-wide default are ABSENT from this map rather than listed at their default value, so
+ * nothing here has to distinguish "no override" from "an override that happens to match".
+ */
+function renderBlobQuotas(quotas) {
+  const table = el('blob-quota-table');
+  const body = el('blob-quota-body');
+  if (!table || !body) return;
+
+  const rows = Object.entries(quotas).sort(([a], [b]) => a.localeCompare(b));
+  table.hidden = rows.length === 0;
+  body.innerHTML = '';
+
+  for (const [gameId, bytes] of rows) {
+    const row = document.createElement('tr');
+    appendCells(row, [gameId, bytes < 0 ? 'No cap' : formatBytes(bytes)]);
+
+    const actions = document.createElement('td');
+    const clear = document.createElement('button');
+    clear.className = 'btn btn-secondary btn-small';
+    clear.textContent = 'Clear';
+    clear.dataset.blobQuotaClear = gameId;
+    // Omitting bytes is what clears an override -- the server refuses a literal 0, because in a quota
+    // field a typed zero reads as "I am clearing this" rather than "no limit".
+    clear.onclick = async () => {
+      if (await postJson('/admin/api/blob-quota', { gameId })) refreshPlatform();
+    };
+    actions.appendChild(clear);
+    row.appendChild(actions);
+
+    body.appendChild(row);
+  }
+}
+
+async function setBlobQuota() {
+  const gameId = el('blob-quota-game')?.value.trim() || '';
+  const text = el('blob-quota-bytes')?.value.trim() || '';
+  if (!gameId) { toast('Enter the game id to set a quota for.', 'error'); return; }
+
+  // Validated here as well as on the server for the reason validateLimits gives: a round trip to be told
+  // "that is not a number" is a worse form than one that says so before it posts.
+  let bytes = null;
+  if (text !== '') {
+    bytes = Number(text);
+    if (!Number.isInteger(bytes)) { toast('Bytes must be a whole number.', 'error'); return; }
+    if (bytes === 0) {
+      toast('Leave bytes empty to clear the override, or use a negative value for no cap.', 'error');
+      return;
+    }
+  }
+
+  if (!await postJson('/admin/api/blob-quota', { gameId, bytes })) return;
+  el('blob-quota-game').value = '';
+  el('blob-quota-bytes').value = '';
+  refreshPlatform();
 }
 
 async function saveLimits() {
@@ -3351,6 +3422,7 @@ function wire() {
   el('limits-save')?.addEventListener('click', saveLimits);
   el('limits-reset')?.addEventListener('click', revertLimits);
   el('limits-refresh')?.addEventListener('click', refreshPlatform);
+  el('blob-quota-set')?.addEventListener('click', setBlobQuota);
 
   el('hook-add')?.addEventListener('click', addWebhook);
 

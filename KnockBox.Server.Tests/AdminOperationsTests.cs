@@ -53,7 +53,8 @@ public class AdminOperationsTests : IDisposable
             _connections,
             new ContentPaths.Resolved(
                 Path.Combine(_root, "web"), _gamesRoot, Path.Combine(_root, "logs"),
-                _compressedRoot, _unpackedRoot, _managedRoot),
+                _compressedRoot, _unpackedRoot, _managedRoot)
+            { BlobsRoot = Path.Combine(_root, "blobs") },
             _clock,
             NullLogger<AdminOperations>.Instance);
 

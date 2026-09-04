@@ -1161,6 +1161,11 @@ Brotli still get gzip on the fly), `Packages`/`GamesUnpackedRoot`/`MaxPackageByt
 (outbound webhooks; `Enabled=false` ⇒ no dispatcher and no HttpClient at all),
 `GamesManagedRoot`/`ManagedPackages`/`PackageBackupCount`/`MaxConcurrentInstalls`/`PackageJobRetention`
 (portal installs; the managed root must be writable, outside `games/`, and — unlike the caches — backed up),
+`Blobs`/`BlobsRoot`/`BlobMaxBytes`/`BlobLobbyQuotaBytes`/`BlobTotalQuotaBytes`/`BlobGraceMinutes`/`BlobSweepSeconds`/`BlobMaxUploadsPerLobby`
+(blob sharing — the side channel for media too large for `/ws`'s 512 KiB frame cap; the root must be
+writable and must not overlap the three game roots, is **emptied on every startup**, and needs no mount —
+the three caps and the grace window are editable at runtime from the portal and persisted, the sweep
+cadence is not),
 `MarketplaceUpdate{Cadence,HourUtc,DayOfWeek}`/`MarketplaceMaxSources` (the *starting* update schedule —
 the portal overrides it and persists — and extra catalogs),
 `Marketplace{Enabled,CatalogUrl,DownloadBaseUrl,MaxCatalogBytes,MaxDownloadBytes,CatalogTimeoutSeconds,DownloadTimeoutSeconds}`

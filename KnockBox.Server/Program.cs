@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Blobs;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
@@ -39,9 +40,20 @@ var contentPaths = ContentPaths.Resolve(
     builder.Configuration["KnockBox:GamesCompressedRoot"],
     builder.Configuration["KnockBox:GamesUnpackedRoot"],
     builder.Configuration["KnockBox:GamesManagedRoot"],
+    builder.Configuration["KnockBox:BlobsRoot"],
     builder.Environment.ContentRootPath,
     AppContext.BaseDirectory);
 var (webRoot, gamesRoot, logsRoot, gamesCompressedRoot, gamesUnpackedRoot, gamesManagedRoot) = contentPaths;
+// BlobsRoot is a named init member rather than a positional one, so it is not in the deconstruction —
+// see ContentPaths.Resolved for why a seventh positional string was the wrong shape.
+var blobsRoot = contentPaths.BlobsRoot;
+
+// Media a game uploads for its session to share, because it cannot cross the relay: /ws has a
+// non-configurable 512 KiB frame cap whose overage closes the socket, so a 20 MB battlemap has no
+// route through it. Master switch — off ⇒ the root is never created and the store refuses every write
+// with a reason the game can show, rather than the routes simply not being there.
+var blobOptions = BlobOptions.FromConfiguration(builder.Configuration, blobsRoot);
+var blobsEnabled = blobOptions.Enabled;
 
 // Pre-compress game assets once into gamesCompressedRoot and serve those variants via Accept-Encoding
 // negotiation, instead of re-compressing every full-body response on the fly (see the ResponseCompression
@@ -95,6 +107,7 @@ List<string> bootstrapDirs = [webRoot, gamesRoot, logsRoot];
 if (precompressEnabled) bootstrapDirs.Add(gamesCompressedRoot);
 if (packagesEnabled) bootstrapDirs.Add(gamesUnpackedRoot);
 if (managedPackagesEnabled) bootstrapDirs.Add(gamesManagedRoot);
+if (blobsEnabled) bootstrapDirs.Add(blobsRoot);
 foreach (var dir in bootstrapDirs)
 {
     try { Directory.CreateDirectory(dir); }
@@ -116,6 +129,7 @@ List<(string Dir, string Label)> writableDirs = [(logsRoot, "Logs folder")];
 if (precompressEnabled) writableDirs.Add((gamesCompressedRoot, "Pre-compressed cache"));
 if (packagesEnabled) writableDirs.Add((gamesUnpackedRoot, "Game package cache"));
 if (managedPackagesEnabled) writableDirs.Add((gamesManagedRoot, "Managed package folder"));
+if (blobsEnabled) writableDirs.Add((blobsRoot, "Blob folder"));
 foreach (var (dir, label) in writableDirs)
 {
     if (!Directory.Exists(dir)) continue; // a create failure above already reported it
@@ -325,6 +339,15 @@ builder.Services.AddSingleton(sp =>
     new GameCatalog(gameRoots, sp.GetRequiredService<ILogger<GameCatalog>>(),
         authorityOptions.MaxScriptBytes, authorityOptions.MaxWordFileBytes));
 builder.Services.AddSingleton<IAuthorityWordService, AuthorityWordService>();
+// Blob sharing. Registered even when switched off, like the marketplace options and the package
+// manager: the store carries Enabled itself and refuses each write with a reason the game can show,
+// which is far more useful than an endpoint that isn't there. A third options provider for the same
+// reason there is a second — the caps do not belong on ServerLimits, whose contract is ApplyTo of a
+// record enforced per frame by TokenBucket, and blob quotas are neither.
+builder.Services.AddSingleton(blobOptions);
+builder.Services.AddSingleton(sp => new BlobOptionsProvider(sp.GetRequiredService<BlobOptions>()));
+builder.Services.AddSingleton<BlobStore>();
+builder.Services.AddSingleton<IBlobStore>(sp => sp.GetRequiredService<BlobStore>());
 if (precompressEnabled)
     builder.Services.AddSingleton(sp => new GameAssetPrecompressor(
         gamesCompressedRoot, precompressGzip, precompressMinBytes,
@@ -464,14 +487,15 @@ var app = builder.Build();
 
 // The resolved roots are the first thing an admin needs when "my games don't show up" — and the
 // second thing they need when state vanished on an image update, which is why games-managed and the
-// admin files are here too. All eight, not the five this once logged: a root missing from this line is
+// admin files are here too. All nine, not the five this once logged: a root missing from this line is
 // a root whose mount an operator has to infer.
 app.Logger.LogInformation(
     "Content roots — web: {WebRoot}, games: {GamesRoot}, logs: {LogsRoot}, games-compressed: {GamesCompressedRoot} " +
     "(precompress: {Precompress}), games-unpacked: {GamesUnpackedRoot} (packages: {Packages}), " +
-    "games-managed: {GamesManagedRoot} (managed: {ManagedPackages}), admin state: {AdminStateRoot}",
+    "games-managed: {GamesManagedRoot} (managed: {ManagedPackages}), blobs: {BlobsRoot} (blobs: {Blobs}), " +
+    "admin state: {AdminStateRoot}",
     webRoot, gamesRoot, logsRoot, gamesCompressedRoot, precompressEnabled, gamesUnpackedRoot, packagesEnabled,
-    gamesManagedRoot, managedPackagesEnabled,
+    gamesManagedRoot, managedPackagesEnabled, blobsRoot, blobsEnabled,
     Path.GetDirectoryName(AdminAuthService.ResolveSecretPath(builder.Configuration)));
 
 // Where the admin portal actually is — read from Kestrel's BOUND addresses, not from configuration.
@@ -532,6 +556,20 @@ if (managedPackagesEnabled &&
         $"KnockBox:GamesManagedRoot ('{gamesManagedRoot}') must not contain, or sit inside, " +
         $"KnockBox:GamesRoot ('{gamesRoot}') or KnockBox:GamesUnpackedRoot ('{gamesUnpackedRoot}'). " +
         "It holds packages the server writes and must stay outside both.",
+        blocking: true);
+// And so does the blob root, for a reason specific to it: BlobStore.SweepAtStartup deletes every shard
+// directory under its root unconditionally, because after a restart every blob is orphaned by
+// definition. Point it at games/ or games-managed/ and that sweep deletes an operator's games on the
+// next boot — the one overlap here that destroys data rather than merely confusing a watcher.
+if (blobsEnabled &&
+    (IsUnder(blobsRoot, gamesRoot) || IsUnder(gamesRoot, blobsRoot)
+     || IsUnder(blobsRoot, gamesUnpackedRoot) || IsUnder(gamesUnpackedRoot, blobsRoot)
+     || IsUnder(blobsRoot, gamesManagedRoot) || IsUnder(gamesManagedRoot, blobsRoot)))
+    diagnostics.Report("Blob folder overlaps another root",
+        $"KnockBox:BlobsRoot ('{blobsRoot}') must not contain, or sit inside, " +
+        $"KnockBox:GamesRoot ('{gamesRoot}'), KnockBox:GamesUnpackedRoot ('{gamesUnpackedRoot}') or " +
+        $"KnockBox:GamesManagedRoot ('{gamesManagedRoot}'). The server clears the blob folder on every " +
+        "startup, so an overlap would delete whatever the other root holds.",
         blocking: true);
 // A web root without the shell means a blank site — make the misconfiguration loud and diagnosable
 // instead of silently serving nothing. (Blocking: surfaced on the home-page warning below.)
@@ -637,12 +675,26 @@ else
 
 // Same treatment for the saved server-authority overrides, for the reasons above.
 var authorityLimitsProvider = app.Services.GetRequiredService<AuthorityOptionsProvider>();
+var blobLimitsProvider = app.Services.GetRequiredService<BlobOptionsProvider>();
 if (adminSettings.AuthorityLimits.Validate() is { } authorityLimitsError)
     app.Logger.LogError(
         "Ignoring the saved server-authority overrides in '{Path}' and using the configured values: {Reason}",
         adminSettings.FilePath, authorityLimitsError);
 else
     authorityLimitsProvider.Apply(adminSettings.AuthorityLimits);
+
+// And the saved blob-store overrides. The per-game quota map is published unconditionally rather than
+// behind the same validation: each entry is a single number that AdminSettingsStore already dropped if it
+// was unusable, so there is no combination of them to judge and nothing an all-or-nothing check could
+// protect. Applied even when blobs are switched off, so that switching them on is a restart rather than a
+// restart plus a re-save.
+if (adminSettings.BlobLimits.Validate() is { } blobLimitsError)
+    app.Logger.LogError(
+        "Ignoring the saved blob-store overrides in '{Path}' and using the configured values: {Reason}",
+        adminSettings.FilePath, blobLimitsError);
+else
+    blobLimitsProvider.Apply(adminSettings.BlobLimits);
+blobLimitsProvider.ApplyPerGameQuotas(adminSettings.BlobQuotas);
 
 // Keep the pre-compressed asset cache in lock-step with the catalog. Subscribing BEFORE the first
 // Discover() means startup discovery also kicks the initial reconcile. The work is offloaded to a
@@ -681,7 +733,24 @@ catalog.Discovered += games =>
 // engine for the process lifetime. The dependency runs closer <- manager (the manager's fatal path uses
 // the closer), so the manager can't also be a constructor argument to it — hence this one-time hook,
 // the same shape as the manager's own gameDirectory resolver. Set before any request is served.
-app.Services.GetRequiredService<LobbyCloser>().OnClosing = authorityManager.Stop;
+//
+// TWO subscribers now, composed here rather than by promoting OnClosing to an event. The property is a
+// single Action<string> and one assignment is all it has ever needed; making it an event to add a
+// second would change every subscriber's syntax (including LobbyCloserTests') for no benefit, and
+// composing at the one wiring site keeps the order explicit — which matters, because the second
+// subscriber deletes files. Blobs are released last: a lobby's art is worth nothing once its authority
+// has stopped, and stopping the actor is the part that must not be delayed by disk I/O.
+//
+// This is only ONE of the two teardown paths. WebSocketHandler.CloseLobbyIfDark handles the normal one
+// (disconnect, leave, kick, reap) and never comes through here, because it closes a lobby nobody is
+// connected to and deliberately broadcasts nothing. Both need the release, and a blob store wired to
+// only this one would leak every blob of every session that simply ended.
+var blobStore = app.Services.GetRequiredService<BlobStore>();
+app.Services.GetRequiredService<LobbyCloser>().OnClosing = lobbyId =>
+{
+    authorityManager.Stop(lobbyId);
+    blobStore.ReleaseLobby(lobbyId);
+};
 
 // Drop relay counters for games that no longer exist, so an uninstalled game doesn't hold a row in the
 // metrics view forever. Inline like the two prunes above, and guarded for the same reason.
@@ -741,6 +810,15 @@ if (installer is not null)
 // startup, which is the only moment nothing can be using one.
 if (managedPackagesEnabled) app.Services.GetRequiredService<PackageManager>().SweepStaging();
 
+// The blob root goes further: not just staging leftovers but EVERY blob, because after a restart all of
+// them are orphaned by definition — a blob's lifetime is its lobby's, lobbies are an in-memory
+// dictionary that dies with the process, and the ticket secret is regenerated per process, so no client
+// could authenticate a claim on one even if it wanted to. Startup is the same "only moment nothing can
+// be using one" the line above relies on. This is also why blobs/ is absent from the ephemeral-mount
+// warnings: it is regenerable by construction, and warning about a root the server empties on purpose
+// would train an operator to skim past the lines that matter.
+if (blobsEnabled) blobStore.SweepAtStartup();
+
 catalog.Discover();
 catalog.StartWatching();
 // Polling safety net for bind mounts where file events don't propagate (Docker Desktop). 0 = off.
@@ -773,6 +851,14 @@ if (app.Services.GetService<UpdateScheduler>() is { } updateScheduler)
     updateScheduler.Start(app.Lifetime.ApplicationStopping);
     app.Lifetime.ApplicationStopping.Register(updateScheduler.Dispose);
 }
+
+// Backstop blob sweep: retry a delete that lost to an open read handle, and collect the provisional
+// entry an abandoned upload leaves behind. NOT the mechanism — the refcount deletes on the last release
+// — so unlike the module sweep this one is skippable, and KnockBox:BlobSweepSeconds=0 says so. The
+// cadence is fixed for the process while the grace window is read live, the rule DisconnectGraceSeconds
+// exists to illustrate. The store owns the timer so that Sweep() itself stays public and clock-free for
+// a test to drive; what is left here is two lines with nothing to assert.
+if (blobsEnabled) blobStore.StartSweep(app.Lifetime.ApplicationStopping);
 
 // Idle-module sweep: stop holding the parsed AST of an authority game nobody is playing. Armed
 // unconditionally — the window is editable from the portal, so a deployment that starts at 0 must still be
@@ -982,6 +1068,12 @@ IFileProvider gamesFiles = new CompositeFileProvider(
         ? new PhysicalFileProvider(gamesUnpackedRoot) : new NullFileProvider());
 // The pre-compressed cache (.br/.gz siblings). NullFileProvider when precompression is off, so the
 // negotiation middleware below always misses and serving falls back to raw + on-the-fly compression.
+// PhysicalFileProvider throws when its root is missing, hence the same guard every provider here
+// carries. Blobs are content-addressed files with no extension, which is why the mount below has to
+// serve unknown types — and why it always overrides the content type in OnPrepareResponse.
+IFileProvider blobFiles = blobsEnabled && Directory.Exists(blobsRoot)
+    ? new PhysicalFileProvider(blobsRoot)
+    : new NullFileProvider();
 IFileProvider gamesCompressedFiles = precompressEnabled && Directory.Exists(gamesCompressedRoot)
     ? new PhysicalFileProvider(gamesCompressedRoot) : new NullFileProvider();
 
@@ -1056,6 +1148,41 @@ StaticFileOptions GamesCompressedStaticOptions() => new()
 // Shell files (index.html, shell.js, home.css, knockbox.js) change between deploys and are tiny, so
 // always revalidate — otherwise a browser can keep serving a heuristically-cached old shell after an
 // update (e.g. a fresh shell.js with new message handling), which looks like "the fix didn't deploy".
+// Blobs. A factory like its three neighbours, and the same StaticFileMiddleware reuse: ETag,
+// If-None-Match/304, Range/206, Content-Length and kernel sendfile, all with framework-guaranteed
+// constant memory. BlobApi's read handler has already rewritten the path to /blob/<shard>/<hash> and
+// verified the URL's MAC by the time this mount sees the request.
+StaticFileOptions BlobStaticOptions() => new()
+{
+    FileProvider = blobFiles,
+    RequestPath = BlobApi.RoutePrefix,
+    // Content-addressed names carry no extension, so nothing can be inferred from one. Safe here in a
+    // way it is not for /games (where it is why .kbg needs its own gate): this mount is only ever
+    // reached through BlobApi, which serves a path it derived from a hash whose MAC it verified.
+    ServeUnknownFileTypes = true,
+    DefaultContentType = BlobContentTypes.Default,
+    OnPrepareResponse = ctx =>
+    {
+        var headers = ctx.Context.Response.Headers;
+        // Immutable by construction: the name IS the hash of the bytes, so a cached copy can never be
+        // stale. This is the one place in the server where a year-long immutable cache is a fact rather
+        // than a bet.
+        headers.CacheControl = "public, max-age=31536000, immutable";
+        headers["Cross-Origin-Resource-Policy"] = "same-origin";
+
+        if (ctx.Context.Items[BlobApi.ContentTypeItem] is not string type) return;
+        ctx.Context.Response.ContentType = type;
+
+        // application/octet-stream IS in the response-compression MIME list above, so a blob served
+        // under it gets Brotli'd at request time — burning CPU to re-compress an already-compressed
+        // PNG on every cache miss. A recognised image type is off that list and needs nothing; the
+        // fallback declares `identity`, which makes ResponseCompression skip the response (it compresses
+        // only when Content-Encoding is unset). `identity` rather than a fake `br`, because it is true:
+        // the bytes really are untransformed.
+        if (type == BlobContentTypes.Default) headers.ContentEncoding = "identity";
+    },
+};
+
 StaticFileOptions WebStaticOptions() => new()
 {
     FileProvider = webFiles,
@@ -1143,6 +1270,10 @@ app.MapWhen(
             metricSampleSeconds,
             limitsProvider,
             authorityLimitsProvider,
+            blobLimitsProvider,
+            // Optional for the same reason ServerAuthorityManager is: the portal reports 0 bytes used
+            // rather than the admin origin failing to build if this registration ever becomes conditional.
+            app.Services.GetService<IBlobStore>(),
             app.Services.GetService<WebhookDispatcher>(),
             app.Services.GetService<WebhookLogSink>(),
             webhookOptions,
@@ -1248,6 +1379,25 @@ app.MapWhen(
             ApplyCrossOriginIsolation(ctx, catalog);
             await next();
         });
+        // The blob side channel, for the media that cannot cross the relay. Placed here for three
+        // reasons, each of which is a different way to get it wrong:
+        //   • AFTER the two 404 gates, so it cannot be used to reach a path they refuse.
+        //   • BEFORE the pre-compression negotiation, which rewrites paths of its own — a /blob path
+        //     reaching it would be looked up in the wrong provider.
+        //   • NOT under /games, because the shell origin 404s every /games/* path that is not a
+        //     catalog-declared thumbnail, so /games/blob/... would die there while looking correct here.
+        // The mount immediately follows the middleware, because the middleware serves nothing itself:
+        // it verifies the URL's MAC, rewrites the path, and hands off.
+        if (blobsEnabled)
+        {
+            gameApp.Use(BlobApi.Middleware(new BlobApi.Options(
+                app.Services.GetRequiredService<IBlobStore>(),
+                app.Services.GetRequiredService<BlobOptionsProvider>(),
+                app.Services.GetRequiredService<TokenService>(),
+                app.Services.GetRequiredService<LobbyManager>(),
+                app.Logger)));
+            gameApp.UseStaticFiles(BlobStaticOptions());
+        }
         // Pre-compressed content negotiation: if a `.br`/`.gz` variant exists and the client accepts it,
         // rewrite to that path so the next middleware serves the cached, max-effort-compressed bytes
         // (no per-request CPU). On a miss this is a no-op and serving falls through to the raw file.

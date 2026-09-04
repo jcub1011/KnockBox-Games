@@ -5,6 +5,7 @@ using KnockBox.Contracts;
 using Microsoft.AspNetCore.Http.Features;
 using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Blobs;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
@@ -75,6 +76,13 @@ internal static class AdminApi
         // The server-authority half of the same form. Named AuthorityLimits rather than Authority because
         // that name is already taken above by AuthorityMetrics, which is a different thing entirely.
         AuthorityOptionsProvider AuthorityLimits,
+        // The blob half of the same form. A third provider for the reason there is a second: a blob
+        // quota is enforced on an upload, not on a frame, so it cannot ride ServerLimits.
+        BlobOptionsProvider BlobLimits,
+        // For the bytes-used figure, which is the only question an operator asks about an aggregate cap.
+        // Nullable so a server with blobs switched off still renders the form, the same choice
+        // Authorities makes.
+        IBlobStore? Blobs,
         // Null when KnockBox:WebhooksEnabled is false — the same nullable-when-disabled precedent as
         // Marketplace. Registered endpoints are still listed; the mutating routes refuse with 409.
         WebhookDispatcher? Webhooks,
@@ -166,6 +174,8 @@ internal static class AdminApi
                 RequireSession(options, WriteGuard(ctx => SetMaintenance(ctx, options))));
             routes.MapPost("/admin/api/limits",
                 RequireSession(options, WriteGuard(ctx => SetLimits(ctx, options))));
+            routes.MapPost("/admin/api/blob-quota",
+                RequireSession(options, WriteGuard(ctx => SetBlobQuota(ctx, options))));
             routes.MapPost("/admin/api/room-codes",
                 RequireSession(options, WriteGuard(ctx => SetRoomCodes(ctx, options))));
             routes.MapPost("/admin/api/announcement",
@@ -553,6 +563,8 @@ internal static class AdminApi
             disk.LogsBytes,
             options.Paths.GamesManagedRoot,
             disk.ManagedRootBytes,
+            options.Paths.BlobsRoot,
+            disk.BlobsBytes,
             KnockBoxSdk.VersionString));
     }
 
@@ -1612,6 +1624,56 @@ internal static class AdminApi
 
     // ── Platform limits ───────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Sets or clears one game's per-lobby blob quota.
+    /// </summary>
+    /// <remarks>
+    /// Validated against the CATALOG rather than accepted for any id, like the availability route: a
+    /// quota for a game that is not installed is almost always a typo, and silently accepting it means
+    /// the operator sets a limit they will never see take effect. (Unlike availability, an existing row
+    /// for a game whose files went missing is preserved by <c>Save</c> and not touched here.)
+    /// </remarks>
+    private static async Task SetBlobQuota(HttpContext ctx, Options options)
+    {
+        var body = await ReadJson(ctx, KnockBoxProtocolContext.Default.AdminBlobQuotaRequest);
+        if (body?.GameId is not { Length: > 0 } gameId
+            || !options.Catalog.TryGet(gameId, out var manifest))
+        {
+            await Refuse(ctx, StatusCodes.Status404NotFound,
+                $"No installed game with id '{body?.GameId}'.");
+            return;
+        }
+
+        // Zero is refused rather than treated as "unlimited", which is what a non-positive value means
+        // everywhere else here. In a QUOTA field a typed 0 reads as "I am clearing this", and the way to
+        // clear it is to omit the value -- so accepting 0 as "no cap" would be the one place in this
+        // server where a 0 quietly did the opposite of what an operator meant.
+        if (body.Bytes == 0)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest,
+                "bytes must not be 0. Omit it to clear the override and use the server-wide default, " +
+                "or send a negative value for no per-lobby cap on this game.");
+            return;
+        }
+
+        var warning = options.Settings.SetBlobQuota(manifest.Id, body.Bytes);
+        options.BlobLimits.ApplyPerGameQuotas(options.Settings.BlobQuotas);
+
+        var detail = body.Bytes switch
+        {
+            null => $"'{manifest.Id}' is back on the server-wide per-lobby quota " +
+                    $"({options.BlobLimits.Current.LobbyQuotaBytes:N0} bytes).",
+            < 0 => $"'{manifest.Id}' now has no per-lobby blob quota. The server-wide total " +
+                   $"({options.BlobLimits.Current.TotalQuotaBytes:N0} bytes) still applies.",
+            // Existing registrations are never revoked by a lowered quota, exactly as a lowered lobby
+            // cap never closes a lobby: the next upload is refused instead.
+            _ => $"'{manifest.Id}' lobbies may now hold {body.Bytes:N0} bytes of blobs each. Sessions " +
+                 "already over the new figure keep what they registered; their next upload is refused.",
+        };
+
+        await WriteAction(ctx, new AdminActionResponse(true, Warning: warning, Detail: detail));
+    }
+
     private static Task Limits(HttpContext ctx, Options options)
     {
         var provider = options.Limits;
@@ -1620,10 +1682,11 @@ internal static class AdminApi
         // Two providers behind one flat response: the connection limits and the server-authority knobs are
         // different records enforced in different places, but they are one form on the operator's screen.
         var authority = options.AuthorityLimits;
+        var blobs = options.BlobLimits;
         return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminLimitsResponse, new AdminLimitsResponse(
-            Defaults: Values(startup, authority.Configured),
-            Effective: Values(provider.Current, authority.Current),
-            Overridden: OverriddenKeys(overrides, authority.Overrides),
+            Defaults: Values(startup, authority.Configured, blobs.Configured),
+            Effective: Values(provider.Current, authority.Current, blobs.Current),
+            Overridden: OverriddenKeys(overrides, authority.Overrides, blobs.Overrides),
             // Reported read-only. The portal shows them greyed with the reason rather than omitting them:
             // an operator looking for "handshake timeout" and not finding it assumes the portal is
             // incomplete, where a disabled field with "set in configuration" answers the question.
@@ -1637,18 +1700,29 @@ internal static class AdminApi
             // dependency, and a portal that failed to render because nobody ships an authority game would
             // be a worse answer than two honest zeroes.
             AuthorityModulesCached: options.Authorities?.CachedModules ?? 0,
-            AuthorityModulesEvicted: options.Authorities?.EvictedModules ?? 0));
+            AuthorityModulesEvicted: options.Authorities?.EvictedModules ?? 0,
+            // Read-only, like the handshake timeout above and for the same reason: both gate wiring done
+            // before the first request, so an editable field would lie about when it takes effect.
+            BlobsEnabled: blobs.Configured.Enabled,
+            BlobSweepSeconds: blobs.Configured.SweepInterval.TotalSeconds,
+            // Zero when blobs are off, like the two authority counters: a metric, not a dependency.
+            BlobBytesUsed: options.Blobs?.TotalBytes ?? 0,
+            BlobQuotas: blobs.PerGameQuotas));
 
-        static AdminLimitValues Values(ServerLimits limits, AuthorityOptions authority) => new(
+        static AdminLimitValues Values(
+            ServerLimits limits, AuthorityOptions authority, BlobOptions blobs) => new(
             limits.GameMessagesPerSecond, limits.GameMessagesBurst,
             limits.ControlMessagesPerSecond, limits.ControlMessagesBurst,
             limits.LobbyCreatesPerMinute, limits.MaxConnectionsPerIp,
             limits.MaxLobbies, limits.MaxLobbiesPerGame,
-            authority.MaxLobbies, (int)authority.ModuleCacheIdle.TotalMinutes);
+            authority.MaxLobbies, (int)authority.ModuleCacheIdle.TotalMinutes,
+            blobs.MaxBlobBytes, blobs.LobbyQuotaBytes, blobs.TotalQuotaBytes,
+            (int)blobs.Grace.TotalMinutes, blobs.MaxUploadsPerLobby);
 
-        static IReadOnlyList<string> OverriddenKeys(OperatorLimits o, OperatorAuthorityOptions a)
+        static IReadOnlyList<string> OverriddenKeys(
+            OperatorLimits o, OperatorAuthorityOptions a, OperatorBlobOptions b)
         {
-            var keys = new List<string>(10);
+            var keys = new List<string>(15);
             if (o.GameMessagesPerSecond is not null) keys.Add("gameMessagesPerSecond");
             if (o.GameMessagesBurst is not null) keys.Add("gameMessagesBurst");
             if (o.ControlMessagesPerSecond is not null) keys.Add("controlMessagesPerSecond");
@@ -1659,6 +1733,11 @@ internal static class AdminApi
             if (o.MaxLobbiesPerGame is not null) keys.Add("maxLobbiesPerGame");
             if (a.MaxLobbies is not null) keys.Add("authorityMaxLobbies");
             if (a.ModuleCacheIdleMinutes is not null) keys.Add("authorityModuleCacheIdleMinutes");
+            if (b.MaxBlobBytes is not null) keys.Add("blobMaxBytes");
+            if (b.LobbyQuotaBytes is not null) keys.Add("blobLobbyQuotaBytes");
+            if (b.TotalQuotaBytes is not null) keys.Add("blobTotalQuotaBytes");
+            if (b.GraceMinutes is not null) keys.Add("blobGraceMinutes");
+            if (b.MaxUploadsPerLobby is not null) keys.Add("blobMaxUploadsPerLobby");
             return keys;
         }
     }
@@ -1674,6 +1753,9 @@ internal static class AdminApi
             body.MaxLobbies, body.MaxLobbiesPerGame);
         var authorityOverrides = new OperatorAuthorityOptions(
             body.AuthorityMaxLobbies, body.AuthorityModuleCacheIdleMinutes);
+        var blobOverrides = new OperatorBlobOptions(
+            body.BlobMaxBytes, body.BlobLobbyQuotaBytes, body.BlobTotalQuotaBytes,
+            body.BlobGraceMinutes, body.BlobMaxUploadsPerLobby);
 
         // 400, not 409: an out-of-range number or a burst that would refuse every message is a bad
         // request, not a state conflict. The message names the field and the range, matching how the
@@ -1691,21 +1773,28 @@ internal static class AdminApi
             await Refuse(ctx, StatusCodes.Status400BadRequest, authorityError);
             return;
         }
+        if (blobOverrides.Validate() is { } blobError)
+        {
+            await Refuse(ctx, StatusCodes.Status400BadRequest, blobError);
+            return;
+        }
 
         // Persist first, then publish — both happen regardless of whether the write succeeded, which is
         // the store's contract: a change is in effect even when it can't be saved.
         var warning = options.Settings.SetLimits(overrides);
         var authorityWarning = options.Settings.SetAuthorityLimits(authorityOverrides);
+        var blobWarning = options.Settings.SetBlobLimits(blobOverrides);
         options.Limits.Apply(overrides);
         options.AuthorityLimits.Apply(authorityOverrides);
+        options.BlobLimits.Apply(blobOverrides);
 
         var effective = options.Limits.Current;
-        var detail = overrides.IsEmpty && authorityOverrides.IsEmpty
+        var detail = overrides.IsEmpty && authorityOverrides.IsEmpty && blobOverrides.IsEmpty
             ? "Every limit is back to its default."
             : Applied(effective, options.AuthorityLimits.Current, options.Lobbies, options.Authorities);
-        // Both setters write the same file, so at most one of them has anything new to report.
+        // All three setters write the same file, so at most one of them has anything new to report.
         await WriteAction(ctx, new AdminActionResponse(
-            true, Warning: warning ?? authorityWarning, Detail: detail));
+            true, Warning: warning ?? authorityWarning ?? blobWarning, Detail: detail));
 
         // What the operator most needs told: the change reached sockets that were already open (that is
         // the whole point), but a lowered cap never tears anything down — it refuses the next one.

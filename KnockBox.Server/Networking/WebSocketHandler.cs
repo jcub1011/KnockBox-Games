@@ -4,6 +4,7 @@ using System.Text.Json;
 using KnockBox.Contracts;
 using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Blobs;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Security;
 using KnockBox.Server.Serialization;
@@ -33,7 +34,11 @@ public sealed class WebSocketHandler(
     RelayMetrics relay,
     TimeProvider time,
     ILoggerFactory loggerFactory,
-    ILogger<WebSocketHandler> logger)
+    ILogger<WebSocketHandler> logger,
+    // Optional and trailing, the convention TestAuthorities.Manager follows: a dozen test call sites
+    // construct this handler and none of them care about blobs. Null means "no blob store on this
+    // server", which is also what KnockBox:BlobsEnabled=false produces at the DI layer.
+    IBlobStore? blobs = null)
 {
     // Per-connection Connection instances are created with `new` (not DI), so they get their logger
     // category from this shared factory.
@@ -857,6 +862,11 @@ public sealed class WebSocketHandler(
         // The single normal-teardown chokepoint for the authority actor — every leave/kick/reap
         // path funnels through here. (The fatal path tears down via the manager itself, §7.)
         if (lobby.IsServerAuthority) authorities.Stop(lobby.Id);
+        // Every blob the session uploaded goes with it, with no cleanup call from the game — which is
+        // the point: a crashed or abandoned session never runs its own teardown, so anchoring blob
+        // lifetime to a lifecycle the server already manages is what makes a leak structurally
+        // impossible. Unconditional, unlike the authority stop above: any lobby can register blobs.
+        blobs?.ReleaseLobby(lobby.Id);
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Lobby {LobbyId} closed — no connected members remain", lobby.Id);
     }

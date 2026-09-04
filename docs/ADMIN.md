@@ -320,6 +320,21 @@ definition, already connected. It is also saved, so it survives a restart.
 | Max lobbies per game | Stops one popular title consuming every remaining slot. |
 | Max lobbies (server-authority) | **A different cap from the platform one above.** Counts only lobbies whose game runs server-side logic, each of which holds its own JavaScript engine — the one thing on this server whose memory grows with how many people are playing. Empty or **0** is unlimited, and that is the default. |
 | Authority module cache idle (min) | How long a game's shared parsed server logic is kept after its last lobby ends. **0** keeps it until the server restarts. |
+| Max blob size (bytes) | Largest single file a game may upload for its session to share — a map image, a sound. Enforced while streaming, not from the length the client declares. |
+| Blob quota per session (bytes) | Total a single lobby's blobs may occupy. Identical files are stored once and charged once, however many names reference them. Overridable per game — see below. |
+| Blob quota, server-wide (bytes) | **The cap that actually bounds disk use.** Without it the per-session figure is only that times the number of sessions. Full means new uploads are refused; nothing already registered is deleted. |
+| Blob grace window (min) | How long freshly uploaded bytes are protected before the game claims them. Covers the round trip between upload and register, and nothing after it. |
+| Concurrent uploads per session | Bounds how many uploads one lobby may have open at once, which is what stops an abandoned upload being used to churn the store. |
+
+**Per-game blob quota.** Under the limits above, one game at a time can be given its own per-session
+figure — a map-heavy game needs gigabytes of art where a word game needs none. Leave the bytes empty to
+clear an override and return that game to the server-wide number; a negative value means no per-session cap
+for it, with the server-wide total still applying. Lowering a quota never deletes anything: sessions already
+over the new figure keep what they registered and their next upload is refused.
+
+The card also reports **how much blob storage is held against the server-wide cap**. That line is worth
+looking at, because a full quota has exactly one symptom and it arrives second-hand: a player saying their
+map will not load.
 
 Four rules worth knowing:
 
@@ -485,6 +500,12 @@ The file is indented and safe to hand-edit while the server is stopped:
   "authority": {
     "maxLobbies": 4,
     "moduleCacheIdleMinutes": 30
+  },
+  "blobs": {
+    "totalQuotaBytes": 5368709120
+  },
+  "blobQuotas": {
+    "dnd-mapper": 4294967296
   },
   "roomCodes": {
     "words": ["XQ"],

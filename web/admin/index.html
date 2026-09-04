@@ -538,6 +538,28 @@
                 <button class="btn btn-secondary btn-small" id="limits-refresh">Refresh</button>
               </div>
               <p class="panel-card-note" id="limits-note"></p>
+
+              <!-- Per-game blob quota. Inside this card on purpose: it overrides the per-session blob
+                   quota above it, and an override two cards away from the thing it overrides is an
+                   override nobody finds. -->
+              <p class="panel-card-note">
+                <strong>Per-game blob quota.</strong> Overrides <em>Blob quota per session</em> for one
+                game &mdash; a map-heavy game needs gigabytes of art where a word game needs none. Leave
+                the bytes empty to clear an override and return the game to the server-wide figure. A
+                negative value means no per-session cap for that game; the server-wide total still
+                applies. Lowering a quota never deletes anything: the next upload is refused.
+              </p>
+              <div class="field-row">
+                <label class="limit-label" for="blob-quota-game">Game id</label>
+                <input class="text-input filter-narrow" id="blob-quota-game" placeholder="e.g. dnd-mapper" />
+                <input class="text-input filter-narrow" id="blob-quota-bytes" inputmode="numeric"
+                       placeholder="Bytes (empty clears)" />
+                <button class="btn btn-secondary btn-small" id="blob-quota-set">Set</button>
+              </div>
+              <table class="data-table" id="blob-quota-table" hidden>
+                <thead><tr><th>Game</th><th>Bytes per session</th><th></th></tr></thead>
+                <tbody id="blob-quota-body"></tbody>
+              </table>
             </div>
 
             <!-- Setting: Update Schedule -->
