@@ -317,6 +317,60 @@ export function formatBytes(bytes) {
 }
 
 /**
+ * Scales for byte settings input, from BYTE up to TiB with decimal (SI) and binary (IEC) units.
+ */
+export const BYTE_SCALES = [
+  { unit: 'BYTE', multiplier: 1 },
+  { unit: 'KB', multiplier: 1_000 },
+  { unit: 'KiB', multiplier: 1_024 },
+  { unit: 'MB', multiplier: 1_000_000 },
+  { unit: 'MiB', multiplier: 1_048_576 },
+  { unit: 'GB', multiplier: 1_000_000_000 },
+  { unit: 'GiB', multiplier: 1_073_741_824 },
+  { unit: 'TB', multiplier: 1_000_000_000_000 },
+  { unit: 'TiB', multiplier: 1_099_511_627_776 },
+];
+
+export const BYTE_UNITS = BYTE_SCALES.map((s) => s.unit);
+
+export const BYTE_MULTIPLIERS = Object.fromEntries(BYTE_SCALES.map((s) => [s.unit, s.multiplier]));
+
+/**
+ * Decomposes a byte integer into an integer number and the largest matching scaling unit,
+ * falling back to 'BYTE' if not evenly divisible by larger units.
+ */
+export function splitBytes(bytes) {
+  if (bytes === null || bytes === undefined || bytes === '') {
+    return { value: '', unit: 'BYTE' };
+  }
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n === 0) {
+    return { value: 0, unit: 'BYTE' };
+  }
+  if (n < 0) {
+    return { value: n, unit: 'BYTE' };
+  }
+  for (let i = BYTE_SCALES.length - 1; i >= 0; i--) {
+    const { unit, multiplier } = BYTE_SCALES[i];
+    if (multiplier > 1 && n >= multiplier && n % multiplier === 0) {
+      return { value: n / multiplier, unit };
+    }
+  }
+  return { value: n, unit: 'BYTE' };
+}
+
+/**
+ * Formats a byte limit for display in placeholders or hints, decomposing into the largest matching integer unit.
+ */
+export function formatByteLimit(bytes) {
+  if (bytes === null || bytes === undefined || bytes === '') {
+    return '--';
+  }
+  const split = splitBytes(bytes);
+  return `${split.value} ${split.unit}`;
+}
+
+/**
  * A duration in seconds as the two largest useful units ("3d 4h", "5m 12s"). Two units, not all four:
  * the point of this column is scanning for the outlier, and "3d 4h 17m 9s" makes every row the same
  * width and none of them readable.
@@ -1240,17 +1294,17 @@ export const LIMIT_FIELDS = [
   // hints have to say what a full quota does — an upload refused with 507 is the only symptom, and it
   // reaches the operator as "a player says their map will not load".
   {
-    key: 'blobMaxBytes', label: 'Max blob size (bytes)', integer: true,
+    key: 'blobMaxBytes', label: 'Max blob size', dataType: 'bytes', integer: true,
     hint: 'Largest single file a game may upload for its session to share — a map image, a sound. '
       + 'Enforced while streaming, not on the declared length. 0 means no limit.',
   },
   {
-    key: 'blobLobbyQuotaBytes', label: 'Blob quota per session (bytes)', integer: true,
+    key: 'blobLobbyQuotaBytes', label: 'Blob quota per session', dataType: 'bytes', integer: true,
     hint: 'Total a single lobby’s blobs may occupy. Identical files are stored once and charged once, '
       + 'however many names reference them. Per-game overrides live on the Games tab. 0 means no limit.',
   },
   {
-    key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide (bytes)', integer: true,
+    key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide', dataType: 'bytes', integer: true,
     hint: 'The aggregate cap, and the one that actually bounds disk use — without it the per-session '
       + 'figure is only that times the number of sessions. Full means new uploads are refused; nothing '
       + 'already registered is deleted. 0 means no limit.',
@@ -1290,20 +1344,42 @@ export const STARTUP_LIMITS = [
  * The server validates this again and is the authority. Doing it here too is not duplication for its own
  * sake: a round trip to be told "that's not a number" is a worse form than one that says so as you type.
  */
-export function validateLimits(raw, fields = LIMIT_FIELDS) {
+export function validateLimits(raw, fields = LIMIT_FIELDS, scales = {}) {
   const values = {};
   for (const field of fields) {
-    const text = String(raw?.[field.key] ?? '').trim();
+    const rawVal = raw?.[field.key];
+    let text = '';
+    let scale = scales?.[field.key];
+    if (typeof rawVal === 'object' && rawVal !== null) {
+      text = String(rawVal.value ?? '').trim();
+      scale = rawVal.unit ?? rawVal.scale ?? scale;
+    } else {
+      text = String(rawVal ?? '').trim();
+    }
     if (text === '') { values[field.key] = null; continue; }
 
     const n = Number(text);
     if (!Number.isFinite(n) || n < 0) {
       return { ok: false, error: `${field.label} must be 0 or more, or empty to use the default.`, values: null };
     }
-    if (field.integer && !Number.isInteger(n)) {
+    if ((field.integer || field.dataType === 'bytes') && !Number.isInteger(n)) {
       return { ok: false, error: `${field.label} must be a whole number.`, values: null };
     }
-    values[field.key] = n;
+
+    if (field.dataType === 'bytes') {
+      const unit = scale || 'BYTE';
+      const mult = BYTE_MULTIPLIERS[unit];
+      if (mult === undefined) {
+        return { ok: false, error: `Unknown byte unit "${unit}" for ${field.label}.`, values: null };
+      }
+      const totalBytes = n * mult;
+      if (!Number.isSafeInteger(totalBytes)) {
+        return { ok: false, error: `${field.label} is too large.`, values: null };
+      }
+      values[field.key] = totalBytes;
+    } else {
+      values[field.key] = n;
+    }
   }
 
   // The one combination that locks everyone out rather than merely limiting them, checked here so the

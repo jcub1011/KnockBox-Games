@@ -552,12 +552,25 @@
               <div class="field-row">
                 <label class="limit-label" for="blob-quota-game">Game id</label>
                 <input class="text-input filter-narrow" id="blob-quota-game" placeholder="e.g. dnd-mapper" />
-                <input class="text-input filter-narrow" id="blob-quota-bytes" inputmode="numeric"
-                       placeholder="Bytes (empty clears)" />
+                <div class="byte-input-group filter-narrow">
+                  <input class="text-input byte-input" id="blob-quota-bytes" inputmode="numeric"
+                         placeholder="Quota (empty clears)" />
+                  <select class="text-input byte-scale-select" id="blob-quota-scale" title="Unit scaling">
+                    <option value="BYTE">BYTE</option>
+                    <option value="KB">KB</option>
+                    <option value="KiB">KiB</option>
+                    <option value="MB">MB</option>
+                    <option value="MiB">MiB</option>
+                    <option value="GB">GB</option>
+                    <option value="GiB">GiB</option>
+                    <option value="TB">TB</option>
+                    <option value="TiB">TiB</option>
+                  </select>
+                </div>
                 <button class="btn btn-secondary btn-small" id="blob-quota-set">Set</button>
               </div>
               <table class="data-table" id="blob-quota-table" hidden>
-                <thead><tr><th>Game</th><th>Bytes per session</th><th></th></tr></thead>
+                <thead><tr><th>Game</th><th>Quota per session</th><th></th></tr></thead>
                 <tbody id="blob-quota-body"></tbody>
               </table>
             </div>

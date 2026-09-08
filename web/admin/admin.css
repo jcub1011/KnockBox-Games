@@ -1479,6 +1479,25 @@ code, pre {
 .filter-narrow { flex: 0 1 12rem; }
 .filter-spacer { flex: 1 1 auto; }
 
+.byte-input-group {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex: 0 1 14rem;
+}
+
+.byte-input-group .byte-input {
+  flex: 1 1 7rem;
+  min-width: 0;
+}
+
+.byte-input-group .byte-scale-select {
+  flex: 0 0 5.5rem;
+  min-width: 0;
+  padding: 0.55rem 0.4rem;
+  cursor: pointer;
+}
+
 .limit-label {
   flex: 0 0 14rem;
   color: var(--text-main);
@@ -1496,6 +1515,7 @@ code, pre {
 @media (max-width: 768px) {
   .limit-label { flex: 1 1 100%; }
   .limit-hint { flex: 1 1 100%; }
+  .byte-input-group { flex: 1 1 100%; }
 }
 
 .checkbox-label {

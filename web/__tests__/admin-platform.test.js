@@ -13,6 +13,7 @@ import { LIMIT_FIELDS } from '../admin/admin-core.js';
 
 const el = (id) => document.getElementById(id);
 const limitInput = (key) => document.querySelector(`#limits-fields input[data-limit-key="${key}"]`);
+const limitScaleSelect = (key) => document.querySelector(`#limits-fields select[data-limit-scale-key="${key}"]`);
 
 let admin;
 let fake;
@@ -136,6 +137,9 @@ describe('limits form', () => {
     // Empty box + default placeholder is the whole UI for "not overridden".
     expect(limitInput('maxLobbies').value).toBe('');
     expect(limitInput('controlMessagesPerSecond').placeholder).toBe('Default: 5');
+    expect(limitInput('blobMaxBytes').placeholder).toBe('Default: 100 MiB');
+    expect(limitInput('blobLobbyQuotaBytes').placeholder).toBe('Default: 1 GiB');
+    expect(limitInput('blobTotalQuotaBytes').placeholder).toBe('Default: 20 GiB');
     expect(el('limits-badge').hidden).toBe(true);
     expect(el('limits-reset').disabled).toBe(true);
   });
@@ -229,6 +233,81 @@ describe('limits form', () => {
     expect(posts[1].body).toEqual({ gameId: 'dnd-mapper' });
   });
 
+  it('renders a scaling dropdown for byte limit fields and scales input values on save', async () => {
+    await openPlatform();
+
+    const expectedUnits = ['BYTE', 'KB', 'KiB', 'MB', 'MiB', 'GB', 'GiB', 'TB', 'TiB'];
+
+    for (const key of ['blobMaxBytes', 'blobLobbyQuotaBytes', 'blobTotalQuotaBytes']) {
+      const select = limitScaleSelect(key);
+      expect(select, key).toBeTruthy();
+      const options = [...select.options].map((o) => o.value);
+      expect(options).toEqual(expectedUnits);
+      expect(select.value).toBe('BYTE');
+    }
+
+    // Non-byte fields do not have scale dropdowns
+    expect(limitScaleSelect('maxLobbies')).toBeNull();
+    expect(limitScaleSelect('blobGraceMinutes')).toBeNull();
+
+    // Set 100 MiB on blobMaxBytes
+    limitInput('blobMaxBytes').value = '100';
+    limitScaleSelect('blobMaxBytes').value = 'MiB';
+
+    // Set 5 GB on blobTotalQuotaBytes
+    limitInput('blobTotalQuotaBytes').value = '5';
+    limitScaleSelect('blobTotalQuotaBytes').value = 'GB';
+
+    el('limits-save').click();
+    await tick();
+    await tick();
+
+    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/limits');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.blobMaxBytes).toBe(104_857_600);
+    expect(posts[0].body.blobTotalQuotaBytes).toBe(5_000_000_000);
+  });
+
+  it('decomposes overridden byte limits into integer and scale unit on load', async () => {
+    await openPlatform({
+      'GET /admin/api/limits': {
+        body: limits(
+          { blobMaxBytes: 104857600, blobTotalQuotaBytes: 21474836480 },
+          { blobMaxBytes: 104857600, blobTotalQuotaBytes: 21474836480 }
+        ),
+      },
+    });
+
+    expect(limitInput('blobMaxBytes').value).toBe('100');
+    expect(limitScaleSelect('blobMaxBytes').value).toBe('MiB');
+
+    expect(limitInput('blobTotalQuotaBytes').value).toBe('20');
+    expect(limitScaleSelect('blobTotalQuotaBytes').value).toBe('GiB');
+
+    const blobMaxRow = limitInput('blobMaxBytes').closest('.field-row');
+    expect(blobMaxRow.querySelector('.limit-hint').textContent).toContain('the default is 100 MiB');
+  });
+
+  it('posts a per-game quota with unit scaling', async () => {
+    await openPlatform();
+
+    expect(el('blob-quota-scale')).toBeTruthy();
+    const options = [...el('blob-quota-scale').options].map((o) => o.value);
+    expect(options).toEqual(['BYTE', 'KB', 'KiB', 'MB', 'MiB', 'GB', 'GiB', 'TB', 'TiB']);
+
+    el('blob-quota-game').value = 'dnd-mapper';
+    el('blob-quota-bytes').value = '2';
+    el('blob-quota-scale').value = 'GiB';
+    el('blob-quota-set').click();
+    await tick();
+    await tick();
+
+    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toEqual({ gameId: 'dnd-mapper', bytes: 2_147_483_648 });
+    expect(el('blob-quota-scale').value).toBe('BYTE');
+  });
+
   it('refuses a per-game quota of zero before posting it', async () => {
     await openPlatform();
 
@@ -238,6 +317,60 @@ describe('limits form', () => {
     await tick();
 
     expect(fake.calls.filter((c) => c.path === '/admin/api/blob-quota')).toHaveLength(0);
+  });
+
+  it('strips non-digits and prevents decimal entry on byte limit inputs and per-game quota', async () => {
+    await openPlatform();
+
+    const maxBlob = limitInput('blobMaxBytes');
+    expect(maxBlob).toBeTruthy();
+
+    // Keydown test for decimal point
+    const dotEvent = new KeyboardEvent('keydown', { key: '.', cancelable: true });
+    maxBlob.dispatchEvent(dotEvent);
+    expect(dotEvent.defaultPrevented).toBe(true);
+
+    const minusEvent = new KeyboardEvent('keydown', { key: '-', cancelable: true });
+    maxBlob.dispatchEvent(minusEvent);
+    expect(minusEvent.defaultPrevented).toBe(true);
+
+    const digitEvent = new KeyboardEvent('keydown', { key: '5', cancelable: true });
+    maxBlob.dispatchEvent(digitEvent);
+    expect(digitEvent.defaultPrevented).toBe(false);
+
+    // Input sanitization test (e.g. pasted '12.5 MB')
+    maxBlob.value = '12.5 MB';
+    maxBlob.dispatchEvent(new Event('input'));
+    expect(maxBlob.value).toBe('125');
+
+    // Per-game quota input allows leading minus but strips decimals
+    const quotaBytes = el('blob-quota-bytes');
+    expect(quotaBytes).toBeTruthy();
+
+    const quotaDotEvent = new KeyboardEvent('keydown', { key: '.', cancelable: true });
+    quotaBytes.dispatchEvent(quotaDotEvent);
+    expect(quotaDotEvent.defaultPrevented).toBe(true);
+
+    quotaBytes.value = '-12.8';
+    quotaBytes.dispatchEvent(new Event('input'));
+    expect(quotaBytes.value).toBe('-128');
+  });
+
+  it('renders byte setting labels and table headers without (bytes)', async () => {
+    await openPlatform();
+
+    const labels = [...document.querySelectorAll('#limits-fields .limit-label')].map((l) => l.textContent);
+    expect(labels).toContain('Max blob size');
+    expect(labels).toContain('Blob quota per session');
+    expect(labels).toContain('Blob quota, server-wide');
+    for (const label of labels) {
+      if (label.toLowerCase().includes('blob') && label.toLowerCase().includes('quota')) {
+        expect(label).not.toContain('(bytes)');
+      }
+    }
+
+    const quotaHeader = document.querySelector('#blob-quota-table th:nth-child(2)');
+    expect(quotaHeader?.textContent).toBe('Quota per session');
   });
 
   it('reports the startup-only limits read-only rather than hiding them', async () => {

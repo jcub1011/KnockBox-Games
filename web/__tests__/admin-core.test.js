@@ -7,6 +7,7 @@ import {
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES,
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
+  BYTE_MULTIPLIERS, BYTE_SCALES, BYTE_UNITS, formatByteLimit, splitBytes,
   cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
   formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
@@ -155,6 +156,55 @@ describe('formatBytes', () => {
 
   it('returns a placeholder for values that are not a size', () => {
     for (const bad of [undefined, null, NaN, -1, 'abc']) expect(formatBytes(bad)).toBe('--');
+  });
+});
+
+describe('BYTE_SCALES and splitBytes', () => {
+  it('defines the 9 byte scales in ascending order', () => {
+    expect(BYTE_UNITS).toEqual(['BYTE', 'KB', 'KiB', 'MB', 'MiB', 'GB', 'GiB', 'TB', 'TiB']);
+    expect(BYTE_MULTIPLIERS.BYTE).toBe(1);
+    expect(BYTE_MULTIPLIERS.KB).toBe(1_000);
+    expect(BYTE_MULTIPLIERS.KiB).toBe(1_024);
+    expect(BYTE_MULTIPLIERS.MB).toBe(1_000_000);
+    expect(BYTE_MULTIPLIERS.MiB).toBe(1_048_576);
+    expect(BYTE_MULTIPLIERS.GB).toBe(1_000_000_000);
+    expect(BYTE_MULTIPLIERS.GiB).toBe(1_073_741_824);
+    expect(BYTE_MULTIPLIERS.TB).toBe(1_000_000_000_000);
+    expect(BYTE_MULTIPLIERS.TiB).toBe(1_099_511_627_776);
+  });
+
+  it('decomposes byte numbers into the largest matching integer scale', () => {
+    expect(splitBytes(5_497_558_138_880)).toEqual({ value: 5, unit: 'TiB' });
+    expect(splitBytes(3_000_000_000_000)).toEqual({ value: 3, unit: 'TB' });
+    expect(splitBytes(21_474_836_480)).toEqual({ value: 20, unit: 'GiB' });
+    expect(splitBytes(5_000_000_000)).toEqual({ value: 5, unit: 'GB' });
+    expect(splitBytes(104_857_600)).toEqual({ value: 100, unit: 'MiB' });
+    expect(splitBytes(5_000_000)).toEqual({ value: 5, unit: 'MB' });
+    expect(splitBytes(2_048)).toEqual({ value: 2, unit: 'KiB' });
+    expect(splitBytes(5_000)).toEqual({ value: 5, unit: 'KB' });
+    expect(splitBytes(123)).toEqual({ value: 123, unit: 'BYTE' });
+    expect(splitBytes(0)).toEqual({ value: 0, unit: 'BYTE' });
+    expect(splitBytes(-1)).toEqual({ value: -1, unit: 'BYTE' });
+    expect(splitBytes(null)).toEqual({ value: '', unit: 'BYTE' });
+    expect(splitBytes('')).toEqual({ value: '', unit: 'BYTE' });
+  });
+});
+
+describe('formatByteLimit', () => {
+  it('formats byte numbers with the largest matching scalar unit and smaller readable numbers', () => {
+    expect(formatByteLimit(1_048_576)).toBe('1 MiB');
+    expect(formatByteLimit(104_857_600)).toBe('100 MiB');
+    expect(formatByteLimit(1_073_741_824)).toBe('1 GiB');
+    expect(formatByteLimit(21_474_836_480)).toBe('20 GiB');
+    expect(formatByteLimit(5_000)).toBe('5 KB');
+    expect(formatByteLimit(500)).toBe('500 BYTE');
+    expect(formatByteLimit(0)).toBe('0 BYTE');
+  });
+
+  it('handles null, undefined, or empty values with placeholder --', () => {
+    expect(formatByteLimit(null)).toBe('--');
+    expect(formatByteLimit(undefined)).toBe('--');
+    expect(formatByteLimit('')).toBe('--');
   });
 });
 
@@ -870,6 +920,17 @@ describe('platform limit fields', () => {
     expect(authority.hint).toMatch(/unlimited/i);
   });
 
+  it('marks blob byte caps with dataType: "bytes" and labels without (bytes)', () => {
+    const byteKeys = ['blobMaxBytes', 'blobLobbyQuotaBytes', 'blobTotalQuotaBytes'];
+    for (const key of byteKeys) {
+      const field = LIMIT_FIELDS.find((f) => f.key === key);
+      expect(field).toBeTruthy();
+      expect(field.dataType).toBe('bytes');
+      expect(field.integer).toBe(true);
+      expect(field.label).not.toContain('(bytes)');
+    }
+  });
+
   it('lists the startup-only limits, which are deliberately NOT editable', () => {
     // Two are startup-derived (the reaper's interval comes from the grace window); two bound PBKDF2 CPU
     // for an unauthenticated caller, and a lock that opens from inside the room is not a lock. The blob
@@ -894,6 +955,42 @@ describe('validateLimits', () => {
     expect(result.ok).toBe(true);
     for (const field of LIMIT_FIELDS) expect(result.values[field.key]).toBeNull();
     expect(noLimitOverrides(result.values)).toBe(true);
+  });
+
+  it('scales byte fields using the provided unit', () => {
+    const result = validateLimits(
+      { ...blank(), blobMaxBytes: '100', blobTotalQuotaBytes: '20' },
+      LIMIT_FIELDS,
+      { blobMaxBytes: 'MiB', blobTotalQuotaBytes: 'GiB' }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.values.blobMaxBytes).toBe(104_857_600);
+    expect(result.values.blobTotalQuotaBytes).toBe(21_474_836_480);
+  });
+
+  it('accepts byte fields passed as { value, unit } objects', () => {
+    const result = validateLimits({
+      ...blank(),
+      blobTotalQuotaBytes: { value: '5', unit: 'GB' },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.values.blobTotalQuotaBytes).toBe(5_000_000_000);
+  });
+
+  it('rejects non-integer byte inputs even when scaled', () => {
+    const result = validateLimits(
+      { ...blank(), blobMaxBytes: '1.5' },
+      LIMIT_FIELDS,
+      { blobMaxBytes: 'MiB' }
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/whole number/);
+  });
+
+  it('defaults scale to BYTE when not specified', () => {
+    const result = validateLimits({ ...blank(), blobMaxBytes: '500' });
+    expect(result.ok).toBe(true);
+    expect(result.values.blobMaxBytes).toBe(500);
   });
 
   it('keeps zero as zero, because zero disables a limit', () => {
