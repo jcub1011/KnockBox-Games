@@ -321,14 +321,14 @@ definition, already connected. It is also saved, so it survives a restart.
 | Max lobbies (server-authority) | **A different cap from the platform one above.** Counts only lobbies whose game runs server-side logic, each of which holds its own JavaScript engine — the one thing on this server whose memory grows with how many people are playing. Empty or **0** is unlimited, and that is the default. |
 | Authority module cache idle (min) | How long a game's shared parsed server logic is kept after its last lobby ends. **0** keeps it until the server restarts. |
 | Max blob size | Largest single file a game may upload for its session to share — a map image, a sound. Enforced while streaming, not from the length the client declares. |
-| Blob quota per session | Total a single lobby's blobs may occupy. Identical files are stored once and charged once, however many names reference them. Overridable per game — see below. |
+| Blob quota per session | Total a single lobby's blobs may occupy. Identical files are stored once and charged once, however many names reference them. Overridable per game in the plugin settings modal — see below. |
 | Blob quota, server-wide | **The cap that actually bounds disk use.** Without it the per-session figure is only that times the number of sessions. Full means new uploads are refused; nothing already registered is deleted. |
 | Blob grace window (min) | How long freshly uploaded bytes are protected before the game claims them. Covers the round trip between upload and register, and nothing after it. |
 | Concurrent uploads per session | Bounds how many uploads one lobby may have open at once, which is what stops an abandoned upload being used to churn the store. |
 
-**Per-game blob quota.** Under the limits above, one game at a time can be given its own per-session
-figure — a map-heavy game needs gigabytes of art where a word game needs none. Leave the bytes empty to
-clear an override and return that game to the server-wide number; a negative value means no per-session cap
+**Per-game blob quota.** In each installed game's settings modal under **Blob Quota Override**, a game can be given its own per-session
+figure — a map-heavy game needs gigabytes of art where a word game needs none. Leave the input box empty (the default) to
+disable the override and return that game to the server-wide number; a negative value means no per-session cap
 for it, with the server-wide total still applying. Lowering a quota never deletes anything: sessions already
 over the new figure keep what they registered and their next upload is refused.
 

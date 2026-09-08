@@ -523,6 +523,7 @@ internal static class AdminApi
             // Whether Delete could work is answered here so the portal can disable the button and say why,
             // rather than offering an action that always fails on a read-only games mount.
             var blocked = DeleteBlockedReason(options, location.Directory, package);
+            long? blobQuota = options.Settings.BlobQuotas is { } bq && bq.TryGetValue(manifest.Id, out var q) ? q : null;
 
             games.Add(new AdminGameSummary(
                 manifest.Id,
@@ -548,7 +549,8 @@ internal static class AdminApi
                 Camel(options.Settings.GetUpdatePolicy(manifest.Id).ToString()),
                 options.Packages.Jobs.ActiveFor(manifest.Id)?.JobId,
                 manifest.Sdk,
-                KnockBoxSdk.StatusOf(manifest.Sdk)));
+                KnockBoxSdk.StatusOf(manifest.Sdk),
+                BlobQuota: blobQuota));
         }
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));

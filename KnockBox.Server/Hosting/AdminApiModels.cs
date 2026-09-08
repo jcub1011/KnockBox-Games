@@ -223,7 +223,11 @@ public sealed record AdminGameSummary(
     /// <c>unknown</c> / <c>current</c> / <c>behind</c> / <c>ahead</c>, from KnockBoxSdk.StatusOf.
     /// Derived here rather than in the portal so one rule serves the UI and any future webhook.
     /// </summary>
-    string SdkStatus
+    string SdkStatus,
+    /// <summary>
+    /// Per-game override of the per-lobby blob quota in bytes, or null if using server-wide default.
+    /// </summary>
+    long? BlobQuota = null
 );
 
 public sealed record AdminGamesResponse(

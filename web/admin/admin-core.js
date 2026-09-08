@@ -798,6 +798,7 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       sourceKind,
       pendingJobId: game.pendingJobId || entry?.pendingJobId || null,
       serverAuthority: Boolean(game.serverAuthority),
+      blobQuota: game.blobQuota ?? null,
       reason: entry?.reason || null,
       shadowedBy: entry?.shadowedBy || null,
     });
@@ -851,6 +852,7 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
         sourceKind,
         pendingJobId: entry.pendingJobId || null,
         serverAuthority: false,
+        blobQuota: entry.blobQuota ?? null,
         reason: entry.reason || null,
         shadowedBy: entry.shadowedBy || null,
       });
@@ -1301,7 +1303,7 @@ export const LIMIT_FIELDS = [
   {
     key: 'blobLobbyQuotaBytes', label: 'Blob quota per session', dataType: 'bytes', integer: true,
     hint: 'Total a single lobby’s blobs may occupy. Identical files are stored once and charged once, '
-      + 'however many names reference them. Per-game overrides live on the Games tab. 0 means no limit.',
+      + 'however many names reference them. Per-game overrides live in each plugin’s settings. 0 means no limit.',
   },
   {
     key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide', dataType: 'bytes', integer: true,

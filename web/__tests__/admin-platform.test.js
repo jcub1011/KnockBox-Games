@@ -186,51 +186,12 @@ describe('limits form', () => {
     expect(el('limits-note').textContent).toMatch(/Blobs: .* held of /);
   });
 
-  it('lists the per-game blob quota overrides, and hides the table when there are none', async () => {
+  it('does not render per-game blob quota elements on the platform settings card', async () => {
     await openPlatform();
-    // Hidden rather than shown empty: the add row above it is the whole UI until an override exists, and
-    // an empty table under it reads as "loading" or "broken".
-    expect(el('blob-quota-table').hidden).toBe(true);
-
-    await openPlatform({
-      'GET /admin/api/limits': {
-        body: { ...limits(), blobQuotas: { 'dnd-mapper': 4294967296, 'sound-board': -1 } },
-      },
-    });
-
-    expect(el('blob-quota-table').hidden).toBe(false);
-    const rows = [...el('blob-quota-body').querySelectorAll('tr')];
-    expect(rows).toHaveLength(2);
-    expect(rows[0].children[0].textContent).toBe('dnd-mapper');
-    // A negative override means "no per-session cap for this game", so showing it as a byte count
-    // (or worse, as "-1 B") would be a lie about the policy in force.
-    expect(rows[1].children[1].textContent).toBe('No cap');
-  });
-
-  it('posts a per-game quota, and clears one by omitting the bytes entirely', async () => {
-    await openPlatform({
-      'GET /admin/api/limits': { body: { ...limits(), blobQuotas: { 'dnd-mapper': 4294967296 } } },
-    });
-
-    el('blob-quota-game').value = 'sound-board';
-    el('blob-quota-bytes').value = '2000000';
-    el('blob-quota-set').click();
-    await tick();
-    await tick();
-
-    let posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
-    expect(posts).toHaveLength(1);
-    expect(posts[0].body).toEqual({ gameId: 'sound-board', bytes: 2_000_000 });
-
-    // Clearing sends NO bytes at all. The server refuses a literal 0, because in a quota field a typed
-    // zero reads as "I am clearing this" rather than as this server's usual "no limit".
-    el('blob-quota-body').querySelector('button').click();
-    await tick();
-    await tick();
-
-    posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
-    expect(posts).toHaveLength(2);
-    expect(posts[1].body).toEqual({ gameId: 'dnd-mapper' });
+    expect(el('blob-quota-table')).toBeNull();
+    expect(el('blob-quota-game')).toBeNull();
+    expect(el('blob-quota-bytes')).toBeNull();
+    expect(el('blob-quota-set')).toBeNull();
   });
 
   it('renders a scaling dropdown for byte limit fields and scales input values on save', async () => {
@@ -288,38 +249,7 @@ describe('limits form', () => {
     expect(blobMaxRow.querySelector('.limit-hint').textContent).toContain('the default is 100 MiB');
   });
 
-  it('posts a per-game quota with unit scaling', async () => {
-    await openPlatform();
-
-    expect(el('blob-quota-scale')).toBeTruthy();
-    const options = [...el('blob-quota-scale').options].map((o) => o.value);
-    expect(options).toEqual(['BYTE', 'KB', 'KiB', 'MB', 'MiB', 'GB', 'GiB', 'TB', 'TiB']);
-
-    el('blob-quota-game').value = 'dnd-mapper';
-    el('blob-quota-bytes').value = '2';
-    el('blob-quota-scale').value = 'GiB';
-    el('blob-quota-set').click();
-    await tick();
-    await tick();
-
-    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
-    expect(posts).toHaveLength(1);
-    expect(posts[0].body).toEqual({ gameId: 'dnd-mapper', bytes: 2_147_483_648 });
-    expect(el('blob-quota-scale').value).toBe('BYTE');
-  });
-
-  it('refuses a per-game quota of zero before posting it', async () => {
-    await openPlatform();
-
-    el('blob-quota-game').value = 'dnd-mapper';
-    el('blob-quota-bytes').value = '0';
-    el('blob-quota-set').click();
-    await tick();
-
-    expect(fake.calls.filter((c) => c.path === '/admin/api/blob-quota')).toHaveLength(0);
-  });
-
-  it('strips non-digits and prevents decimal entry on byte limit inputs and per-game quota', async () => {
+  it('strips non-digits and prevents decimal entry on byte limit inputs', async () => {
     await openPlatform();
 
     const maxBlob = limitInput('blobMaxBytes');
@@ -342,21 +272,9 @@ describe('limits form', () => {
     maxBlob.value = '12.5 MB';
     maxBlob.dispatchEvent(new Event('input'));
     expect(maxBlob.value).toBe('125');
-
-    // Per-game quota input allows leading minus but strips decimals
-    const quotaBytes = el('blob-quota-bytes');
-    expect(quotaBytes).toBeTruthy();
-
-    const quotaDotEvent = new KeyboardEvent('keydown', { key: '.', cancelable: true });
-    quotaBytes.dispatchEvent(quotaDotEvent);
-    expect(quotaDotEvent.defaultPrevented).toBe(true);
-
-    quotaBytes.value = '-12.8';
-    quotaBytes.dispatchEvent(new Event('input'));
-    expect(quotaBytes.value).toBe('-128');
   });
 
-  it('renders byte setting labels and table headers without (bytes)', async () => {
+  it('renders byte setting labels without (bytes)', async () => {
     await openPlatform();
 
     const labels = [...document.querySelectorAll('#limits-fields .limit-label')].map((l) => l.textContent);
@@ -368,9 +286,6 @@ describe('limits form', () => {
         expect(label).not.toContain('(bytes)');
       }
     }
-
-    const quotaHeader = document.querySelector('#blob-quota-table th:nth-child(2)');
-    expect(quotaHeader?.textContent).toBe('Quota per session');
   });
 
   it('reports the startup-only limits read-only rather than hiding them', async () => {

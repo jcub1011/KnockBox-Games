@@ -98,6 +98,7 @@ function routes(overrides = {}) {
     '* /admin/api/packages/word-rush/uninstall': { status: 202, body: { success: true, jobId: 'j3', detail: 'Uninstalling.' } },
     '* /admin/api/packages/word-rush/update-policy': { body: { success: true, detail: 'Set.' } },
     '* /admin/api/packages/jobs/j9/cancel': { body: { success: true, detail: 'Cancelling.' } },
+    '* /admin/api/blob-quota': { body: { success: true, detail: 'Blob quota updated.' } },
     ...overrides,
   };
 }
@@ -1177,4 +1178,162 @@ describe('plugin stability & dropdown state preservation', () => {
     expect(updatedCard.querySelector('.mkt-action').textContent).toBe('Downgrade');
   });
 });
+
+describe('plugin details modal blob quota override setting', () => {
+  it('renders the "Blob Quota Override" setting with custom data input box for installed games', async () => {
+    await openMarketplace();
+
+    const wordRush = card('word-rush');
+    const dotsBtn = wordRush.querySelector('.plugin-details-btn');
+    dotsBtn.click();
+
+    expect(el('plugin-blob-quota-bytes')).not.toBeNull();
+    expect(el('plugin-blob-quota-scale')).not.toBeNull();
+    expect(el('plugin-blob-quota-set')).not.toBeNull();
+    expect(el('plugin-blob-quota-hint')).not.toBeNull();
+
+    // Check setting label
+    const label = document.querySelector('label[for="plugin-blob-quota-bytes"]');
+    expect(label?.textContent).toBe('Blob Quota Override');
+
+    // Default state: disabled (empty input, BYTE scale)
+    expect(el('plugin-blob-quota-bytes').value).toBe('');
+    expect(el('plugin-blob-quota-scale').value).toBe('BYTE');
+    expect(el('plugin-blob-quota-hint').textContent).toContain('Disabled');
+
+    el('plugin-details-close').click();
+  });
+
+  it('does not render "Blob Quota Override" for uninstalled games', async () => {
+    await openMarketplace();
+
+    const alphaChain = card('alpha-chain');
+    const dotsBtn = alphaChain.querySelector('.plugin-details-btn');
+    dotsBtn.click();
+
+    expect(el('plugin-blob-quota-bytes')).toBeNull();
+    expect(el('plugin-blob-quota-scale')).toBeNull();
+    expect(el('plugin-blob-quota-set')).toBeNull();
+
+    el('plugin-details-close').click();
+  });
+
+  it('sets a blob quota override with unit scaling when clicking Set', async () => {
+    fake = await openMarketplace();
+
+    const wordRush = card('word-rush');
+    wordRush.querySelector('.plugin-details-btn').click();
+
+    el('plugin-blob-quota-bytes').value = '2';
+    el('plugin-blob-quota-scale').value = 'GiB';
+    el('plugin-blob-quota-set').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(post).toBeDefined();
+    expect(post.body).toEqual({ gameId: 'word-rush', bytes: 2_147_483_648 });
+    expect(el('plugin-blob-quota-hint').textContent).toContain('Overridden');
+
+    el('plugin-details-close').click();
+  });
+
+  it('disables the override when the input box is empty', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/games': {
+        body: {
+          ...GAMES,
+          games: GAMES.games.map((g) => g.id === 'word-rush' ? { ...g, blobQuota: 1048576 } : g),
+        },
+      },
+    });
+
+    const wordRush = card('word-rush');
+    wordRush.querySelector('.plugin-details-btn').click();
+
+    // Already overridden: 1 MiB
+    expect(el('plugin-blob-quota-bytes').value).toBe('1');
+    expect(el('plugin-blob-quota-scale').value).toBe('MiB');
+    expect(el('plugin-blob-quota-hint').textContent).toContain('Overridden');
+
+    // Clear input to disable override
+    el('plugin-blob-quota-bytes').value = '';
+    el('plugin-blob-quota-set').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(post).toBeDefined();
+    expect(post.body).toEqual({ gameId: 'word-rush', bytes: null });
+    expect(el('plugin-blob-quota-hint').textContent).toContain('Disabled');
+
+    el('plugin-details-close').click();
+  });
+
+  it('refuses 0 and non-integer inputs', async () => {
+    fake = await openMarketplace();
+
+    const wordRush = card('word-rush');
+    wordRush.querySelector('.plugin-details-btn').click();
+
+    el('plugin-blob-quota-bytes').value = '0';
+    el('plugin-blob-quota-set').click();
+    await tick();
+
+    expect(fake.calls.filter((c) => c.path === '/admin/api/blob-quota')).toHaveLength(0);
+
+    el('plugin-details-close').click();
+  });
+
+  it('supports negative quota values for no cap', async () => {
+    fake = await openMarketplace();
+
+    const wordRush = card('word-rush');
+    wordRush.querySelector('.plugin-details-btn').click();
+
+    el('plugin-blob-quota-bytes').value = '-1';
+    el('plugin-blob-quota-set').click();
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(post).toBeDefined();
+    expect(post.body).toEqual({ gameId: 'word-rush', bytes: -1 });
+    expect(el('plugin-blob-quota-hint').textContent).toContain('no per-session');
+
+    el('plugin-details-close').click();
+  });
+
+  it('supports saving quota with Enter key and sanitizes numeric input', async () => {
+    fake = await openMarketplace();
+
+    const wordRush = card('word-rush');
+    wordRush.querySelector('.plugin-details-btn').click();
+
+    const input = el('plugin-blob-quota-bytes');
+
+    // Input sanitization (strips letters)
+    input.value = '500 MB';
+    input.dispatchEvent(new Event('input'));
+    expect(input.value).toBe('500');
+
+    // Disallow decimal point keydown
+    const dotEvent = new KeyboardEvent('keydown', { key: '.', cancelable: true });
+    input.dispatchEvent(dotEvent);
+    expect(dotEvent.defaultPrevented).toBe(true);
+
+    // Save with Enter
+    el('plugin-blob-quota-scale').value = 'MB';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await tick();
+    await tick();
+
+    const post = fake.calls.find((c) => c.method === 'POST' && c.path === '/admin/api/blob-quota');
+    expect(post).toBeDefined();
+    expect(post.body).toEqual({ gameId: 'word-rush', bytes: 500_000_000 });
+
+    el('plugin-details-close').click();
+  });
+});
+
 

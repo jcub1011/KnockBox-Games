@@ -1770,6 +1770,168 @@ export function openPluginDetails(entry) {
     secStorage.appendChild(gridStorage);
     body.appendChild(secStorage);
 
+    // Section: Settings
+    if (entry.installed) {
+      const secSettings = document.createElement('div');
+      secSettings.className = 'details-section';
+      const hSettings = document.createElement('h4');
+      hSettings.className = 'details-section-title';
+      hSettings.textContent = 'Settings';
+      secSettings.appendChild(hSettings);
+
+      const row = document.createElement('div');
+      row.className = 'field-row';
+
+      const label = document.createElement('label');
+      label.className = 'limit-label';
+      label.textContent = 'Blob Quota Override';
+      label.htmlFor = 'plugin-blob-quota-bytes';
+
+      const group = document.createElement('div');
+      group.className = 'byte-input-group filter-narrow';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.className = 'text-input byte-input';
+      input.id = 'plugin-blob-quota-bytes';
+      input.placeholder = 'Quota (empty to disable)';
+      input.title = 'Per-game override of Blob quota per session. Leave empty to disable the override.';
+
+      const select = document.createElement('select');
+      select.className = 'text-input byte-scale-select';
+      select.id = 'plugin-blob-quota-scale';
+      select.title = 'Unit scaling';
+      for (const unit of BYTE_UNITS) {
+        const opt = document.createElement('option');
+        opt.value = unit;
+        opt.textContent = unit;
+        select.appendChild(opt);
+      }
+
+      group.append(input, select);
+
+      const setBtn = document.createElement('button');
+      setBtn.type = 'button';
+      setBtn.className = 'btn btn-secondary btn-small';
+      setBtn.id = 'plugin-blob-quota-set';
+      setBtn.textContent = 'Set';
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.id = 'plugin-blob-quota-hint';
+
+      let quota = (limitsData?.blobQuotas && Object.prototype.hasOwnProperty.call(limitsData.blobQuotas, entry.id))
+        ? limitsData.blobQuotas[entry.id]
+        : (entry.blobQuota ?? null);
+
+      const updateQuotaUI = () => {
+        const defaultBytes = limitsData?.effective?.blobLobbyQuotaBytes ?? limitsData?.defaults?.blobLobbyQuotaBytes;
+        const defaultDisplay = formatByteLimit(defaultBytes);
+
+        if (quota === null || quota === undefined) {
+          input.value = '';
+          select.value = 'BYTE';
+          hint.textContent = defaultDisplay !== '--'
+            ? `Disabled — uses server default (${defaultDisplay}). Leave empty to disable.`
+            : 'Disabled — uses server default. Leave empty to disable.';
+        } else if (quota < 0) {
+          input.value = String(quota);
+          select.value = 'BYTE';
+          hint.textContent = 'Overridden — no per-session blob quota cap for this game.';
+        } else {
+          const split = splitBytes(quota);
+          input.value = String(split.value);
+          select.value = split.unit;
+          hint.textContent = defaultDisplay !== '--'
+            ? `Overridden — server default is ${defaultDisplay}.`
+            : 'Overridden.';
+        }
+      };
+
+      updateQuotaUI();
+
+      if (!limitsData) {
+        getJson('/admin/api/limits').then((data) => {
+          if (!data) return;
+          limitsData = data;
+          if (document.activeElement !== input && document.activeElement !== select) {
+            if (limitsData.blobQuotas && Object.prototype.hasOwnProperty.call(limitsData.blobQuotas, entry.id)) {
+              quota = limitsData.blobQuotas[entry.id];
+            }
+            updateQuotaUI();
+          }
+        }).catch(() => {});
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'].includes(e.key)) return;
+        if (e.ctrlKey || e.metaKey) return;
+        if (e.key === '-' && input.selectionStart === 0 && !input.value.includes('-')) return;
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveQuota();
+          return;
+        }
+        if (!/^[0-9]$/.test(e.key)) {
+          e.preventDefault();
+        }
+      });
+
+      input.addEventListener('input', () => {
+        input.value = input.value.replace(/(?!^-)[^0-9]/g, '');
+      });
+
+      const saveQuota = async () => {
+        const text = input.value.trim();
+        let bytes = null;
+        if (text !== '') {
+          const rawNumber = Number(text);
+          if (!Number.isInteger(rawNumber)) {
+            toast('Quota must be a whole number.', 'error');
+            return;
+          }
+          if (rawNumber === 0) {
+            toast('Leave quota empty to disable the override, or use a negative value for no cap.', 'error');
+            return;
+          }
+          if (rawNumber < 0) {
+            bytes = -1;
+          } else {
+            const scale = select.value || 'BYTE';
+            const multiplier = BYTE_MULTIPLIERS[scale] || 1;
+            bytes = rawNumber * multiplier;
+          }
+        }
+
+        const res = await postJson('/admin/api/blob-quota', { gameId: entry.id, bytes });
+        if (!res) return;
+
+        quota = bytes;
+        entry.blobQuota = bytes;
+        if (limitsData?.blobQuotas) {
+          if (bytes === null) {
+            delete limitsData.blobQuotas[entry.id];
+          } else {
+            limitsData.blobQuotas[entry.id] = bytes;
+          }
+        }
+        if (gameData?.games) {
+          const g = gameData.games.find((x) => x.id === entry.id);
+          if (g) g.blobQuota = bytes;
+        }
+
+        updateQuotaUI();
+        refreshGames();
+      };
+
+      setBtn.addEventListener('click', saveQuota);
+
+      row.append(label, group, setBtn, hint);
+      secSettings.appendChild(row);
+      body.appendChild(secSettings);
+    }
+
     // Section 5: Retained Backups
     if (entry.backups && entry.backups.length > 0) {
       const secBackups = document.createElement('div');
@@ -2871,8 +3033,6 @@ function renderLimits(data) {
       + `${cap > 0 ? ` of ${formatBytes(cap)}` : ' (no server-wide cap)'}.`;
   }
 
-  renderBlobQuotas(data.blobQuotas || {});
-
   const startupBody = el('limits-startup-body');
   startupBody.innerHTML = '';
   for (const field of STARTUP_LIMITS) {
@@ -2880,71 +3040,6 @@ function renderLimits(data) {
     appendCells(row, [field.label, String(data[field.key] ?? '--')]);
     startupBody.appendChild(row);
   }
-}
-
-/**
- * Draws the per-game blob quota overrides. The table is hidden entirely when there are none, rather than
- * shown empty: the add row above it is the whole UI until an override exists, and an empty table under it
- * reads as "loading" or "broken".
- *
- * Games at the server-wide default are ABSENT from this map rather than listed at their default value, so
- * nothing here has to distinguish "no override" from "an override that happens to match".
- */
-function renderBlobQuotas(quotas) {
-  const table = el('blob-quota-table');
-  const body = el('blob-quota-body');
-  if (!table || !body) return;
-
-  const rows = Object.entries(quotas).sort(([a], [b]) => a.localeCompare(b));
-  table.hidden = rows.length === 0;
-  body.innerHTML = '';
-
-  for (const [gameId, bytes] of rows) {
-    const row = document.createElement('tr');
-    appendCells(row, [gameId, bytes < 0 ? 'No cap' : formatBytes(bytes)]);
-
-    const actions = document.createElement('td');
-    const clear = document.createElement('button');
-    clear.className = 'btn btn-secondary btn-small';
-    clear.textContent = 'Clear';
-    clear.dataset.blobQuotaClear = gameId;
-    // Omitting bytes is what clears an override -- the server refuses a literal 0, because in a quota
-    // field a typed zero reads as "I am clearing this" rather than "no limit".
-    clear.onclick = async () => {
-      if (await postJson('/admin/api/blob-quota', { gameId })) refreshPlatform();
-    };
-    actions.appendChild(clear);
-    row.appendChild(actions);
-
-    body.appendChild(row);
-  }
-}
-
-async function setBlobQuota() {
-  const gameId = el('blob-quota-game')?.value.trim() || '';
-  const text = el('blob-quota-bytes')?.value.trim() || '';
-  if (!gameId) { toast('Enter the game id to set a quota for.', 'error'); return; }
-
-  // Validated here as well as on the server for the reason validateLimits gives: a round trip to be told
-  // "that is not a number" is a worse form than one that says so before it posts.
-  let bytes = null;
-  if (text !== '') {
-    const rawNumber = Number(text);
-    if (!Number.isInteger(rawNumber)) { toast('Quota must be a whole number.', 'error'); return; }
-    if (rawNumber === 0) {
-      toast('Leave quota empty to clear the override, or use a negative value for no cap.', 'error');
-      return;
-    }
-    const scale = el('blob-quota-scale')?.value || 'BYTE';
-    const multiplier = BYTE_MULTIPLIERS[scale] || 1;
-    bytes = rawNumber < 0 ? rawNumber : rawNumber * multiplier;
-  }
-
-  if (!await postJson('/admin/api/blob-quota', { gameId, bytes })) return;
-  el('blob-quota-game').value = '';
-  el('blob-quota-bytes').value = '';
-  if (el('blob-quota-scale')) el('blob-quota-scale').value = 'BYTE';
-  refreshPlatform();
 }
 
 async function saveLimits() {
@@ -3494,21 +3589,6 @@ function wire() {
   el('limits-save')?.addEventListener('click', saveLimits);
   el('limits-reset')?.addEventListener('click', revertLimits);
   el('limits-refresh')?.addEventListener('click', refreshPlatform);
-  el('blob-quota-set')?.addEventListener('click', setBlobQuota);
-  const quotaBytesInput = el('blob-quota-bytes');
-  if (quotaBytesInput) {
-    quotaBytesInput.addEventListener('keydown', (e) => {
-      if (['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'].includes(e.key)) return;
-      if (e.ctrlKey || e.metaKey) return;
-      if (e.key === '-' && quotaBytesInput.selectionStart === 0 && !quotaBytesInput.value.includes('-')) return;
-      if (!/^[0-9]$/.test(e.key)) {
-        e.preventDefault();
-      }
-    });
-    quotaBytesInput.addEventListener('input', () => {
-      quotaBytesInput.value = quotaBytesInput.value.replace(/(?!^-)[^0-9]/g, '');
-    });
-  }
 
   el('hook-add')?.addEventListener('click', addWebhook);
 
