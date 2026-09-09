@@ -35,11 +35,23 @@ public class DockerPersistenceTests
         ("/app/games-managed", "the game packages the admin portal installed, including uploaded ones that exist nowhere else"),
     ];
 
-    /// <summary>Every directory the image creates for the server to write into.</summary>
+    /// <summary>
+    /// Every directory the image creates for the server to write into, and the source the theory below
+    /// enumerates.
+    /// </summary>
+    /// <remarks>
+    /// This list used to be unreferenced, with the theory repeating it as <c>InlineData</c> — two lists
+    /// that had to agree and nothing making them, in the one file whose whole job is catching exactly
+    /// that. Adding the blob root is what surfaced it: the sixth entry went in here and the theory kept
+    /// testing five.
+    /// </remarks>
     private static readonly string[] WritableContainerDirs =
     [
         "/app/data", "/app/games-managed", "/app/games-compressed", "/app/games-unpacked", "/app/logs",
+        "/app/blobs",
     ];
+
+    public static TheoryData<string> WritableDirs() => new(WritableContainerDirs);
 
     // ── The image ──────────────────────────────────────────────────────────────────────────────────
 
@@ -51,11 +63,7 @@ public class DockerPersistenceTests
     /// write it, and the admin portal accepted settings that were never saved.
     /// </summary>
     [Theory]
-    [InlineData("/app/data")]
-    [InlineData("/app/games-managed")]
-    [InlineData("/app/games-compressed")]
-    [InlineData("/app/games-unpacked")]
-    [InlineData("/app/logs")]
+    [MemberData(nameof(WritableDirs))]
     public void Every_writable_container_directory_is_created_and_chowned(string dir)
     {
         var dockerfile = ReadRepoFile(Path.Combine("KnockBox.Server", "Dockerfile"));
@@ -153,6 +161,40 @@ public class DockerPersistenceTests
         Assert.True(MountsTarget(compose, target),
             $"docker-compose.yml has no mount at '{target}', so it lives inside the container and is " +
             "destroyed on the next image update.");
+    }
+
+    /// <summary>
+    /// The blob root is writable but is deliberately NOT mounted and NOT treated as non-regenerable, and
+    /// this test is here so that stays a decision rather than an oversight.
+    /// </summary>
+    /// <remarks>
+    /// <para><c>BlobStore.SweepAtStartup</c> deletes every blob on every boot, because a blob's lifetime
+    /// is its lobby's and lobbies do not survive the process. So a named volume here would persist
+    /// exactly one thing: garbage, for the few milliseconds between the mount coming up and the sweep
+    /// emptying it. And <c>StatePersistence</c>'s ephemeral-mount warning skips it for the reason
+    /// <c>Program.cs</c> gives about the derived caches — a warning that fires on a root the server
+    /// empties on purpose teaches an operator to skim past the ones that matter.</para>
+    /// <para>What IS worth an operator's attention is size, not persistence: on a host with a
+    /// size-capped overlay filesystem, a large <c>BlobTotalQuotaBytes</c> writes gigabytes into the
+    /// container's writable layer. That is a sizing decision the aggregate quota exists to bound, and
+    /// <c>docs/HOSTING.md</c> says so — it is not something a mount this test could demand would fix.</para>
+    /// </remarks>
+    [Fact]
+    public void The_blob_root_is_writable_but_neither_persisted_nor_warned_about()
+    {
+        // Writable — the theory above now covers the mkdir and the chown, because it enumerates the
+        // same list this asserts membership of.
+        Assert.Contains("/app/blobs", WritableContainerDirs);
+        Assert.DoesNotContain("/app/blobs", NonRegenerable.Select(e => e.Path));
+
+        var program = ReadRepoFile(Path.Combine("KnockBox.Server", "Program.cs"));
+        if (program is null) return;
+
+        // persistentState is the ephemeral-mount warning list. A blobs entry there would fire on every
+        // container that has not mounted a volume it does not need.
+        var persistentState = program[program.IndexOf("persistentState =", StringComparison.Ordinal)..];
+        persistentState = persistentState[..persistentState.IndexOf("foreach", StringComparison.Ordinal)];
+        Assert.DoesNotContain("blobsRoot", persistentState);
     }
 
     /// <summary>

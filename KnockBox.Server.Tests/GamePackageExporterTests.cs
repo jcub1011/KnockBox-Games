@@ -23,6 +23,7 @@ public sealed class GamePackageExporterTests : IDisposable
         var compressed = Path.Combine(_temp, "games-compressed");
         var logs = Path.Combine(_temp, "logs");
         var web = Path.Combine(_temp, "web");
+        var blobs = Path.Combine(_temp, "blobs");
 
         Directory.CreateDirectory(games);
         Directory.CreateDirectory(managed);
@@ -30,8 +31,24 @@ public sealed class GamePackageExporterTests : IDisposable
         Directory.CreateDirectory(compressed);
         Directory.CreateDirectory(logs);
         Directory.CreateDirectory(web);
+        Directory.CreateDirectory(blobs);
 
-        _paths = new ContentPaths.Resolved(web, games, unpacked, compressed, logs, managed);
+        // Named, not positional. This call used to read
+        // `new(web, games, unpacked, compressed, logs, managed)` against a declaration ordered
+        // (Web, Games, Logs, GamesCompressed, GamesUnpacked, GamesManaged) -- so LogsRoot pointed at
+        // games-unpacked and GamesUnpackedRoot at logs, and it compiled for as long as it existed
+        // because all six parameters are `string`. Nothing in this file reads either root, which is
+        // why nothing failed.
+        _paths = new ContentPaths.Resolved(
+            WebRoot: web,
+            GamesRoot: games,
+            LogsRoot: logs,
+            GamesCompressedRoot: compressed,
+            GamesUnpackedRoot: unpacked,
+            GamesManagedRoot: managed)
+        {
+            BlobsRoot = blobs,
+        };
     }
 
     public void Dispose()

@@ -1,5 +1,6 @@
 using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Blobs;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
 using KnockBox.Server.Networking;
@@ -359,6 +360,91 @@ public class AdminSettingsStoreTests : IDisposable
         var reloaded = NewStore();
         Assert.Equal(40, reloaded.Limits.MaxLobbies);
         Assert.Equal(4, reloaded.AuthorityLimits.MaxLobbies);
+    }
+
+    [Fact]
+    public void Blob_overrides_are_a_third_object_and_survive_a_restart()
+    {
+        var store = NewStore();
+        store.SetLimits(new OperatorLimits(MaxLobbies: 40));
+        store.SetAuthorityLimits(new OperatorAuthorityOptions(MaxLobbies: 4));
+        store.SetBlobLimits(new OperatorBlobOptions(TotalQuotaBytes: 5_368_709_120));
+
+        // Three objects, not one, for the reason the pair above are two: "limits" means ServerLimits
+        // overrides to anyone hand-editing this file, and a blob quota is enforced on an upload rather
+        // than on a frame.
+        var json = File.ReadAllText(_settingsPath);
+        Assert.Contains("\"blobs\"", json);
+        Assert.Contains("\"totalQuotaBytes\": 5368709120", json);
+
+        // Save() builds AdminSettings POSITIONALLY on purpose, so that adding a member and forgetting to
+        // write it is a compile error rather than a field that silently never persists. This is the
+        // assertion that would have caught it if the positional call had been a named one.
+        var reloaded = NewStore();
+        Assert.Equal(40, reloaded.Limits.MaxLobbies);
+        Assert.Equal(4, reloaded.AuthorityLimits.MaxLobbies);
+        Assert.Equal(5_368_709_120, reloaded.BlobLimits.TotalQuotaBytes);
+    }
+
+    [Fact]
+    public void A_per_game_blob_quota_is_recorded_by_absence_and_survives_a_restart()
+    {
+        var store = NewStore();
+        Assert.Null(store.SetBlobQuota("dnd-mapper", 4_294_967_296));
+        Assert.Null(store.SetBlobQuota("sound-board", -1));
+
+        var reloaded = NewStore();
+        Assert.Equal(4_294_967_296, reloaded.BlobQuotas["dnd-mapper"]);
+        // Negative is kept: BlobOptions.LobbyQuotaFor reads it as "no per-lobby cap for this game", which
+        // is a policy an operator may genuinely want, so dropping it as junk would silently reinstate the
+        // cap they removed.
+        Assert.Equal(-1, reloaded.BlobQuotas["sound-board"]);
+        // Game ids are OrdinalIgnoreCase everywhere else in this server, so a lookup that missed on
+        // casing would present as an override the portal shows but the store never applies.
+        Assert.True(reloaded.BlobQuotas.ContainsKey("DND-Mapper"));
+
+        // Cleared by REMOVING the row, not by writing the server default into it — otherwise "no
+        // override" becomes two things, and raising the default later would not reach this game.
+        Assert.Null(store.SetBlobQuota("dnd-mapper", null));
+        Assert.False(store.BlobQuotas.ContainsKey("dnd-mapper"));
+        Assert.DoesNotContain("dnd-mapper", File.ReadAllText(_settingsPath));
+
+        // And the whole map goes when its last row does, rather than persisting as an empty object.
+        store.SetBlobQuota("sound-board", null);
+        Assert.Contains("\"blobQuotas\": null", File.ReadAllText(_settingsPath));
+    }
+
+    [Fact]
+    public void A_hand_edited_per_game_blob_quota_of_zero_is_dropped_rather_than_honoured()
+    {
+        // A quota field somebody typed 0 into reads as "I am clearing this", not as this server's usual
+        // "no limit" — and honouring it would be the one place a 0 quietly did the opposite of what an
+        // operator meant. The admin route refuses 0 outright; this is the hand-edited file's version of
+        // the same rule, and it drops the row instead of rejecting the whole file.
+        File.WriteAllText(_settingsPath, """
+            { "blobQuotas": { "dnd-mapper": 0, "sound-board": 100 } }
+            """);
+
+        var store = NewStore();
+        Assert.False(store.BlobQuotas.ContainsKey("dnd-mapper"));
+        Assert.Equal(100, store.BlobQuotas["sound-board"]);
+    }
+
+    [Fact]
+    public void OperatorBlobOptions_Validate_enforces_1_TiB_cap()
+    {
+        const long maxBytes = 1024L * 1024 * 1024 * 1024;
+        var valid = new OperatorBlobOptions(MaxBlobBytes: maxBytes, LobbyQuotaBytes: maxBytes, TotalQuotaBytes: maxBytes);
+        Assert.Null(valid.Validate());
+
+        var overflowMaxBlob = new OperatorBlobOptions(MaxBlobBytes: maxBytes + 1);
+        Assert.NotNull(overflowMaxBlob.Validate());
+
+        var overflowLobby = new OperatorBlobOptions(LobbyQuotaBytes: maxBytes + 1);
+        Assert.NotNull(overflowLobby.Validate());
+
+        var overflowTotal = new OperatorBlobOptions(TotalQuotaBytes: maxBytes + 1);
+        Assert.NotNull(overflowTotal.Validate());
     }
 
     [Fact]

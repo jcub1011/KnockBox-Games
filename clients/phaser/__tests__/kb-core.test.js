@@ -8,6 +8,8 @@ const {
   reconnectDelay,
   parseLaunchParams,
   defaultEndpoint,
+  blobBaseUrl,
+  sha256Hex,
   LOG_LEVELS,
   makeLogger,
   normalizeReady,
@@ -155,5 +157,48 @@ describe('normalizeReady', () => {
 
   it('defaults a missing players list to empty', () => {
     expect(normalizeReady({ playerId: 'me', isHost: false }).players).toEqual([]);
+  });
+});
+
+describe('blobBaseUrl', () => {
+  it('converts ws to http and wss to https', () => {
+    expect(blobBaseUrl('ws://example.com:8080/ws')).toBe('http://example.com:8080');
+    expect(blobBaseUrl('wss://example.com/ws')).toBe('https://example.com');
+  });
+
+  it('keeps http and https origins unchanged', () => {
+    expect(blobBaseUrl('http://localhost:5000/some/path')).toBe('http://localhost:5000');
+    expect(blobBaseUrl('https://games.local/')).toBe('https://games.local');
+  });
+
+  it('returns empty string for missing or invalid endpoint', () => {
+    expect(blobBaseUrl('')).toBe('');
+    expect(blobBaseUrl(null)).toBe('');
+    expect(blobBaseUrl(undefined)).toBe('');
+    expect(blobBaseUrl('not-a-url://bad')).toBe('');
+  });
+});
+
+describe('sha256Hex', () => {
+  it('hashes strings correctly', async () => {
+    expect(await sha256Hex('hello-world')).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+    expect(await sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  });
+
+  it('hashes ArrayBuffer and Uint8Array correctly', async () => {
+    const bytes = new TextEncoder().encode('hello-world');
+    expect(await sha256Hex(bytes)).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+    expect(await sha256Hex(bytes.buffer)).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+  });
+
+  it('hashes Blob instances correctly', async () => {
+    const blob = new Blob(['hello-world']);
+    expect(await sha256Hex(blob)).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+  });
+
+  it('rejects unsupported types with TypeError', async () => {
+    await expect(sha256Hex(123)).rejects.toThrow(TypeError);
+    await expect(sha256Hex(null)).rejects.toThrow(TypeError);
+    await expect(sha256Hex({})).rejects.toThrow(TypeError);
   });
 });

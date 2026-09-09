@@ -23,6 +23,11 @@ namespace KnockBox.Server.Admin;
 [JsonSerializable(typeof(IReadOnlyList<RegisteredMarketplace>))]
 [JsonSerializable(typeof(Networking.OperatorLimits))]
 [JsonSerializable(typeof(Games.OperatorAuthorityOptions))]
+[JsonSerializable(typeof(Games.Blobs.OperatorBlobOptions))]
+// The per-game blob quota map. A dictionary of a primitive still needs its own entry, for the same
+// reason the marketplace list does: source generation covers a registered type's members, not the
+// collection types reached through them.
+[JsonSerializable(typeof(IReadOnlyDictionary<string, long>))]
 [JsonSerializable(typeof(BannedRoomCodes))]
 [JsonSerializable(typeof(PlatformAnnouncement))]
 [JsonSerializable(typeof(WebhookEndpoint))]

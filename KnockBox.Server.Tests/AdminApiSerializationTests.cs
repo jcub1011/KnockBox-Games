@@ -6,22 +6,28 @@ using Xunit;
 namespace KnockBox.Server.Tests;
 
 /// <summary>
-/// Guards the one rule <c>AdminApiModels.cs</c> cannot enforce for itself: every admin request and
-/// response type must be registered in <see cref="KnockBoxProtocolContext"/>.
+/// Guards the one rule <c>AdminApiModels.cs</c> cannot enforce for itself: every request and response
+/// type the hosting layer declares must be registered in <see cref="KnockBoxProtocolContext"/>.
 /// </summary>
 /// <remarks>
-/// Reflection-based JSON is not Native-AOT-safe, so <c>AdminApi.WriteJson</c> only ever serializes
-/// through a source-generated <c>JsonTypeInfo</c>. Adding a record to <c>AdminApiModels.cs</c> and
-/// forgetting the matching <c>[JsonSerializable]</c> attribute compiles, passes every other test, and
-/// then fails in the <c>aot</c> CI job — or, worse, in a published binary. This test moves that failure
-/// to the moment the record is added.
+/// Reflection-based JSON is not Native-AOT-safe, so <c>AdminApi.WriteJson</c> and its
+/// <c>BlobApi</c> counterpart only ever serialize through a source-generated <c>JsonTypeInfo</c>.
+/// Adding a record to <c>AdminApiModels.cs</c> or <c>BlobApi.cs</c> and forgetting the matching
+/// <c>[JsonSerializable]</c> attribute compiles, passes every other test, and then fails in the
+/// <c>aot</c> CI job — or, worse, in a published binary. This test moves that failure to the moment the
+/// record is added.
+///
+/// The discovery deliberately does NOT require an <c>Admin</c> prefix. It once did, which meant the
+/// guard silently stopped covering the namespace the moment a non-admin wire type was added to it —
+/// and <c>BlobApi</c>'s two types were exactly that. Every <c>*Request</c>/<c>*Response</c> in this
+/// namespace is a wire type, so the suffix is the whole rule.
 ///
 /// Reflection is fine here: the test project is JIT, and the types being enumerated are the very ones
 /// whose reflection-free serialization is being asserted.
 /// </remarks>
 public class AdminApiSerializationTests
 {
-    /// <summary>Every <c>Admin*Request</c> / <c>Admin*Response</c> record the admin API declares.</summary>
+    /// <summary>Every <c>*Request</c> / <c>*Response</c> record the hosting layer declares.</summary>
     public static TheoryData<Type> AdminWireTypes()
     {
         var data = new TheoryData<Type>();
@@ -29,7 +35,6 @@ public class AdminApiSerializationTests
                      .GetTypes()
                      .Where(t => t is { IsClass: true, IsAbstract: false, IsPublic: true }
                                  && t.Namespace == typeof(AdminGamesResponse).Namespace
-                                 && t.Name.StartsWith("Admin", StringComparison.Ordinal)
                                  && (t.Name.EndsWith("Request", StringComparison.Ordinal)
                                      || t.Name.EndsWith("Response", StringComparison.Ordinal)))
                      .OrderBy(t => t.Name, StringComparer.Ordinal))
@@ -45,7 +50,7 @@ public class AdminApiSerializationTests
     {
         Assert.True(
             KnockBoxProtocolContext.Default.GetTypeInfo(type) is not null,
-            $"{type.Name} is an admin wire type but has no [JsonSerializable(typeof({type.Name}))] entry in " +
+            $"{type.Name} is a wire type but has no [JsonSerializable(typeof({type.Name}))] entry in " +
             "KnockBoxProtocolContext. Without one, serializing it falls back to reflection, which the " +
             "Native AOT publish rejects.");
     }
@@ -68,10 +73,11 @@ public class AdminApiSerializationTests
             DiskBytes: 10, DirectoryBytes: 4, CompressedBytes: 3, PackageBytes: 2, BackupBytes: 1,
             ActiveLobbies: 0, ActivePlayers: 0, Deletable: true, DeleteBlockedReason: null,
             Lifecycle: "ready", UpdatePolicy: "manual", PendingJobId: null,
-            Sdk: new Dictionary<string, string> { ["godot"] = "1.0.0" }, SdkStatus: "current");
+            Sdk: new Dictionary<string, string> { ["godot"] = "1.0.0" }, SdkStatus: "current",
+            BlobQuota: 4_294_967_296);
         var response = new AdminGamesResponse(
             [summary], "/games", "/games-unpacked", null, "2026-01-01T00:00:00.0000000Z", 0, 0,
-            "/games-managed", 0, ServerSdkVersion: "1.0.0");
+            "/games-managed", 0, "/blobs", 0, ServerSdkVersion: "1.0.0");
 
         var json = JsonSerializer.Serialize(response, KnockBoxProtocolContext.Default.AdminGamesResponse);
         var back = JsonSerializer.Deserialize(json, KnockBoxProtocolContext.Default.AdminGamesResponse);
@@ -79,6 +85,7 @@ public class AdminApiSerializationTests
         Assert.NotNull(back);
         Assert.Equal("managed", back.Games[0].PackageRoot);
         Assert.Equal(1, back.Games[0].BackupBytes);
+        Assert.Equal(4_294_967_296, back.Games[0].BlobQuota);
         // The SDK stamp is a dictionary, so it exercises a different source-generated converter than
         // the scalar fields above — worth round-tripping rather than assuming.
         Assert.Equal("1.0.0", back.Games[0].Sdk?["godot"]);
@@ -86,5 +93,6 @@ public class AdminApiSerializationTests
         Assert.Equal("/games-managed", back.ManagedRoot);
         // camelCase on the wire, per the context's naming policy.
         Assert.Contains("\"packageRoot\":", json, StringComparison.Ordinal);
+        Assert.Contains("\"blobQuota\":", json, StringComparison.Ordinal);
     }
 }

@@ -8,16 +8,16 @@
 // display names are untrusted input.
 
 import {
-  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
+  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, BYTE_MULTIPLIERS, BYTE_UNITS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
-  filterPlugins, filterSettings, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
+  filterPlugins, filterSettings, formatByteLimit, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
   noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
-  sparklinePath, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
@@ -1770,6 +1770,168 @@ export function openPluginDetails(entry) {
     secStorage.appendChild(gridStorage);
     body.appendChild(secStorage);
 
+    // Section: Settings
+    if (entry.installed) {
+      const secSettings = document.createElement('div');
+      secSettings.className = 'details-section';
+      const hSettings = document.createElement('h4');
+      hSettings.className = 'details-section-title';
+      hSettings.textContent = 'Settings';
+      secSettings.appendChild(hSettings);
+
+      const row = document.createElement('div');
+      row.className = 'field-row';
+
+      const label = document.createElement('label');
+      label.className = 'limit-label';
+      label.textContent = 'Blob Quota Override';
+      label.htmlFor = 'plugin-blob-quota-bytes';
+
+      const group = document.createElement('div');
+      group.className = 'byte-input-group filter-narrow';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.className = 'text-input byte-input';
+      input.id = 'plugin-blob-quota-bytes';
+      input.placeholder = 'Quota (empty to disable)';
+      input.title = 'Per-game override of Blob quota per session. Leave empty to disable the override.';
+
+      const select = document.createElement('select');
+      select.className = 'text-input byte-scale-select';
+      select.id = 'plugin-blob-quota-scale';
+      select.title = 'Unit scaling';
+      for (const unit of BYTE_UNITS) {
+        const opt = document.createElement('option');
+        opt.value = unit;
+        opt.textContent = unit;
+        select.appendChild(opt);
+      }
+
+      group.append(input, select);
+
+      const setBtn = document.createElement('button');
+      setBtn.type = 'button';
+      setBtn.className = 'btn btn-secondary btn-small';
+      setBtn.id = 'plugin-blob-quota-set';
+      setBtn.textContent = 'Set';
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.id = 'plugin-blob-quota-hint';
+
+      let quota = (limitsData?.blobQuotas && Object.prototype.hasOwnProperty.call(limitsData.blobQuotas, entry.id))
+        ? limitsData.blobQuotas[entry.id]
+        : (entry.blobQuota ?? null);
+
+      const updateQuotaUI = () => {
+        const defaultBytes = limitsData?.effective?.blobLobbyQuotaBytes ?? limitsData?.defaults?.blobLobbyQuotaBytes;
+        const defaultDisplay = formatByteLimit(defaultBytes);
+
+        if (quota === null || quota === undefined) {
+          input.value = '';
+          select.value = 'BYTE';
+          hint.textContent = defaultDisplay !== '--'
+            ? `Disabled — uses server default (${defaultDisplay}). Leave empty to disable.`
+            : 'Disabled — uses server default. Leave empty to disable.';
+        } else if (quota < 0) {
+          input.value = String(quota);
+          select.value = 'BYTE';
+          hint.textContent = 'Overridden — no per-session blob quota cap for this game.';
+        } else {
+          const split = splitBytes(quota);
+          input.value = String(split.value);
+          select.value = split.unit;
+          hint.textContent = defaultDisplay !== '--'
+            ? `Overridden — server default is ${defaultDisplay}.`
+            : 'Overridden.';
+        }
+      };
+
+      updateQuotaUI();
+
+      if (!limitsData) {
+        getJson('/admin/api/limits').then((data) => {
+          if (!data) return;
+          limitsData = data;
+          if (document.activeElement !== input && document.activeElement !== select) {
+            if (limitsData.blobQuotas && Object.prototype.hasOwnProperty.call(limitsData.blobQuotas, entry.id)) {
+              quota = limitsData.blobQuotas[entry.id];
+            }
+            updateQuotaUI();
+          }
+        }).catch(() => {});
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'].includes(e.key)) return;
+        if (e.ctrlKey || e.metaKey) return;
+        if (e.key === '-' && input.selectionStart === 0 && !input.value.includes('-')) return;
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveQuota();
+          return;
+        }
+        if (!/^[0-9]$/.test(e.key)) {
+          e.preventDefault();
+        }
+      });
+
+      input.addEventListener('input', () => {
+        input.value = input.value.replace(/(?!^-)[^0-9]/g, '');
+      });
+
+      const saveQuota = async () => {
+        const text = input.value.trim();
+        let bytes = null;
+        if (text !== '') {
+          const rawNumber = Number(text);
+          if (!Number.isInteger(rawNumber)) {
+            toast('Quota must be a whole number.', 'error');
+            return;
+          }
+          if (rawNumber === 0) {
+            toast('Leave quota empty to disable the override, or use a negative value for no cap.', 'error');
+            return;
+          }
+          if (rawNumber < 0) {
+            bytes = -1;
+          } else {
+            const scale = select.value || 'BYTE';
+            const multiplier = BYTE_MULTIPLIERS[scale] || 1;
+            bytes = rawNumber * multiplier;
+          }
+        }
+
+        const res = await postJson('/admin/api/blob-quota', { gameId: entry.id, bytes });
+        if (!res) return;
+
+        quota = bytes;
+        entry.blobQuota = bytes;
+        if (limitsData?.blobQuotas) {
+          if (bytes === null) {
+            delete limitsData.blobQuotas[entry.id];
+          } else {
+            limitsData.blobQuotas[entry.id] = bytes;
+          }
+        }
+        if (gameData?.games) {
+          const g = gameData.games.find((x) => x.id === entry.id);
+          if (g) g.blobQuota = bytes;
+        }
+
+        updateQuotaUI();
+        refreshGames();
+      };
+
+      setBtn.addEventListener('click', saveQuota);
+
+      row.append(label, group, setBtn, hint);
+      secSettings.appendChild(row);
+      body.appendChild(secSettings);
+    }
+
     // Section 5: Retained Backups
     if (entry.backups && entry.backups.length > 0) {
       const secBackups = document.createElement('div');
@@ -2752,8 +2914,11 @@ function renderLimits(data) {
   limitsData = data;
   const host = el('limits-fields');
   const focused = document.activeElement?.dataset?.limitKey || null;
+  const focusedScale = document.activeElement?.dataset?.limitScaleKey || null;
   const kept = new Map(
     [...host.querySelectorAll('input[data-limit-key]')].map((input) => [input.dataset.limitKey, input.value]));
+  const keptScales = new Map(
+    [...host.querySelectorAll('select[data-limit-scale-key]')].map((sel) => [sel.dataset.limitScaleKey, sel.value]));
   host.innerHTML = '';
 
   const overridden = new Set(data.overridden || []);
@@ -2766,28 +2931,89 @@ function renderLimits(data) {
     label.textContent = field.label;
     label.htmlFor = `limit-${field.key}`;
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.inputMode = 'decimal';
-    input.className = 'text-input filter-narrow';
-    input.id = `limit-${field.key}`;
-    input.dataset.limitKey = field.key;
-    input.placeholder = `Default: ${data.defaults?.[field.key] ?? '--'}`;
-    input.title = field.hint;
-    // Don't fight the operator's cursor — the same rule the maintenance message follows. On entry, or
-    // after a save, the server's value wins; a field being edited keeps what is in it.
-    input.value = focused === field.key
-      ? kept.get(field.key) ?? ''
-      : overridden.has(field.key) ? String(data.effective?.[field.key] ?? '') : '';
+    if (field.dataType === 'bytes') {
+      const group = document.createElement('div');
+      group.className = 'byte-input-group filter-narrow';
 
-    const hint = document.createElement('span');
-    hint.className = 'limit-hint';
-    hint.textContent = overridden.has(field.key)
-      ? `Overridden — the default is ${data.defaults?.[field.key] ?? '--'}`
-      : field.hint;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.className = 'text-input byte-input';
+      input.id = `limit-${field.key}`;
+      input.dataset.limitKey = field.key;
+      const defaultDisplay = formatByteLimit(data.defaults?.[field.key]);
+      input.placeholder = `Default: ${defaultDisplay}`;
+      input.title = field.hint;
 
-    row.append(label, input, hint);
-    host.appendChild(row);
+      const select = document.createElement('select');
+      select.className = 'text-input byte-scale-select';
+      select.id = `limit-${field.key}-scale`;
+      select.dataset.limitScaleKey = field.key;
+      select.title = 'Unit scaling';
+      for (const unit of BYTE_UNITS) {
+        const opt = document.createElement('option');
+        opt.value = unit;
+        opt.textContent = unit;
+        select.appendChild(opt);
+      }
+
+      if (focused === field.key || focusedScale === field.key) {
+        input.value = kept.get(field.key) ?? '';
+        select.value = keptScales.get(field.key) ?? 'BYTE';
+      } else if (overridden.has(field.key)) {
+        const split = splitBytes(data.effective?.[field.key]);
+        input.value = split.value === '' ? '' : String(split.value);
+        select.value = split.unit;
+      } else {
+        input.value = '';
+        select.value = 'BYTE';
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'].includes(e.key)) return;
+        if (e.ctrlKey || e.metaKey) return;
+        if (!/^[0-9]$/.test(e.key)) {
+          e.preventDefault();
+        }
+      });
+      input.addEventListener('input', () => {
+        input.value = input.value.replace(/[^0-9]/g, '');
+      });
+
+      group.append(input, select);
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.textContent = overridden.has(field.key)
+        ? `Overridden — the default is ${defaultDisplay}`
+        : field.hint;
+
+      row.append(label, group, hint);
+      host.appendChild(row);
+    } else {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = field.integer ? 'numeric' : 'decimal';
+      input.className = 'text-input filter-narrow';
+      input.id = `limit-${field.key}`;
+      input.dataset.limitKey = field.key;
+      input.placeholder = `Default: ${data.defaults?.[field.key] ?? '--'}`;
+      input.title = field.hint;
+      // Don't fight the operator's cursor — the same rule the maintenance message follows. On entry, or
+      // after a save, the server's value wins; a field being edited keeps what is in it.
+      input.value = focused === field.key
+        ? kept.get(field.key) ?? ''
+        : overridden.has(field.key) ? String(data.effective?.[field.key] ?? '') : '';
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.textContent = overridden.has(field.key)
+        ? `Overridden — the default is ${data.defaults?.[field.key] ?? '--'}`
+        : field.hint;
+
+      row.append(label, input, hint);
+      host.appendChild(row);
+    }
   }
 
   const anyOverridden = (data.overridden || []).length > 0;
@@ -2798,6 +3024,14 @@ function renderLimits(data) {
     ? `${data.overridden.length} of ${LIMIT_FIELDS.length} limits are overridden. `
       + `${formatCount(data.activeLobbies)} lobbies and ${formatCount(data.connectedPlayers)} players right now.`
     : 'Every limit is at its default.';
+  // Bytes actually held, against the aggregate cap. The only question anyone asks about a server-wide
+  // quota is whether it is close to biting, and an upload refused with 507 reaches an operator as "a
+  // player says their map will not load" -- which is not a clue.
+  if (data.blobsEnabled) {
+    const cap = data.effective?.blobTotalQuotaBytes;
+    el('limits-note').textContent += ` Blobs: ${formatBytes(data.blobBytesUsed || 0)} held`
+      + `${cap > 0 ? ` of ${formatBytes(cap)}` : ' (no server-wide cap)'}.`;
+  }
 
   const startupBody = el('limits-startup-body');
   startupBody.innerHTML = '';
@@ -2810,10 +3044,14 @@ function renderLimits(data) {
 
 async function saveLimits() {
   const raw = {};
+  const scales = {};
   for (const input of document.querySelectorAll('#limits-fields input[data-limit-key]')) {
     raw[input.dataset.limitKey] = input.value;
   }
-  const checked = validateLimits(raw);
+  for (const select of document.querySelectorAll('#limits-fields select[data-limit-scale-key]')) {
+    scales[select.dataset.limitScaleKey] = select.value;
+  }
+  const checked = validateLimits(raw, LIMIT_FIELDS, scales);
   if (!checked.ok) { toast(checked.error, 'error'); return; }
 
   // Tightening a limit is not destructive, but it is felt immediately by everyone connected, so the two

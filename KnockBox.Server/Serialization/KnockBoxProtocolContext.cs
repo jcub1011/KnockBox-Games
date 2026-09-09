@@ -60,10 +60,17 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminSourceRequest))]
 [JsonSerializable(typeof(AdminSourceEnabledRequest))]
 [JsonSerializable(typeof(AdminLimitsRequest))]
+[JsonSerializable(typeof(AdminBlobQuotaRequest))]
 [JsonSerializable(typeof(AdminRoomCodesRequest))]
 [JsonSerializable(typeof(AdminAnnouncementRequest))]
 [JsonSerializable(typeof(AdminWebhookRequest))]
 [JsonSerializable(typeof(AdminUpdateScheduleRequest))]
+// The blob-share side channel (Hosting/BlobApi). Covered by AdminApiSerializationTests, whose
+// discovery matches every *Request/*Response in the Hosting namespace rather than only the Admin*
+// ones. Without an entry here the Native AOT publish falls back to reflection and the aot job fails —
+// at publish time, not at runtime, which is why the test exists at all.
+[JsonSerializable(typeof(BlobResponse))]
+[JsonSerializable(typeof(BlobRegisterRequest))]
 // The roster projection handed to an authority module's init(players) (ServerAuthorityManager).
 [JsonSerializable(typeof(IReadOnlyList<Player>))]
 // Not a wire type, but it goes through the same source-generated serializer for the same reason:

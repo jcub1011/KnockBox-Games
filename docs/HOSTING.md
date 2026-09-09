@@ -85,6 +85,10 @@ services:
 > | `/app/games-compressed` | Yes — losing it only costs a re-compression |
 > | `/app/games-unpacked` | Yes — re-extracted from the packages |
 >
+> `/app/blobs` is the deliberate exception and is not in that list: the server empties it on every
+> startup, so a mount there can only preserve content the next boot deletes. It does still need *room* —
+> see the sizing note under [What to back up](#what-to-back-up).
+>
 > This matters more here than under plain Compose: **TrueNAS Custom Apps, Kubernetes, Portainer and
 > ECS all recreate the container on every image update**, so a writable path that is not an explicit
 > mount is discarded each time you update — and the server keeps running perfectly against the empty
@@ -497,6 +501,25 @@ release's `appsettings.json` defaults, diff them in rather than replacing the fi
 
 `/app/games-compressed` and `/app/games-unpacked` need no backup — they are rebuilt from the games
 and packages above. Losing them costs a slow first boot, nothing more.
+
+`/app/blobs` needs no backup either, and for a stronger reason: the server **deletes everything in it on
+every startup**. A blob is the media a game uploaded for one session to share, its lifetime is that
+session's, and lobbies are in-memory and die with the process — so after a restart every blob on disk is
+orphaned by definition and a client re-uploads whatever its session still needs.
+
+> **What blobs do need is room, and by default that room is the container's own writable layer.**
+> `KnockBox:BlobTotalQuotaBytes` defaults to 20 GiB, which is a lot to write into an overlay filesystem —
+> and on a host that size-caps that layer (`--storage-opt size=…`, and some managed platforms by default)
+> the container hits its own ceiling before the quota does, with no warning that says so. Either lower
+> `KnockBox:BlobTotalQuotaBytes` to fit, or move the root: set `KnockBox__BlobsRoot=/app/blobs-ext` and
+> add your own `- /srv/knockbox/blobs:/app/blobs-ext` to the service's `volumes:` (there is no shipped
+> mount or `.env` variable for it, deliberately). Whatever you point it at, treat it as scratch: the only
+> thing a backed-up volume there can preserve is content the next startup deletes.
+>
+> The blob root must also **not overlap** `games/`, `games-unpacked` or `games-managed`. The server
+> refuses an overlapping configuration outright, and that refusal is doing real work here rather than
+> tidying: the startup sweep removes the whole root, so pointing it at your games directory would delete
+> your library on the next boot.
 
 ```bash
 # The two that matter, with the stack stopped.

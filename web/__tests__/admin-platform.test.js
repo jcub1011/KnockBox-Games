@@ -13,6 +13,7 @@ import { LIMIT_FIELDS } from '../admin/admin-core.js';
 
 const el = (id) => document.getElementById(id);
 const limitInput = (key) => document.querySelector(`#limits-fields input[data-limit-key="${key}"]`);
+const limitScaleSelect = (key) => document.querySelector(`#limits-fields select[data-limit-scale-key="${key}"]`);
 
 let admin;
 let fake;
@@ -29,6 +30,10 @@ const DEFAULTS = {
   maxLobbies: 0, maxLobbiesPerGame: 0,
   // The server-authority pair, which the same flat response carries from a second provider.
   authorityMaxLobbies: 0, authorityModuleCacheIdleMinutes: 30,
+  // And the blob caps, from a third. Bytes, so the numbers are large; the form treats them as any other
+  // integer field.
+  blobMaxBytes: 104857600, blobLobbyQuotaBytes: 1073741824, blobTotalQuotaBytes: 21474836480,
+  blobGraceMinutes: 5, blobMaxUploadsPerLobby: 4,
 };
 
 function limits(overrides = {}, effective = {}) {
@@ -40,6 +45,7 @@ function limits(overrides = {}, effective = {}) {
     adminLoginAttemptsPerMinute: 10, adminLoginAttemptsPerMinuteGlobal: 60,
     activeLobbies: 3, connectedPlayers: 7,
     authorityModulesCached: 0, authorityModulesEvicted: 0,
+    blobsEnabled: true, blobSweepSeconds: 300, blobBytesUsed: 0, blobQuotas: {},
   };
 }
 
@@ -92,6 +98,7 @@ function routes(overrides = {}) {
     '* /admin/api/webhooks/ops/test': { body: { success: true, detail: 'Delivered (204).' } },
     '* /admin/api/announcement': { body: { success: true, affected: 3, detail: 'Posted to 3 connected player(s).' } },
     '* /admin/api/announcement/delete': { body: { success: true, detail: 'Cleared for 3 connected player(s).' } },
+    '* /admin/api/blob-quota': { body: { success: true, detail: 'Set.' } },
     ...overrides,
   };
 }
@@ -130,6 +137,9 @@ describe('limits form', () => {
     // Empty box + default placeholder is the whole UI for "not overridden".
     expect(limitInput('maxLobbies').value).toBe('');
     expect(limitInput('controlMessagesPerSecond').placeholder).toBe('Default: 5');
+    expect(limitInput('blobMaxBytes').placeholder).toBe('Default: 100 MiB');
+    expect(limitInput('blobLobbyQuotaBytes').placeholder).toBe('Default: 1 GiB');
+    expect(limitInput('blobTotalQuotaBytes').placeholder).toBe('Default: 20 GiB');
     expect(el('limits-badge').hidden).toBe(true);
     expect(el('limits-reset').disabled).toBe(true);
   });
@@ -142,7 +152,140 @@ describe('limits form', () => {
     expect(limitInput('maxLobbies').value).toBe('40');
     expect(el('limits-badge').hidden).toBe(false);
     expect(el('limits-reset').disabled).toBe(false);
-    expect(el('limits-note').textContent).toContain('1 of 10');
+    expect(el('limits-note').textContent).toContain('1 of 15');
+  });
+
+  it('renders the blob caps from the third provider on the same flat body', async () => {
+    await openPlatform();
+
+    // Five more knobs from BlobOptionsProvider, riding the one flat response exactly as the authority
+    // pair does. If the wire ever nests any of them, these inputs stop existing.
+    for (const key of ['blobMaxBytes', 'blobLobbyQuotaBytes', 'blobTotalQuotaBytes',
+      'blobGraceMinutes', 'blobMaxUploadsPerLobby']) {
+      expect(limitInput(key), key).toBeTruthy();
+    }
+
+    limitInput('blobTotalQuotaBytes').value = '5000000000';
+    el('limits-save').click();
+    await tick();
+    await tick();
+
+    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/limits');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.blobTotalQuotaBytes).toBe(5_000_000_000);
+    // Untouched, so cleared rather than pinned to whatever was showing — same rule as every other field.
+    expect(posts[0].body.blobMaxBytes).toBeNull();
+  });
+
+  it('says how much blob storage is held against the aggregate cap', async () => {
+    // An upload refused for a full quota reaches an operator as "a player says their map will not load",
+    // which is not a clue. This line is the only place the server says how close the cap is to biting.
+    await openPlatform({
+      'GET /admin/api/limits': { body: limits({}, {}) },
+    });
+    expect(el('limits-note').textContent).toMatch(/Blobs: .* held of /);
+  });
+
+  it('does not render per-game blob quota elements on the platform settings card', async () => {
+    await openPlatform();
+    expect(el('blob-quota-table')).toBeNull();
+    expect(el('blob-quota-game')).toBeNull();
+    expect(el('blob-quota-bytes')).toBeNull();
+    expect(el('blob-quota-set')).toBeNull();
+  });
+
+  it('renders a scaling dropdown for byte limit fields and scales input values on save', async () => {
+    await openPlatform();
+
+    const expectedUnits = ['BYTE', 'KB', 'KiB', 'MB', 'MiB', 'GB', 'GiB', 'TB', 'TiB'];
+
+    for (const key of ['blobMaxBytes', 'blobLobbyQuotaBytes', 'blobTotalQuotaBytes']) {
+      const select = limitScaleSelect(key);
+      expect(select, key).toBeTruthy();
+      const options = [...select.options].map((o) => o.value);
+      expect(options).toEqual(expectedUnits);
+      expect(select.value).toBe('BYTE');
+    }
+
+    // Non-byte fields do not have scale dropdowns
+    expect(limitScaleSelect('maxLobbies')).toBeNull();
+    expect(limitScaleSelect('blobGraceMinutes')).toBeNull();
+
+    // Set 100 MiB on blobMaxBytes
+    limitInput('blobMaxBytes').value = '100';
+    limitScaleSelect('blobMaxBytes').value = 'MiB';
+
+    // Set 5 GB on blobTotalQuotaBytes
+    limitInput('blobTotalQuotaBytes').value = '5';
+    limitScaleSelect('blobTotalQuotaBytes').value = 'GB';
+
+    el('limits-save').click();
+    await tick();
+    await tick();
+
+    const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === '/admin/api/limits');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.blobMaxBytes).toBe(104_857_600);
+    expect(posts[0].body.blobTotalQuotaBytes).toBe(5_000_000_000);
+  });
+
+  it('decomposes overridden byte limits into integer and scale unit on load', async () => {
+    await openPlatform({
+      'GET /admin/api/limits': {
+        body: limits(
+          { blobMaxBytes: 104857600, blobTotalQuotaBytes: 21474836480 },
+          { blobMaxBytes: 104857600, blobTotalQuotaBytes: 21474836480 }
+        ),
+      },
+    });
+
+    expect(limitInput('blobMaxBytes').value).toBe('100');
+    expect(limitScaleSelect('blobMaxBytes').value).toBe('MiB');
+
+    expect(limitInput('blobTotalQuotaBytes').value).toBe('20');
+    expect(limitScaleSelect('blobTotalQuotaBytes').value).toBe('GiB');
+
+    const blobMaxRow = limitInput('blobMaxBytes').closest('.field-row');
+    expect(blobMaxRow.querySelector('.limit-hint').textContent).toContain('the default is 100 MiB');
+  });
+
+  it('strips non-digits and prevents decimal entry on byte limit inputs', async () => {
+    await openPlatform();
+
+    const maxBlob = limitInput('blobMaxBytes');
+    expect(maxBlob).toBeTruthy();
+
+    // Keydown test for decimal point
+    const dotEvent = new KeyboardEvent('keydown', { key: '.', cancelable: true });
+    maxBlob.dispatchEvent(dotEvent);
+    expect(dotEvent.defaultPrevented).toBe(true);
+
+    const minusEvent = new KeyboardEvent('keydown', { key: '-', cancelable: true });
+    maxBlob.dispatchEvent(minusEvent);
+    expect(minusEvent.defaultPrevented).toBe(true);
+
+    const digitEvent = new KeyboardEvent('keydown', { key: '5', cancelable: true });
+    maxBlob.dispatchEvent(digitEvent);
+    expect(digitEvent.defaultPrevented).toBe(false);
+
+    // Input sanitization test (e.g. pasted '12.5 MB')
+    maxBlob.value = '12.5 MB';
+    maxBlob.dispatchEvent(new Event('input'));
+    expect(maxBlob.value).toBe('125');
+  });
+
+  it('renders byte setting labels without (bytes)', async () => {
+    await openPlatform();
+
+    const labels = [...document.querySelectorAll('#limits-fields .limit-label')].map((l) => l.textContent);
+    expect(labels).toContain('Max blob size');
+    expect(labels).toContain('Blob quota per session');
+    expect(labels).toContain('Blob quota, server-wide');
+    for (const label of labels) {
+      if (label.toLowerCase().includes('blob') && label.toLowerCase().includes('quota')) {
+        expect(label).not.toContain('(bytes)');
+      }
+    }
   });
 
   it('reports the startup-only limits read-only rather than hiding them', async () => {

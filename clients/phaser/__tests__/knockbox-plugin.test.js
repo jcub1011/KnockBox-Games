@@ -305,3 +305,164 @@ describe('close handling & teardown', () => {
     expect(plugin.events).toBeNull();
   });
 });
+
+describe('blob sharing', () => {
+  it('rejects invalid arguments to registerBlob', async () => {
+    const { plugin } = await makePlugin();
+    await expect(plugin.registerBlob('', new Blob(['test']))).rejects.toThrow(TypeError);
+    await expect(plugin.registerBlob('   ', new Blob(['test']))).rejects.toThrow(TypeError);
+    await expect(plugin.registerBlob(123, new Blob(['test']))).rejects.toThrow(TypeError);
+    await expect(plugin.registerBlob('map', null)).rejects.toThrow(TypeError);
+    await expect(plugin.registerBlob('map', 'not a blob')).rejects.toThrow(TypeError);
+  });
+
+  it('rejects registerBlob if ticket is missing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { plugin } = await makePlugin({ skipStart: true, ticket: '' });
+    await expect(plugin.registerBlob('map', new Blob(['test']))).rejects.toThrow('missing ticket');
+  });
+
+  it('probes HEAD, uploads PUT on 404, registers POST, and tracks blobUrl', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://test-host:8080/ws' });
+    const blob = new Blob(['hello-world'], { type: 'text/plain' });
+
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      requests.push({ url, method: init.method, headers: init.headers, body: init.body });
+      if (init.method === 'HEAD') return { status: 404, ok: false, statusText: 'Not Found' };
+      if (init.method === 'PUT') return { status: 200, ok: true, statusText: 'OK' };
+      if (init.method === 'POST') return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/abc.txt' }) };
+      return { status: 500, ok: false };
+    }));
+
+    expect(plugin.blobUrl('map')).toBeNull();
+    const url = await plugin.registerBlob('map', blob);
+    expect(url).toBe('/blob/abc.txt');
+    expect(plugin.blobUrl('map')).toBe('/blob/abc.txt');
+
+    expect(requests).toHaveLength(3);
+    expect(requests[0].method).toBe('HEAD');
+    expect(requests[0].url).toContain('http://test-host:8080/blob/');
+    expect(requests[1].method).toBe('PUT');
+    expect(requests[1].url).toContain('http://test-host:8080/blob/');
+    expect(requests[2].method).toBe('POST');
+    expect(requests[2].url).toBe('http://test-host:8080/blob/register');
+  });
+
+  it('skips PUT upload when HEAD probe returns 200 OK', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://test-host:8080/ws' });
+    const blob = new Blob(['cached-content']);
+
+    const methods = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      methods.push(init.method);
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'POST') return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/cached.dat' }) };
+      return { status: 500, ok: false };
+    }));
+
+    const url = await plugin.registerBlob('map', blob);
+    expect(url).toBe('/blob/cached.dat');
+    expect(methods).toEqual(['HEAD', 'POST']);
+  });
+
+  it('unregisters a blob by logicalId and removes from blobUrl', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    const blob = new Blob(['temp']);
+
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'POST') return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/1.dat' }) };
+      if (init.method === 'DELETE') return { status: 200, ok: true };
+      return { status: 500, ok: false };
+    }));
+
+    await plugin.registerBlob('temp-map', blob);
+    expect(plugin.blobUrl('temp-map')).toBe('/blob/1.dat');
+
+    await plugin.unregisterBlob('temp-map');
+    expect(plugin.blobUrl('temp-map')).toBeNull();
+  });
+
+  it('throws when probe, upload, or register fails', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    const blob = new Blob(['fail-test']);
+
+    // Probe failure (e.g. 500)
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 500, ok: false, statusText: 'Server Error' })));
+    await expect(plugin.registerBlob('map', blob)).rejects.toThrow('Failed to probe blob: 500');
+
+    // Upload failure (e.g. 413)
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init.method === 'HEAD') return { status: 404, ok: false };
+      return { status: 413, ok: false, statusText: 'Payload Too Large' };
+    }));
+    await expect(plugin.registerBlob('map', blob)).rejects.toThrow('Failed to upload blob: 413');
+
+    // Register failure (surfacing server JSON error)
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'PUT') return { status: 200, ok: true };
+      return { status: 507, ok: false, statusText: 'Insufficient Storage', json: async () => ({ ok: false, error: 'LobbyQuotaExceeded' }) };
+    }));
+    await expect(plugin.registerBlob('map', blob)).rejects.toThrow('Failed to register blob: LobbyQuotaExceeded');
+  });
+
+  it('retries upload on 409 Conflict during register and succeeds', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    const blob = new Blob(['evicted-content']);
+
+    const methods = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      methods.push(init.method);
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      if (init.method === 'PUT') return { status: 200, ok: true };
+      if (init.method === 'POST') {
+        if (methods.filter(m => m === 'POST').length === 1) {
+          return { status: 409, ok: false, statusText: 'Conflict', json: async () => ({ ok: false, error: 'UnknownHash' }) };
+        }
+        return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/recovered.dat' }) };
+      }
+      return { status: 500, ok: false };
+    }));
+
+    const url = await plugin.registerBlob('map', blob);
+    expect(url).toBe('/blob/recovered.dat');
+    expect(methods).toEqual(['HEAD', 'POST', 'PUT', 'POST']);
+  });
+
+  it('throws when unregister fails with surfaced error', async () => {
+    const { plugin } = await makePlugin({ ticket: 'secret-ticket', endpoint: 'ws://srv/ws' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 403,
+      ok: false,
+      statusText: 'Forbidden',
+      json: async () => ({ ok: false, error: 'Forbidden' }),
+    })));
+
+    await expect(plugin.unregisterBlob('temp-map')).rejects.toThrow('Failed to unregister blob: Forbidden');
+  });
+
+  it('clears registered blob URLs on terminal socket close and destroy', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { plugin, ws } = await makePlugin();
+    const blob = new Blob(['data']);
+
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init.method === 'HEAD') return { status: 200, ok: true };
+      return { status: 200, ok: true, json: async () => ({ ok: true, url: '/blob/test.dat' }) };
+    }));
+
+    await plugin.registerBlob('item', blob);
+    expect(plugin.blobUrl('item')).toBe('/blob/test.dat');
+
+    ws._open();
+    ws._close(1008, 'terminal');
+    expect(plugin.blobUrl('item')).toBeNull();
+
+    await plugin.registerBlob('item2', blob);
+    expect(plugin.blobUrl('item2')).toBe('/blob/test.dat');
+    plugin.destroy();
+    expect(plugin.blobUrl('item2')).toBeNull();
+  });
+});
