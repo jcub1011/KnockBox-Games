@@ -108,4 +108,30 @@ public class GameManifestTests
         Assert.Equal(DateTimeOffset.Parse("2026-01-15T10:00:00Z"), manifest.CreatedAt);
         Assert.Equal(DateTimeOffset.Parse("2026-02-20T12:30:00Z"), manifest.UpdatedAt);
     }
+
+    [Fact]
+    public void Homepage_defaults_to_null_when_absent()
+    {
+        const string json = """
+        { "id": "ttt", "name": "Tic-Tac-Toe", "entry": "index.html", "maxPlayers": 2 }
+        """;
+
+        var manifest = JsonSerializer.Deserialize<GameManifest>(json, Options);
+
+        Assert.NotNull(manifest);
+        Assert.Null(manifest!.Homepage);
+    }
+
+    [Fact]
+    public void Homepage_parses_from_camelCase()
+    {
+        const string json = """
+        { "id": "alpha-chain", "name": "Alpha Chain", "entry": "index.html", "maxPlayers": 8,
+          "homepage": "https://github.com/jcub1011/Alpha-Chain-Phaser-" }
+        """;
+
+        var manifest = JsonSerializer.Deserialize<GameManifest>(json, Options);
+
+        Assert.Equal("https://github.com/jcub1011/Alpha-Chain-Phaser-", manifest!.Homepage);
+    }
 }

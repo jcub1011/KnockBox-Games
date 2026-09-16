@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -605,14 +605,31 @@ function setDocumentTitle(gameName) {
 
 // Game version subtitle under the in-game header title. The version is optional, unvalidated
 // author input (like tags), so it is written via textContent and formatted through the shared
-// kb-core helper. A missing/blank version renders as "v?.?.?" here — the header slot is always
+// kb-core helper. A missing/blank version renders as "v0.0.0" here — the header slot is always
 // present while in-game, unlike the home-page tile chip, which is omitted when unversioned.
-const GAME_VERSION_UNKNOWN = 'v?.?.?';
+//
+// The badge is a link to the game's own page when the manifest declares a safe `homepage`
+// (absolute https://, re-checked client-side — the wire is untrusted): new tab, opener
+// unlinked. Without one it stays plain text with a tooltip saying so.
+const GAME_VERSION_UNKNOWN = 'v0.0.0';
+const GAME_VERSION_NO_SOURCE_TITLE = 'Game does not provide a source link.';
 
 export function setGameVersion(manifest) {
   const badge = el('game-version');
   if (!badge) return; // header markup not present (some test fixtures)
   badge.textContent = formatGameVersion(manifest?.version) ?? GAME_VERSION_UNKNOWN;
+  const homepage = typeof manifest?.homepage === 'string' ? manifest.homepage.trim() : '';
+  if (homepage && isSafeHomepageUrl(homepage)) {
+    badge.href = homepage;
+    badge.target = '_blank';
+    badge.rel = 'noopener noreferrer';
+    badge.removeAttribute('title');
+  } else {
+    badge.removeAttribute('href');
+    badge.removeAttribute('target');
+    badge.removeAttribute('rel');
+    badge.title = GAME_VERSION_NO_SOURCE_TITLE;
+  }
   badge.hidden = false;
 }
 
@@ -620,6 +637,10 @@ export function clearGameVersion() {
   const badge = el('game-version');
   if (!badge) return;
   badge.textContent = '';
+  badge.removeAttribute('href');
+  badge.removeAttribute('target');
+  badge.removeAttribute('rel');
+  badge.removeAttribute('title');
   badge.hidden = true;
 }
 

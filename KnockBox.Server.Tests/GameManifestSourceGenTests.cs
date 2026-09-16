@@ -52,6 +52,7 @@ public class GameManifestSourceGenTests
         // a game that positively declared itself suitable for everyone, and most games declare neither.
         Assert.Null(manifest.License);
         Assert.Null(manifest.ContentRating);
+        Assert.Null(manifest.Homepage);
     }
 
     [Fact]
@@ -88,6 +89,19 @@ public class GameManifestSourceGenTests
 
         Assert.Equal("MIT", manifest.License);
         Assert.Equal("teen", manifest.ContentRating);
+    }
+
+    [Fact]
+    public void Homepage_parses_from_camelCase()
+    {
+        var manifest = Parse("""
+        {
+          "id": "alpha-chain", "name": "Alpha Chain", "entry": "index.html", "maxPlayers": 8,
+          "homepage": "https://github.com/jcub1011/Alpha-Chain-Phaser-"
+        }
+        """);
+
+        Assert.Equal("https://github.com/jcub1011/Alpha-Chain-Phaser-", manifest.Homepage);
     }
 
     [Fact]

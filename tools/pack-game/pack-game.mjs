@@ -199,6 +199,23 @@ export function validate(manifest, manifestPath, inDir) {
   if (manifest.version !== undefined && (typeof manifest.version !== "string" || manifest.version.trim() === "")) {
     throw new PackError("GAME.json: 'version' must be a non-empty string when present (e.g. \"1.0.0\").");
   }
+  // homepage (optional): the game's own page or repository, rendered as the in-game version
+  // badge's link and in the marketplace listing. The server keeps only absolute https:// URLs
+  // (and drops the rest with a warning), so fail fast here while the author is present to fix it.
+  if (manifest.homepage !== undefined) {
+    if (typeof manifest.homepage !== "string" || manifest.homepage.trim() === "") {
+      throw new PackError("GAME.json: 'homepage' must be a non-empty string when present (e.g. \"https://github.com/owner/repo\").");
+    }
+    let parsed;
+    try {
+      parsed = new URL(manifest.homepage.trim());
+    } catch {
+      parsed = null;
+    }
+    if (parsed?.protocol !== "https:") {
+      throw new PackError("GAME.json: 'homepage' must be an absolute https:// URL when present.");
+    }
+  }
 
   // The entry must resolve to a file inside the built dir — never escape it (path traversal).
   const inFull = resolve(inDir);

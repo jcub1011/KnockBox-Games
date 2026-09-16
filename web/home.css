@@ -1181,7 +1181,17 @@ body.in-game::after {
     overflow: hidden;
     text-overflow: ellipsis;
     pointer-events: none;
+    text-decoration: none;
 }
+
+/* Only a badge that actually links (a safe homepage declared) is interactive — the plain-text
+   fallback keeps the inert subtitle behaviour. */
+.game-header-version[href] {
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.game-header-version[href]:hover { text-decoration: underline; }
 
 /* shell.js toggles the subtitle via `hidden`; the rule above sets no display, but keep the
    guard explicit so a later display declaration can't strand an empty subtitle line. */

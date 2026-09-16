@@ -444,7 +444,7 @@ export function formatTagsTooltip(tags) {
 
 // Formats a GAME.json `version` for display ("1.2.3" → "v1.2.3"). The version is optional and
 // never validated server-side, so anything absent/blank/non-string yields null and the caller
-// decides: the home-page tile omits the chip, the in-game header falls back to "v?.?.?". A
+// decides: the home-page tile omits the chip, the in-game header falls back to "v0.0.0". A
 // single leading "v" is stripped first so an author-declared "v1.2.3" doesn't render "vv1.2.3".
 export function formatGameVersion(version) {
   if (typeof version !== 'string') return null;
@@ -453,6 +453,21 @@ export function formatGameVersion(version) {
   const stripped = trimmed.replace(/^v/i, '');
   if (!stripped) return null;
   return `v${stripped}`;
+}
+
+// Whether a GAME.json `homepage` is safe to render as a link. Author-supplied and untrusted:
+// only absolute https:// URLs pass, so a `javascript:`/data:/relative value stays inert text.
+// The server normalizes this too, but the shell re-checks — the wire is untrusted either way.
+export function isSafeHomepageUrl(url) {
+  if (typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 // Unified filtering and sorting pipeline for the games catalog.

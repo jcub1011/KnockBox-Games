@@ -44,6 +44,7 @@ import {
   formatPlayerCapacity,
   formatTagsTooltip,
   formatGameVersion,
+  isSafeHomepageUrl,
   normalizeTags,
   filterAndSortGames,
 } from '../kb-core.js';
@@ -838,6 +839,26 @@ describe('formatGameVersion', () => {
     expect(formatGameVersion('   ')).toBeNull();
     expect(formatGameVersion('v')).toBeNull();
     expect(formatGameVersion(123)).toBeNull();
+  });
+});
+
+describe('isSafeHomepageUrl', () => {
+  it('accepts absolute https URLs', () => {
+    expect(isSafeHomepageUrl('https://github.com/jcub1011/Alpha-Chain-Phaser-')).toBe(true);
+    expect(isSafeHomepageUrl('  https://example.com/game  ')).toBe(true);
+  });
+
+  it('rejects anything that is not an absolute https URL', () => {
+    expect(isSafeHomepageUrl('http://example.com/game')).toBe(false);
+    expect(isSafeHomepageUrl('javascript:alert(1)')).toBe(false);
+    expect(isSafeHomepageUrl('data:text/html,<b>x</b>')).toBe(false);
+    expect(isSafeHomepageUrl('/relative/path')).toBe(false);
+    expect(isSafeHomepageUrl('not a url')).toBe(false);
+    expect(isSafeHomepageUrl('')).toBe(false);
+    expect(isSafeHomepageUrl('   ')).toBe(false);
+    expect(isSafeHomepageUrl(null)).toBe(false);
+    expect(isSafeHomepageUrl(undefined)).toBe(false);
+    expect(isSafeHomepageUrl(123)).toBe(false);
   });
 });
 

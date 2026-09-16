@@ -781,12 +781,43 @@ describe('game version subtitle', () => {
     expect(el('game-version').textContent).toBe('');
   });
 
-  it('falls back to v?.?.? when the manifest declares no version', async () => {
+  it('links the version to the game source when the manifest declares a homepage', async () => {
+    await importShell();
+    const ws = await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
+      homepage: 'https://github.com/jcub1011/Alpha-Chain-Phaser-',
+    }]);
+
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.textContent).toBe('v1.2.3');
+    expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+    expect(badge.getAttribute('target')).toBe('_blank');
+    expect(badge.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(badge.getAttribute('title')).toBeNull();
+
+    shell.showLobbyView();
+    expect(badge.getAttribute('href')).toBeNull();
+    expect(badge.getAttribute('target')).toBeNull();
+  });
+
+  it('leaves the version as plain text with a tooltip when the game provides no source link', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3' }]);
+
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.textContent).toBe('v1.2.3');
+    expect(badge.getAttribute('href')).toBeNull();
+    expect(badge.title).toBe('Game does not provide a source link.');
+  });
+
+  it('falls back to v0.0.0 when the manifest declares no version', async () => {
     await importShell();
     const ws = await bootWithGames();
     await createLobbySuccess(ws);
     expect(el('game-version').hidden).toBe(false);
-    expect(el('game-version').textContent).toBe('v?.?.?');
+    expect(el('game-version').textContent).toBe('v0.0.0');
   });
 
   it('updates the subtitle on enterGame and renders hostile input as inert text', async () => {
@@ -800,6 +831,21 @@ describe('game version subtitle', () => {
     await tick();
     expect(el('game-version').textContent).toBe('v<b>9.9');
     expect(el('game-version').querySelector('b')).toBeNull();
+  });
+
+  it('never links a hostile homepage — an unsafe URL stays plain text with the tooltip', async () => {
+    await importShell();
+    const ws = await bootWithGames([
+      {
+        id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
+        homepage: 'javascript:alert(1)',
+      },
+    ]);
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.textContent).toBe('v1.2.3');
+    expect(badge.getAttribute('href')).toBeNull();
+    expect(badge.title).toBe('Game does not provide a source link.');
   });
 });
 
