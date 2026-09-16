@@ -442,6 +442,19 @@ export function formatTagsTooltip(tags) {
   return normalizeTags(tags).join(', ');
 }
 
+// Formats a GAME.json `version` for display ("1.2.3" → "v1.2.3"). The version is optional and
+// never validated server-side, so anything absent/blank/non-string yields null and the caller
+// decides: the home-page tile omits the chip, the in-game header falls back to "v?.?.?". A
+// single leading "v" is stripped first so an author-declared "v1.2.3" doesn't render "vv1.2.3".
+export function formatGameVersion(version) {
+  if (typeof version !== 'string') return null;
+  const trimmed = version.trim();
+  if (!trimmed) return null;
+  const stripped = trimmed.replace(/^v/i, '');
+  if (!stripped) return null;
+  return `v${stripped}`;
+}
+
 // Unified filtering and sorting pipeline for the games catalog.
 export function filterAndSortGames(gamesList, { search = '', playerCount = '', sort = 'newest' } = {}) {
   const base = Array.isArray(gamesList) ? gamesList : [];

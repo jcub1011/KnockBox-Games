@@ -136,7 +136,10 @@
   <section id="game-view">
     <div class="game-shell">
       <header class="game-header">
-        <a class="game-header-title" id="game-title" href="/"></a>
+        <div class="game-title-stack">
+          <a class="game-header-title" id="game-title" href="/"></a>
+          <span class="game-header-version" id="game-version" hidden></span>
+        </div>
         <div class="header-actions">
           <button type="button" class="room-code-btn" id="room-code-btn" title="Click to reveal · double-click to enlarge · right-click/long-press to copy · middle-click to join in a new tab">
             <span class="room-code-face room-code-label">Room Code</span>
@@ -200,6 +203,6 @@
 
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module">import { bootstrap } from '/shell.js?v=18'; bootstrap();</script>
+  <script type="module">import { bootstrap } from '/shell.js?v=19'; bootstrap();</script>
 </body>
 </html>

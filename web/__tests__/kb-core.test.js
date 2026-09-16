@@ -43,6 +43,7 @@ import {
   sortGames,
   formatPlayerCapacity,
   formatTagsTooltip,
+  formatGameVersion,
   normalizeTags,
   filterAndSortGames,
 } from '../kb-core.js';
@@ -818,6 +819,26 @@ describe('formatTagsTooltip', () => {
     expect(formatTagsTooltip([])).toBe('');
     expect(formatTagsTooltip(null)).toBe('');
     expect(formatTagsTooltip(undefined)).toBe('');
+  });
+});
+
+describe('formatGameVersion', () => {
+  it('prefixes a bare version with v', () => {
+    expect(formatGameVersion('1.2.3')).toBe('v1.2.3');
+  });
+
+  it('does not double the v when the author declared one', () => {
+    expect(formatGameVersion('v1.2.3')).toBe('v1.2.3');
+    expect(formatGameVersion('  2.0.0-beta.1  ')).toBe('v2.0.0-beta.1');
+  });
+
+  it('returns null for anything absent, blank or non-string', () => {
+    expect(formatGameVersion(null)).toBeNull();
+    expect(formatGameVersion(undefined)).toBeNull();
+    expect(formatGameVersion('')).toBeNull();
+    expect(formatGameVersion('   ')).toBeNull();
+    expect(formatGameVersion('v')).toBeNull();
+    expect(formatGameVersion(123)).toBeNull();
   });
 });
 

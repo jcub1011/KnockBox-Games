@@ -774,6 +774,16 @@ body.in-game::after {
     white-space: nowrap;
 }
 
+/* The game version leads the tag chips but is display metadata, not a genre tag: same chip
+   language, subdued light-grey treatment so it doesn't compete with the tags behind it. */
+.game-chin-tag-version {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.10);
+    color: var(--ink-soft);
+}
+
 /* ── Play Log rail ───────────────────────────────────────────────────────── */
 .pl-panel {
     display: flex;
@@ -1142,9 +1152,40 @@ body.in-game::after {
     color: inherit;
     text-decoration: none;
     cursor: pointer;
+    line-height: 1.05;
 }
 
 .game-header-title:hover { text-decoration: underline; }
+
+/* Two-line title stack: the game name with its version as a small subtitle beneath it. The
+   stack (not the link) is the header's flex child, so it carries the flex growth and the
+   min-width: 0 the title's ellipsis needs. The subtitle uses the theme-aware muted foreground
+   (set per-game by themeHeader) so it stays subtle on light and dark tints alike. */
+.game-title-stack {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    flex: 1 1 auto;
+    line-height: 1.1;
+    gap: 4px;
+}
+
+.game-header-version {
+    font-size: 0.7rem;
+    font-weight: 500;
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+    color: var(--gh-fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+}
+
+/* shell.js toggles the subtitle via `hidden`; the rule above sets no display, but keep the
+   guard explicit so a later display declaration can't strand an empty subtitle line. */
+.game-header-version[hidden] { display: none; }
 
 .header-actions {
     display: flex;
