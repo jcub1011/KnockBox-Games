@@ -605,13 +605,15 @@ function setDocumentTitle(gameName) {
 
 // Game version subtitle under the in-game header title. The version is optional, unvalidated
 // author input (like tags), so it is written via textContent and formatted through the shared
-// kb-core helper. A missing/blank version renders as "v0.0.0" here — the header slot is always
-// present while in-game, unlike the home-page tile chip, which is omitted when unversioned.
+// kb-core helper. A missing/blank version renders as "Version Undeclared" here — the header slot
+// is always present while in-game, unlike the home-page tile chip, which is omitted when
+// unversioned (an undeclared version must never read as a real "v0.0.0").
 //
 // The badge is a link to the game's own page when the manifest declares a safe `homepage`
 // (absolute https://, re-checked client-side — the wire is untrusted): new tab, opener
-// unlinked. Without one it stays plain text with a tooltip saying so.
-const GAME_VERSION_UNKNOWN = 'v0.0.0';
+// unlinked, with the URL as the tooltip so the destination stays inspectable. Without one it
+// stays plain text with a tooltip saying so.
+const GAME_VERSION_UNKNOWN = 'Version Undeclared';
 const GAME_VERSION_NO_SOURCE_TITLE = 'Game does not provide a source link.';
 
 export function setGameVersion(manifest) {
@@ -623,7 +625,7 @@ export function setGameVersion(manifest) {
     badge.href = homepage;
     badge.target = '_blank';
     badge.rel = 'noopener noreferrer';
-    badge.removeAttribute('title');
+    badge.title = homepage;
   } else {
     badge.removeAttribute('href');
     badge.removeAttribute('target');

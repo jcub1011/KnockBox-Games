@@ -444,8 +444,9 @@ export function formatTagsTooltip(tags) {
 
 // Formats a GAME.json `version` for display ("1.2.3" → "v1.2.3"). The version is optional and
 // never validated server-side, so anything absent/blank/non-string yields null and the caller
-// decides: the home-page tile omits the chip, the in-game header falls back to "v0.0.0". A
-// single leading "v" is stripped first so an author-declared "v1.2.3" doesn't render "vv1.2.3".
+// decides: the home-page tile omits the chip, the in-game header falls back to
+// "Version Undeclared". A single leading "v" is stripped first so an author-declared "v1.2.3"
+// doesn't render "vv1.2.3".
 export function formatGameVersion(version) {
   if (typeof version !== 'string') return null;
   const trimmed = version.trim();

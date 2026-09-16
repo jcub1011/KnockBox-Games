@@ -794,7 +794,7 @@ describe('game version subtitle', () => {
     expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
     expect(badge.getAttribute('target')).toBe('_blank');
     expect(badge.getAttribute('rel')).toBe('noopener noreferrer');
-    expect(badge.getAttribute('title')).toBeNull();
+    expect(badge.getAttribute('title')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
 
     shell.showLobbyView();
     expect(badge.getAttribute('href')).toBeNull();
@@ -812,12 +812,12 @@ describe('game version subtitle', () => {
     expect(badge.title).toBe('Game does not provide a source link.');
   });
 
-  it('falls back to v0.0.0 when the manifest declares no version', async () => {
+  it('falls back to Version Undeclared when the manifest declares no version', async () => {
     await importShell();
     const ws = await bootWithGames();
     await createLobbySuccess(ws);
     expect(el('game-version').hidden).toBe(false);
-    expect(el('game-version').textContent).toBe('v0.0.0');
+    expect(el('game-version').textContent).toBe('Version Undeclared');
   });
 
   it('updates the subtitle on enterGame and renders hostile input as inert text', async () => {

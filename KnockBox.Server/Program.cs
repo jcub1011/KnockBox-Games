@@ -1347,6 +1347,13 @@ app.MapWhen(
             // token — same scheme as the shell origin below, so the portal needs no manual version.
             adminApp.Use(async (ctx, next) =>
             {
+                // Carriers are GET/HEAD pages: let other methods fall through so e.g. POST /
+                // keeps prior routing semantics instead of answering 200 + HTML.
+                if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method))
+                {
+                    await next();
+                    return;
+                }
                 var page = VersionedCacheHeaders.IsCarrierPage(ctx.Request.Path.Value, new[] { "/terminal.html" }) ? "terminal.html"
                     : VersionedCacheHeaders.IsCarrierPage(ctx.Request.Path.Value, new[] { "/", "/index.html" }) ? "index.html"
                     : null;
@@ -1490,6 +1497,13 @@ app.UseMiddleware<DeploymentWarningMiddleware>(diagnostics);
 // UseDefaultFiles/UseStaticFiles so it wins over the static index.html.
 app.Use(async (ctx, next) =>
 {
+    // Carriers are GET/HEAD pages: let other methods fall through so e.g. POST /
+    // keeps prior routing semantics instead of answering 200 + HTML.
+    if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method))
+    {
+        await next();
+        return;
+    }
     if (VersionedCacheHeaders.IsCarrierPage(ctx.Request.Path.Value, new[] { "/", "/index.html" })
         && await ServeVersionedPage(ctx, shellContent, "index.html", "__KB_SHELL_HASH__"))
         return;
