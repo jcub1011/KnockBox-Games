@@ -35,7 +35,7 @@
 import { execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_QUALITY, KbgError, packKbg, readKbg } from "./kbg.mjs";
 
 const toolDir = dirname(fileURLToPath(import.meta.url));
@@ -126,8 +126,13 @@ export function scanAuthorityImports(source) {
 export async function checkAuthorityModule(authorityPath) {
   let mod;
   try {
-    // Cache-bust so repeated packs (and tests) see the current file, not Node's module cache.
-    mod = await import(`${pathToFileURL(authorityPath).href}?v=${Date.now()}`);
+    // Import the bytes just read, not the path: a data: URL never touches Node's module cache,
+    // so repeated packs (and tests) always evaluate the current file with no cache-busting query —
+    // and the file cannot change between validation and import. The sourceURL comment keeps stack
+    // traces naming the real file. Safe under the single-file rule (scanAuthorityImports), which
+    // leaves no relative import for the URL-less module to resolve.
+    const source = readFileSync(authorityPath, "utf8") + `\n//# sourceURL=${authorityPath}`;
+    mod = await import(`data:text/javascript;base64,${Buffer.from(source, "utf8").toString("base64")}`);
   } catch (err) {
     throw new PackError(`serverAuthority module failed to load: ${err.message}`);
   }

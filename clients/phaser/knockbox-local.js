@@ -54,6 +54,18 @@
     return 'p-' + Math.random().toString(36).slice(2, 8);
   }
 
+  // Base64 of a UTF-8 string with no platform dependency: Buffer under Node, btoa (fed a
+  // UTF-8-encoded binary string — btoa itself is Latin-1-only) in browsers.
+  function base64Utf8(text) {
+    if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+      return Buffer.from(text, 'utf8').toString('base64');
+    }
+    var utf8 = encodeURIComponent(text).replace(/%([0-9A-F]{2})/g, function (_, hex) {
+      return String.fromCharCode(parseInt(hex, 16));
+    });
+    return btoa(utf8);
+  }
+
   function makeEmitter() {
     if (Phaser && Phaser.Events && Phaser.Events.EventEmitter) return new Phaser.Events.EventEmitter();
     var listeners = {};
@@ -875,8 +887,13 @@
     });
   };
 
-  // URL form: fetch the source, run the single-file import scan (a relative import would happily
-  // resolve in the browser but fail on the server), then dynamic-import for real.
+  // URL form: fetch the source ONCE, run the single-file import scan (a relative import would
+  // happily resolve in the browser but fail on the server), then import the fetched bytes. The
+  // import runs off a data: URL rather than the original URL so the scan and the import can never
+  // disagree: re-importing the URL could answer from the module map with bytes older than the text
+  // just scanned. data: URLs import identically in browsers and Node and carry no base URL — safe
+  // under the single-file rule, which leaves no relative import to resolve. sourceURL keeps the
+  // real filename in stack traces.
   KnockBoxLocalPeer.prototype._loadAuthority = function (url) {
     return fetch(url)
       .then(function (res) {
@@ -885,7 +902,7 @@
       })
       .then(function (source) {
         scanAuthorityImports(source);
-        return import(/* @vite-ignore */ url);
+        return import(/* @vite-ignore */ 'data:text/javascript;base64,' + base64Utf8(source + '\n//# sourceURL=' + url));
       })
       .then(function (mod) {
         if (typeof mod.createAuthority !== 'function') {

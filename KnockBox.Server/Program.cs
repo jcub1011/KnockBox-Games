@@ -1145,9 +1145,43 @@ StaticFileOptions GamesCompressedStaticOptions() => new()
     },
 };
 
-// Shell files (index.html, shell.js, home.css, knockbox.js) change between deploys and are tiny, so
-// always revalidate — otherwise a browser can keep serving a heuristically-cached old shell after an
-// update (e.g. a fresh shell.js with new message handling), which looks like "the fix didn't deploy".
+// Platform files (shell, admin portal) are versioned by CONTENT HASH, not by a hand-bumped query
+// string: the carrier pages hold ?v= placeholders the middleware below substitutes with the
+// provider's current token, and a versioned URL carrying the current token is immutable (see
+// VersionedCacheHeaders). Transitive ES imports (kb-core.js, kb-protocol.js, admin-core.js) and
+// the game SDK are never versioned in a URL, so they always revalidate via ETag.
+var shellVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "/shell.js", "/home.css" };
+var adminVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "/admin.js", "/admin.css", "/terminal.js" };
+var noVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+var shellContent = new ContentHashProvider(webRoot, "shell.js", "kb-core.js", "kb-protocol.js", "home.css");
+var adminContent = new ContentHashProvider(adminWebRoot, "admin.js", "admin-core.js", "admin.css", "terminal.js");
+
+StaticFileOptions WebStaticOptions(HashSet<string> versionedPaths, Func<string> currentToken) => new()
+{
+    FileProvider = webFiles,
+    OnPrepareResponse = ctx =>
+        ctx.Context.Response.Headers.CacheControl = VersionedCacheHeaders.CacheControlFor(
+            ctx.Context.Request.Path.Value,
+            ctx.Context.Request.Query["v"].ToString(),
+            currentToken(),
+            versionedPaths),
+};
+
+// Serves a token-substituted carrier page (index.html and friends hold ?v= placeholders).
+// False when the page itself can't be read, so the caller falls through to static files.
+static async Task<bool> ServeVersionedPage(HttpContext ctx, ContentHashProvider provider, string page, string placeholder)
+{
+    var rendered = provider.TryRenderPage(page, placeholder);
+    if (rendered is null) return false;
+    ctx.Response.StatusCode = StatusCodes.Status200OK;
+    ctx.Response.ContentType = "text/html; charset=utf-8";
+    ctx.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+    ctx.Response.Headers.Pragma = "no-cache";
+    if (!HttpMethods.IsHead(ctx.Request.Method))
+        await ctx.Response.WriteAsync(rendered, ctx.RequestAborted);
+    return true;
+}
+
 // Blobs. A factory like its three neighbours, and the same StaticFileMiddleware reuse: ETag,
 // If-None-Match/304, Range/206, Content-Length and kernel sendfile, all with framework-guaranteed
 // constant memory. BlobApi's read handler has already rewritten the path to /blob/<shard>/<hash> and
@@ -1187,13 +1221,6 @@ StaticFileOptions BlobStaticOptions() => new()
         // the bytes really are untransformed.
         if (type == BlobContentTypes.Default) headers.ContentEncoding = "identity";
     },
-};
-
-StaticFileOptions WebStaticOptions() => new()
-{
-    FileProvider = webFiles,
-    OnPrepareResponse = ctx =>
-        ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate",
 };
 
 // The single real-time transport (both origins/ports). The connection's role is decided by its
@@ -1316,11 +1343,28 @@ app.MapWhen(
         }
         else
         {
+            // The portal's carrier pages hold ?v= placeholders for the admin bundle's content-hash
+            // token — same scheme as the shell origin below, so the portal needs no manual version.
+            adminApp.Use(async (ctx, next) =>
+            {
+                var page = VersionedCacheHeaders.IsCarrierPage(ctx.Request.Path.Value, new[] { "/terminal.html" }) ? "terminal.html"
+                    : VersionedCacheHeaders.IsCarrierPage(ctx.Request.Path.Value, new[] { "/", "/index.html" }) ? "index.html"
+                    : null;
+                if (page is not null
+                    && await ServeVersionedPage(ctx, adminContent, page, "__KB_ADMIN_HASH__"))
+                    return;
+                await next();
+            });
             adminApp.UseDefaultFiles(new DefaultFilesOptions { FileProvider = adminWebFiles });
             adminApp.UseStaticFiles(new StaticFileOptions
             {
                 FileProvider = adminWebFiles,
-                OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate"
+                OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl =
+                    VersionedCacheHeaders.CacheControlFor(
+                        ctx.Context.Request.Path.Value,
+                        ctx.Context.Request.Query["v"].ToString(),
+                        adminContent.Current,
+                        adminVersionedPaths)
             });
             adminApp.UseStaticFiles(new StaticFileOptions
             {
@@ -1416,7 +1460,7 @@ app.MapWhen(
             });
             gameApp.UseStaticFiles(GamesCompressedStaticOptions());
         }
-        gameApp.UseStaticFiles(WebStaticOptions());   // /knockbox.js + /kb-protocol.js
+        gameApp.UseStaticFiles(WebStaticOptions(noVersionedPaths, () => ""));   // /knockbox.js + /kb-protocol.js
         gameApp.UseStaticFiles(GamesStaticOptions());
     });
 
@@ -1440,8 +1484,20 @@ if (isolateShell)
 // broken index.html.
 app.UseMiddleware<DeploymentWarningMiddleware>(diagnostics);
 
+// The shell's carrier page holds ?v= placeholders for the shell bundle's content-hash token, so a
+// deploy needs no manual version bump: any byte change moves the token and stale caches miss.
+// Registered after the warning middleware (the diagnostic page is not a carrier) and before
+// UseDefaultFiles/UseStaticFiles so it wins over the static index.html.
+app.Use(async (ctx, next) =>
+{
+    if (VersionedCacheHeaders.IsCarrierPage(ctx.Request.Path.Value, new[] { "/", "/index.html" })
+        && await ServeVersionedPage(ctx, shellContent, "index.html", "__KB_SHELL_HASH__"))
+        return;
+    await next();
+});
+
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
-app.UseStaticFiles(WebStaticOptions());
+app.UseStaticFiles(WebStaticOptions(shellVersionedPaths, () => shellContent.Current));
 
 // Gate /games/* on the shell origin to each game's declared thumbnail only; everything else 404s,
 // so untrusted game HTML/JS/WASM is unreachable here (it serves from the game origin). The static

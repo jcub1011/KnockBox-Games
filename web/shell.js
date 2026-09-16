@@ -680,7 +680,6 @@ export async function enterGame(starting) {
       reply.ticket,
       gameWsEndpoint(gameOrigin),
       manifest?.version,
-      manifest?.updatedAt || manifest?.createdAt,
     );
   } catch {
     // gameOrigin is sanitized at the source (Welcome), so this is defensive: surface it like every

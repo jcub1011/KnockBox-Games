@@ -98,9 +98,13 @@ export function sanitizeGameOrigin(value) {
 }
 
 // Builds the iframe src for an embedded game, with credentials in the fragment (see parseLaunchParams).
-// Optional `version` and `updatedAt` append cache-busting query parameters so browser/proxy caches
-// pick up newly published releases and same-version overwrites immediately without a manual refresh.
-export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint, version, updatedAt) {
+// Optional `version` appends a release label (`?v=`) so an entry document held by a non-compliant
+// cache still misses after a release — and so the running build stays identifiable from the URL.
+// There is deliberately no timestamp parameter: the entry document is served `no-store`, so a
+// per-install timestamp only churns the URL (every reinstall re-extracts with new mtimes) and
+// guarantees cache misses on identical bytes without buying any freshness a compliant cache doesn't
+// already provide.
+export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint, version) {
   // The origin is server-supplied; reject anything that isn't a real http(s) origin so the iframe
   // src can never become a javascript:/data: navigation or point off to an arbitrary host.
   const safeOrigin = sanitizeGameOrigin(gameOrigin);
@@ -113,10 +117,6 @@ export function buildGameSrc(gameOrigin, gameId, entry, ticket, wsEndpoint, vers
   const queryParts = [];
   if (version && typeof version === 'string' && version.trim()) {
     queryParts.push(`v=${encodeURIComponent(version.trim())}`);
-  }
-  if (updatedAt) {
-    const epoch = typeof updatedAt === 'number' ? updatedAt : Date.parse(updatedAt);
-    if (Number.isFinite(epoch) && epoch > 0) queryParts.push(`t=${epoch}`);
   }
   const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
   const base = `${safeOrigin}/games/${safeGameId}/${safeEntry}${query}`;
