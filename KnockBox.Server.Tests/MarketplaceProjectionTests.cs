@@ -133,14 +133,15 @@ public class MarketplaceProjectionTests
     [Fact]
     public void A_managed_game_no_source_offers_reads_its_metadata_from_the_installed_manifest()
     {
-        // There is no catalog entry to read, so the manifest is the only source. Homepage and Bugs have
-        // no GameManifest equivalent — they exist only in a catalog entry — so an uploaded game
-        // genuinely has none to show, which is different from having lost them in the mapping.
+        // There is no catalog entry to read, so the manifest is the only source. Bugs has no
+        // GameManifest equivalent — it exists only in a catalog entry — so an uploaded game
+        // genuinely has none to show, which is different from having lost it in the mapping.
         var installed = new Dictionary<string, GameCatalog.GameLocation>(StringComparer.OrdinalIgnoreCase)
         {
             ["mine"] = new(
                 new GameManifest("mine", "Mine", "index.html", null, 6, MinPlayers: 3, Version: "1.0.0",
-                    License: "Apache-2.0", ContentRating: "teen"),
+                    License: "Apache-2.0", ContentRating: "teen",
+                    Homepage: "https://example.com/mine"),
                 "/games/mine"),
         };
 
@@ -150,9 +151,9 @@ public class MarketplaceProjectionTests
         Assert.Equal(MarketplaceProjection.InstalledOnly, row.Status);
         Assert.Equal("Apache-2.0", row.License);
         Assert.Equal("teen", row.ContentRating);
+        Assert.Equal("https://example.com/mine", row.Homepage);
         Assert.Equal(3, row.MinPlayers);
         Assert.Equal(6, row.MaxPlayers);
-        Assert.Null(row.Homepage);
         Assert.Null(row.Bugs);
     }
 

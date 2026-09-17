@@ -29,6 +29,11 @@ const hostGlobals = {
   URL: 'readonly',
   URLSearchParams: 'readonly',
   Image: 'readonly',
+  Blob: 'readonly',
+  File: 'readonly',
+  TextEncoder: 'readonly',
+  crypto: 'readonly',
+  btoa: 'readonly',
   setTimeout: 'readonly',
   clearTimeout: 'readonly',
   setInterval: 'readonly',
@@ -37,6 +42,7 @@ const hostGlobals = {
   // Node (tests + the UMD CommonJS branch)
   process: 'readonly',
   require: 'readonly',
+  Buffer: 'readonly',
   // Module systems the UMD wrapper feature-detects
   module: 'writable',
   exports: 'writable',

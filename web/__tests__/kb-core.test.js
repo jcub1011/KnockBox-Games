@@ -7,6 +7,8 @@ import {
   parseLaunchParams,
   parseJoinParam,
   defaultEndpoint,
+  blobBaseUrl,
+  sha256Hex,
   gameWsEndpoint,
   sanitizeGameOrigin,
   buildGameSrc,
@@ -41,6 +43,8 @@ import {
   sortGames,
   formatPlayerCapacity,
   formatTagsTooltip,
+  formatGameVersion,
+  isSafeHomepageUrl,
   normalizeTags,
   filterAndSortGames,
 } from '../kb-core.js';
@@ -281,7 +285,7 @@ describe('buildGameSrc', () => {
   it('puts the ticket in the fragment, not the query string', () => {
     const src = buildGameSrc('http://localhost:5115', 'ttt', 'index.html', 'tok+/=', 'ws://localhost:5115/ws');
     expect(src.startsWith('http://localhost:5115/games/ttt/index.html#')).toBe(true);
-    expect(src.includes('?')).toBe(false); // no query when version/timestamp are omitted
+    expect(src.includes('?')).toBe(false); // no query when the version is omitted
     // The ticket is URL-encoded in the fragment.
     const frag = src.split('#')[1];
     const params = new URLSearchParams(frag);
@@ -289,7 +293,7 @@ describe('buildGameSrc', () => {
     expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
   });
 
-  it('appends version and timestamp query parameters for cache-busting while preserving fragment credentials', () => {
+  it('appends the version release label while preserving fragment credentials', () => {
     const src = buildGameSrc(
       'http://localhost:5115',
       'ttt',
@@ -297,10 +301,9 @@ describe('buildGameSrc', () => {
       'tok+/=',
       'ws://localhost:5115/ws',
       '1.2.0',
-      '2026-09-02T10:00:00Z',
     );
     const [urlPart, fragPart] = src.split('#');
-    expect(urlPart).toBe('http://localhost:5115/games/ttt/index.html?v=1.2.0&t=1788343200000');
+    expect(urlPart).toBe('http://localhost:5115/games/ttt/index.html?v=1.2.0');
     const params = new URLSearchParams(fragPart);
     expect(params.get('kbTicket')).toBe('tok+/=');
     expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
@@ -819,6 +822,46 @@ describe('formatTagsTooltip', () => {
   });
 });
 
+describe('formatGameVersion', () => {
+  it('prefixes a bare version with v', () => {
+    expect(formatGameVersion('1.2.3')).toBe('v1.2.3');
+  });
+
+  it('does not double the v when the author declared one', () => {
+    expect(formatGameVersion('v1.2.3')).toBe('v1.2.3');
+    expect(formatGameVersion('  2.0.0-beta.1  ')).toBe('v2.0.0-beta.1');
+  });
+
+  it('returns null for anything absent, blank or non-string', () => {
+    expect(formatGameVersion(null)).toBeNull();
+    expect(formatGameVersion(undefined)).toBeNull();
+    expect(formatGameVersion('')).toBeNull();
+    expect(formatGameVersion('   ')).toBeNull();
+    expect(formatGameVersion('v')).toBeNull();
+    expect(formatGameVersion(123)).toBeNull();
+  });
+});
+
+describe('isSafeHomepageUrl', () => {
+  it('accepts absolute https URLs', () => {
+    expect(isSafeHomepageUrl('https://github.com/jcub1011/Alpha-Chain-Phaser-')).toBe(true);
+    expect(isSafeHomepageUrl('  https://example.com/game  ')).toBe(true);
+  });
+
+  it('rejects anything that is not an absolute https URL', () => {
+    expect(isSafeHomepageUrl('http://example.com/game')).toBe(false);
+    expect(isSafeHomepageUrl('javascript:alert(1)')).toBe(false);
+    expect(isSafeHomepageUrl('data:text/html,<b>x</b>')).toBe(false);
+    expect(isSafeHomepageUrl('/relative/path')).toBe(false);
+    expect(isSafeHomepageUrl('not a url')).toBe(false);
+    expect(isSafeHomepageUrl('')).toBe(false);
+    expect(isSafeHomepageUrl('   ')).toBe(false);
+    expect(isSafeHomepageUrl(null)).toBe(false);
+    expect(isSafeHomepageUrl(undefined)).toBe(false);
+    expect(isSafeHomepageUrl(123)).toBe(false);
+  });
+});
+
 describe('filterAndSortGames', () => {
   const games = [
     { id: 'tictactoe', name: 'Tic-Tac-Toe', minPlayers: 2, maxPlayers: 2, tags: ['classic', 'board-game'], createdAt: '2026-01-01T00:00:00Z' },
@@ -845,5 +888,48 @@ describe('filterAndSortGames', () => {
 
     const res2 = filterAndSortGames(games, { search: 'game', playerCount: '2', sort: 'alphabetical' });
     expect(res2.map((g) => g.id)).toEqual(['alpha-chain', 'tictactoe']);
+  });
+});
+
+describe('blobBaseUrl', () => {
+  it('converts ws to http and wss to https', () => {
+    expect(blobBaseUrl('ws://example.com:8080/ws')).toBe('http://example.com:8080');
+    expect(blobBaseUrl('wss://example.com/ws')).toBe('https://example.com');
+  });
+
+  it('keeps http and https origins unchanged', () => {
+    expect(blobBaseUrl('http://localhost:5000/some/path')).toBe('http://localhost:5000');
+    expect(blobBaseUrl('https://games.local/')).toBe('https://games.local');
+  });
+
+  it('returns empty string for missing or invalid endpoint', () => {
+    expect(blobBaseUrl('')).toBe('');
+    expect(blobBaseUrl(null)).toBe('');
+    expect(blobBaseUrl(undefined)).toBe('');
+    expect(blobBaseUrl('not-a-url://bad')).toBe('');
+  });
+});
+
+describe('sha256Hex', () => {
+  it('hashes strings correctly', async () => {
+    expect(await sha256Hex('hello-world')).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+    expect(await sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  });
+
+  it('hashes ArrayBuffer and Uint8Array correctly', async () => {
+    const bytes = new TextEncoder().encode('hello-world');
+    expect(await sha256Hex(bytes)).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+    expect(await sha256Hex(bytes.buffer)).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+  });
+
+  it('hashes Blob instances correctly', async () => {
+    const blob = new Blob(['hello-world']);
+    expect(await sha256Hex(blob)).toBe('afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d');
+  });
+
+  it('rejects unsupported types with TypeError', async () => {
+    await expect(sha256Hex(123)).rejects.toThrow(TypeError);
+    await expect(sha256Hex(null)).rejects.toThrow(TypeError);
+    await expect(sha256Hex({})).rejects.toThrow(TypeError);
   });
 });

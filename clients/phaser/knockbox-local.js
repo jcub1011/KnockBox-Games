@@ -54,6 +54,18 @@
     return 'p-' + Math.random().toString(36).slice(2, 8);
   }
 
+  // Base64 of a UTF-8 string with no platform dependency: Buffer under Node, btoa (fed a
+  // UTF-8-encoded binary string — btoa itself is Latin-1-only) in browsers.
+  function base64Utf8(text) {
+    if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+      return Buffer.from(text, 'utf8').toString('base64');
+    }
+    var utf8 = encodeURIComponent(text).replace(/%([0-9A-F]{2})/g, function (_, hex) {
+      return String.fromCharCode(parseInt(hex, 16));
+    });
+    return btoa(utf8);
+  }
+
   function makeEmitter() {
     if (Phaser && Phaser.Events && Phaser.Events.EventEmitter) return new Phaser.Events.EventEmitter();
     var listeners = {};
@@ -767,6 +779,9 @@
     this._stopped = false;
     this._pending = [];  // outbound sends queued until ready
     this._inbox = [];    // inbound messages that arrived before our own ready
+    this._blobUrls = new Map();
+    this._blobs = new Map();
+    this._blobHashes = new Map();
     this._transport = makeTransport(this);
 
     // There's no server to receive logs locally, so mirror them to the dev console (API parity with
@@ -872,8 +887,13 @@
     });
   };
 
-  // URL form: fetch the source, run the single-file import scan (a relative import would happily
-  // resolve in the browser but fail on the server), then dynamic-import for real.
+  // URL form: fetch the source ONCE, run the single-file import scan (a relative import would
+  // happily resolve in the browser but fail on the server), then import the fetched bytes. The
+  // import runs off a data: URL rather than the original URL so the scan and the import can never
+  // disagree: re-importing the URL could answer from the module map with bytes older than the text
+  // just scanned. data: URLs import identically in browsers and Node and carry no base URL — safe
+  // under the single-file rule, which leaves no relative import to resolve. sourceURL keeps the
+  // real filename in stack traces.
   KnockBoxLocalPeer.prototype._loadAuthority = function (url) {
     return fetch(url)
       .then(function (res) {
@@ -882,7 +902,7 @@
       })
       .then(function (source) {
         scanAuthorityImports(source);
-        return import(/* @vite-ignore */ url);
+        return import(/* @vite-ignore */ 'data:text/javascript;base64,' + base64Utf8(source + '\n//# sourceURL=' + url));
       })
       .then(function (mod) {
         if (typeof mod.createAuthority !== 'function') {
@@ -910,6 +930,76 @@
     if (this._actor) { this._actor.destroy(); this._actor = null; }
     if (this._transport) { this._transport.stop(); this._transport = null; }
     if (this.events) this.events.destroy();
+    if (this._blobUrls) {
+      if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        this._blobUrls.forEach(function (url) {
+          if (url && typeof url === 'string' && url.indexOf('blob:') === 0) {
+            URL.revokeObjectURL(url);
+          }
+        });
+      }
+      this._blobUrls.clear();
+    }
+    if (this._blobs) this._blobs.clear();
+    if (this._blobHashes) this._blobHashes.clear();
+  };
+
+  KnockBoxLocalPeer.prototype.registerBlob = function (logicalId, blob) {
+    if (typeof logicalId !== 'string' || !logicalId.trim()) {
+      return Promise.reject(new TypeError('logicalId must be a non-empty string'));
+    }
+    if (!blob || typeof blob.arrayBuffer !== 'function') {
+      return Promise.reject(new TypeError('blob must be a Blob or File'));
+    }
+
+    var self = this;
+    return KBCore.sha256Hex(blob).then(function (sha256) {
+      var existingHash = self._blobHashes ? self._blobHashes.get(logicalId) : null;
+      var existingUrl = self._blobUrls.get(logicalId);
+
+      // Idempotent: re-registering the same logicalId with identical content returns the existing URL
+      if (existingHash === sha256 && existingUrl) {
+        return existingUrl;
+      }
+
+      if (existingUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function' && typeof existingUrl === 'string' && existingUrl.indexOf('blob:') === 0) {
+        URL.revokeObjectURL(existingUrl);
+      }
+
+      var url;
+      if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+        try {
+          url = URL.createObjectURL(blob);
+        } catch (e) {
+          url = '/blob/' + sha256;
+        }
+      } else {
+        url = '/blob/' + sha256;
+      }
+
+      self._blobUrls.set(logicalId, url);
+      self._blobs.set(logicalId, blob);
+      if (self._blobHashes) self._blobHashes.set(logicalId, sha256);
+      return url;
+    });
+  };
+
+  KnockBoxLocalPeer.prototype.unregisterBlob = function (logicalId) {
+    if (typeof logicalId !== 'string' || !logicalId.trim()) {
+      return Promise.reject(new TypeError('logicalId must be a non-empty string'));
+    }
+    var url = this._blobUrls.get(logicalId);
+    if (url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function' && typeof url === 'string' && url.indexOf('blob:') === 0) {
+      URL.revokeObjectURL(url);
+    }
+    this._blobUrls.delete(logicalId);
+    this._blobs.delete(logicalId);
+    if (this._blobHashes) this._blobHashes.delete(logicalId);
+    return Promise.resolve();
+  };
+
+  KnockBoxLocalPeer.prototype.blobUrl = function (logicalId) {
+    return this._blobUrls.get(logicalId) || null;
   };
 
   KnockBoxLocalPeer.prototype._send = function (to, payload) {
@@ -1034,7 +1124,7 @@
     };
 
     // Forward the send API to the peer.
-    ['sendToHost', 'sendToAll', 'sendTo', 'setLobbyOpen', 'kickPlayer', 'setLaunchParams'].forEach(function (m) {
+    ['sendToHost', 'sendToAll', 'sendTo', 'setLobbyOpen', 'kickPlayer', 'setLaunchParams', 'registerBlob', 'unregisterBlob', 'blobUrl'].forEach(function (m) {
       KnockBoxLocalPlugin.prototype[m] = function () { return this._peer[m].apply(this._peer, arguments); };
     });
     // Mirror the peer's state as read-only properties (log is the peer's console-like logger object).

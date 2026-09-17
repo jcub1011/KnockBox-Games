@@ -95,6 +95,13 @@ namespace KnockBox.Contracts;
 /// any declared value: it means the author never said, which a rating filter has to treat
 /// differently from a game that positively declared itself suitable for everyone.
 /// </param>
+/// <param name="Homepage">
+/// Link to the game's own page or repository (<c>"https://github.com/owner/repo"</c>). The shell
+/// renders the in-game version badge as a link to it (new tab); the marketplace listing shows it
+/// too. Author-supplied and untrusted: the server keeps only absolute <c>https://</c> URLs and the
+/// shell re-checks before linking. Absent means the author never said — the badge stays plain
+/// text. Never affects whether a game loads.
+/// </param>
 public sealed record GameManifest(
     string Id,
     string Name,
@@ -114,7 +121,8 @@ public sealed record GameManifest(
     DateTimeOffset? CreatedAt = null,
     DateTimeOffset? UpdatedAt = null,
     string? License = null,
-    string? ContentRating = null);
+    string? ContentRating = null,
+    string? Homepage = null);
 
 /// <summary>
 /// One entry in <see cref="GameManifest.AuthorityWords"/>: the game-relative path of a line-delimited

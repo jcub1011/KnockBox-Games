@@ -83,6 +83,9 @@
   /* ── Layout Dimensions ─────────────────────────────────────────────────── */
   --admin-header-height: 60px;
   --logs-view-padding: 3rem;
+  /* Compact plugin rows: one fixed height for rows and skeletons alike, so content
+     size and list↔skeleton swaps never move the rows below. */
+  --plugin-row-height: 5.25rem;
 }
 
 /* ── Base Reset ──────────────────────────────────────────────────────────── */
@@ -324,6 +327,29 @@ code, pre {
 .btn-small {
   padding: 0.3rem 0.65rem;
   font-size: 0.78rem;
+}
+
+/* Icon-only buttons (header log-out, notification read/dismiss): square, with the accessible
+   name on aria-label/title since there is no text to read. Padding matches .btn/.btn-small and
+   the glyph fills the text row's height, so an icon button stands as tall as its text sibling. */
+.btn-icon-only {
+  padding: 0.55rem;
+  line-height: 0;
+}
+
+.btn-icon-only .btn-icon-svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.btn-small.btn-icon-only {
+  padding: 0.3rem;
+}
+
+.btn-small.btn-icon-only .btn-icon-svg {
+  width: 18px;
+  height: 18px;
 }
 
 .btn:disabled {
@@ -1318,6 +1344,14 @@ code, pre {
   color: var(--text-dim);
 }
 
+/* Title-row action cluster (the Plugins & Games card header): the panel's icon buttons,
+   right-aligned via a filter-spacer ahead of this wrapper. */
+.panel-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* ── Dashboard Tabs ──────────────────────────────────────────────────────── */
 .tab-panel {
   display: flex;
@@ -1479,6 +1513,136 @@ code, pre {
 .filter-narrow { flex: 0 1 12rem; }
 .filter-spacer { flex: 1 1 auto; }
 
+/* ── Plugins & Games status tabs ───────────────────────────────────────────
+   The status filter as tabs rather than a dropdown (same visual language as the
+   top-bar tabs, smaller). The list below is frozen between explicit renders, so these
+   never move on their own — no layout shift under the cursor. */
+.plugin-tabs {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.plugin-tab-btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.plugin-tab-btn:hover {
+  color: var(--text-main);
+  background-color: var(--bg-hover);
+  border-color: var(--border-subtle);
+}
+
+.plugin-tab-btn.active {
+  color: var(--accent-mint);
+  background-color: var(--bg-card);
+  border-color: var(--border-strong);
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.plugin-tab-count {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.plugin-tab-btn.active .plugin-tab-count {
+  color: var(--accent-mint);
+}
+
+/* Stale pill: the frozen list's only self-announcement. A button (click = refresh), styled
+   as a warning rather than a badge, sitting in the tab row's reserved spacer so appearing
+   never shifts the rows below. */
+.stale-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  background-color: var(--accent-amber-bg);
+  border: 1px solid var(--accent-amber-border);
+  border-radius: var(--radius-sm);
+  color: var(--accent-amber-text);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stale-pill:hover {
+  border-color: var(--accent-amber-text);
+}
+
+/* Skeleton rows for fetch-driven plugins loads (initial entry, manual refresh). Same card
+   footprint as a real row so the swap doesn't shift the page; the shimmer is motion, so it
+   goes static under prefers-reduced-motion. Skeleton nodes are never focusable. */
+.plugin-skeleton-card {
+  pointer-events: none;
+  user-select: none;
+  height: var(--plugin-row-height);
+  min-height: var(--plugin-row-height);
+  max-height: var(--plugin-row-height);
+  justify-content: center;
+  overflow: hidden;
+}
+
+.plugin-skeleton-bar {
+  height: 0.85rem;
+  border-radius: var(--radius-xs);
+  background: linear-gradient(90deg, var(--bg-well) 25%, var(--bg-hover) 50%, var(--bg-well) 75%);
+  background-size: 200% 100%;
+  animation: plugin-skeleton-shimmer 1.2s ease-in-out infinite;
+  margin: 0.5rem 0;
+}
+
+.plugin-skeleton-bar:first-child { width: 45%; }
+.plugin-skeleton-bar:nth-child(2) { width: 90%; }
+.plugin-skeleton-bar:nth-child(3) { width: 70%; }
+
+@keyframes plugin-skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-skeleton-bar { animation: none; }
+}
+
+.byte-input-group {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex: 0 1 14rem;
+}
+
+.byte-input-group .byte-input {
+  flex: 1 1 7rem;
+  min-width: 0;
+}
+
+.byte-input-group .byte-scale-select {
+  flex: 0 0 5.5rem;
+  min-width: 0;
+  padding: 0.55rem 0.4rem;
+  cursor: pointer;
+}
+
 .limit-label {
   flex: 0 0 14rem;
   color: var(--text-main);
@@ -1496,6 +1660,7 @@ code, pre {
 @media (max-width: 768px) {
   .limit-label { flex: 1 1 100%; }
   .limit-hint { flex: 1 1 100%; }
+  .byte-input-group { flex: 1 1 100%; }
 }
 
 .checkbox-label {
@@ -1752,103 +1917,139 @@ code, pre {
   box-shadow: var(--shadow-sm);
 }
 
-.game-card-header {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.9rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.game-card-header h3 {
-  font-family: var(--font-display);
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: var(--text-main);
-  letter-spacing: -0.01em;
-}
-
-.game-card-header code {
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  background-color: var(--bg-well);
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--border-subtle);
-}
-
-.plugin-details-btn {
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  padding: 0.25rem 0.45rem;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.plugin-details-btn:hover {
-  color: var(--text-main);
-  background-color: var(--bg-hover);
-  border-color: var(--border-default);
-}
-
-.plugin-details-btn .dots-icon {
-  width: 1.15rem;
-  height: 1.15rem;
-}
-
-.game-facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.game-fact {
+/* ── Compact plugin rows ───────────────────────────────────────────────────
+   Fixed two-line rows with constant height regardless of content: the top line carries
+   name + author, the tag strip, and the version indicator; the bottom line carries the
+   single-line description plus mini status badges and the size readout. The row is one big
+   button (see pluginCard) that opens the metadata modal, where all controls live. Every
+   truncation is ellipsis + a `title` tooltip holding the full text. */
+.plugin-row {
+  height: var(--plugin-row-height);
+  min-height: var(--plugin-row-height);
+  max-height: var(--plugin-row-height);
+  padding: 0.6rem 0.9rem;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  min-width: 0;
+  justify-content: center;
+  gap: 0.3rem;
+  overflow: hidden;
+  cursor: pointer;
 }
 
-.game-fact-label {
-  font-family: var(--font-display);
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
+.plugin-row:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
 }
 
-.game-fact-value {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-main);
-  font-variant-numeric: tabular-nums;
+.plugin-row:focus-visible {
+  outline: 2px solid var(--accent-mint);
+  outline-offset: 2px;
 }
 
-.game-fact-sub {
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
-  color: var(--text-muted);
-  overflow-wrap: anywhere;
-}
-
-.game-actions {
+.plugin-row-top,
+.plugin-row-bottom {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  flex-wrap: wrap;
-  padding-top: 0.9rem;
-  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.plugin-row-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.plugin-row-name {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-row-author {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 2;
+}
+
+/* The tag strip takes the flexible middle: chips never wrap, overflow is hidden, and
+   fitPluginTags hides what doesn't fit behind the `…` chip (full list as its tooltip). */
+.plugin-row-tags {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.plugin-row-tags .badge {
+  flex-shrink: 0;
+}
+
+.plugin-row-version {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.plugin-row-update {
+  color: var(--accent-amber-text);
+  font-weight: 700;
+}
+
+.plugin-row-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-row-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.plugin-mini-badge {
+  font-size: 0.62rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.plugin-row-size {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  /* The author is the most expendable top-line item on a narrow viewport. */
+  .plugin-row-author {
+    display: none;
+  }
 }
 
 .game-hint {
@@ -1953,7 +2154,44 @@ code, pre {
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  z-index: 50;
+  z-index: 200;
+}
+
+/* The confirm dialog is reused by every destructive action — including Dismiss all inside the
+   notification modal — so it must paint above every other backdrop, not just the page. All
+   backdrops share z-index 200 and later DOM wins ties, which put the confirm (first in the
+   document) behind the notification modal. All backdrops paint above the header (z 100),
+   so an open modal owns the screen and the header is not clickable behind it. */
+#confirm-backdrop {
+  z-index: 210;
+}
+
+/* Entrance and exit for the notification modals only (180ms — see NOTIF_MODAL_EXIT_MS): the modal
+   rises as it opens and settles back as it closes. Scoped by id so the confirm/files/upload
+   dialogs — and the tests that assert on them synchronously — keep their instant behaviour. */
+#notifications-backdrop .modal, #notification-details-backdrop .modal {
+  animation: notif-modal-in 180ms ease;
+}
+
+@keyframes notif-modal-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+#notifications-backdrop.modal-closing, #notification-details-backdrop.modal-closing {
+  animation: notif-fade-out 180ms ease forwards;
+}
+
+#notifications-backdrop.modal-closing .modal, #notification-details-backdrop.modal-closing .modal {
+  animation: notif-modal-out 180ms ease forwards;
+}
+
+@keyframes notif-fade-out {
+  to { opacity: 0; }
+}
+
+@keyframes notif-modal-out {
+  to { opacity: 0; transform: translateY(8px); }
 }
 
 .modal {
@@ -1966,6 +2204,28 @@ code, pre {
   width: 100%;
   max-height: 85vh;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-mint-border) transparent;
+}
+
+.modal::-webkit-scrollbar {
+  width: 10px;
+}
+
+.modal::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.modal::-webkit-scrollbar-thumb {
+  background-color: var(--accent-mint-border);
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.modal::-webkit-scrollbar-thumb:hover {
+  background-color: var(--accent-mint-hover);
+  background-clip: content-box;
 }
 
 .modal h3 {
@@ -2121,38 +2381,286 @@ code, pre {
   white-space: nowrap;
 }
 
-/* ── Toasts ──────────────────────────────────────────────────────────────── */
-.toast-host {
+/* ── Notifications (bell, drawer, list) ──────────────────────────────────── */
+.notif-bell-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.notif-bell-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.notif-bell-btn:hover, .notif-bell-btn:focus-visible {
+  background-color: var(--bg-hover);
+  color: var(--text-main);
+  border-color: var(--border-default);
+  outline: none;
+}
+
+.notif-bell-icon {
+  width: 19px;
+  height: 19px;
+}
+
+.notif-badge {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  line-height: 1.15rem;
+  padding: 0 0.25rem;
+  border-radius: var(--radius-pill);
+  background-color: var(--accent-magenta);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 1px 1px 0 #000;
+}
+
+/* Arrival preview anchored under the header, above page content but below open modals. */
+.notif-drawer {
   position: fixed;
-  bottom: 1.25rem;
-  right: 1.25rem;
+  top: calc(var(--admin-header-height, 60px) + 0.5rem);
+  right: 1rem;
+  width: min(24rem, calc(100vw - 2rem));
+  background-color: var(--bg-card-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  z-index: 90;
+  overflow: hidden;
+  animation: notif-in 160ms ease;
+}
+
+.notif-drawer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.9rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.notif-drawer-title {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.notif-link {
+  background: transparent;
+  border: none;
+  color: var(--accent-mint);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: var(--radius-xs);
+}
+
+.notif-link:hover {
+  text-decoration: underline;
+}
+
+.notif-drawer-items {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  z-index: 60;
-  max-width: min(28rem, calc(100vw - 2.5rem));
+  max-height: 22rem;
+  overflow-y: auto;
 }
 
-.toast {
-  padding: 0.75rem 1.1rem;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-card-elevated);
-  border: 1px solid var(--border-default);
+.notif-item {
+  padding: 0.6rem 0.9rem;
   border-left: 4px solid var(--border-strong);
-  box-shadow: var(--shadow-modal);
-  color: var(--text-main);
-  font-size: 0.88rem;
-  font-family: var(--font-body);
-  animation: toast-in 160ms ease;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
 }
 
-.toast-success { border-left-color: var(--accent-mint); }
-.toast-warning { border-left-color: var(--accent-amber); }
-.toast-error { border-left-color: var(--accent-magenta); }
+.notif-item:last-child {
+  border-bottom: none;
+}
 
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(6px); }
+.notif-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.notif-info { border-left-color: var(--border-strong); }
+.notif-success { border-left-color: var(--accent-mint); }
+.notif-warning { border-left-color: var(--accent-amber); }
+.notif-error { border-left-color: var(--accent-magenta); }
+
+.notif-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.notif-kind {
+  font-family: var(--font-display);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.notif-time {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.notif-message {
+  color: var(--text-main);
+  font-size: 0.86rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  /* Two lines, then an ellipsis: the full text lives one click away in the details modal, so a
+     long message must not stretch its row (or drawer item) open. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Unread notifications are set in semibold; the wash itself lives with the row rules below,
+   where it must beat .notif-row's own background. */
+
+.notif-item-unread .notif-message {
+  font-weight: 600;
+}
+
+/* The wash drops the dimmest text below readable contrast, so unread rows promote the kind
+   label and the timestamp up the ink hierarchy while it is on. */
+.notif-item-unread .notif-kind {
+  color: var(--text-main);
+}
+
+.notif-item-unread .notif-time {
+  color: var(--text-muted);
+}
+
+@keyframes notif-in {
+  from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: none; }
+}
+
+/* Exit mirrors the entrance (160ms — see NOTIF_DRAWER_EXIT_MS): the drawer fades back the way it
+   came instead of vanishing. `to`-only so it starts from whatever state it is in, and `forwards`
+   so the faded end state holds until the timeout applies `hidden` — without it the drawer snaps
+   back to full opacity for any frames between animation end and timeout, which reads as a stutter. */
+.notif-drawer.notif-drawer-closing {
+  animation: notif-out 160ms ease forwards;
+}
+
+@keyframes notif-out {
+  to { opacity: 0; transform: translateY(-4px); }
+}
+
+/* List modal rows: message + time on the left, read/dismiss on the right. */
+.notif-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.9rem 0 0.75rem;
+  flex-wrap: wrap;
+}
+
+.notif-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-default);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-well);
+  cursor: pointer;
+}
+
+.notif-row:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
+}
+
+/* Unread wash, tinted by severity instead of one mint wash for everything: mint reads as
+   "good news" in this palette, which is the wrong impression on a warning or an error, so each
+   kind brings its own tint and mint only ever means success. Info has no accent tint, so it gets
+   --text-muted at the same 12% alpha the accent washes use. These pair the severity class with
+   the unread class, so they cover drawer items and modal rows alike, and sit after :hover so the
+   wash (not the hover gray) is what an unread row shows. */
+.notif-info.notif-item-unread { background-color: rgba(158, 151, 175, 0.12); }
+.notif-success.notif-item-unread { background-color: var(--accent-mint-bg); }
+.notif-warning.notif-item-unread { background-color: var(--accent-amber-bg); }
+.notif-error.notif-item-unread { background-color: var(--accent-magenta-bg); }
+
+/* The modal rows pair the same severity classes with their own bordered box, but .notif-row's
+   border shorthand sits later in the file than the severity rules and wipes the left-line color —
+   restate it per row so the modal matches the drawer. Placed after :hover as well, so the line
+   keeps its severity color while hovering too. */
+.notif-row.notif-info { border-left-color: var(--border-strong); }
+.notif-row.notif-success { border-left-color: var(--accent-mint); }
+.notif-row.notif-warning { border-left-color: var(--accent-amber); }
+.notif-row.notif-error { border-left-color: var(--accent-magenta); }
+
+/* Severity-tinted kind labels, matching the log stream: WARNING reads amber, errors rose,
+   successes mint; info stays dim. After the unread promotion above, so the tint wins there too. */
+.notif-warning .notif-kind { color: var(--accent-amber-text); }
+.notif-error .notif-kind { color: #ffa0be; }
+.notif-success .notif-kind { color: var(--accent-mint); }
+
+.notif-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.notif-row-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.notif-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.notif-details-message {
+  color: var(--text-main);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 /* ── Marketplace & Packages ──────────────────────────────────────────────── */
@@ -2285,6 +2793,20 @@ code, pre {
 
 .source-name { font-family: var(--font-display); color: var(--text-main); font-weight: 700; }
 .source-url { color: var(--text-muted); flex: 1 1 10rem; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8rem; }
+/* Source catalog URLs truncate to two lines with an ellipsis: the full URL stays on the
+   title tooltip and is one click away, so a long URL must not stretch its row open.
+   Scoped to the marketplace list — the webhook table reuses .source-url for its
+   origin-only display. */
+#mkt-sources .source-url {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+a.source-url { text-decoration: none; }
+a.source-url:hover { text-decoration: underline; }
 
 .source-form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .source-form .text-input { flex: 1 1 10rem; }
@@ -2310,7 +2832,12 @@ code, pre {
 
 /* ── Motion & Responsive Adjustments ─────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .toast { animation: none; }
+  .notif-drawer, .notif-drawer.notif-drawer-closing,
+  #notifications-backdrop .modal, #notification-details-backdrop .modal,
+  #notifications-backdrop.modal-closing, #notification-details-backdrop.modal-closing,
+  #notifications-backdrop.modal-closing .modal, #notification-details-backdrop.modal-closing .modal {
+    animation: none;
+  }
   .job-bar-indeterminate { animation: none; width: 100%; opacity: 0.5; }
   .btn, .metric-card, .sidebar-toggle-icon { transition: none; }
 }
@@ -2511,6 +3038,24 @@ code, pre {
   .log-line { grid-template-columns: 4.5rem 2.2rem minmax(0, 1fr); }
   .log-category { display: none; }
 
+  /* Modals give back their desktop padding: at 360px wide, 1.75rem a side costs nearly a fifth
+     of the viewport before any content renders. */
+  .modal {
+    padding: 1.25rem 1rem;
+  }
+
   .status-pill { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
   .brand-title { font-size: 1.15rem; }
+
+  /* Bottom sheet instead of a top-anchored drawer: the wrapped mobile header (tabs drop to their
+     own row) grows past --admin-header-height, so a fixed top offset slides the drawer underneath
+     it — the header paints above (z 100 over the drawer's 90) and covers the drawer header row
+     with its View all and close buttons. Bottom-anchoring avoids guessing the wrapped height. */
+  .notif-drawer {
+    top: auto;
+    bottom: 1rem;
+    left: 1rem;
+    right: 1rem;
+    width: auto;
+  }
 }

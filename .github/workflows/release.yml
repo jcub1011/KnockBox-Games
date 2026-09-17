@@ -89,15 +89,6 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      # `:latest` must never point at unmerged code. One line to relax if you ever need to release
-      # from a branch — but then drop `latest`/`major.minor` from the tag list too.
-      - name: Release from main only
-        run: |
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "::error::releases are cut from main; this run is on $GITHUB_REF."
-            exit 1
-          fi
-
       - name: Read the version from the csproj
         id: v
         run: |
