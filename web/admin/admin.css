@@ -1341,6 +1341,14 @@ code, pre {
   color: var(--text-dim);
 }
 
+/* Title-row action cluster (the Plugins & Games card header): the panel's icon buttons,
+   right-aligned via a filter-spacer ahead of this wrapper. */
+.panel-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* ── Dashboard Tabs ──────────────────────────────────────────────────────── */
 .tab-panel {
   display: flex;
@@ -1501,6 +1509,112 @@ code, pre {
 
 .filter-narrow { flex: 0 1 12rem; }
 .filter-spacer { flex: 1 1 auto; }
+
+/* ── Plugins & Games status tabs ───────────────────────────────────────────
+   The status filter as tabs rather than a dropdown (same visual language as the
+   top-bar tabs, smaller). The list below is frozen between explicit renders, so these
+   never move on their own — no layout shift under the cursor. */
+.plugin-tabs {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.plugin-tab-btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.plugin-tab-btn:hover {
+  color: var(--text-main);
+  background-color: var(--bg-hover);
+  border-color: var(--border-subtle);
+}
+
+.plugin-tab-btn.active {
+  color: var(--accent-mint);
+  background-color: var(--bg-card);
+  border-color: var(--border-strong);
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.plugin-tab-count {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.plugin-tab-btn.active .plugin-tab-count {
+  color: var(--accent-mint);
+}
+
+/* Stale pill: the frozen list's only self-announcement. A button (click = refresh), styled
+   as a warning rather than a badge, sitting in the tab row's reserved spacer so appearing
+   never shifts the rows below. */
+.stale-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  background-color: var(--accent-amber-bg);
+  border: 1px solid var(--accent-amber-border);
+  border-radius: var(--radius-sm);
+  color: var(--accent-amber-text);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stale-pill:hover {
+  border-color: var(--accent-amber-text);
+}
+
+/* Skeleton rows for fetch-driven plugins loads (initial entry, manual refresh). Same card
+   footprint as a real row so the swap doesn't shift the page; the shimmer is motion, so it
+   goes static under prefers-reduced-motion. Skeleton nodes are never focusable. */
+.plugin-skeleton-card {
+  pointer-events: none;
+  user-select: none;
+}
+
+.plugin-skeleton-bar {
+  height: 0.85rem;
+  border-radius: var(--radius-xs);
+  background: linear-gradient(90deg, var(--bg-well) 25%, var(--bg-hover) 50%, var(--bg-well) 75%);
+  background-size: 200% 100%;
+  animation: plugin-skeleton-shimmer 1.2s ease-in-out infinite;
+  margin: 0.5rem 0;
+}
+
+.plugin-skeleton-bar:first-child { width: 45%; }
+.plugin-skeleton-bar:nth-child(2) { width: 90%; }
+.plugin-skeleton-bar:nth-child(3) { width: 70%; }
+
+@keyframes plugin-skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-skeleton-bar { animation: none; }
+}
 
 .byte-input-group {
   display: flex;

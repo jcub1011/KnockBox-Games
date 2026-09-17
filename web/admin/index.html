@@ -333,6 +333,37 @@
               <div class="setting-card panel-card tab-panel" id="setting-games" data-setting-id="setting-games" data-tab="games">
                 <div class="panel-card-header">
                   <h3>Plugins &amp; Games</h3>
+                  <span class="filter-spacer"></span>
+                  <div class="panel-header-actions">
+                    <button class="btn btn-secondary btn-icon-only" id="rescan-btn" aria-label="Rescan Now" title="Rescan Now">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="23 4 23 10 17 10"></polyline>
+                        <polyline points="1 20 1 14 7 14"></polyline>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                      </svg>
+                    </button>
+                    <button class="btn btn-secondary btn-icon-only" id="mkt-upload-btn" aria-label="Upload .kbg…" title="Upload .kbg…">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="16 16 12 12 8 16"></polyline>
+                        <line x1="12" y1="12" x2="12" y2="21"></line>
+                        <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path>
+                      </svg>
+                    </button>
+                    <button class="btn btn-secondary btn-icon-only" id="mkt-settings-btn" aria-label="Sources…" title="Sources…">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                      </svg>
+                    </button>
+                    <button class="btn btn-secondary btn-icon-only" id="mkt-refresh-btn" aria-label="Refresh Catalog" title="Refresh Catalog">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="8 17 12 21 16 17"></polyline>
+                        <line x1="12" y1="21" x2="12" y2="9"></line>
+                        <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"></path>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
 
                 <div class="panel-card hidden" id="mkt-disabled">
@@ -347,6 +378,21 @@
                 <!-- In-flight and recently finished operations now surface as notifications
                      (bell icon, above): job outcomes are announced there, so no inline list is needed. -->
 
+                <div class="plugin-tabs" role="tablist" aria-label="Plugin status">
+                  <button type="button" role="tab" id="ptab-installed" class="plugin-tab-btn active"
+                          data-ptab="installed" aria-selected="true">Installed
+                    <span class="plugin-tab-count" id="ptab-count-installed"></span></button>
+                  <button type="button" role="tab" id="ptab-updates" class="plugin-tab-btn"
+                          data-ptab="updates" aria-selected="false" tabindex="-1">Updates
+                    <span class="plugin-tab-count" id="ptab-count-updates"></span></button>
+                  <button type="button" role="tab" id="ptab-available" class="plugin-tab-btn"
+                          data-ptab="available" aria-selected="false" tabindex="-1">Available
+                    <span class="plugin-tab-count" id="ptab-count-available"></span></button>
+                  <span class="filter-spacer"></span>
+                  <!-- Shown when a background poll saw newer data than the frozen list below.
+                       A button, not a badge: clicking it is the manual refresh. -->
+                  <button type="button" class="stale-pill hidden" id="plugins-stale">List may be outdated &mdash; Refresh</button>
+                </div>
                 <div class="filter-bar">
                   <input type="search" id="plugins-filter-q" class="text-input" placeholder="Filter by name, id, tag, or description" />
                   <select id="plugins-filter-source" class="text-input filter-narrow">
@@ -354,18 +400,16 @@
                     <option value="games">Games Folder</option>
                     <option value="upload">Manual Upload</option>
                   </select>
-                  <select id="plugins-filter-status" class="text-input filter-narrow">
-                    <option value="">Any Status</option>
-                    <option value="installed">Installed</option>
-                    <option value="updateAvailable">Update Available</option>
-                    <option value="problem">Problems</option>
-                    <option value="notInstalled">Not Installed</option>
+                  <select id="plugins-sort" class="text-input filter-narrow" aria-label="Sort plugins">
+                    <option value="name-az">Name (A&ndash;Z)</option>
+                    <option value="name-za">Name (Z&ndash;A)</option>
+                    <option value="status">Status (problems first)</option>
+                    <option value="newest">Newest first</option>
+                    <option value="updated">Recently updated</option>
+                    <option value="version">Version (highest first)</option>
+                    <option value="size">Largest first</option>
+                    <option value="active">Most active first</option>
                   </select>
-                  <span class="filter-spacer"></span>
-                  <button class="btn btn-secondary" id="rescan-btn">Rescan Now</button>
-                  <button class="btn btn-secondary" id="mkt-upload-btn">Upload .kbg…</button>
-                  <button class="btn btn-secondary" id="mkt-settings-btn">Sources…</button>
-                  <button class="btn btn-secondary" id="mkt-refresh-btn">Refresh Catalog</button>
                 </div>
                 <div id="plugins-list" class="games-list"></div>
                 <p class="empty-state" id="plugins-empty">No plugins discovered or available.</p>

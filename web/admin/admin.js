@@ -18,7 +18,7 @@ import {
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
   noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
-  sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  sortPlugins, sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
@@ -86,6 +86,27 @@ let announcementData = null;
 let webhookData = null;
 // The blocklist being edited, which is not what is saved until the operator says so.
 let codesDraft = { words: [], patterns: [] };
+
+// ── Plugins & Games tab state ─────────────────────────────────────────────────
+// The status tabs slice one merged list, and each remembers its own sort — switching tabs
+// restores that tab's last order rather than resetting it.
+const PLUGIN_TABS = ['installed', 'updates', 'available'];
+// filterPlugins status each tab shows. Problems have no tab of their own: an incompatible
+// installed game sits in Installed, an incompatible catalog-only entry in Available, both
+// surfaced by badge + the `status` sort rather than by a separate view.
+const PLUGIN_TAB_STATUS = { installed: 'installed', updates: 'updateAvailable', available: 'notInstalled' };
+let activePluginTab = 'installed';
+let pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
+// Frozen-list discipline (Visual Studio style): a background poll never moves the rows an
+// operator may be about to click. Polls update the caches + notifications and only raise the
+// stale pill; the list re-renders on tab switch, sort/search/source change, manual refresh,
+// or a user-initiated mutation's completion.
+let pluginsDirty = false;
+let pluginsRendered = false;
+let pluginsLoading = false;
+// Fetch generation: a tab switch or second refresh while a load is in flight makes the first
+// reply stale, and rendering it would swap the list under the operator's new tab.
+let pluginsFetchSeq = 0;
 
 // Previous counter samples, for the rates admin-core derives. `{ value, at }` pairs — see ratePerSecond.
 let cpuSample = null;
@@ -1188,9 +1209,13 @@ function enterTab(tab, { force = false } = {}) {
     jobCursor = 0;
     jobs = [];
     // The one read that is NOT on the poll path — it reaches the network with a 30-second timeout —
-    // so arriving is one of the few moments it happens. Everything else this panel shows is
-    // refreshActiveTab's job; calling it here too just fetched each of them twice on entry.
-    refreshCatalog();
+    // so arriving is one of the few moments it happens. enterPluginsTab fetches every feed the cards
+    // read (games, catalog, jobs) and renders once through the skeleton path; the shared
+    // refreshActiveTab below is skipped so entry doesn't fetch the jobs feed twice. Poll ticks from
+    // here on only refresh the caches and raise the stale pill — never re-render.
+    enterPluginsTab();
+    startPolling();
+    return;
   }
   refreshActiveTab();
   startPolling();
@@ -1284,6 +1309,9 @@ async function refreshActiveTab() {
   }
   const timeStr = `Updated ${new Date().toLocaleTimeString()}`;
   for (const ind of document.querySelectorAll('.refresh-indicator')) {
+    // The plugins list is frozen between explicit renders, so its indicator shows the last RENDER
+    // (owned by renderPlugins) — stamping it here would claim freshness the rows don't have.
+    if (ind.id === 'last-updated-plugins') continue;
     ind.textContent = timeStr;
   }
 }
@@ -1618,9 +1646,15 @@ export function resetPluginStateForTests() {
   lastGamesSummary = null;
   lastSourceFilterSources = null;
   renderPendingOnBlur = false;
+  activePluginTab = 'installed';
+  pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
+  pluginsDirty = false;
+  pluginsRendered = false;
+  pluginsLoading = false;
+  pluginsFetchSeq = 0;
 }
 
-async function refreshGames({ force = false } = {}) {
+async function refreshGames({ force = false, render = false } = {}) {
   const data = await getJson('/admin/api/games');
   if (!data) return;
   gameData = data;
@@ -1628,16 +1662,112 @@ async function refreshGames({ force = false } = {}) {
   const changed = force || summary !== lastGamesSummary;
   lastGamesSummary = summary;
   if (changed) {
-    renderPlugins();
+    // Background polls only raise the stale pill — re-rendering here is what moved rows under
+    // the cursor every few seconds. Explicit callers (manual refresh, availability/delete/quota
+    // saves) pass render: true for the re-render they asked for.
+    if (render) renderPlugins();
+    else markPluginsStale();
   }
 }
 
 export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
+  // The explicit refresh: skeleton, refetch everything, then one render. Poll ticks never come
+  // through here — they take refreshGames/refreshJobs directly, which only mark stale.
+  const seq = beginPluginsLoad();
   await Promise.all([
     refreshGames({ force: true }),
     refreshCatalog({ refresh: refreshCatalogNow }),
     refreshJobs(),
   ]);
+  if (seq !== pluginsFetchSeq) return;
+  pluginsLoading = false;
+  renderPlugins();
+}
+
+/**
+ * Entering the panel: skeleton first, then every feed the cards read (games, catalog — which
+ * also carries the job set — plus the jobs feed, which may be ahead of the catalog reply),
+ * then one render. Fire-and-forget (enterTab is sync) — the seq token drops the reply if the
+ * operator left or refreshed again first.
+ */
+async function enterPluginsTab() {
+  const seq = beginPluginsLoad();
+  await Promise.all([refreshGames({ force: true }), refreshCatalog(), refreshJobs()]);
+  if (seq !== pluginsFetchSeq) return;
+  pluginsLoading = false;
+  renderPlugins();
+}
+
+/**
+ * Switches the visible status tab, restoring that tab's remembered sort into the sort control.
+ * Instant and fetch-free: it re-slices the cached merge, which is also why it does not clear a
+ * stale pill — the data is no fresher than it was, only the slice changed.
+ */
+export function setPluginTab(name) {
+  if (!PLUGIN_TABS.includes(name)) return;
+  activePluginTab = name;
+  for (const btn of document.querySelectorAll('.plugin-tab-btn')) {
+    const on = btn.dataset.ptab === name;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', String(on));
+    btn.tabIndex = on ? 0 : -1;
+  }
+  const sort = el('plugins-sort');
+  if (sort) sort.value = pluginSort[name] ?? 'name-az';
+  renderPlugins();
+}
+
+/** Tab counts: each tab's share of the search+source-filtered merge, painted on every render. */
+function paintPluginCounts(base) {
+  const list = base || [];
+  for (const tab of PLUGIN_TABS) {
+    const countEl = el(`ptab-count-${tab}`);
+    if (!countEl) continue;
+    const status = PLUGIN_TAB_STATUS[tab];
+    const n = filterPlugins(list, { status }).length;
+    countEl.textContent = `(${n})`;
+  }
+}
+
+/** Background data moved behind a rendered list: say so without moving a single row. */
+function markPluginsStale() {
+  pluginsDirty = true;
+  if (!pluginsRendered || pluginsLoading) return;
+  el('plugins-stale')?.classList.remove('hidden');
+}
+
+function hidePluginsStale() {
+  pluginsDirty = false;
+  el('plugins-stale')?.classList.add('hidden');
+}
+
+function makePluginSkeleton() {
+  const skel = document.createElement('div');
+  skel.className = 'game-card plugin-card mkt-card plugin-skeleton-card';
+  skel.setAttribute('aria-hidden', 'true');
+  for (let i = 0; i < 3; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'plugin-skeleton-bar';
+    skel.appendChild(bar);
+  }
+  return skel;
+}
+
+/**
+ * Starts a fetch-driven load: skeleton rows + aria-busy, and a seq token the reply must still
+ * hold to render. Returns the token.
+ */
+function beginPluginsLoad() {
+  pluginsFetchSeq += 1;
+  pluginsLoading = true;
+  hidePluginsStale();
+  const host = el('plugins-list') || el('mkt-list') || el('games-list');
+  if (host) {
+    host.setAttribute('aria-busy', 'true');
+    host.replaceChildren(...Array.from({ length: 6 }, makePluginSkeleton));
+  }
+  el('last-updated-plugins').textContent = 'Loading…';
+  return pluginsFetchSeq;
 }
 
 export function renderPlugins() {
@@ -1678,9 +1808,13 @@ export function renderPlugins() {
 
   const q = (el('plugins-filter-q') || el('mkt-filter-q') || el('game-filter-q'))?.value || '';
   const source = (el('plugins-filter-source') || el('mkt-filter-source'))?.value || '';
-  const status = (el('plugins-filter-status') || el('mkt-filter-status') || el('game-filter-availability'))?.value || '';
+  // The status dropdown is gone: the active tab IS the status filter.
+  const status = PLUGIN_TAB_STATUS[activePluginTab] ?? PLUGIN_TAB_STATUS.installed;
 
-  const filtered = filterPlugins(allEntries, { q, source, status });
+  const base = filterPlugins(allEntries, { q, source, status: '' });
+  paintPluginCounts(base);
+  const filtered = filterPlugins(base, { status });
+  const sorted = sortPlugins(filtered, pluginSort[activePluginTab] ?? 'name-az');
 
   const totalInstalled = (gameData?.games || []).length;
   const emptyEl = el('plugins-empty') || el('mkt-empty') || el('games-empty');
@@ -1688,7 +1822,7 @@ export function renderPlugins() {
     emptyEl.textContent = allEntries.length === 0
       ? 'No plugins discovered or available.'
       : 'No plugins match these filters.';
-    emptyEl.classList.toggle('hidden', filtered.length > 0);
+    emptyEl.classList.toggle('hidden', sorted.length > 0);
   }
 
   // Preserve any card currently containing user focus (e.g. open select, active tap)
@@ -1700,7 +1834,7 @@ export function renderPlugins() {
   }
 
   const newCards = [];
-  for (const entry of filtered) {
+  for (const entry of sorted) {
     const existing = existingCards.get(entry.id);
     if (existing && existing.contains(document.activeElement)) {
       newCards.push(existing);
@@ -1716,6 +1850,7 @@ export function renderPlugins() {
   if (!isIdentical) {
     host.replaceChildren(...newCards);
   }
+  host.removeAttribute('aria-busy');
 
   const disabledBanner = el('mkt-disabled');
   if (disabledBanner) {
@@ -1750,6 +1885,15 @@ export function renderPlugins() {
   setNavCount('plugins', updatesAvailable());
   setNavCount('marketplace', updatesAvailable());
   setNavCount('games', totalInstalled);
+
+  // The list now reflects the caches, whatever triggered this render — so any stale pill is
+  // answered, the loading state (if this render ends one) resolves, and the panel's timestamp
+  // records the render rather than the last background poll.
+  pluginsRendered = true;
+  pluginsLoading = false;
+  hidePluginsStale();
+  const updatedEl = el('last-updated-plugins');
+  if (updatedEl) updatedEl.textContent = `List updated ${new Date().toLocaleTimeString()}`;
 }
 
 export function renderGames() {
@@ -2380,7 +2524,7 @@ export function openPluginDetails(entry) {
         }
 
         updateQuotaUI();
-        refreshGames();
+        refreshGames({ render: true });
       };
 
       setBtn.addEventListener('click', saveQuota);
@@ -2729,7 +2873,7 @@ async function setAvailability(game, state) {
     renderGames(); // put the select back where it was
     return;
   }
-  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/availability`, { state })) refreshGames();
+  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/availability`, { state })) refreshGames({ render: true });
   else renderGames();
 }
 
@@ -2889,7 +3033,9 @@ async function openLogFiles() {
 // ── Marketplace & packages ────────────────────────────────────────────────────
 
 // The catalog can reach the network, so it is NEVER on the poll path — see POLL_MS.
-async function refreshCatalog({ refresh = false } = {}) {
+// Like refreshGames, it only re-renders for an explicit caller (render: true); background
+// arrivals (notably job completions) update the caches and raise the stale pill instead.
+async function refreshCatalog({ refresh = false, render = false } = {}) {
   const data = await getJson(`/admin/api/marketplace/catalog${refresh ? '?refresh=1' : ''}`);
   if (!data) return;
   catalogData = data;
@@ -2897,8 +3043,8 @@ async function refreshCatalog({ refresh = false } = {}) {
   // than two.
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
   jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
-  renderSourceFilter();
-  renderMarketplace();
+  if (render) renderPlugins();
+  else markPluginsStale();
 }
 
 async function refreshJobs() {
@@ -2934,8 +3080,9 @@ async function refreshJobs() {
     if (!inView.has(id)) reportedJobs.delete(id);
   }
 
-  // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
-  // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
+  // A job reaching a terminal state is the moment the catalog's answer changed — but the frozen
+  // list does not flip on its own. The re-read below only refreshes the caches and raises the stale
+  // pill; the bell notification (see announceJob) is what tells the operator, and Refresh re-renders.
   // There is no operations list anymore: the feed is polled silently and outcomes surface as
   // notifications (see announceJob below).
   let finished = false;
@@ -3300,12 +3447,12 @@ function renderSources() {
     toggle.type = 'button';
     toggle.className = 'btn btn-small source-toggle';
     toggle.textContent = source.enabled === false ? 'Enable' : 'Disable';
-    toggle.onclick = async () => {
-      const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
-      if (await postJson(url, { enabled: source.enabled === false })) {
-        refreshCatalog({ refresh: true });
-      }
-    };
+      toggle.onclick = async () => {
+        const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
+        if (await postJson(url, { enabled: source.enabled === false })) {
+          refreshCatalog({ refresh: true, render: true });
+        }
+      };
     row.appendChild(toggle);
 
     if (!source.builtIn) {
@@ -3315,7 +3462,7 @@ function renderSources() {
       remove.textContent = 'Remove';
       remove.onclick = async () => {
         if (await postJson(`/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/delete`, {})) {
-          refreshCatalog({ refresh: true });
+          refreshCatalog({ refresh: true, render: true });
         }
       };
       row.appendChild(remove);
@@ -3338,7 +3485,7 @@ async function addSource() {
     for (const id of ['mkt-source-id', 'mkt-source-name', 'mkt-source-url', 'mkt-source-download']) {
       el(id).value = '';
     }
-    await refreshCatalog({ refresh: true });
+    await refreshCatalog({ refresh: true, render: true });
     renderSources();
   }
 }
@@ -4013,7 +4160,30 @@ function wire() {
 
   el('plugins-filter-q')?.addEventListener('input', renderPlugins);
   el('plugins-filter-source')?.addEventListener('change', renderPlugins);
-  el('plugins-filter-status')?.addEventListener('change', renderPlugins);
+  el('plugins-sort')?.addEventListener('change', (e) => {
+    // Per-tab memory: the choice belongs to the tab it was made on, and returning to that tab
+    // restores it (see setPluginTab).
+    pluginSort[activePluginTab] = e.target.value;
+    renderPlugins();
+  });
+  el('plugins-stale')?.addEventListener('click', () => refreshPlugins({ refreshCatalogNow: true }));
+  for (const btn of document.querySelectorAll('.plugin-tab-btn')) {
+    btn.addEventListener('click', () => setPluginTab(btn.dataset.ptab));
+    // WAI-APG tabs pattern with automatic activation: arrows move and select, Home/End jump.
+    btn.addEventListener('keydown', (e) => {
+      const order = [...document.querySelectorAll('.plugin-tab-btn')];
+      const at = order.indexOf(btn);
+      let next = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (at + 1) % order.length;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (at - 1 + order.length) % order.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = order.length - 1;
+      if (next < 0) return;
+      e.preventDefault();
+      order[next].focus();
+      setPluginTab(order[next].dataset.ptab);
+    });
+  }
 
   el('plugin-details-close')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));
   el('plugin-details-close-x')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));

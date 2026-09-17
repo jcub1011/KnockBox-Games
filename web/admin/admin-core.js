@@ -799,6 +799,8 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       pendingJobId: game.pendingJobId || entry?.pendingJobId || null,
       serverAuthority: Boolean(game.serverAuthority),
       blobQuota: game.blobQuota ?? null,
+      createdAt: game.createdAt || null,
+      updatedAt: game.updatedAt || null,
       reason: entry?.reason || null,
       shadowedBy: entry?.shadowedBy || null,
     });
@@ -853,6 +855,8 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
         pendingJobId: entry.pendingJobId || null,
         serverAuthority: false,
         blobQuota: entry.blobQuota ?? null,
+        createdAt: entry.createdAt || null,
+        updatedAt: entry.updatedAt || null,
         reason: entry.reason || null,
         shadowedBy: entry.shadowedBy || null,
       });
@@ -904,10 +908,12 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       sourceName: entry.sourceName || entry.sourceId || '',
       sourceKind: entry.sourceId || 'marketplace',
       pendingJobId: entry.pendingJobId || null,
-      serverAuthority: false,
-      reason: entry.reason || null,
-      shadowedBy: entry.shadowedBy || null,
-    });
+        serverAuthority: false,
+        reason: entry.reason || null,
+        shadowedBy: entry.shadowedBy || null,
+        createdAt: null,
+        updatedAt: null,
+      });
   }
 
   installedList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
@@ -988,6 +994,129 @@ export function filterCatalog(entries, { q = '', status = '', source = '' } = {}
         && !matches(e.id, needle)
         && !(e.tags || []).some((t) => matches(t, needle))) return false;
     return true;
+  });
+}
+
+// ── Plugin sorting ────────────────────────────────────────────────────────────
+
+/**
+ * The sort options offered on every Plugins & Games status tab. One shared list rather than
+ * per-tab options: the entries are one shape regardless of which tab shows them, and a second
+ * list to keep in sync with this one is exactly the kind of duplication that drifts.
+ *
+ * Direction is embedded in the option (A–Z vs Z–A) rather than a separate asc/desc toggle:
+ * a single select stays one control, and the magnitude sorts only have one useful direction
+ * (nobody hunts for their smallest game first).
+ */
+export const PLUGIN_SORTS = [
+  { value: 'name-az', label: 'Name (A–Z)' },
+  { value: 'name-za', label: 'Name (Z–A)' },
+  { value: 'status', label: 'Status (problems first)' },
+  { value: 'newest', label: 'Newest first' },
+  { value: 'updated', label: 'Recently updated' },
+  { value: 'version', label: 'Version (highest first)' },
+  { value: 'size', label: 'Largest first' },
+  { value: 'active', label: 'Most active first' },
+];
+
+/**
+ * Severity rank for the `status` sort: the entries an operator must act on float above the
+ * ones that are merely listed. Unknown statuses sink below the known-bad but above the known
+ * fine — a server that grew a status should read oddly near the top, not vanish at the bottom.
+ * An outdated SDK stamp promotes an otherwise-fine row, since that is actionable too.
+ */
+export function pluginStatusSeverity(entry) {
+  const status = String(entry?.status ?? '');
+  if (status === 'incompatible' || status === 'unusable') return 0;
+  if (status === 'updateAvailable') return 1;
+  if (String(entry?.sdkStatus ?? '').toLowerCase() === 'behind') return 1;
+  if (status === 'installedOnly' || status === 'upToDate' || status === 'installedAhead'
+      || status === 'installedVersionUnknown' || status === 'notInstalled') return 2;
+  return 1;
+}
+
+function comparePluginNames(a, b) {
+  return String(a?.name || a?.id || '').localeCompare(String(b?.name || b?.id || ''),
+    undefined, { sensitivity: 'base' });
+}
+
+/** Epoch millis, or null when the value is absent or unparseable — never NaN. */
+function pluginEpoch(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const at = new Date(value).getTime();
+  return Number.isFinite(at) ? at : null;
+}
+
+/**
+ * Orders already-filtered plugin entries for display. Pure — the caller (`renderPlugins`)
+ * filters first, then sorts, so each tab slices the same merged list and only the order differs.
+ *
+ * Nulls/unknowns always sort LAST within a magnitude (a missing date is not the oldest date;
+ * claiming otherwise would pile every hand-made game at one end), and every key tie-breaks by
+ * name so the order is total and re-renders don't shuffle equal rows.
+ */
+export function sortPlugins(entries, sortKey = 'name-az') {
+  const list = Array.isArray(entries) ? [...entries] : [];
+  const key = String(sortKey || 'name-az').toLowerCase();
+
+  const versionOf = (e) => e?.installedVersion ?? e?.availableVersion ?? null;
+  const sizeOf = (e) => {
+    const raw = e?.diskBytes ?? e?.sizeBytes ?? null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  return list.sort((a, b) => {
+    switch (key) {
+      case 'name-za':
+        return comparePluginNames(b, a);
+      case 'status': {
+        const rank = pluginStatusSeverity(a) - pluginStatusSeverity(b);
+        if (rank !== 0) return rank;
+        return comparePluginNames(a, b);
+      }
+      case 'newest':
+      case 'updated': {
+        const prop = key === 'newest' ? 'createdAt' : 'updatedAt';
+        const ta = pluginEpoch(a?.[prop]);
+        const tb = pluginEpoch(b?.[prop]);
+        if (ta === null && tb === null) return comparePluginNames(a, b);
+        if (ta === null) return 1;
+        if (tb === null) return -1;
+        if (ta !== tb) return tb - ta;
+        return comparePluginNames(a, b);
+      }
+      case 'version': {
+        const va = versionOf(a);
+        const vb = versionOf(b);
+        if (!va && !vb) return comparePluginNames(a, b);
+        if (!va) return 1;
+        if (!vb) return -1;
+        const cmp = compareSemVer(vb, va);
+        return cmp !== 0 ? cmp : comparePluginNames(a, b);
+      }
+      case 'size': {
+        const sa = sizeOf(a);
+        const sb = sizeOf(b);
+        if (sa === null && sb === null) return comparePluginNames(a, b);
+        if (sa === null) return 1;
+        if (sb === null) return -1;
+        if (sa !== sb) return sb - sa;
+        return comparePluginNames(a, b);
+      }
+      case 'active': {
+        const la = Number(a?.activeLobbies) || 0;
+        const lb = Number(b?.activeLobbies) || 0;
+        if (la !== lb) return lb - la;
+        const pa = Number(a?.activePlayers) || 0;
+        const pb = Number(b?.activePlayers) || 0;
+        if (pa !== pb) return pb - pa;
+        return comparePluginNames(a, b);
+      }
+      case 'name-az':
+      default:
+        return comparePluginNames(a, b);
+    }
   });
 }
 

@@ -576,7 +576,9 @@ internal static class AdminApi
                 options.Packages.Jobs.ActiveFor(manifest.Id)?.JobId,
                 manifest.Sdk,
                 KnockBoxSdk.StatusOf(manifest.Sdk),
-                BlobQuota: blobQuota));
+                BlobQuota: blobQuota,
+                CreatedAt: manifest.CreatedAt?.UtcDateTime.ToString("O"),
+                UpdatedAt: manifest.UpdatedAt?.UtcDateTime.ToString("O")));
         }
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));

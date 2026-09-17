@@ -125,6 +125,17 @@ authority, which is the server itself.
 
 ## 3. Game Catalog
 
+Cards are grouped under three status tabs — **Installed**, **Updates**, and **Available** — each
+with its own count. Problems have no tab of their own: an incompatible entry sits on whichever of
+Installed/Available it belongs to, badged, and the **Status (problems first)** sort floats it to
+the top. Each tab remembers its own sort (name A–Z/Z–A, status, newest, recently updated,
+version, size, activity).
+
+The list is deliberately frozen while you look at it: background polls update the data and raise
+a **List may be outdated — Refresh** pill, but rows never move on their own — so a click can't
+land on the wrong card. The list re-renders when you switch tabs, change the sort or filters, or
+refresh. While a refresh is loading, skeleton rows hold the layout.
+
 One card per discovered game, with its disk footprint, what it's running right now, and where it came
 from.
 

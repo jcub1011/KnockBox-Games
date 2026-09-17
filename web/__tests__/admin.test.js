@@ -784,12 +784,18 @@ describe('game catalog', () => {
 
   it('renders a card per game with its disk breakdown and live counts', async () => {
     await openGames();
+    // Installed tab: the two installed games, A–Z. The catalog-only entry lives on Available.
     const cards = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card');
-    expect(cards).toHaveLength(3);
+    expect(cards).toHaveLength(2);
     expect(cards[0].textContent).toContain('Tic-Tac-Toe');
     expect(cards[0].textContent).toContain('12 KB');   // total
     expect(cards[0].textContent).toContain('7.6 KB');  // files
     expect(cards[0].textContent).toContain('1 lobby/lobbies');
+
+    admin.setPluginTab('available');
+    const available = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card');
+    expect(available).toHaveLength(1);
+    expect(available[0].textContent).toContain('Alpha Chain');
   });
 
   it('shows the availability each game is actually in', async () => {

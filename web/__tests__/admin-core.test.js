@@ -14,8 +14,9 @@ import {
   playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
   tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptionValue, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
-  webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
+  webhookEventLabel, checkWebhook, webhookLastDelivery,   mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
+  PLUGIN_SORTS, pluginStatusSeverity, sortPlugins,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge, compareSemVer,
   NOTIFICATION_KINDS, NOTIFICATION_LIMIT, NOTIFICATION_STORAGE_KEY, normalizeNotificationKind,
   createNotification, localOffsetIso, notificationEpoch, sortNotifications, capNotifications, unreadCount,
@@ -1386,6 +1387,19 @@ describe('mergePluginEntries', () => {
     expect(merged[3].id).toBe('custom-card');
     expect(merged[3].installed).toBe(false);
   });
+
+  it('carries per-game dates through for the date sorts, null for catalog-only rows', () => {
+    const merged = mergePluginEntries(
+      [{
+        id: 'g', name: 'G', root: 'games',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z',
+      }],
+      [{ id: 'h', name: 'H', status: 'notInstalled', installed: false }]);
+    expect(merged.find((e) => e.id === 'g').createdAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(merged.find((e) => e.id === 'g').updatedAt).toBe('2026-02-01T00:00:00.000Z');
+    expect(merged.find((e) => e.id === 'h').createdAt).toBeNull();
+    expect(merged.find((e) => e.id === 'h').updatedAt).toBeNull();
+  });
 });
 
 describe('filterPlugins', () => {
@@ -1417,6 +1431,65 @@ describe('filterPlugins', () => {
     expect(filterPlugins(entries, { q: 'Author B' })).toEqual([entries[2]]);
     expect(filterPlugins(entries, { q: 'Fast word' })).toEqual([entries[1]]);
     expect(filterPlugins(entries, { q: 'words' })).toEqual([entries[1], entries[2]]);
+  });
+});
+
+describe('sortPlugins', () => {
+  const entries = [
+    { id: 'c-game', name: 'C Game', status: 'upToDate', installed: true, installedVersion: '1.0.0', createdAt: '2026-03-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z', diskBytes: 3000, activeLobbies: 1, activePlayers: 2 },
+    { id: 'a-game', name: 'A Game', status: 'updateAvailable', installed: true, installedVersion: '2.0.0', availableVersion: '2.1.0', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-06-01T00:00:00.000Z', diskBytes: 1000, activeLobbies: 0, activePlayers: 0 },
+    { id: 'b-game', name: 'B Game', status: 'incompatible', installed: false, availableVersion: '3.0.0', createdAt: null, updatedAt: null, sizeBytes: 9000, activeLobbies: 0, activePlayers: 0 },
+    { id: 'd-game', name: 'D Game', status: 'notInstalled', installed: false, availableVersion: null, createdAt: null, updatedAt: 'not-a-date', diskBytes: null, sizeBytes: null, activeLobbies: 5, activePlayers: 9 },
+  ];
+  const ids = (list) => list.map((e) => e.id);
+
+  it('offers one shared option list for every tab', () => {
+    expect(PLUGIN_SORTS.map((s) => s.value)).toEqual(
+      ['name-az', 'name-za', 'status', 'newest', 'updated', 'version', 'size', 'active']);
+  });
+
+  it('sorts names A–Z by default and Z–A on request', () => {
+    expect(ids(sortPlugins(entries))).toEqual(['a-game', 'b-game', 'c-game', 'd-game']);
+    expect(ids(sortPlugins(entries, 'name-az'))).toEqual(['a-game', 'b-game', 'c-game', 'd-game']);
+    expect(ids(sortPlugins(entries, 'name-za'))).toEqual(['d-game', 'c-game', 'b-game', 'a-game']);
+  });
+
+  it('floats problems first, then updates, then the fine — unknowns read oddly near the top', () => {
+    expect(ids(sortPlugins(entries, 'status'))).toEqual(['b-game', 'a-game', 'c-game', 'd-game']);
+    expect(pluginStatusSeverity({ status: 'incompatible' })).toBe(0);
+    expect(pluginStatusSeverity({ status: 'unusable' })).toBe(0);
+    expect(pluginStatusSeverity({ status: 'updateAvailable' })).toBe(1);
+    expect(pluginStatusSeverity({ status: 'upToDate' })).toBe(2);
+    // An outdated SDK stamp promotes an otherwise-fine row.
+    expect(pluginStatusSeverity({ status: 'upToDate', sdkStatus: 'behind' })).toBe(1);
+  });
+
+  it('sorts dates newest first with unknowns last, never as oldest', () => {
+    expect(ids(sortPlugins(entries, 'newest'))).toEqual(['c-game', 'a-game', 'b-game', 'd-game']);
+    expect(ids(sortPlugins(entries, 'updated'))).toEqual(['a-game', 'c-game', 'b-game', 'd-game']);
+  });
+
+  it('sorts versions highest first using semver, not strings', () => {
+    const vers = [
+      { id: 'x', name: 'X', installedVersion: '0.9.0' },
+      { id: 'y', name: 'Y', installedVersion: '0.10.0' },
+      { id: 'z', name: 'Z', installedVersion: null, availableVersion: null },
+    ];
+    expect(ids(sortPlugins(vers, 'version'))).toEqual(['y', 'x', 'z']);
+  });
+
+  it('sorts sizes largest first from diskBytes then sizeBytes, unknowns last', () => {
+    expect(ids(sortPlugins(entries, 'size'))).toEqual(['b-game', 'c-game', 'a-game', 'd-game']);
+  });
+
+  it('sorts activity by lobbies then players with a name tiebreak', () => {
+    expect(ids(sortPlugins(entries, 'active'))).toEqual(['d-game', 'c-game', 'a-game', 'b-game']);
+  });
+
+  it('does not mutate the input', () => {
+    const before = entries.map((e) => e.id);
+    sortPlugins(entries, 'size');
+    expect(entries.map((e) => e.id)).toEqual(before);
   });
 });
 

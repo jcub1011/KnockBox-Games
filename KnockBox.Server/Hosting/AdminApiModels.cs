@@ -235,7 +235,17 @@ public sealed record AdminGameSummary(
     /// <summary>
     /// Per-game override of the per-lobby blob quota in bytes, or null if using server-wide default.
     /// </summary>
-    long? BlobQuota = null
+    long? BlobQuota = null,
+    /// <summary>
+    /// When the game was created, ISO-8601 ("O"), from GAME.json <c>createdAt</c> or the manifest
+    /// file's birth time. Null when unknown — the portal sorts those last.
+    /// </summary>
+    string? CreatedAt = null,
+    /// <summary>
+    /// When the game build was last updated, ISO-8601 ("O"), from GAME.json <c>updatedAt</c> or the
+    /// manifest file's write time (package marker time for package-backed games). Null when unknown.
+    /// </summary>
+    string? UpdatedAt = null
 );
 
 public sealed record AdminGamesResponse(
