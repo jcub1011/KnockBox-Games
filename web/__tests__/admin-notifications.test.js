@@ -218,7 +218,7 @@ describe('list modal', () => {
 });
 
 describe('details modal', () => {
-  it('opens on row click with the full text and seconds, without marking read', async () => {
+  it('opens on row click with the full text and seconds, marking it read', async () => {
     vi.useFakeTimers();
     await bootstrapAuthed();
     notifs.notify('Full story here', 'warning');
@@ -229,13 +229,15 @@ describe('details modal', () => {
     const body = el('notification-details-body');
     expect(body.textContent).toContain('Full story here');
     expect(body.textContent).toContain('Warning');
-    expect(body.textContent).toContain('Unread');
-    // Clicking never marks read: the badge still counts it.
-    expect(el('notif-badge').textContent).toBe('1');
+    // Opening the dedicated modal auto-marks the notification read.
+    expect(body.textContent).toContain('Read');
+    expect(body.textContent).not.toContain('Unread');
+    expect(el('notif-badge').classList.contains('hidden')).toBe(true);
 
     el('notification-details-toggle').click();
-    expect(el('notif-badge').classList.contains('hidden')).toBe(true);
-    expect(el('notification-details-toggle').textContent).toBe('Mark unread');
+    expect(el('notif-badge').classList.contains('hidden')).toBe(false);
+    expect(el('notif-badge').textContent).toBe('1');
+    expect(el('notification-details-toggle').textContent).toBe('Mark read');
 
     el('notification-details-dismiss').click();
     await vi.advanceTimersByTimeAsync(200);
@@ -470,5 +472,68 @@ describe('encrypted store', () => {
     await notifs.loadNotifications();
     expect(notifs.getNotifications()).toHaveLength(0);
     expect(notifs.consumeDecryptFailure()).toBe(true);
+  });
+
+  it('never overwrites an unread v1 blob with plaintext when WebCrypto is missing', async () => {
+    const storage = memoryStorage();
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage });
+    notifs.setNotificationKey(keyA);
+    notifs.notify('Secure history', 'error');
+    await notifs.persistNow();
+    const before = storage.getItem('kb.admin.notifications');
+    expect(before).toContain('"v":1');
+
+    // Same profile, later visit over plain-HTTP LAN: no subtle, no key yet.
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage });
+    notifs.setSubtleForTests(null);
+    await notifs.loadNotifications();
+    expect(notifs.hasUnreadEncrypted()).toBe(true);
+    expect(notifs.getNotifications()).toHaveLength(0);
+
+    notifs.notify('New session note', 'info');
+    await notifs.persistNow();
+    // The v1 ciphertext must be untouched — persist stayed memory-only.
+    expect(storage.getItem('kb.admin.notifications')).toBe(before);
+  });
+
+  it('clears the plaintext fallback flag once the store re-encrypts to v1', async () => {
+    const storage = memoryStorage();
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage });
+    notifs.setSubtleForTests(null);
+    notifs.notify('Plain note', 'warning');
+    await notifs.persistNow();
+    expect(notifs.isPlaintextFallback()).toBe(true);
+
+    // Back on a secure context with the key: next persist re-encrypts.
+    notifs.setSubtleForTests(undefined);
+    notifs.setNotificationKey(keyA);
+    await notifs.persistNow();
+    expect(storage.getItem('kb.admin.notifications')).toContain('"v":1');
+    expect(notifs.isPlaintextFallback()).toBe(false);
+  });
+
+  it('drops memory without touching storage on logout unload', async () => {
+    vi.useFakeTimers();
+    const storage = memoryStorage();
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage });
+    notifs.setNotificationKey(keyA);
+    notifs.notify('Secret outcome', 'error');
+    await notifs.persistNow();
+    const before = storage.getItem('kb.admin.notifications');
+
+    notifs.clearNotificationKey();
+    notifs.unloadNotificationsForLogout();
+    expect(notifs.getNotifications()).toHaveLength(0);
+    expect(notifs.isPlaintextFallback()).toBe(false);
+    expect(notifs.hasUnreadEncrypted()).toBe(false);
+    // A pending debounce must not persist the cleared list over the blob.
+    notifs.notify('Unsaved', 'info');
+    notifs.unloadNotificationsForLogout();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(storage.getItem('kb.admin.notifications')).toBe(before);
   });
 });

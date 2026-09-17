@@ -49,6 +49,12 @@ let persistTimer = null;
 let subtleOverride = undefined;
 let plaintextFallback = false;
 let decryptFailed = false;
+// Set when a v1 (encrypted) blob was found but this origin cannot decrypt it
+// (no WebCrypto, e.g. plain-HTTP LAN). While set, persistNow() must not write
+// a v0 plaintext blob over it — that would destroy history the next
+// secure-context visit could still read. Cleared once the v1 blob is
+// successfully read, discarded as corrupt, or dropped on logout.
+let unreadEncrypted = false;
 
 function defaultStorage() {
   try {
@@ -165,6 +171,15 @@ export function hadDecryptFailure() {
   return decryptFailed;
 }
 
+/**
+ * True when an encrypted blob is stored but unreadable on this origin
+ * (no WebCrypto here). The blob is left untouched so a secure context can
+ * still read it; session items are memory-only meanwhile.
+ */
+export function hasUnreadEncrypted() {
+  return unreadEncrypted;
+}
+
 /** Reads and clears the decrypt-failure flag, so the notice is raised exactly once. */
 export function consumeDecryptFailure() {
   const was = decryptFailed;
@@ -266,12 +281,23 @@ export async function loadNotifications() {
 
   if (env.v === 1) {
     const subtle = resolveSubtle();
-    if (!subtle || !keyBytes) return; // key not fetched yet — the caller retries after fetching
+    if (!subtle) {
+      // Insecure origin: the ciphertext is intact but undecryptable here.
+      // Mark it so persistNow() stays memory-only instead of overwriting it
+      // with a v0 plaintext containing only this session's items. A missing
+      // key alone (secure origin, key not fetched yet) stays a silent retry.
+      unreadEncrypted = true;
+      emit();
+      return;
+    }
+    if (!keyBytes) return; // key not fetched yet — the caller retries after fetching
     try {
       items = sanitizeNotifications(await decryptEnvelope(env, keyBytes, subtle), NOTIFICATION_LIMIT);
     } catch {
       return corrupted();
     }
+    unreadEncrypted = false;
+    plaintextFallback = false;
     emit();
     return;
   }
@@ -281,6 +307,7 @@ export async function loadNotifications() {
 
 function corrupted() {
   decryptFailed = true;
+  unreadEncrypted = false;
   items = [];
   try {
     storage?.removeItem(NOTIFICATION_STORAGE_KEY);
@@ -310,7 +337,12 @@ export async function persistNow() {
   try {
     if (subtle && keyBytes) {
       storage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(await encryptItems(items, keyBytes, subtle)));
+      if (plaintextFallback) {
+        plaintextFallback = false;
+        emit();
+      }
     } else if (!subtle) {
+      if (unreadEncrypted) return; // an unread v1 blob is stored: stay memory-only, never clobber it
       plaintextFallback = true;
       storage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify({ v: 0, items }));
     }
@@ -319,6 +351,23 @@ export async function persistNow() {
   } catch {
     // Quota or a hostile storage backend: in-memory state stays authoritative for the session.
   }
+}
+
+/**
+ * Drops everything in memory without touching storage. Logout calls this
+ * after clearNotificationKey(): decrypted items are plaintext regardless of
+ * the at-rest form, so leaving them behind the login view breaks the shared-
+ * workstation guarantee. The stored blob is left intact for the next login;
+ * a pending debounce is cancelled first so it cannot persist the cleared
+ * list over it. Unsaved memory-only items are intentionally discarded.
+ */
+export function unloadNotificationsForLogout() {
+  stopPersistTimer();
+  items = [];
+  unreadEncrypted = false;
+  plaintextFallback = false;
+  decryptFailed = false;
+  emit();
 }
 
 // ── Test seams ────────────────────────────────────────────────────────────────
@@ -337,4 +386,5 @@ export function resetNotificationsForTests() {
   subtleOverride = undefined;
   plaintextFallback = false;
   decryptFailed = false;
+  unreadEncrypted = false;
 }

@@ -33,6 +33,7 @@ import {
   getNotification,
   getNotifications,
   getUnreadCount,
+  hasUnreadEncrypted,
   initNotificationStore,
   isMemoryOnly,
   isPlaintextFallback,
@@ -42,6 +43,7 @@ import {
   notify,
   refreshNotificationKey,
   subscribe as subscribeNotifications,
+  unloadNotificationsForLogout,
 } from './admin-notifications.js';
 
 const el = (id) => document.getElementById(id);
@@ -453,7 +455,10 @@ function renderNotifications() {
 
   const note = el('notifications-note');
   const notes = [];
-  if (isPlaintextFallback()) {
+  if (hasUnreadEncrypted()) {
+    notes.push('Encrypted notifications are stored on this browser but cannot be read on this connection '
+      + '(plain HTTP over LAN has no WebCrypto). They were left untouched — revisit over loopback or HTTPS.');
+  } else if (isPlaintextFallback()) {
     notes.push('Stored unencrypted on this connection: this browser cannot do WebCrypto here '
       + '(plain HTTP over LAN), so anyone reading this browser profile can read these.');
   } else if (isMemoryOnly()) {
@@ -481,6 +486,11 @@ async function dismissAllNotificationsUI() {
 
 export function openNotificationDetails(id) {
   notifDetailId = id;
+  // Opening the dedicated modal counts as reading: mark unread items read so
+  // the badge/list reflect what the operator has now seen. The store emit
+  // re-renders badge + list; the explicit render below shows the Read status.
+  const current = getNotification(id);
+  if (current && !current.read) markNotificationRead(id, true);
   if (!renderNotificationDetails()) return;
   closeNotifDrawer();
   const bd = el('notification-details-backdrop');
@@ -4158,9 +4168,12 @@ async function onLogout() {
   }
   stopPolling();
   // The store's encryption key is memory-only by design: dropping it here is what makes the stored
-  // ciphertext unreadable until the next login re-fetches it. The notifications themselves persist
-  // (same password-bound key after re-login reads them); only a password change rotates the key.
+  // ciphertext unreadable until the next login re-fetches it. Decrypted items are plaintext
+  // regardless of the at-rest form, so memory is dropped too (the stored blob is left intact for
+  // the next login; unsaved memory-only items are intentionally discarded). The unload emits, so
+  // the badge/list re-render empty behind the login view.
   clearNotificationKey();
+  unloadNotificationsForLogout();
   closeNotifDrawer();
   closeNotifications();
   closeNotificationDetails();
