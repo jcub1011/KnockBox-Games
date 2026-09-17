@@ -33,6 +33,7 @@ import {
   getNotification,
   getNotifications,
   getUnreadCount,
+  hasStoredBlob,
   hasUnreadEncrypted,
   initNotificationStore,
   isMemoryOnly,
@@ -193,8 +194,9 @@ function showErrorStatus(msg) {
 // The persistent replacement for the toast system: a bell with an unread badge in the header, an
 // arrival drawer with the three newest, a full list modal, and a details modal for one
 // notification. The STORE (list, encryption, persistence) lives in admin-notifications.js, which
-// this module subscribes to; everything below is rendering over it. Read state changes ONLY via
-// the explicit buttons — opening, previewing or clicking a notification never marks it read.
+// this module subscribes to; everything below is rendering over it. Read state changes via the
+// explicit buttons, and by opening the details modal (which marks the shown item read); the drawer
+// preview and opening the list never mark anything read.
 
 let notifDrawerTimer = null;
 let notifDrawerOpen = false;
@@ -281,6 +283,9 @@ function openNotifDrawer() {
   if (!canHoverPreview()) return;
   if (el('dashboard-view')?.classList.contains('hidden')) return;
   if (!el('notifications-backdrop')?.classList.contains('hidden')) return;
+  // An arrival while the details modal is open would pop the drawer underneath it (z-90 vs z-200):
+  // invisible, but arming the auto-dismiss timer and flipping open state behind the modal.
+  if (!el('notification-details-backdrop')?.classList.contains('hidden')) return;
   renderNotifDrawer();
   // A close in flight is cancelled: the exit timer is dropped and the closing class removed, so a
   // reopen never inherits the fade-out it just interrupted.
@@ -444,9 +449,13 @@ function notificationRow(n) {
 
   const actions = document.createElement('div');
   actions.className = 'notif-row-actions';
+  // Disabled alongside the toolbar buttons while an unreadable encrypted blob is stored (see
+  // renderNotifications): a per-row delete here could not delete what is actually stored.
+  const rowLocked = hasUnreadEncrypted();
   const toggle = document.createElement('button');
   toggle.className = 'btn btn-secondary btn-small btn-icon-only';
   toggle.type = 'button';
+  toggle.disabled = rowLocked;
   paintNotifToggle(toggle, n.read);
   toggle.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -458,6 +467,7 @@ function notificationRow(n) {
   dismiss.innerHTML = NOTIF_ICON_X;
   dismiss.setAttribute('aria-label', 'Dismiss notification');
   dismiss.title = 'Dismiss notification';
+  dismiss.disabled = rowLocked;
   dismiss.addEventListener('click', (e) => {
     e.stopPropagation();
     dismissOneNotification(n.id);
@@ -484,9 +494,14 @@ function renderNotifications() {
 
   const note = el('notifications-note');
   const notes = [];
-  if (hasUnreadEncrypted()) {
+  // While an encrypted blob is stored but unreadable on this origin, mutating controls stay disabled:
+  // any delete or mark-read would only touch memory while the stored blob survives, so the action
+  // could not do what its label promises.
+  const locked = hasUnreadEncrypted();
+  if (locked) {
     notes.push('Encrypted notifications are stored on this browser but cannot be read on this connection '
-      + '(plain HTTP over LAN has no WebCrypto). They were left untouched — revisit over loopback or HTTPS.');
+      + '(plain HTTP over LAN has no WebCrypto). They were left untouched — managing is disabled until '
+      + 'you revisit over loopback or HTTPS.');
   } else if (isPlaintextFallback()) {
     notes.push('Stored unencrypted on this connection: this browser cannot do WebCrypto here '
       + '(plain HTTP over LAN), so anyone reading this browser profile can read these.');
@@ -502,12 +517,14 @@ function renderNotifications() {
   for (const n of list) host.appendChild(notificationRow(n));
   host.classList.toggle('hidden', list.length === 0);
   el('notifications-empty').classList.toggle('hidden', list.length > 0);
-  el('notifications-mark-all').disabled = unread === 0;
-  el('notifications-dismiss-all').disabled = list.length === 0;
+  el('notifications-mark-all').disabled = unread === 0 || locked;
+  el('notifications-dismiss-all').disabled = list.length === 0 || locked;
 }
 
 async function dismissAllNotificationsUI() {
   if (getNotifications().length === 0) return;
+  // Buttons are disabled while an unreadable encrypted blob is stored; this is the keyboard/forced-click net.
+  if (hasUnreadEncrypted()) return;
   if (!await confirmAction(
     'Dismiss every notification? This deletes them permanently.', 'Dismiss All')) return;
   clearNotifications();
@@ -580,6 +597,11 @@ function renderNotificationDetails() {
   }
   body.append(message, grid);
   paintNotifToggle(el('notification-details-toggle'), n.read);
+  // Same lock as the list rows: while an unreadable encrypted blob is stored, toggling or dismissing
+  // from the details modal could not touch what is actually stored.
+  const detailsLocked = hasUnreadEncrypted();
+  el('notification-details-toggle').disabled = detailsLocked;
+  el('notification-details-dismiss').disabled = detailsLocked;
   return true;
 }
 
@@ -589,7 +611,7 @@ function renderNotificationDetails() {
  * rather than leaving the portal on a dashboard it is no longer entitled to.
  */
 async function initNotificationsAfterAuth() {
-  const { unauthorized } = await refreshNotificationKey();
+  const { key, unauthorized } = await refreshNotificationKey();
   if (unauthorized) {
     await checkAuthStatus();
     return;
@@ -598,6 +620,11 @@ async function initNotificationsAfterAuth() {
   if (consumeDecryptFailure()) {
     notify('Stored notifications could not be decrypted, so they were cleared. '
       + 'This happens when the admin password changes.', 'warning');
+  } else if (!key && (hasUnreadEncrypted() || isMemoryOnly() || hasStoredBlob())) {
+    // The key endpoint failed for a non-auth reason (network/500): the portal must not look simply
+    // empty — stored history is unreachable and anything new lives in memory for this session only.
+    notify('Could not fetch the notification encryption key, so stored notifications are unavailable '
+      + 'and new ones live in memory for this session only.', 'warning');
   }
   refreshNotifBadge();
 }
@@ -2875,7 +2902,7 @@ async function refreshCatalog({ refresh = false } = {}) {
 }
 
 async function refreshJobs() {
-  const data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
+  let data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
   if (!data) return;
 
   // A sequence that went BACKWARDS means the server restarted: the registry is in-memory, so it begins
@@ -2883,12 +2910,29 @@ async function refreshJobs() {
   // holding and is sliced away at JOB_VIEW_LIMIT, while the cursor — only ever clamped upward — asks
   // for everything after a sequence the new process will not reach for a long time. The log feed
   // already handles exactly this; the job feed is the same shape and did not.
-  const lastSequence = Number(data.lastSequence) || 0;
-  if (lastSequence < jobCursor) { jobs = []; jobCursor = 0; }
+  if ((Number(data.lastSequence) || 0) < jobCursor) {
+    jobs = [];
+    jobCursor = 0;
+    // Notified ids belong to the old process and will never reappear — drop them so the set cannot
+    // grow one entry per finished job for the lifetime of the page.
+    reportedJobs.clear();
+    // The fetch above used the old process's cursor, so jobs the new process already created were
+    // missed: re-read at zero in this same tick rather than leaving per-card progress absent until
+    // the next poll.
+    data = await getJson(`/admin/api/packages/jobs?after=0`);
+    if (!data) return;
+  }
 
+  const lastSequence = Number(data.lastSequence) || 0;
   const before = new Set(jobs.filter((j) => j.terminal).map((j) => j.jobId));
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
   jobCursor = lastSequence || jobCursor;
+  // Bound the notified set to what is still in view: an id evicted at JOB_VIEW_LIMIT that later
+  // reappears notifies again, exactly as after a restart.
+  const inView = new Set(jobs.map((j) => j.jobId));
+  for (const id of reportedJobs) {
+    if (!inView.has(id)) reportedJobs.delete(id);
+  }
 
   // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
   // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
@@ -4082,12 +4126,12 @@ function wire() {
   el('notification-details-close')?.addEventListener('click', closeNotificationDetails);
   el('notification-details-close-x')?.addEventListener('click', closeNotificationDetails);
   el('notification-details-toggle')?.addEventListener('click', () => {
-    if (notifDetailId === null) return;
+    if (notifDetailId === null || hasUnreadEncrypted()) return;
     const current = getNotification(notifDetailId);
     if (current) markNotificationRead(notifDetailId, !current.read);
   });
   el('notification-details-dismiss')?.addEventListener('click', () => {
-    if (notifDetailId !== null) dismissOneNotification(notifDetailId);
+    if (notifDetailId !== null && !hasUnreadEncrypted()) dismissOneNotification(notifDetailId);
   });
 
   el('confirm-ok')?.addEventListener('click', () => settleConfirm(true));

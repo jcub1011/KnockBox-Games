@@ -192,6 +192,26 @@ export function isMemoryOnly() {
   return items.length > 0 && !keyBytes && !plaintextFallback && resolveSubtle() !== null;
 }
 
+/**
+ * True when storage holds any notification blob (v0 or v1), regardless of readability. Lets callers
+ * tell "no stored notifications" apart from "stored but currently unavailable" (key fetch failed).
+ */
+export function hasStoredBlob() {
+  let raw = null;
+  try {
+    raw = storage?.getItem(NOTIFICATION_STORAGE_KEY) ?? null;
+  } catch {
+    return false;
+  }
+  if (!raw) return false;
+  try {
+    const env = JSON.parse(raw);
+    return !!env && typeof env === 'object' && (env.v === 0 || env.v === 1);
+  } catch {
+    return false;
+  }
+}
+
 export function subscribe(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);

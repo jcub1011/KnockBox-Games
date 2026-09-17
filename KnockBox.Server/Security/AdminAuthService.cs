@@ -325,17 +325,34 @@ public sealed class AdminAuthService
     /// </summary>
     private byte[] SecretFingerprint()
     {
+        if (TryGetSecretFingerprint(out var fingerprint, logFailure: true))
+            return fingerprint;
+        // An unreadable secret must not authenticate anyone. Returning a random key makes every
+        // signature comparison fail closed, rather than falling back to a constant an attacker
+        // could rely on.
+        return RandomNumberGenerator.GetBytes(HashSizeBytes);
+    }
+
+    /// <summary>
+    /// Tries to read the SHA-256 of the secret file's bytes. Returns false (rather than throwing)
+    /// when the file cannot be read — a transient lock (AV/indexer) must be distinguishable from a
+    /// password change, so <see cref="NotificationKeyService"/> keeps its existing key on failure
+    /// instead of rotating. Session validation stays fail-closed via <see cref="SecretFingerprint"/>.
+    /// Empty (unconfigured) is a successful read of nothing, not a failure.
+    /// </summary>
+    internal bool TryGetSecretFingerprint(out byte[] fingerprint, bool logFailure = true)
+    {
         try
         {
-            return File.Exists(_secretFilePath) ? SHA256.HashData(File.ReadAllBytes(_secretFilePath)) : [];
+            fingerprint = File.Exists(_secretFilePath) ? SHA256.HashData(File.ReadAllBytes(_secretFilePath)) : [];
+            return true;
         }
         catch (Exception ex)
         {
-            // An unreadable secret must not authenticate anyone. Returning a random key makes every
-            // signature comparison fail closed, rather than falling back to a constant an attacker
-            // could rely on.
-            _logger.LogWarning(ex, "Could not read admin secret file at '{Path}' to validate a session.", _secretFilePath);
-            return RandomNumberGenerator.GetBytes(HashSizeBytes);
+            fingerprint = [];
+            if (logFailure)
+                _logger.LogWarning(ex, "Could not read admin secret file at '{Path}'.", _secretFilePath);
+            return false;
         }
     }
 

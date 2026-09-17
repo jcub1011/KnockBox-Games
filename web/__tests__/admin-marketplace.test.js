@@ -938,11 +938,12 @@ describe('the job feed survives a server restart', () => {
     fake.routes['GET /admin/api/packages/jobs'] =
       { body: { jobs: [{ ...runningJob, jobId: 'fresh', sequence: 1 }], lastSequence: 1, active: 1, retained: 1 } };
     await vi.advanceTimersByTimeAsync(3500);
-    await vi.advanceTimersByTimeAsync(3500);
 
-    // The poll after the restart asks after the new process's sequence, not the old 900…
-    const last = fake.calls.filter((c) => c.path === '/admin/api/packages/jobs').at(-1);
-    expect(last.url).toContain('after=1');
+    // The poll after the restart re-reads at zero in the same tick — the first fetch used the old
+    // process's cursor, so without the re-fetch the new process's jobs would wait for the next poll.
+    const recent = fake.calls.filter((c) => c.path === '/admin/api/packages/jobs').slice(-2);
+    expect(recent[0].url).toContain('after=900');
+    expect(recent[1].url).toContain('after=0');
     // …and the still-running fresh job raises no notification until it finishes.
     expect(el('notif-badge').textContent).toBe('1');
   });

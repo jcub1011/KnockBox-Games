@@ -48,8 +48,9 @@ outcomes, failed saves, delivery results — becomes a persistent notification i
   clicking it opens the full list, newest first.
 - The preview dismisses itself after five seconds unless you're hovering it or it has keyboard focus.
   On touch devices there is no hover, so the bell skips the preview and opens the list directly.
-  Previewing, opening, or clicking a notification never marks it read — only the explicit **Mark read** /
-  **Mark unread** buttons do, per notification or via **Mark all read**.
+  Previewing the drawer or opening the list never marks anything read; opening a notification's
+  details view marks that one read. The explicit **Mark read** / **Mark unread** buttons (per
+  notification or via **Mark all read**) change read state for anything else.
 - **Dismiss** deletes one notification; **Dismiss all** (behind a confirm) deletes everything. Clicking a
   notification opens a details view with the full text and the exact received time, with seconds.
 - Up to **50** notifications are kept in `localStorage`; older ones fall off as new ones arrive.

@@ -802,8 +802,9 @@
     <div id="notif-drawer-items" class="notif-drawer-items"></div>
   </div>
 
-  <!-- Notification list. Newest first; read state changes only via the explicit buttons, never by
-       opening or clicking a row (clicking opens the details modal below, also without marking read). -->
+  <!-- Notification list. Newest first; read state changes via the explicit buttons, and by
+        opening the details modal (which marks the shown item read). The drawer preview never marks
+        read, and clicking a row only opens the details modal. -->
   <div class="modal-backdrop hidden" id="notifications-backdrop">
     <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="notifications-title">
       <div class="modal-header-row">

@@ -157,6 +157,24 @@ describe('arrival drawer', () => {
     // The badge still moves — suppression is about attention, not information.
     expect(el('notif-badge').textContent).toBe('1');
   });
+
+  it('stays shut while the details modal is open', async () => {
+    vi.useFakeTimers();
+    await bootstrapAuthed();
+    notifs.notify('Detail me', 'info');
+    el('notif-bell-btn').click();
+    el('notifications-list').querySelector('.notif-row').click();
+    expect(el('notification-details-backdrop').classList.contains('hidden')).toBe(false);
+    // Opening details closes the drawer through its exit animation — let it land first.
+    await vi.advanceTimersByTimeAsync(200);
+
+    // An arrival here must not pop the drawer underneath the modal (where it would arm its
+    // auto-dismiss timer invisibly) — the badge is the only signal. (The first item was marked
+    // read by opening its details, so only the arrival counts.)
+    notifs.notify('While details', 'warning');
+    expect(el('notif-drawer').classList.contains('hidden')).toBe(true);
+    expect(el('notif-badge').textContent).toBe('1');
+  });
 });
 
 describe('list modal', () => {
@@ -222,6 +240,40 @@ describe('list modal', () => {
     el('notif-bell-btn').click();
     expect(el('notifications-note').classList.contains('hidden')).toBe(false);
     expect(el('notifications-note').textContent).toContain('unencrypted');
+  });
+
+  it('disables managing while an unreadable encrypted blob is stored', async () => {
+    await bootstrapAuthed();
+    // A previous secure-context session left ciphertext behind…
+    notifs.setNotificationKey(new Uint8Array(32).fill(7));
+    notifs.notify('Secure history', 'error');
+    await notifs.persistNow();
+    expect(localStorage.getItem('kb.admin.notifications')).toContain('"v":1');
+
+    // …and this visit is over plain-HTTP LAN: no WebCrypto, no key.
+    notifs.setSubtleForTests(null);
+    notifs.setNotificationKey(null);
+    await notifs.loadNotifications();
+    expect(notifs.hasUnreadEncrypted()).toBe(true);
+
+    notifs.notify('Session note', 'info'); // memory-only
+    el('notif-bell-btn').click();
+    expect(el('notifications-note').classList.contains('hidden')).toBe(false);
+    expect(el('notifications-note').textContent).toContain('disabled');
+    // Toolbar, per-row, and details-modal controls all stay disabled: any delete or mark-read
+    // here would only touch memory while the stored blob survives, so it could not do what its
+    // label promises.
+    expect(el('notifications-dismiss-all').disabled).toBe(true);
+    expect(el('notifications-mark-all').disabled).toBe(true);
+    const row = el('notifications-list').querySelector('.notif-row');
+    for (const btn of row.querySelectorAll('button')) expect(btn.disabled).toBe(true);
+
+    row.click();
+    expect(el('notification-details-toggle').disabled).toBe(true);
+    expect(el('notification-details-dismiss').disabled).toBe(true);
+
+    // The stored blob survives the session untouched.
+    expect(localStorage.getItem('kb.admin.notifications')).toContain('"v":1');
   });
 });
 
@@ -531,8 +583,22 @@ describe('encrypted store', () => {
     expect(notifs.isPlaintextFallback()).toBe(false);
   });
 
-  it('drops memory without touching storage on logout unload', async () => {
-    vi.useFakeTimers();
+  it('reports whether a blob is stored', async () => {
+    const storage = memoryStorage();
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage });
+    expect(notifs.hasStoredBlob()).toBe(false);
+
+    notifs.setNotificationKey(keyA);
+    notifs.notify('Hi', 'info');
+    await notifs.persistNow();
+    expect(notifs.hasStoredBlob()).toBe(true);
+
+    storage.setItem('kb.admin.notifications', '{not json');
+    expect(notifs.hasStoredBlob()).toBe(false);
+  });
+
+  it('drops memory without touching storage on logout unload', async () => {    vi.useFakeTimers();
     const storage = memoryStorage();
     notifs.resetNotificationsForTests();
     notifs.initNotificationStore({ storage });
@@ -551,5 +617,36 @@ describe('encrypted store', () => {
     notifs.unloadNotificationsForLogout();
     await vi.advanceTimersByTimeAsync(500);
     expect(storage.getItem('kb.admin.notifications')).toBe(before);
+  });
+});
+
+describe('key fetch failure', () => {
+  it('warns instead of looking empty when stored history is unreachable', async () => {
+    // A previous session left ciphertext behind…
+    const seed = await import('../admin/admin-notifications.js');
+    seed.initNotificationStore({ storage: localStorage });
+    seed.setNotificationKey(new Uint8Array(32).fill(7));
+    seed.notify('Earlier outcome', 'info');
+    await seed.persistNow();
+    seed.stopPersistTimer();
+    expect(localStorage.getItem('kb.admin.notifications')).toContain('"v":1');
+
+    // …and now the key endpoint fails for a non-auth reason (network/500).
+    vi.resetModules();
+    installFakeFetch(authedRoutes({ 'GET /admin/api/notifications/key': { status: 500 } }));
+    await importBoth();
+    admin.bootstrap();
+    await tick();
+    await tick();
+    await tick();
+
+    expect(notifs.getNotifications().some((n) => n.message.includes('encryption key'))).toBe(true);
+    expect(el('notif-badge').textContent).toBe('1');
+  });
+
+  it('stays silent when the key fails but nothing is stored', async () => {
+    await bootstrapAuthed({ 'GET /admin/api/notifications/key': { status: 500 } });
+    expect(notifs.getNotifications()).toHaveLength(0);
+    expect(el('notif-badge').classList.contains('hidden')).toBe(true);
   });
 });

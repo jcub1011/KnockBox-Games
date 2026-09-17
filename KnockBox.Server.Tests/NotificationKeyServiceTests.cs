@@ -28,7 +28,12 @@ public class NotificationKeyServiceTests : IDisposable
 
     public void Dispose()
     {
-        try { if (File.Exists(_tempSecretPath)) File.Delete(_tempSecretPath); } catch { /* best effort */ }
+        try
+        {
+            if (File.Exists(_tempSecretPath)) File.Delete(_tempSecretPath);
+            else if (Directory.Exists(_tempSecretPath)) Directory.Delete(_tempSecretPath);
+        }
+        catch { /* best effort */ }
         GC.SuppressFinalize(this);
     }
 
@@ -65,6 +70,40 @@ public class NotificationKeyServiceTests : IDisposable
         Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("SecondPassword456"));
 
         Assert.NotEqual(before, keys.GetKeyBase64());
+    }
+
+    [Fact]
+    public void Key_is_stable_across_transient_secret_read_failures()
+    {
+        // A directory at the secret path makes every read throw (portably, on Windows and Linux),
+        // simulating a transient AV/indexer lock. That must not look like a password change.
+        Directory.CreateDirectory(_tempSecretPath);
+        try
+        {
+            var auth = Auth();
+            var keys = new NotificationKeyService(auth, maxAttempts: 3, retryDelayMs: 0);
+
+            Assert.Equal(keys.GetKeyBase64(), keys.GetKeyBase64());
+        }
+        finally
+        {
+            Directory.Delete(_tempSecretPath);
+        }
+    }
+
+    [Fact]
+    public void Key_rotates_once_after_recovery_from_read_failures()
+    {
+        Directory.CreateDirectory(_tempSecretPath);
+        var auth = Auth();
+        var keys = new NotificationKeyService(auth, maxAttempts: 2, retryDelayMs: 0);
+        var fallback = keys.GetKeyBase64();
+        Directory.Delete(_tempSecretPath);
+
+        Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("FirstPassword123"));
+
+        Assert.NotEqual(fallback, keys.GetKeyBase64());
+        Assert.Equal(keys.GetKeyBase64(), keys.GetKeyBase64());
     }
 
     [Fact]
