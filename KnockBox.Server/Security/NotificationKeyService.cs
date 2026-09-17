@@ -137,7 +137,8 @@ public sealed class NotificationKeyService
             {
                 // Still unreadable: keep serving the existing key (mint once when there is none),
                 // untagged so the next successful read rotates exactly once instead of once per call.
-                // Never persisted without a fingerprint to bind it to.
+                // Never persisted without a fingerprint to bind it to (Persist_Locked skips
+                // untagged entries, so a later call for another account cannot sweep this one to disk).
                 if (entry is not null)
                     return (byte[])entry.Key.Clone();
                 _logger.LogWarning("Admin secret file still unreadable; minted a fallback notification key.");
@@ -241,6 +242,12 @@ public sealed class NotificationKeyService
         {
             if (entry.Key.Length != KeySizeBytes)
                 continue;
+            // Untagged fallbacks (minted while the secret file was unreadable) carry no fingerprint
+            // to bind them to, so they stay memory-only: persisting one would write a key whose next
+            // successful read cannot tell it apart from a password change, and another account's
+            // persist would otherwise sweep it to disk.
+            if (entry.Fingerprint.Length == 0)
+                continue;
             records[id] = new NotificationKeyEntry(
                 Convert.ToHexString(entry.Fingerprint), Convert.ToBase64String(entry.Key));
         }
@@ -271,8 +278,11 @@ public sealed class NotificationKeyService
                 File.WriteAllBytes(temp, json);
             }
             AtomicFile.MoveWithRetry(temp, _keyFilePath);
-            foreach (var entry in _entries.Values)
-                entry.Persisted = true;
+            foreach (var (id, entry) in _entries)
+            {
+                if (records.ContainsKey(id))
+                    entry.Persisted = true;
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

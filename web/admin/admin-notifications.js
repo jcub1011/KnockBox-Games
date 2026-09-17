@@ -123,7 +123,11 @@ async function decryptEnvelope(env, key, subtle) {
 export function initNotificationStore({ storage: s = defaultStorage(), onNew = null, accountId = null } = {}) {
   storage = s;
   onNewCallback = onNew;
-  storeKey = accountId ? `${NOTIFICATION_STORAGE_KEY}.${accountId}` : NOTIFICATION_STORAGE_KEY;
+  // Trim to agree with the server's NormalizeAccountId (blank means the default account): a
+  // whitespace-only id namespaces client-side but not server-side if compared by truthiness.
+  const trimmed = typeof accountId === 'string' ? accountId.trim() : '';
+  storeKey = trimmed ? `${NOTIFICATION_STORAGE_KEY}.${trimmed}` : NOTIFICATION_STORAGE_KEY;
+  items = [];
 }
 
 /** The data key, held in memory only. Null clears it (logout). */

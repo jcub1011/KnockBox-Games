@@ -166,14 +166,39 @@ if (containerMounts is not null)
     var adminSettingsPath = AdminSettingsStore.ResolveFilePath(builder.Configuration, adminSecretPath);
     var adminNotificationKeyPath = NotificationKeyService.ResolveKeyPath(builder.Configuration, adminSecretPath);
 
+    var adminStateDir = Path.GetDirectoryName(adminSecretPath) ?? adminSecretPath;
+    var adminSettingsDir = Path.GetDirectoryName(adminSettingsPath) ?? adminSettingsPath;
+    var adminKeyDir = Path.GetDirectoryName(adminNotificationKeyPath) ?? adminNotificationKeyPath;
+
     List<(string Path, string Title, string Lost)> persistentState =
     [
-        (Path.GetDirectoryName(adminSecretPath) ?? adminSecretPath, "Admin state is not persisted",
+        (adminStateDir, "Admin state is not persisted",
             $"the admin password ('{adminSecretPath}'), every saved operator policy decision " +
             $"('{adminSettingsPath}') — disabled and staged games, maintenance mode, runtime limit " +
             "overrides, banned room codes, the announcement, registered marketplaces and webhooks — " +
             $"and the notification encryption keys ('{adminNotificationKeyPath}')"),
     ];
+    // A custom AdminSettingsPath / AdminNotificationKeyPath can live on a different mount than the
+    // secret file. The base entry above only checks the secret's directory, so an ephemeral key or
+    // settings dir would be lost on the next image update with no warning. Warn per distinct dir.
+    var settingsSharesSecretDir =
+        string.Equals(adminSettingsDir, adminStateDir, StringComparison.OrdinalIgnoreCase);
+    var keySharesSecretDir =
+        string.Equals(adminKeyDir, adminStateDir, StringComparison.OrdinalIgnoreCase);
+    var keySharesSettingsDir =
+        string.Equals(adminKeyDir, adminSettingsDir, StringComparison.OrdinalIgnoreCase);
+    if (!settingsSharesSecretDir)
+    {
+        var lost = $"saved operator policy decisions ('{adminSettingsPath}')";
+        if (!keySharesSecretDir && keySharesSettingsDir)
+            lost += $" and the notification encryption keys ('{adminNotificationKeyPath}')";
+        persistentState.Add((adminSettingsDir, "Admin settings are not persisted", lost));
+    }
+    if (!keySharesSecretDir && (settingsSharesSecretDir || !keySharesSettingsDir))
+    {
+        persistentState.Add((adminKeyDir, "Notification keys are not persisted",
+            $"the notification encryption keys ('{adminNotificationKeyPath}')"));
+    }
     if (managedPackagesEnabled)
         persistentState.Add((gamesManagedRoot, "Installed packages are not persisted",
             "every game the admin portal installed. A marketplace package can be downloaded again; " +
