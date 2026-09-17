@@ -23,7 +23,10 @@ public class GamePackageLocationsTests : IDisposable
             Path.Combine(_root, "logs"),
             Path.Combine(_root, "games-compressed"),
             Path.Combine(_root, "games-unpacked"),
-            Path.Combine(_root, "games-managed"));
+            Path.Combine(_root, "games-managed"))
+        {
+            BlobsRoot = Path.Combine(_root, "blobs"),
+        };
         foreach (var dir in new[] { _paths.GamesRoot, _paths.GamesUnpackedRoot, _paths.GamesManagedRoot })
             Directory.CreateDirectory(dir);
     }

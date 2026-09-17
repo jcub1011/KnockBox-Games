@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Outfit:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet" href="/admin.css" />
+  <link rel="stylesheet" href="/admin.css?v=__KB_ADMIN_HASH__" />
 </head>
 <body>
   <div id="app">
@@ -53,6 +53,18 @@
       </nav>
 
       <div class="header-actions">
+        <!-- Operator notifications. The badge counts unread (hidden at zero); hover or tap opens a
+             preview of the three newest, clicking the bell opens the full list. Hidden until the
+             dashboard is — there is nothing to show, and no key to read it with, before login. -->
+        <div class="notif-bell-wrap hidden" id="notif-bell-wrap">
+          <button id="notif-bell-btn" class="notif-bell-btn" aria-label="Notifications" aria-expanded="false" title="Notifications">
+            <svg class="notif-bell-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>
+              <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path>
+            </svg>
+            <span class="notif-badge hidden" id="notif-badge"></span>
+          </button>
+        </div>
         <!-- Only ever rendered when something is wrong. An "Admin Port Active" pill could by
              construction never be read while it was false: this page is served BY the admin port, so
              the pill was green or the whole portal was absent. Hidden until showErrorStatus paints it. -->
@@ -60,7 +72,13 @@
           <span class="status-dot"></span>
           <span id="server-status-text"></span>
         </div>
-        <button id="logout-btn" class="btn btn-secondary hidden">Log Out</button>
+        <button id="logout-btn" class="btn btn-secondary btn-icon-only hidden" aria-label="Log out" title="Log out">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -71,8 +89,7 @@
       <section id="setup-view" class="view-card hidden">
         <div class="card-header">
           <h2>Initialize Admin Password</h2>
-          <p>This server is unconfigured. Set an administrative password to secure this portal &mdash; until
-             you do, anyone who can reach this page can claim it. Minimum 12 characters.</p>
+          <p>This server is unconfigured. Set an administrative password. Minimum 12 characters.</p>
         </div>
         <form id="setup-form" class="auth-form">
           <div class="form-group">
@@ -90,6 +107,7 @@
         </form>
         <div class="info-note">
           <strong>Password Reset Note:</strong> In server environments, deleting the <code>admin.secret</code> file on disk resets authentication state back to setup mode.
+          Setting a new password also clears locally stored portal notifications.
         </div>
       </section>
 
@@ -183,13 +201,7 @@
 
               <!-- Setting: Per-Game Server Cost -->
               <div class="setting-card panel-card" id="setting-cost" data-setting-id="setting-cost">
-                <div class="panel-card-header"><h3>Per-Game Server Cost</h3></div>
-                <p class="panel-card-note">
-                  Games run in the player's browser, but relaying for them is not free: every socket holds a
-                  queued outbound channel and a writer task, and a broadcast serializes once then sends once
-                  per recipient. Totals are cumulative since the server started; rates are measured between
-                  polls. Server-authority games additionally run their logic here.
-                </p>
+                <div class="panel-card-header"><h3>Per-Game Server Utilization</h3></div>
                 <div class="table-scroll">
                   <table class="data-table" id="metrics-table">
                     <thead>
@@ -313,6 +325,37 @@
               <div class="setting-card panel-card tab-panel" id="setting-games" data-setting-id="setting-games" data-tab="games">
                 <div class="panel-card-header">
                   <h3>Plugins &amp; Games</h3>
+                  <span class="filter-spacer"></span>
+                  <div class="panel-header-actions">
+                    <button class="btn btn-secondary btn-icon-only" id="rescan-btn" aria-label="Rescan Now" title="Rescan Now">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="23 4 23 10 17 10"></polyline>
+                        <polyline points="1 20 1 14 7 14"></polyline>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                      </svg>
+                    </button>
+                    <button class="btn btn-secondary btn-icon-only" id="mkt-upload-btn" aria-label="Upload .kbg…" title="Upload .kbg…">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="16 16 12 12 8 16"></polyline>
+                        <line x1="12" y1="12" x2="12" y2="21"></line>
+                        <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path>
+                      </svg>
+                    </button>
+                    <button class="btn btn-secondary btn-icon-only" id="mkt-settings-btn" aria-label="Sources…" title="Sources…">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                      </svg>
+                    </button>
+                    <button class="btn btn-secondary btn-icon-only" id="mkt-refresh-btn" aria-label="Refresh Catalog" title="Refresh Catalog">
+                      <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="8 17 12 21 16 17"></polyline>
+                        <line x1="12" y1="21" x2="12" y2="9"></line>
+                        <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"></path>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
 
                 <div class="panel-card hidden" id="mkt-disabled">
@@ -324,12 +367,24 @@
                   </p>
                 </div>
 
-                <!-- In-flight and recently finished operations -->
-                <div class="panel-card hidden" id="mkt-jobs-card">
-                  <div class="panel-card-header"><h4>Operations</h4></div>
-                  <div id="mkt-jobs"></div>
-                </div>
+                <!-- In-flight and recently finished operations now surface as notifications
+                     (bell icon, above): job outcomes are announced there, so no inline list is needed. -->
 
+                <div class="plugin-tabs" role="tablist" aria-label="Plugin status">
+                  <button type="button" role="tab" id="ptab-installed" class="plugin-tab-btn active"
+                          data-ptab="installed" aria-selected="true">Installed
+                    <span class="plugin-tab-count" id="ptab-count-installed"></span></button>
+                  <button type="button" role="tab" id="ptab-updates" class="plugin-tab-btn"
+                          data-ptab="updates" aria-selected="false" tabindex="-1">Updates
+                    <span class="plugin-tab-count" id="ptab-count-updates"></span></button>
+                  <button type="button" role="tab" id="ptab-available" class="plugin-tab-btn"
+                          data-ptab="available" aria-selected="false" tabindex="-1">Available
+                    <span class="plugin-tab-count" id="ptab-count-available"></span></button>
+                  <span class="filter-spacer"></span>
+                  <!-- Shown when a background poll saw newer data than the frozen list below.
+                       A button, not a badge: clicking it is the manual refresh. -->
+                  <button type="button" class="stale-pill hidden" id="plugins-stale">List may be outdated &mdash; Refresh</button>
+                </div>
                 <div class="filter-bar">
                   <input type="search" id="plugins-filter-q" class="text-input" placeholder="Filter by name, id, tag, or description" />
                   <select id="plugins-filter-source" class="text-input filter-narrow">
@@ -337,18 +392,16 @@
                     <option value="games">Games Folder</option>
                     <option value="upload">Manual Upload</option>
                   </select>
-                  <select id="plugins-filter-status" class="text-input filter-narrow">
-                    <option value="">Any Status</option>
-                    <option value="installed">Installed</option>
-                    <option value="updateAvailable">Update Available</option>
-                    <option value="problem">Problems</option>
-                    <option value="notInstalled">Not Installed</option>
+                  <select id="plugins-sort" class="text-input filter-narrow" aria-label="Sort plugins">
+                    <option value="name-az">Name (A&ndash;Z)</option>
+                    <option value="name-za">Name (Z&ndash;A)</option>
+                    <option value="status">Status (problems first)</option>
+                    <option value="newest">Newest first</option>
+                    <option value="updated">Recently updated</option>
+                    <option value="version">Version (highest first)</option>
+                    <option value="size">Largest first</option>
+                    <option value="active">Most active first</option>
                   </select>
-                  <span class="filter-spacer"></span>
-                  <button class="btn btn-secondary" id="rescan-btn">Rescan Now</button>
-                  <button class="btn btn-secondary" id="mkt-upload-btn">Upload .kbg…</button>
-                  <button class="btn btn-secondary" id="mkt-settings-btn">Sources…</button>
-                  <button class="btn btn-secondary" id="mkt-refresh-btn">Refresh Catalog</button>
                 </div>
                 <div id="plugins-list" class="games-list"></div>
                 <p class="empty-state" id="plugins-empty">No plugins discovered or available.</p>
@@ -479,8 +532,7 @@
                 <span class="badge" id="maintenance-badge">Off</span>
               </div>
               <p class="panel-card-note">
-                Blocks new lobbies across every game. Sessions already running are left alone and finish
-                normally &mdash; use it to drain the platform before a restart, not to stop it dead.
+                Blocks new lobbies across every game. Sessions already running are left alone and finish normally.
               </p>
               <div class="field-row">
                 <input type="text" id="maintenance-message" class="text-input"
@@ -496,9 +548,7 @@
                 <span class="badge" id="announce-badge">None</span>
               </div>
               <p class="panel-card-note">
-                One banner, shown on the player home page until they dismiss it or you clear it. Everyone
-                connected sees it immediately, and anyone arriving later gets it too. Purely informational
-                &mdash; it stops nothing; maintenance mode is the control that blocks new lobbies.
+                One banner, shown on the player home page until they dismiss it or you clear it.
               </p>
               <div class="field-row">
                 <input type="text" id="announce-text" class="text-input" maxlength="200"
@@ -525,10 +575,8 @@
                 <span class="badge" id="limits-badge" hidden>Overridden</span>
               </div>
               <p class="panel-card-note">
-                Abuse protection and capacity. A change applies immediately &mdash; including to sockets
-                that are already open &mdash; and is saved, so it survives a restart. Leave a field empty to
-                use its default; <strong>0</strong> is different, and disables that limit entirely. A lowered
-                cap never disconnects anyone: it refuses the next connection or lobby.
+                Abuse protection and capacity. A change applies immediately. Leave a field empty to
+                use its default; <strong>0</strong> disables that limit entirely.
               </p>
               <div id="limits-fields"></div>
               <div class="field-row">
@@ -548,10 +596,7 @@
               </div>
               <p class="panel-card-note">
                 When this server checks its marketplaces for newer versions of the games you enrolled in
-                automatic updates (Marketplace tab). Times are <strong>UTC</strong>, so the schedule does
-                not move with a host's time zone or with daylight saving. A check also runs shortly after
-                every start; <strong>Refresh Catalog</strong> on the Marketplace tab checks right now
-                regardless of this.
+                automatic updates (Marketplace tab). A check also runs shortly after every start.
               </p>
               <div class="field-row">
                 <select id="schedule-cadence" class="text-input filter-narrow">
@@ -577,7 +622,6 @@
                 <span class="filter-spacer"></span>
                 <button class="btn btn-secondary btn-small" id="schedule-refresh">Refresh</button>
               </div>
-              <p class="panel-card-note" id="schedule-note"></p>
             </div>
 
             <!-- Setting: Banned Room Codes -->
@@ -650,10 +694,7 @@
             <div class="setting-card panel-card" id="setting-startup-config" data-setting-id="setting-startup-config">
               <div class="panel-card-header"><h3>Set in Configuration</h3></div>
               <p class="panel-card-note">
-                These are deliberately not editable here. The reconnect and handshake windows are read when
-                the server starts (the reaper's own interval comes from the grace window), and the admin
-                login caps bound the CPU an unauthenticated caller can spend on password hashing &mdash; a
-                lock that opens from inside the room it protects is not a lock. Change them with
+                These are deliberately not editable here. Change them with
                 <code>KnockBox:*</code> configuration and restart.
               </p>
               <div class="table-scroll">
@@ -661,10 +702,6 @@
                   <thead><tr><th>Setting</th><th>Value</th></tr></thead>
                   <tbody id="limits-startup-body"></tbody>
                 </table>
-              </div>
-              <div class="info-card">
-                <h3>Network Port Isolation Active</h3>
-                <p>This administrative portal is executing on a dedicated network port. Admin APIs and portal static pages are strictly inaccessible over public player or game origin ports.</p>
               </div>
             </div>
           </section>
@@ -713,9 +750,7 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
       <h3 id="upload-title">Upload a game package</h3>
       <p class="panel-card-note">
-        A <code>.kbg</code> package, as produced by <code>knockbox-pack</code>. It is validated exactly
-        like one downloaded from a marketplace — but nothing published its hash, so the bytes you supply
-        are the only thing vouching for it.
+        A <code>.kbg</code> package, as produced by <code>knockbox-pack</code>.
       </p>
       <div class="upload-drop" id="upload-drop" tabindex="0" role="button">
         <span id="upload-name">Drop a .kbg here, or click to choose one</span>
@@ -770,8 +805,67 @@
     </div>
   </div>
 
-  <div class="toast-host" id="toast-host" aria-live="polite"></div>
+  <!-- Arrival preview: the three newest notifications, below the bell. It previews only — nothing
+       here marks anything read. Hover or keyboard focus holds it; otherwise it dismisses itself. -->
+  <div class="notif-drawer hidden" id="notif-drawer" role="status" aria-live="polite" aria-label="Latest notifications">
+    <div class="notif-drawer-header">
+      <span class="notif-drawer-title">Latest</span>
+      <span class="filter-spacer"></span>
+      <button type="button" class="notif-link" id="notif-drawer-all">View all</button>
+      <button type="button" class="modal-close-icon" id="notif-drawer-close" aria-label="Dismiss preview">&times;</button>
+    </div>
+    <div id="notif-drawer-items" class="notif-drawer-items"></div>
+  </div>
 
-  <script type="module">import { bootstrap } from '/admin.js'; bootstrap();</script>
+  <!-- Notification list. Newest first; read state changes via the explicit buttons, and by
+        opening the details modal (which marks the shown item read). The drawer preview never marks
+        read, and clicking a row only opens the details modal. -->
+  <div class="modal-backdrop hidden" id="notifications-backdrop">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="notifications-title">
+      <div class="modal-header-row">
+        <h3 id="notifications-title">Notifications</h3>
+        <button type="button" class="modal-close-icon" id="notifications-close-x" aria-label="Close dialog">&times;</button>
+      </div>
+      <p class="panel-card-note hidden" id="notifications-note"></p>
+      <div class="notif-toolbar">
+        <span class="badge badge-muted" id="notifications-unread">0 unread</span>
+        <span class="filter-spacer"></span>
+        <button class="btn btn-secondary btn-small" id="notifications-mark-all" type="button">Mark all read</button>
+        <button class="btn btn-danger btn-small" id="notifications-dismiss-all" type="button">Dismiss all</button>
+      </div>
+      <div id="notifications-list" class="notif-list"></div>
+      <p class="empty-state hidden" id="notifications-empty">No notifications.</p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="notifications-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- One notification, whole: full text, kind, read state, and the full absolute time with seconds. -->
+  <div class="modal-backdrop hidden" id="notification-details-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="notification-details-title">
+      <div class="modal-header-row">
+        <h3 id="notification-details-title">Notification</h3>
+        <button type="button" class="modal-close-icon" id="notification-details-close-x" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body notif-details-body" id="notification-details-body"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary btn-icon-only" id="notification-details-toggle" type="button" aria-label="Mark unread" title="Mark unread">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 8L17.4392 9.97822C15.454 11.0811 14.4614 11.6326 13.4102 11.8488C12.4798 12.0401 11.5202 12.0401 10.5898 11.8488C9.53864 11.6326 8.54603 11.0811 6.5608 9.97822L3 8M6.2 19H17.8C18.9201 19 19.4802 19 19.908 18.782C20.2843 18.5903 20.5903 18.2843 20.782 17.908C21 17.4802 21 16.9201 21 15.8V8.2C21 7.0799 21 6.51984 20.782 6.09202C20.5903 5.71569 20.2843 5.40973 19.908 5.21799C19.4802 5 18.9201 5 17.8 5H6.2C5.0799 5 4.51984 5 4.09202 5.21799C3.71569 5.40973 3.40973 5.71569 3.21799 6.09202C3 6.51984 3 7.07989 3 8.2V15.8C3 16.9201 3 17.4802 3.21799 17.908C3.40973 18.2843 3.71569 18.5903 4.09202 18.782C4.51984 19 5.07989 19 6.2 19Z"></path>
+          </svg>
+        </button>
+        <button class="btn btn-danger btn-icon-only" id="notification-details-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+        <button class="btn btn-secondary" id="notification-details-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">import { bootstrap } from '/admin.js?v=__KB_ADMIN_HASH__'; bootstrap();</script>
 </body>
 </html>

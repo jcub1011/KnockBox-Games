@@ -317,6 +317,60 @@ export function formatBytes(bytes) {
 }
 
 /**
+ * Scales for byte settings input, from BYTE up to TiB with decimal (SI) and binary (IEC) units.
+ */
+export const BYTE_SCALES = [
+  { unit: 'BYTE', multiplier: 1 },
+  { unit: 'KB', multiplier: 1_000 },
+  { unit: 'KiB', multiplier: 1_024 },
+  { unit: 'MB', multiplier: 1_000_000 },
+  { unit: 'MiB', multiplier: 1_048_576 },
+  { unit: 'GB', multiplier: 1_000_000_000 },
+  { unit: 'GiB', multiplier: 1_073_741_824 },
+  { unit: 'TB', multiplier: 1_000_000_000_000 },
+  { unit: 'TiB', multiplier: 1_099_511_627_776 },
+];
+
+export const BYTE_UNITS = BYTE_SCALES.map((s) => s.unit);
+
+export const BYTE_MULTIPLIERS = Object.fromEntries(BYTE_SCALES.map((s) => [s.unit, s.multiplier]));
+
+/**
+ * Decomposes a byte integer into an integer number and the largest matching scaling unit,
+ * falling back to 'BYTE' if not evenly divisible by larger units.
+ */
+export function splitBytes(bytes) {
+  if (bytes === null || bytes === undefined || bytes === '') {
+    return { value: '', unit: 'BYTE' };
+  }
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n === 0) {
+    return { value: 0, unit: 'BYTE' };
+  }
+  if (n < 0) {
+    return { value: n, unit: 'BYTE' };
+  }
+  for (let i = BYTE_SCALES.length - 1; i >= 0; i--) {
+    const { unit, multiplier } = BYTE_SCALES[i];
+    if (multiplier > 1 && n >= multiplier && n % multiplier === 0) {
+      return { value: n / multiplier, unit };
+    }
+  }
+  return { value: n, unit: 'BYTE' };
+}
+
+/**
+ * Formats a byte limit for display in placeholders or hints, decomposing into the largest matching integer unit.
+ */
+export function formatByteLimit(bytes) {
+  if (bytes === null || bytes === undefined || bytes === '') {
+    return '--';
+  }
+  const split = splitBytes(bytes);
+  return `${split.value} ${split.unit}`;
+}
+
+/**
  * A duration in seconds as the two largest useful units ("3d 4h", "5m 12s"). Two units, not all four:
  * the point of this column is scanning for the outlier, and "3d 4h 17m 9s" makes every row the same
  * width and none of them readable.
@@ -382,28 +436,6 @@ export function hourOptionLabel(hourUtc, reference = new Date()) {
   const shift = dayShift > 1 ? -1 : dayShift < -1 ? 1 : dayShift;
   const suffix = shift === 0 ? '' : shift < 0 ? ', prev. day' : ', next day';
   return `${utc} (${local} local${suffix})`;
-}
-
-/**
- * The sentence under the update-schedule form.
- *
- * The next run is stated in the operator's OWN time zone even though the schedule is set in UTC: the
- * point of the line is "will this happen when I think it will", and answering it in the same zone they
- * just typed proves nothing. The enrolment count is here because a schedule with nothing enrolled makes
- * no request at all — an operator who set one and saw no activity would otherwise assume it was broken.
- */
-export function scheduleNote(schedule) {
-  if (!schedule) return '';
-  const parts = [`Checks run ${schedule.summary || 'on no schedule'}.`];
-  parts.push(schedule.nextRunUtc
-    ? `Next check ${formatDateTime(schedule.nextRunUtc)} (your time).`
-    : 'No check is scheduled.');
-  const enrolled = toNumber(schedule.enrolled) ?? 0;
-  parts.push(enrolled > 0
-    ? `${formatCount(enrolled)} game(s) enrolled in automatic updates.`
-    : 'No game is enrolled in automatic updates, so a check currently installs nothing — '
-      + 'set a game’s update policy on the Marketplace tab.');
-  return parts.join(' ');
 }
 
 // ── Rates from cumulative counters ────────────────────────────────────────────
@@ -524,7 +556,7 @@ export function appendLogEntries(existing, incoming, limit = 500) {
 export const AVAILABILITY = [
   { value: 'available', label: 'Available', hint: 'Listed for players and startable.' },
   { value: 'disabled', label: 'Disabled', hint: 'Hidden, and new lobbies are refused. Running lobbies continue.' },
-  { value: 'staged', label: 'Staged', hint: 'Hidden, but still startable via its direct link. Visibility only — not access control.' },
+  { value: 'staged', label: 'Staged', hint: 'Hidden, but still startable via its direct link.' },
 ];
 
 export function availabilityLabel(value) {
@@ -590,8 +622,7 @@ export function sdkBadge(game, serverSdkVersion) {
       return {
         label: 'SDK newer',
         className: 'badge badge-muted',
-        title: `Built against ${stamped}; this server ships ${serverSdkVersion}. `
-          + 'It will still run — the wire protocol is versioned separately — but this server is the older side.',
+        title: `Built against ${stamped}; this server ships ${serverSdkVersion}.`,
       };
     default:
       return null;
@@ -618,9 +649,9 @@ export const PLUGIN_STATUS = [
   { value: 'notInstalled', label: 'Not installed', badge: 'badge-muted', hint: 'Offered by a marketplace but not installed here.' },
   { value: 'upToDate', label: 'Up to date', badge: 'badge-ok', hint: 'The installed version matches what the marketplace offers.' },
   { value: 'updateAvailable', label: 'Update available', badge: 'badge-warning', hint: 'A newer version is published.' },
-  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered — usually a hand-built package.' },
-  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version, so there is nothing to compare. Common for hand-made games.' },
-  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version. It is never installed automatically, and installing it by hand stages it rather than publishing it to players.' },
+  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered.' },
+  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version.' },
+  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version.' },
   { value: 'unusable', label: 'Unusable', badge: 'badge-danger', hint: 'The catalog entry is malformed and cannot be acted on.' },
   { value: 'installedOnly', label: 'Installed', badge: 'badge-ok', hint: 'Installed here, but no registered marketplace offers it.' },
 ];
@@ -744,6 +775,9 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       sourceKind,
       pendingJobId: game.pendingJobId || entry?.pendingJobId || null,
       serverAuthority: Boolean(game.serverAuthority),
+      blobQuota: game.blobQuota ?? null,
+      createdAt: game.createdAt || null,
+      updatedAt: game.updatedAt || null,
       reason: entry?.reason || null,
       shadowedBy: entry?.shadowedBy || null,
     });
@@ -797,6 +831,9 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
         sourceKind,
         pendingJobId: entry.pendingJobId || null,
         serverAuthority: false,
+        blobQuota: entry.blobQuota ?? null,
+        createdAt: entry.createdAt || null,
+        updatedAt: entry.updatedAt || null,
         reason: entry.reason || null,
         shadowedBy: entry.shadowedBy || null,
       });
@@ -848,10 +885,12 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       sourceName: entry.sourceName || entry.sourceId || '',
       sourceKind: entry.sourceId || 'marketplace',
       pendingJobId: entry.pendingJobId || null,
-      serverAuthority: false,
-      reason: entry.reason || null,
-      shadowedBy: entry.shadowedBy || null,
-    });
+        serverAuthority: false,
+        reason: entry.reason || null,
+        shadowedBy: entry.shadowedBy || null,
+        createdAt: null,
+        updatedAt: null,
+      });
   }
 
   installedList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
@@ -935,9 +974,132 @@ export function filterCatalog(entries, { q = '', status = '', source = '' } = {}
   });
 }
 
+// ── Plugin sorting ────────────────────────────────────────────────────────────
+
+/**
+ * The sort options offered on every Plugins & Games status tab. One shared list rather than
+ * per-tab options: the entries are one shape regardless of which tab shows them, and a second
+ * list to keep in sync with this one is exactly the kind of duplication that drifts.
+ *
+ * Direction is embedded in the option (A–Z vs Z–A) rather than a separate asc/desc toggle:
+ * a single select stays one control, and the magnitude sorts only have one useful direction
+ * (nobody hunts for their smallest game first).
+ */
+export const PLUGIN_SORTS = [
+  { value: 'name-az', label: 'Name (A–Z)' },
+  { value: 'name-za', label: 'Name (Z–A)' },
+  { value: 'status', label: 'Status (problems first)' },
+  { value: 'newest', label: 'Newest first' },
+  { value: 'updated', label: 'Recently updated' },
+  { value: 'version', label: 'Version (highest first)' },
+  { value: 'size', label: 'Largest first' },
+  { value: 'active', label: 'Most active first' },
+];
+
+/**
+ * Severity rank for the `status` sort: the entries an operator must act on float above the
+ * ones that are merely listed. Unknown statuses sink below the known-bad but above the known
+ * fine — a server that grew a status should read oddly near the top, not vanish at the bottom.
+ * An outdated SDK stamp promotes an otherwise-fine row, since that is actionable too.
+ */
+export function pluginStatusSeverity(entry) {
+  const status = String(entry?.status ?? '');
+  if (status === 'incompatible' || status === 'unusable') return 0;
+  if (status === 'updateAvailable') return 1;
+  if (String(entry?.sdkStatus ?? '').toLowerCase() === 'behind') return 1;
+  if (status === 'installedOnly' || status === 'upToDate' || status === 'installedAhead'
+      || status === 'installedVersionUnknown' || status === 'notInstalled') return 2;
+  return 1;
+}
+
+function comparePluginNames(a, b) {
+  return String(a?.name || a?.id || '').localeCompare(String(b?.name || b?.id || ''),
+    undefined, { sensitivity: 'base' });
+}
+
+/** Epoch millis, or null when the value is absent or unparseable — never NaN. */
+function pluginEpoch(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const at = new Date(value).getTime();
+  return Number.isFinite(at) ? at : null;
+}
+
+/**
+ * Orders already-filtered plugin entries for display. Pure — the caller (`renderPlugins`)
+ * filters first, then sorts, so each tab slices the same merged list and only the order differs.
+ *
+ * Nulls/unknowns always sort LAST within a magnitude (a missing date is not the oldest date;
+ * claiming otherwise would pile every hand-made game at one end), and every key tie-breaks by
+ * name so the order is total and re-renders don't shuffle equal rows.
+ */
+export function sortPlugins(entries, sortKey = 'name-az') {
+  const list = Array.isArray(entries) ? [...entries] : [];
+  const key = String(sortKey || 'name-az').toLowerCase();
+
+  const versionOf = (e) => e?.installedVersion ?? e?.availableVersion ?? null;
+  const sizeOf = (e) => {
+    const raw = e?.diskBytes ?? e?.sizeBytes ?? null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  return list.sort((a, b) => {
+    switch (key) {
+      case 'name-za':
+        return comparePluginNames(b, a);
+      case 'status': {
+        const rank = pluginStatusSeverity(a) - pluginStatusSeverity(b);
+        if (rank !== 0) return rank;
+        return comparePluginNames(a, b);
+      }
+      case 'newest':
+      case 'updated': {
+        const prop = key === 'newest' ? 'createdAt' : 'updatedAt';
+        const ta = pluginEpoch(a?.[prop]);
+        const tb = pluginEpoch(b?.[prop]);
+        if (ta === null && tb === null) return comparePluginNames(a, b);
+        if (ta === null) return 1;
+        if (tb === null) return -1;
+        if (ta !== tb) return tb - ta;
+        return comparePluginNames(a, b);
+      }
+      case 'version': {
+        const va = versionOf(a);
+        const vb = versionOf(b);
+        if (!va && !vb) return comparePluginNames(a, b);
+        if (!va) return 1;
+        if (!vb) return -1;
+        const cmp = compareSemVer(vb, va);
+        return cmp !== 0 ? cmp : comparePluginNames(a, b);
+      }
+      case 'size': {
+        const sa = sizeOf(a);
+        const sb = sizeOf(b);
+        if (sa === null && sb === null) return comparePluginNames(a, b);
+        if (sa === null) return 1;
+        if (sb === null) return -1;
+        if (sa !== sb) return sb - sa;
+        return comparePluginNames(a, b);
+      }
+      case 'active': {
+        const la = Number(a?.activeLobbies) || 0;
+        const lb = Number(b?.activeLobbies) || 0;
+        if (la !== lb) return lb - la;
+        const pa = Number(a?.activePlayers) || 0;
+        const pb = Number(b?.activePlayers) || 0;
+        if (pa !== pb) return pb - pa;
+        return comparePluginNames(a, b);
+      }
+      case 'name-az':
+      default:
+        return comparePluginNames(a, b);
+    }
+  });
+}
+
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 
-/** Statuses a job stays in. Reaching one is what triggers a toast and a catalog re-read. */
+/** Statuses a job stays in. Reaching one is what triggers a notification and a catalog re-read. */
 export const TERMINAL_JOB_STATUSES = ['succeeded', 'failed', 'cancelled'];
 
 export function isTerminalJob(status) {
@@ -1178,6 +1340,127 @@ export function formatVersion(version) {
   return text ? `v${text.replace(/^v/i, '')}` : '--';
 }
 
+// ── Compact plugin rows ─────────────────────────────────────────────────────
+
+/**
+ * The version indicator for a compact plugin row (top right).
+ *
+ * Installed: the installed version, with ` → <available>` appended when an update is pending
+ * (`status === 'updateAvailable'` with a differing available version). Not installed: the
+ * available version. `{ text, title, hasUpdate }` — `hasUpdate` lets the row style the
+ * indicator without re-deriving the comparison.
+ */
+export function pluginRowVersion(entry) {
+  if (entry?.installed) {
+    const installed = formatVersion(entry.installedVersion);
+    const available = String(entry.availableVersion ?? '').trim();
+    const hasUpdate = entry.status === 'updateAvailable'
+      && available !== ''
+      && available !== String(entry.installedVersion ?? '').trim();
+    if (hasUpdate) {
+      const to = formatVersion(available);
+      return {
+        text: `${installed} → ${to}`,
+        title: `Installed ${installed} — ${to} available`
+          + (entry.sourceName ? ` from ${entry.sourceName}` : ''),
+        hasUpdate: true,
+      };
+    }
+    return { text: installed, title: `Installed version ${installed}`, hasUpdate: false };
+  }
+  const available = formatVersion(entry?.availableVersion);
+  return {
+    text: available,
+    title: available === '--' ? 'No version offered' : `Available version ${available}`,
+    hasUpdate: false,
+  };
+}
+
+/**
+ * The size readout for a compact plugin row (bottom right).
+ *
+ * Installed: total disk usage (files + compressed cache + package), with the breakdown as the
+ * tooltip. Not installed: the download size. `{ text, title }`.
+ */
+export function pluginRowSize(entry) {
+  if (entry?.installed) {
+    const parts = [`Files ${formatBytes(entry.directoryBytes)}`,
+      `compressed ${formatBytes(entry.compressedBytes)}`];
+    if (entry.packageBacked) parts.push(`package ${formatBytes(entry.packageBytes)}`);
+    return { text: formatBytes(entry.diskBytes), title: `On disk: ${parts.join(' + ')}` };
+  }
+  return { text: formatBytes(entry?.sizeBytes), title: 'Download size' };
+}
+
+/**
+ * How many leading tags fit in a tag strip of `containerWidth` px.
+ *
+ * `tagWidths` is the measured width of each chip in order; when not every tag fits, a trailing
+ * `...` chip of `ellipsisWidth` px takes the last slot, so the count is the largest `n` with
+ * `sum(widths[0..n-1]) + ellipsisWidth + gapWidth * n <= containerWidth` (one gap between each
+ * visible chip and one more before the ellipsis). Returns all tags when they fit
+ * (`sum + gapWidth * (n-1) <= containerWidth`), 0 when even the ellipsis alone overflows (the
+ * row then shows just `...` with the full list as its tooltip). Pure so it is unit-testable —
+ * jsdom has no layout.
+ */
+export function visibleTagCount(tagWidths, containerWidth, ellipsisWidth = 0, gapWidth = 0) {
+  const widths = Array.isArray(tagWidths) ? tagWidths : [];
+  const container = Number(containerWidth);
+  const ellipsis = Number(ellipsisWidth);
+  if (!Number.isFinite(container) || container < 0) return 0;
+  const gapValue = Number(gapWidth);
+  const gap = Number.isFinite(gapValue) && gapValue > 0 ? gapValue : 0;
+  const total = widths.reduce((sum, w) => sum + (Number(w) || 0), 0) + gap * Math.max(0, widths.length - 1);
+  if (total <= container) return widths.length;
+  const ell = Number.isFinite(ellipsis) && ellipsis > 0 ? ellipsis : 0;
+  let used = 0;
+  let count = 0;
+  for (const w of widths) {
+    if (used + (Number(w) || 0) + ell + gap * (count + 1) > container) break;
+    used += Number(w) || 0;
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Mini status badges for the bottom-right of a compact plugin row, left of the size readout.
+ *
+ * Only states that are NOT already visible elsewhere on the row: the version arrow covers
+ * update-available, and title/author/tags/description/size cover the rest. Each badge carries a
+ * tooltip (`title`), since the label is abbreviated. `{ label, title, className }` items.
+ */
+export function pluginRowBadges(entry, serverSdkVersion) {
+  const badges = [];
+  if (!entry) return badges;
+  if (isBusyLifecycle(entry.lifecycle)) {
+    const hint = LIFECYCLE.find((l) => l.value === String(entry.lifecycle).toLowerCase())?.hint || '';
+    badges.push({
+      label: lifecycleLabel(entry.lifecycle),
+      title: hint,
+      className: `badge ${lifecycleClass(entry.lifecycle)}`,
+    });
+  }
+  if (entry.status === 'incompatible' || entry.status === 'unusable') {
+    badges.push({
+      label: pluginStatusLabel(entry.status),
+      title: pluginStatusHint(entry.status),
+      className: `badge ${pluginStatusClass(entry.status)}`,
+    });
+  }
+  if (entry.installed && entry.availability && String(entry.availability).toLowerCase() !== 'available') {
+    const name = String(entry.availability).toLowerCase();
+    badges.push({
+      label: availabilityLabel(entry.availability),
+      title: AVAILABILITY.find((a) => a.value === name)?.hint || '',
+      className: `badge ${name === 'staged' ? 'badge-staged' : 'badge-warning'}`,
+    });
+  }
+  const sdk = sdkBadge(entry, serverSdkVersion);
+  if (sdk) badges.push(sdk);
+  return badges;
+}
+
 // ── Platform limits ───────────────────────────────────────────────────────────
 
 /**
@@ -1190,7 +1473,7 @@ export function formatVersion(version) {
 export const LIMIT_FIELDS = [
   {
     key: 'controlMessagesPerSecond', label: 'Control messages / second', integer: false,
-    hint: 'Lobby operations from one shell socket. Sustained spam past the burst closes the connection.',
+    hint: 'Lobby operations from one shell socket.',
   },
   {
     key: 'controlMessagesBurst', label: 'Control burst', integer: false,
@@ -1198,7 +1481,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'gameMessagesPerSecond', label: 'Game messages / second', integer: false,
-    hint: 'Per game socket. A host broadcasting state ~20x/s sits well under the default of 30.',
+    hint: 'Per game socket.',
   },
   {
     key: 'gameMessagesBurst', label: 'Game burst', integer: false,
@@ -1206,7 +1489,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'lobbyCreatesPerMinute', label: 'Lobby creates / minute', integer: true,
-    hint: 'Per player. Refuses the operation without closing the connection — codes are a shared namespace.',
+    hint: 'Per player.',
   },
   {
     key: 'maxConnectionsPerIp', label: 'Connections per IP', integer: true,
@@ -1214,7 +1497,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'maxLobbies', label: 'Max lobbies (platform)', integer: true,
-    hint: 'Total simultaneous lobbies across every game. Existing lobbies are never closed by a cap.',
+    hint: 'Total simultaneous lobbies across every game. Existing lobbies are not closed by a cap.',
   },
   {
     key: 'maxLobbiesPerGame', label: 'Max lobbies per game', integer: true,
@@ -1226,14 +1509,35 @@ export const LIMIT_FIELDS = [
   // it, and the hints have to keep those two apart because nothing else on screen does.
   {
     key: 'authorityMaxLobbies', label: 'Max lobbies (server-authority)', integer: true,
-    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine — not the '
-      + 'platform cap above. Empty or 0 means unlimited, which is the default: the host (in Docker, the '
-      + 'container memory limit) is what bounds them until you set this.',
+    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine. Empty or 0 means unlimited.',
   },
   {
     key: 'authorityModuleCacheIdleMinutes', label: 'Authority module cache idle (min)', integer: true,
-    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. '
-      + 'Costs one re-parse when someone next plays it. 0 keeps it until the server restarts.',
+    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. 0 keeps it until the server restarts.',
+  },
+  // The blob-store caps, from a THIRD provider (BlobOptionsProvider). Same flat wire, same rule: a knob
+  // is one entry here and nothing else client-side. These are sizes in bytes rather than rates, and the
+  // hints have to say what a full quota does — an upload refused with 507 is the only symptom, and it
+  // reaches the operator as "a player says their map will not load".
+  {
+    key: 'blobMaxBytes', label: 'Max blob size', dataType: 'bytes', integer: true,
+    hint: 'Largest single file a game may upload for its session to share. 0 means no limit.',
+  },
+  {
+    key: 'blobLobbyQuotaBytes', label: 'Blob quota per session', dataType: 'bytes', integer: true,
+    hint: 'Total a single lobby’s blobs may occupy. Files are deduplicated. Per-game overrides live in each plugin’s settings. 0 means no limit.',
+  },
+  {
+    key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide', dataType: 'bytes', integer: true,
+    hint: 'The aggregate cap among all lobbies. 0 means no limit.',
+  },
+  {
+    key: 'blobGraceMinutes', label: 'Blob grace window (min)', integer: true,
+    hint: 'How long freshly uploaded bytes are preserved before the game claims them.',
+  },
+  {
+    key: 'blobMaxUploadsPerLobby', label: 'Concurrent uploads per session', integer: true,
+    hint: 'Bounds how many uploads one lobby may have open at once. 0 means unlimited.',
   },
 ];
 
@@ -1243,6 +1547,10 @@ export const STARTUP_LIMITS = [
   { key: 'disconnectGraceSeconds', label: 'Reconnect grace (s)' },
   { key: 'adminLoginAttemptsPerMinute', label: 'Admin login attempts / minute (per IP)' },
   { key: 'adminLoginAttemptsPerMinuteGlobal', label: 'Admin login attempts / minute (server-wide)' },
+  // The blob sweep cadence is startup-only while its window (blobGraceMinutes, above) is editable. That
+  // split is the house rule a cadence follows: deriving the interval from the window is what forced the
+  // reconnect grace to stay startup-only too.
+  { key: 'blobSweepSeconds', label: 'Blob sweep interval (s)' },
 ];
 
 /**
@@ -1256,20 +1564,42 @@ export const STARTUP_LIMITS = [
  * The server validates this again and is the authority. Doing it here too is not duplication for its own
  * sake: a round trip to be told "that's not a number" is a worse form than one that says so as you type.
  */
-export function validateLimits(raw, fields = LIMIT_FIELDS) {
+export function validateLimits(raw, fields = LIMIT_FIELDS, scales = {}) {
   const values = {};
   for (const field of fields) {
-    const text = String(raw?.[field.key] ?? '').trim();
+    const rawVal = raw?.[field.key];
+    let text = '';
+    let scale = scales?.[field.key];
+    if (typeof rawVal === 'object' && rawVal !== null) {
+      text = String(rawVal.value ?? '').trim();
+      scale = rawVal.unit ?? rawVal.scale ?? scale;
+    } else {
+      text = String(rawVal ?? '').trim();
+    }
     if (text === '') { values[field.key] = null; continue; }
 
     const n = Number(text);
     if (!Number.isFinite(n) || n < 0) {
       return { ok: false, error: `${field.label} must be 0 or more, or empty to use the default.`, values: null };
     }
-    if (field.integer && !Number.isInteger(n)) {
+    if ((field.integer || field.dataType === 'bytes') && !Number.isInteger(n)) {
       return { ok: false, error: `${field.label} must be a whole number.`, values: null };
     }
-    values[field.key] = n;
+
+    if (field.dataType === 'bytes') {
+      const unit = scale || 'BYTE';
+      const mult = BYTE_MULTIPLIERS[unit];
+      if (mult === undefined) {
+        return { ok: false, error: `Unknown byte unit "${unit}" for ${field.label}.`, values: null };
+      }
+      const totalBytes = n * mult;
+      if (!Number.isSafeInteger(totalBytes)) {
+        return { ok: false, error: `${field.label} is too large.`, values: null };
+      }
+      values[field.key] = totalBytes;
+    } else {
+      values[field.key] = n;
+    }
   }
 
   // The one combination that locks everyone out rather than merely limiting them, checked here so the
@@ -1473,6 +1803,18 @@ export function webhookEventLabel(value) {
 }
 
 /**
+ * Whether a stored URL is safe to render as a clickable link. Only http(s) qualifies — stored
+ * settings are operator-controlled (hand-edited file, legacy data), so a `javascript:`/`data:`
+ * URL would otherwise be click-to-script for the admin. Display hardening only; the server
+ * remains the authority on what is fetchable.
+ */
+export function isHttpUrl(value) {
+  let parsed;
+  try { parsed = new URL(String(value ?? '').trim()); } catch { return false; }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+}
+
+/**
  * Whether a webhook endpoint is worth sending to the server, and why not if it isn't.
  *
  * The URL rule mirrors the server's (which is the downloader's `IsAllowedUrl`): https anywhere, or http on
@@ -1530,6 +1872,162 @@ export function uploadGuard(file, { maxBytes = 0 } = {}) {
     return { ok: false, error: `That package is ${formatBytes(file.size)}, over the ${formatBytes(maxBytes)} limit.` };
   }
   return { ok: true, error: null };
+}
+
+// ── Notifications ───────────────────────────────────────────────────────────
+
+/**
+ * The severities a notification can carry. Same four as the toast system this replaces, so every
+ * existing call site maps across without re-deciding how serious it is.
+ */
+export const NOTIFICATION_KINDS = ['info', 'success', 'warning', 'error'];
+
+/** How many notifications the portal keeps. Past this, pushing a new one drops the oldest. */
+export const NOTIFICATION_LIMIT = 50;
+
+/** The localStorage key for the (encrypted — see admin-notifications.js) notification store. */
+export const NOTIFICATION_STORAGE_KEY = 'kb.admin.notifications';
+
+export function normalizeNotificationKind(kind) {
+  const name = String(kind ?? 'info').toLowerCase();
+  return NOTIFICATION_KINDS.includes(name) ? name : 'info';
+}
+
+function notificationId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Non-secure contexts may hide crypto: fall through to the Math.random id.
+  }
+  return `n-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffff).toString(36)}`;
+}
+
+/**
+ * An ISO 8601 instant stamped with the LOCAL numeric offset (e.g. `...+02:00`), not UTC-normalized.
+ * `Date.toISOString()` always renders Zulu, which records the same instant but discards the offset the
+ * operator's clock reported — and the requirement is that the stored value carries its offset while
+ * display respects the reader's own culture and timezone (see formatNotificationTime).
+ */
+export function localOffsetIso(date = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return localOffsetIso(new Date());
+  const eastMin = -d.getTimezoneOffset();
+  const sign = eastMin >= 0 ? '+' : '-';
+  const abs = Math.abs(eastMin);
+  const p = (n) => String(n).padStart(2, '0');
+  const hh = p(Math.floor(abs / 60));
+  const mm = p(abs % 60);
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T`
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
+    + `${sign}${hh}:${mm}`;
+}
+
+/** A notification record. `at` is always offset-stamped (see localOffsetIso). */
+export function createNotification({ message, kind = 'info', at = null } = {}) {
+  const text = String(message ?? '').trim();
+  return {
+    id: notificationId(),
+    message: text,
+    kind: normalizeNotificationKind(kind),
+    at: at === null || at === undefined ? localOffsetIso() : localOffsetIso(at),
+    read: false,
+  };
+}
+
+/** Epoch millis for ordering. Unparseable timestamps sort as the oldest, never as NaN. */
+export function notificationEpoch(item) {
+  const at = new Date(item?.at).getTime();
+  return Number.isFinite(at) ? at : 0;
+}
+
+/**
+ * Newest first. Returns a new array. Ties keep their existing order rather than breaking on id:
+ * `Array.sort` is stable, so a fresh push prepended before sorting stays ahead of its
+ * same-millisecond siblings, and a stored list re-sorts without shuffling. (An id tiebreak was tried
+ * and rejected: ids are random, so it ordered same-instant notifications randomly — and same-instant
+ * pushes are the common case, e.g. two validation errors raised in one handler.)
+ */
+export function sortNotifications(list) {
+  return [...(list || [])].sort((a, b) => notificationEpoch(b) - notificationEpoch(a));
+}
+
+/** Keeps the newest `limit` (already ordered or not — this sorts first). */
+export function capNotifications(list, limit = NOTIFICATION_LIMIT) {
+  const sorted = sortNotifications(list);
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 0) return sorted;
+  return sorted.slice(0, Math.floor(n));
+}
+
+export function unreadCount(list) {
+  return (list || []).filter((n) => n && n.read !== true).length;
+}
+
+/** New arrays throughout: the store publishes immutable snapshots, like GameCatalog does. */
+export function markAllRead(list) {
+  return (list || []).map((n) => ({ ...n, read: true }));
+}
+
+export function toggleRead(list, id) {
+  return (list || []).map((n) => (n && n.id === id ? { ...n, read: n.read !== true } : n));
+}
+
+export function dismissNotification(list, id) {
+  return (list || []).filter((n) => n && n.id !== id);
+}
+
+export function dismissAllNotifications() {
+  return [];
+}
+
+/**
+ * Untrusted input (a decrypted blob, a legacy plaintext array, or a half-written value) into
+ * notification records. Drops entries with no message, repairs kind/id/at/read, then sorts and caps
+ * — so a corrupt or tampered store degrades to a shorter list, never a thrown exception mid-render.
+ */
+export function sanitizeNotifications(raw, limit = NOTIFICATION_LIMIT) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const message = String(item.message ?? '').trim().slice(0, 2000);
+    if (!message) continue;
+    const at = typeof item.at === 'string' && !Number.isNaN(new Date(item.at).getTime())
+      ? item.at
+      : localOffsetIso();
+    out.push({
+      id: typeof item.id === 'string' && item.id ? item.id : notificationId(),
+      message,
+      kind: normalizeNotificationKind(item.kind),
+      at,
+      read: item.read === true,
+    });
+  }
+  return capNotifications(out, limit);
+}
+
+/**
+ * An absolute timestamp in the READER's culture and timezone — the stored offset records when it
+ * happened, display answers "when was that for me". Short form for list rows; '--' when unparseable,
+ * the same contract formatClock and formatDateTime keep.
+ */
+export function formatNotificationTime(iso) {
+  // new Date(null) is the epoch, not an invalid date — so null/blank must be refused outright, the
+  // same reason toNumber checks for them before calling Number().
+  if (iso === null || iso === undefined || iso === '') return '--';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '--';
+  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** Full form with seconds, for the dedicated notification-details modal. */
+export function formatNotificationTimeFull(iso) {
+  if (iso === null || iso === undefined || iso === '') return '--';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '--';
+  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
 }
 
 // ── Sidebar State ─────────────────────────────────────────────────────────────

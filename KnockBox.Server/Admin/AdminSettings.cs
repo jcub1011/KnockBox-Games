@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Blobs;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Webhooks;
 
@@ -55,6 +56,18 @@ public enum GameAvailability
 /// object means "<c>ServerLimits</c> overrides", and the two lobby caps it would collide with are
 /// different caps read from different config keys.
 /// </param>
+/// <param name="Blobs">
+/// The operator's overrides of the runtime-editable blob-store caps. Null when untouched, the same
+/// record-by-absence convention <see cref="Limits"/> follows, and its OWN key for the same reason
+/// <see cref="Authority"/> is: <c>Limits</c> means "<c>ServerLimits</c> overrides" to anyone
+/// hand-editing this file, and a blob quota is not a relay limit.
+/// </param>
+/// <param name="BlobQuotas">
+/// Per-game overrides of the per-lobby blob quota, in bytes, keyed by game id. A third per-game map
+/// beside <see cref="Games"/> and <see cref="Updates"/> rather than a field on <see cref="Blobs"/>,
+/// because that record is a flat set of server-wide overrides and this is per-title policy — a mapper
+/// needs gigabytes of art and a word game needs none. Absent when no override is set.
+/// </param>
 /// <param name="Schedule">
 /// When the scheduled update check runs. Null means the configured default
 /// (<c>KnockBox:MarketplaceUpdate*</c>), the same record-by-absence convention <see cref="Limits"/>
@@ -72,7 +85,9 @@ public sealed record AdminSettings(
     IReadOnlyList<WebhookEndpoint>? Webhooks = null,
     bool OfficialSourceDisabled = false,
     UpdateSchedule? Schedule = null,
-    OperatorAuthorityOptions? Authority = null);
+    OperatorAuthorityOptions? Authority = null,
+    OperatorBlobOptions? Blobs = null,
+    IReadOnlyDictionary<string, long>? BlobQuotas = null);
 
 /// <summary>
 /// An outbound endpoint the operator registered, and which events it wants (spec §4.2).

@@ -35,8 +35,11 @@ The `web/` frontend is plain ES modules — **no build step**; it is served dire
 into publish/Docker output. Unit-tested under `web/__tests__/`: `web/kb-core.js` (pure protocol
 logic, Node env) plus `shell.js` and `knockbox.js` (jsdom, against the **real** `index.html` —
 `helpers.js` injects it, so element ids stay in sync with production markup). `index.html` loads
-`/shell.js?v=N` — **bump `N` whenever you change `shell.js`**, or browsers serve the stale module
-against new markup.
+`/shell.js?v=__KB_SHELL_HASH__` — a placeholder the server substitutes with a content hash of the
+shell bundle (`shell.js` + `kb-core.js` + `kb-protocol.js` + `home.css`; see
+`Hosting/ContentHashProvider.cs` + `VersionedCacheHeaders.cs`). Never hardcode a version there:
+the token moves on any byte change by itself, and `VersionedContentTests` fails a hardcoded
+`?v=N`. A versioned URL with the current token is served immutable; anything else revalidates.
 
 ## Docker / CI
 
@@ -1161,6 +1164,11 @@ Brotli still get gzip on the fly), `Packages`/`GamesUnpackedRoot`/`MaxPackageByt
 (outbound webhooks; `Enabled=false` ⇒ no dispatcher and no HttpClient at all),
 `GamesManagedRoot`/`ManagedPackages`/`PackageBackupCount`/`MaxConcurrentInstalls`/`PackageJobRetention`
 (portal installs; the managed root must be writable, outside `games/`, and — unlike the caches — backed up),
+`Blobs`/`BlobsRoot`/`BlobMaxBytes`/`BlobLobbyQuotaBytes`/`BlobTotalQuotaBytes`/`BlobGraceMinutes`/`BlobSweepSeconds`/`BlobMaxUploadsPerLobby`
+(blob sharing — the side channel for media too large for `/ws`'s 512 KiB frame cap; the root must be
+writable and must not overlap the three game roots, is **emptied on every startup**, and needs no mount —
+the three caps and the grace window are editable at runtime from the portal and persisted, the sweep
+cadence is not),
 `MarketplaceUpdate{Cadence,HourUtc,DayOfWeek}`/`MarketplaceMaxSources` (the *starting* update schedule —
 the portal overrides it and persists — and extra catalogs),
 `Marketplace{Enabled,CatalogUrl,DownloadBaseUrl,MaxCatalogBytes,MaxDownloadBytes,CatalogTimeoutSeconds,DownloadTimeoutSeconds}`

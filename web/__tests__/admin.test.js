@@ -757,16 +757,16 @@ describe('lobby directory', () => {
     expect(post.body).toEqual({ playerId: 'p1' });
   });
 
-  it('reports a failed action as an error toast', async () => {
+  it('reports a failed action as an error notification', async () => {
     await openLobbies({ 'POST /admin/api/lobbies/AB12/close': { status: 404, body: { success: false, error: 'No active lobby with code AB12.' } } });
     el('lobbies-body').querySelector('tr .btn-danger').click();
     el('confirm-ok').click();
     await tick();
     await tick();
 
-    const toast = el('toast-host').querySelector('.toast-error');
-    expect(toast).not.toBeNull();
-    expect(toast.textContent).toContain('No active lobby');
+    const item = el('notif-drawer-items').querySelector('.notif-error');
+    expect(item).not.toBeNull();
+    expect(item.textContent).toContain('No active lobby');
   });
 });
 
@@ -782,37 +782,54 @@ describe('game catalog', () => {
     await tick();
   }
 
-  it('renders a card per game with its disk breakdown and live counts', async () => {
+  it('renders a compact row per game with its total size, and details on demand', async () => {
     await openGames();
+    // Installed tab: the two installed games, A–Z. The catalog-only entry lives on Available.
     const cards = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card');
-    expect(cards).toHaveLength(3);
-    expect(cards[0].textContent).toContain('Tic-Tac-Toe');
-    expect(cards[0].textContent).toContain('12 KB');   // total
-    expect(cards[0].textContent).toContain('7.6 KB');  // files
-    expect(cards[0].textContent).toContain('1 lobby/lobbies');
+    expect(cards).toHaveLength(2);
+    expect(cards[0].querySelector('.plugin-row-name').textContent).toBe('Tic-Tac-Toe');
+    // The row shows the total only; the files/compressed breakdown is its tooltip.
+    const size = cards[0].querySelector('.plugin-row-size');
+    expect(size.textContent).toBe('12 KB');   // total
+    expect(size.title).toContain('7.6 KB');  // files
+    // Live lobby counts live in the dialog the row opens.
+    cards[0].click();
+    expect(el('plugin-details-body').textContent).toContain('1 lobby/lobbies');
+    el('plugin-details-close').click();
+
+    admin.setPluginTab('available');
+    const available = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card');
+    expect(available).toHaveLength(1);
+    expect(available[0].querySelector('.plugin-row-name').textContent).toBe('Alpha Chain');
   });
 
   it('shows the availability each game is actually in', async () => {
     await openGames();
-    const selects = (el('plugins-list') || el('games-list')).querySelectorAll('.plugin-availability');
-    expect(selects[0].value).toBe('available');
-    expect(selects[1].value).toBe('disabled');
+    const list = () => (el('plugins-list') || el('games-list'));
+    list().querySelector('.game-card[data-id="tictactoe"]').click();
+    expect(el('plugin-details-actions').querySelector('.plugin-availability').value).toBe('available');
+    el('plugin-details-close').click();
+    list().querySelector('.game-card[data-id="word-rush"]').click();
+    expect(el('plugin-details-actions').querySelector('.plugin-availability').value).toBe('disabled');
+    el('plugin-details-close').click();
   });
 
   it('disables Delete and says why when the deployment forbids it', async () => {
     await openGames();
     const wordRush = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[1];
-    const remove = [...wordRush.querySelectorAll('button')].find((b) => b.textContent === 'Delete' || b.textContent === 'Uninstall');
+    wordRush.click();
+    const remove = el('plugin-details-actions').querySelector('.mkt-uninstall');
 
     // Offering a button that always fails on a read-only games mount is worse than not offering it.
     expect(remove.disabled).toBe(true);
-    expect(wordRush.textContent).toContain('not writable');
-    expect(wordRush.textContent).toMatch(/disable the game instead/i);
+    expect(remove.title).toContain('not writable');
+    el('plugin-details-close').click();
   });
 
   it('confirms before hiding a game that has players in it, and says what survives', async () => {
     await openGames({ 'POST /admin/api/games/tictactoe/availability': { body: { success: true } } });
-    const select = (el('plugins-list') || el('games-list')).querySelector('.plugin-availability');   // tictactoe, 1 running lobby
+    (el('plugins-list') || el('games-list')).querySelector('.game-card[data-id="tictactoe"]').click();
+    const select = el('plugin-details-actions').querySelector('.plugin-availability');   // tictactoe, 1 running lobby
     select.value = 'staged';
     select.dispatchEvent(new Event('change', { bubbles: true }));
 
@@ -831,7 +848,8 @@ describe('game catalog', () => {
 
   it('changes a game with nobody playing it without stopping to ask', async () => {
     await openGames({ 'POST /admin/api/games/word-rush/availability': { body: { success: true } } });
-    const select = (el('plugins-list') || el('games-list')).querySelectorAll('.plugin-availability')[1];  // word-rush, 0 running lobbies
+    (el('plugins-list') || el('games-list')).querySelector('.game-card[data-id="word-rush"]').click();
+    const select = el('plugin-details-actions').querySelector('.plugin-availability');  // word-rush, 0 running lobbies
     select.value = 'available';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     await tick();
@@ -849,21 +867,23 @@ describe('game catalog', () => {
         body: { success: true, warning: 'The change is active now but could not be saved, so it will be lost on restart.' },
       },
     });
-    const select = (el('plugins-list') || el('games-list')).querySelector('.plugin-availability');
+    (el('plugins-list') || el('games-list')).querySelector('.game-card[data-id="tictactoe"]').click();
+    const select = el('plugin-details-actions').querySelector('.plugin-availability');
     select.value = 'disabled';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     el('confirm-ok').click();   // tictactoe has a running lobby, so this asks first
     await tick();
     await tick();
 
-    const toast = el('toast-host').querySelector('.toast-warning');
-    expect(toast).not.toBeNull();
-    expect(toast.textContent).toMatch(/lost on restart/i);
+    const item = el('notif-drawer-items').querySelector('.notif-warning');
+    expect(item).not.toBeNull();
+    expect(item.textContent).toMatch(/lost on restart/i);
   });
 
   it('confirms a delete before sending it', async () => {
     await openGames({ 'POST /admin/api/games/tictactoe/delete': { body: { success: true, detail: 'Deleted.' } } });
-    const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
+    (el('plugins-list') || el('games-list')).querySelector('.game-card[data-id="tictactoe"]').click();
+    const remove = [...el('plugin-details-actions').querySelectorAll('button')]
       .find((b) => b.textContent === 'Delete');
     remove.click();
 
@@ -877,9 +897,10 @@ describe('game catalog', () => {
     expect(fake.calls.find((c) => c.method === 'POST').path).toBe('/admin/api/games/tictactoe/delete');
   });
 
-  it('renders an Export button on each game card and triggers export', async () => {
+  it('renders an Export button for each game in its dialog and triggers export', async () => {
     await openGames();
-    const exportBtn = (el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelector('.game-export');
+    (el('plugins-list') || el('games-list')).querySelector('.game-card[data-id="tictactoe"]').click();
+    const exportBtn = el('plugin-details-actions').querySelector('.game-export');
     expect(exportBtn).not.toBeNull();
     expect(exportBtn.textContent).toBe('Export');
 
@@ -894,7 +915,8 @@ describe('game catalog', () => {
 
   it('warns that nothing can re-supply an unoffered plugin, and offers an export, before deleting', async () => {
     await openGames();
-    const remove = [...(el('plugins-list') || el('games-list')).querySelectorAll('.game-card')[0].querySelectorAll('button')]
+    (el('plugins-list') || el('games-list')).querySelector('.game-card[data-id="tictactoe"]').click();
+    const remove = [...el('plugin-details-actions').querySelectorAll('button')]
       .find((b) => b.textContent === 'Delete');
     remove.click();
 
@@ -1056,6 +1078,9 @@ describe('top-bar tab navigation visibility with auth state', () => {
     expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
     expect(el('admin-top-tabs').classList.contains('hidden')).toBe(false);
     expect(el('logout-btn').classList.contains('hidden')).toBe(false);
+    // Icon-only: the accessible name carries the meaning the text used to.
+    expect(el('logout-btn').getAttribute('aria-label')).toBe('Log out');
+    expect(el('logout-btn').querySelector('svg')).not.toBeNull();
   });
 
   it('hides top-bar tabs on logout', async () => {

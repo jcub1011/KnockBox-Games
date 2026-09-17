@@ -3,6 +3,7 @@ using KnockBox.Server.Hosting;
 using KnockBox.Server.Lobbies;
 using KnockBox.Server.Marketplace;
 using KnockBox.Server.Games;
+using KnockBox.Server.Games.Blobs;
 using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using KnockBox.Server.Webhooks;
@@ -303,6 +304,64 @@ public sealed class AdminSettingsStore : IPlatformPolicy
     }
 
     /// <summary>
+    /// The operator's overrides of the runtime-editable blob-store caps, or
+    /// <see cref="OperatorBlobOptions.None"/> when they have never been touched.
+    /// </summary>
+    /// <remarks>
+    /// A third sibling of <see cref="Limits"/> for the reason the second one exists: <c>"limits"</c> means
+    /// <c>ServerLimits</c> overrides to anyone hand-editing this file, and a blob quota is enforced on an
+    /// upload rather than on a frame. See <see cref="OperatorBlobOptions"/>.
+    /// </remarks>
+    public OperatorBlobOptions BlobLimits => _state.Blobs;
+
+    /// <summary>
+    /// Records new blob-store overrides. Returns null on success, or a message explaining why they could
+    /// not be persisted (they are in effect regardless, until the next restart).
+    /// </summary>
+    /// <remarks>Publishing to <see cref="BlobOptionsProvider"/> and validating are the caller's job, for
+    /// the reasons <see cref="SetLimits"/> gives.</remarks>
+    public string? SetBlobLimits(OperatorBlobOptions blobs)
+    {
+        lock (_writeGate)
+        {
+            _state = _state with { Blobs = blobs.IsEmpty ? OperatorBlobOptions.None : blobs };
+            _logger.LogInformation("Admin changed the blob-store overrides.");
+            return Save();
+        }
+    }
+
+    /// <summary>
+    /// Every per-game override of the per-lobby blob quota, in bytes. Games on the server-wide default
+    /// are absent, not listed.
+    /// </summary>
+    public IReadOnlyDictionary<string, long> BlobQuotas => _state.BlobQuotas;
+
+    /// <summary>
+    /// Sets a game's per-lobby blob quota, or clears it when <paramref name="bytes"/> is null. Returns
+    /// null on success, or a message explaining why it could not be persisted (it is in effect
+    /// regardless, until the next restart).
+    /// </summary>
+    /// <remarks>
+    /// Cleared by <b>removing</b> the row rather than writing the server default into it — the same trick
+    /// availability and update policy use, so "no override" stays one thing rather than two ways to say
+    /// it, and raising the server default later actually reaches every game that never had an override.
+    /// </remarks>
+    public string? SetBlobQuota(string gameId, long? bytes)
+    {
+        lock (_writeGate)
+        {
+            var quotas = new Dictionary<string, long>(_state.BlobQuotas, GameIdComparer);
+            if (bytes is null) quotas.Remove(gameId);
+            else quotas[gameId] = bytes.Value;
+
+            _state = _state with { BlobQuotas = quotas };
+            _logger.LogInformation(
+                "Admin set game {GameId} blob quota to {Bytes}.", gameId, bytes?.ToString() ?? "the default");
+            return Save();
+        }
+    }
+
+    /// <summary>
     /// The operator's chosen update schedule, or null when they have never set one — in which case the
     /// configured default (<c>KnockBox:MarketplaceUpdate*</c>) stands. Same record-by-absence shape as
     /// <see cref="Limits"/>, and for the same reason: "I never chose" and "I chose the same thing the
@@ -512,7 +571,9 @@ public sealed class AdminSettingsStore : IPlatformPolicy
             _state.Webhooks.Count == 0 ? null : _state.Webhooks,
             _state.OfficialSourceDisabled,
             _state.Schedule,
-            _state.Authority.IsEmpty ? null : _state.Authority);
+            _state.Authority.IsEmpty ? null : _state.Authority,
+            _state.Blobs.IsEmpty ? null : _state.Blobs,
+            _state.BlobQuotas.Count == 0 ? null : _state.BlobQuotas);
         var temp = FilePath + ".tmp";
         try
         {
@@ -551,12 +612,15 @@ public sealed class AdminSettingsStore : IPlatformPolicy
         IReadOnlyList<WebhookEndpoint> Webhooks,
         bool OfficialSourceDisabled,
         UpdateSchedule? Schedule,
-        OperatorAuthorityOptions Authority)
+        OperatorAuthorityOptions Authority,
+        OperatorBlobOptions Blobs,
+        IReadOnlyDictionary<string, long> BlobQuotas)
     {
         public static readonly State Default =
             new(false, null, new Dictionary<string, GameAvailability>(GameIdComparer), [],
                 new Dictionary<string, UpdatePolicy>(GameIdComparer), OperatorLimits.None,
-                RoomCodeFilter.Empty, null, [], false, null, OperatorAuthorityOptions.None);
+                RoomCodeFilter.Empty, null, [], false, null, OperatorAuthorityOptions.None,
+                OperatorBlobOptions.None, new Dictionary<string, long>(GameIdComparer));
 
         public static State From(AdminSettings settings)
         {
@@ -567,6 +631,18 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 // for Available, so the file doesn't accumulate a row per game ever looked at.
                 if (string.IsNullOrWhiteSpace(id) || policy == UpdatePolicy.Manual) continue;
                 updates[id] = policy;
+            }
+
+            var blobQuotas = new Dictionary<string, long>(GameIdComparer);
+            foreach (var (id, bytes) in settings.BlobQuotas ?? Default.BlobQuotas)
+            {
+                // Skip junk rather than reject the whole file, the discipline every map here follows. A
+                // NEGATIVE value is kept on purpose: BlobOptions.LobbyQuotaFor reads it as "no per-lobby
+                // cap for this game", which is a policy an operator may genuinely want. Zero is dropped,
+                // because a quota field an operator typed 0 into far more likely means "I am clearing
+                // this" than "this game may store nothing at all".
+                if (string.IsNullOrWhiteSpace(id) || bytes == 0) continue;
+                blobQuotas[id] = bytes;
             }
 
             var games = new Dictionary<string, GameAvailability>(GameIdComparer);
@@ -630,7 +706,9 @@ public sealed class AdminSettingsStore : IPlatformPolicy
                 settings.Schedule?.Normalize(),
                 // Kept as read and judged at startup, exactly like Limits: the range check needs nothing
                 // from this class, and rejecting here would silently drop a whole object over one bad field.
-                settings.Authority ?? OperatorAuthorityOptions.None);
+                settings.Authority ?? OperatorAuthorityOptions.None,
+                settings.Blobs ?? OperatorBlobOptions.None,
+                blobQuotas);
         }
 
         /// <summary>

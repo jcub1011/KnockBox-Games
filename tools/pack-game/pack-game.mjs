@@ -35,7 +35,7 @@
 import { execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_QUALITY, KbgError, packKbg, readKbg } from "./kbg.mjs";
 
 const toolDir = dirname(fileURLToPath(import.meta.url));
@@ -126,8 +126,13 @@ export function scanAuthorityImports(source) {
 export async function checkAuthorityModule(authorityPath) {
   let mod;
   try {
-    // Cache-bust so repeated packs (and tests) see the current file, not Node's module cache.
-    mod = await import(`${pathToFileURL(authorityPath).href}?v=${Date.now()}`);
+    // Import the bytes just read, not the path: a data: URL never touches Node's module cache,
+    // so repeated packs (and tests) always evaluate the current file with no cache-busting query —
+    // and the file cannot change between validation and import. The sourceURL comment keeps stack
+    // traces naming the real file. Safe under the single-file rule (scanAuthorityImports), which
+    // leaves no relative import for the URL-less module to resolve.
+    const source = readFileSync(authorityPath, "utf8") + `\n//# sourceURL=${authorityPath}`;
+    mod = await import(`data:text/javascript;base64,${Buffer.from(source, "utf8").toString("base64")}`);
   } catch (err) {
     throw new PackError(`serverAuthority module failed to load: ${err.message}`);
   }
@@ -193,6 +198,23 @@ export function validate(manifest, manifestPath, inDir) {
   // number here would land in the header as a JSON number and fail to deserialize server-side.
   if (manifest.version !== undefined && (typeof manifest.version !== "string" || manifest.version.trim() === "")) {
     throw new PackError("GAME.json: 'version' must be a non-empty string when present (e.g. \"1.0.0\").");
+  }
+  // homepage (optional): the game's own page or repository, rendered as the in-game version
+  // badge's link and in the marketplace listing. The server keeps only absolute https:// URLs
+  // (and drops the rest with a warning), so fail fast here while the author is present to fix it.
+  if (manifest.homepage !== undefined) {
+    if (typeof manifest.homepage !== "string" || manifest.homepage.trim() === "") {
+      throw new PackError("GAME.json: 'homepage' must be a non-empty string when present (e.g. \"https://github.com/owner/repo\").");
+    }
+    let parsed;
+    try {
+      parsed = new URL(manifest.homepage.trim());
+    } catch {
+      parsed = null;
+    }
+    if (parsed?.protocol !== "https:") {
+      throw new PackError("GAME.json: 'homepage' must be an absolute https:// URL when present.");
+    }
   }
 
   // The entry must resolve to a file inside the built dir — never escape it (path traversal).

@@ -85,6 +85,10 @@ services:
 > | `/app/games-compressed` | Yes — losing it only costs a re-compression |
 > | `/app/games-unpacked` | Yes — re-extracted from the packages |
 >
+> `/app/blobs` is the deliberate exception and is not in that list: the server empties it on every
+> startup, so a mount there can only preserve content the next boot deletes. It does still need *room* —
+> see the sizing note under [What to back up](#what-to-back-up).
+>
 > This matters more here than under plain Compose: **TrueNAS Custom Apps, Kubernetes, Portainer and
 > ECS all recreate the container on every image update**, so a writable path that is not an explicit
 > mount is discarded each time you update — and the server keeps running perfectly against the empty
@@ -241,8 +245,8 @@ the hash and attack it offline — if you bind-mount a host directory, don't loo
 
 **Where operator policy lives.** Alongside it, in `KnockBox__AdminSettingsPath` —
 `/app/data/admin-settings.json` in the image, on the same volume for the same reason. It holds per-game
-availability and maintenance mode. It is **not** a secret (nothing in it is sensitive) but it *is* the one
-piece of state this server keeps across a restart, so back up the volume if your policy is non-trivial. It
+availability and maintenance mode. It is **not** a secret (nothing in it is sensitive) but it *is*
+operator state this server keeps across a restart, so back up the volume if your policy is non-trivial. It
 is indented and safe to hand-edit while the server is stopped; if it can't be read, the server boots with
 platform defaults and says so on the portal's Overview tab rather than failing.
 
@@ -498,6 +502,25 @@ release's `appsettings.json` defaults, diff them in rather than replacing the fi
 `/app/games-compressed` and `/app/games-unpacked` need no backup — they are rebuilt from the games
 and packages above. Losing them costs a slow first boot, nothing more.
 
+`/app/blobs` needs no backup either, and for a stronger reason: the server **deletes everything in it on
+every startup**. A blob is the media a game uploaded for one session to share, its lifetime is that
+session's, and lobbies are in-memory and die with the process — so after a restart every blob on disk is
+orphaned by definition and a client re-uploads whatever its session still needs.
+
+> **What blobs do need is room, and by default that room is the container's own writable layer.**
+> `KnockBox:BlobTotalQuotaBytes` defaults to 20 GiB, which is a lot to write into an overlay filesystem —
+> and on a host that size-caps that layer (`--storage-opt size=…`, and some managed platforms by default)
+> the container hits its own ceiling before the quota does, with no warning that says so. Either lower
+> `KnockBox:BlobTotalQuotaBytes` to fit, or move the root: set `KnockBox__BlobsRoot=/app/blobs-ext` and
+> add your own `- /srv/knockbox/blobs:/app/blobs-ext` to the service's `volumes:` (there is no shipped
+> mount or `.env` variable for it, deliberately). Whatever you point it at, treat it as scratch: the only
+> thing a backed-up volume there can preserve is content the next startup deletes.
+>
+> The blob root must also **not overlap** `games/`, `games-unpacked` or `games-managed`. The server
+> refuses an overlapping configuration outright, and that refusal is doing real work here rather than
+> tidying: the startup sweep removes the whole root, so pointing it at your games directory would delete
+> your library on the next boot.
+
 ```bash
 # The two that matter, with the stack stopped.
 docker run --rm -v knockbox-admin:/data -v "$PWD":/backup \
@@ -647,6 +670,7 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. **Back this up** — see “Updating KnockBox”. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
 | `AdminSettingsPath` | `admin-settings.json` next to the password file | Persisted operator policy: per-game availability and maintenance mode. Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to reset all policy. **Back this up** — see “Updating KnockBox”. |
+| `AdminNotificationKeyPath` | `admin-notifications.key.json` next to the password file (`/app/data/…` Docker, same volume) | Persisted notification encryption keys, one per admin account. Same requirements as the password file; created mode `600`. Delete it to clear stored notifications once — a corrupt file recovers the same way on its own. |
 | `AdminStaleLobbyMinutes` | `30` | Idle minutes before the portal calls a lobby stale (and "Purge Stale" collects it). `0` judges staleness only by "nobody in it is connected". |
 | `AdminLogBufferSize` | `2000` | Log events kept in memory for the portal's live log view. Older entries are only in the rolling files under `LogsRoot`. |
 | `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. `0` measures on every read. |

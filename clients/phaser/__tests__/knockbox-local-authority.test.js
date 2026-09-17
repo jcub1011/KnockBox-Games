@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import LocalPkg from '../knockbox-local.js';
 import KBAuthority from '../kb-authority.js';
 
@@ -321,6 +321,50 @@ describe('authority mode — fidelity checks', () => {
       .toThrow(/single-file/);
     expect(() => scanAuthorityImports('export function createAuthority(kb) {}\nexport const config = {};'))
       .not.toThrow();
+  });
+});
+
+describe('authority mode — URL form loading', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const moduleSource = [
+    'export function createAuthority(kb) {',
+    '  return { init() {}, applyIntent() { return null; }, snapshot() { return {}; } };',
+    '}',
+    'export const config = { tickHz: 7 };',
+    '',
+  ].join('\n');
+
+  it('imports the fetched bytes — the URL is read exactly once', async () => {
+    const seen = [];
+    vi.stubGlobal('fetch', async (url) => {
+      seen.push(url);
+      return { ok: true, text: async () => moduleSource };
+    });
+    const resolved = await peer({ playerId: 'u' })._loadAuthority('http://dev/authority.js');
+    expect(typeof resolved.createAuthority).toBe('function');
+    expect(resolved.config).toMatchObject({ tickHz: 7 });
+    // One read, one import of those bytes: a second fetch could answer with different bytes
+    // than were scanned, and the module map could answer with an older module instance.
+    expect(seen).toEqual(['http://dev/authority.js']);
+  });
+
+  it('rejects scanned-but-unimportable sources before starting a session', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      text: async () => "import x from './other.js';\nexport function createAuthority() { return {}; }",
+    }));
+    await expect(peer({ playerId: 'u' })._loadAuthority('http://dev/authority.js'))
+      .rejects.toThrow(/single-file/);
+  });
+
+  it('rejects modules without the createAuthority export', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      text: async () => 'export const config = {};',
+    }));
+    await expect(peer({ playerId: 'u' })._loadAuthority('http://dev/authority.js'))
+      .rejects.toThrow(/createAuthority/);
   });
 });
 

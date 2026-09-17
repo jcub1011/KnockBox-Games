@@ -39,6 +39,29 @@ replace the *shell's* home page when they're blocking; they're repeated here so 
 player site to find out something is wrong. They re-evaluate on every poll, so a fixed problem disappears
 without a restart.
 
+### Notifications
+
+The bell in the header replaces the old toast popups. Anything the portal used to toast about — job
+outcomes, failed saves, delivery results — becomes a persistent notification instead:
+
+- The badge counts **unread** (hidden at zero). Hovering or tapping the bell previews the three newest;
+  clicking it opens the full list, newest first.
+- The preview dismisses itself after five seconds unless you're hovering it or it has keyboard focus.
+  On touch devices there is no hover, so the bell skips the preview and opens the list directly.
+  Previewing the drawer or opening the list never marks anything read; opening a notification's
+  details view marks that one read. The explicit **Mark read** / **Mark unread** buttons (per
+  notification or via **Mark all read**) change read state for anything else.
+- **Dismiss** deletes one notification; **Dismiss all** (behind a confirm) deletes everything. Clicking a
+  notification opens a details view with the full text and the exact received time, with seconds.
+- Up to **50** notifications are kept in `localStorage`; older ones fall off as new ones arrive.
+
+The stored notifications are **encrypted** (AES-GCM) under a key the server mints and hands only to a
+signed-in portal page — it lives in page memory, never in storage. The key is persisted server-side
+beside the password file, so history survives restarts, and bound to the admin
+password: **changing the password clears stored notifications**, because the old ones can no longer be
+read. (On a plain-HTTP LAN connection the browser cannot do WebCrypto, so the store falls back to
+plaintext and the list says so rather than pretending otherwise.)
+
 ### Per-Game Server Cost
 
 Games are HTML5/WASM and run in the player's browser, so it's tempting to treat them as free server-side.
@@ -101,6 +124,17 @@ authority, which is the server itself.
 ---
 
 ## 3. Game Catalog
+
+Cards are grouped under three status tabs — **Installed**, **Updates**, and **Available** — each
+with its own count. Problems have no tab of their own: an incompatible entry sits on whichever of
+Installed/Available it belongs to, badged, and the **Status (problems first)** sort floats it to
+the top. Each tab remembers its own sort (name A–Z/Z–A, status, newest, recently updated,
+version, size, activity).
+
+The list is deliberately frozen while you look at it: background polls update the data and raise
+a **List may be outdated — Refresh** pill, but rows never move on their own — so a click can't
+land on the wrong card. The list re-renders when you switch tabs, change the sort or filters, or
+refresh. While a refresh is loading, skeleton rows hold the layout.
 
 One card per discovered game, with its disk footprint, what it's running right now, and where it came
 from.
@@ -320,6 +354,21 @@ definition, already connected. It is also saved, so it survives a restart.
 | Max lobbies per game | Stops one popular title consuming every remaining slot. |
 | Max lobbies (server-authority) | **A different cap from the platform one above.** Counts only lobbies whose game runs server-side logic, each of which holds its own JavaScript engine — the one thing on this server whose memory grows with how many people are playing. Empty or **0** is unlimited, and that is the default. |
 | Authority module cache idle (min) | How long a game's shared parsed server logic is kept after its last lobby ends. **0** keeps it until the server restarts. |
+| Max blob size | Largest single file a game may upload for its session to share — a map image, a sound. Enforced while streaming, not from the length the client declares. |
+| Blob quota per session | Total a single lobby's blobs may occupy. Identical files are stored once and charged once, however many names reference them. Overridable per game in the plugin settings modal — see below. |
+| Blob quota, server-wide | **The cap that actually bounds disk use.** Without it the per-session figure is only that times the number of sessions. Full means new uploads are refused; nothing already registered is deleted. |
+| Blob grace window (min) | How long freshly uploaded bytes are protected before the game claims them. Covers the round trip between upload and register, and nothing after it. |
+| Concurrent uploads per session | Bounds how many uploads one lobby may have open at once, which is what stops an abandoned upload being used to churn the store. |
+
+**Per-game blob quota.** In each installed game's settings modal under **Blob Quota Override**, a game can be given its own per-session
+figure — a map-heavy game needs gigabytes of art where a word game needs none. Leave the input box empty (the default) to
+disable the override and return that game to the server-wide number; a negative value means no per-session cap
+for it, with the server-wide total still applying. Lowering a quota never deletes anything: sessions already
+over the new figure keep what they registered and their next upload is refused.
+
+The card also reports **how much blob storage is held against the server-wide cap**. That line is worth
+looking at, because a full quota has exactly one symptom and it arrives second-hand: a player saying their
+map will not load.
 
 Four rules worth knowing:
 
@@ -486,6 +535,12 @@ The file is indented and safe to hand-edit while the server is stopped:
     "maxLobbies": 4,
     "moduleCacheIdleMinutes": 30
   },
+  "blobs": {
+    "totalQuotaBytes": 5368709120
+  },
+  "blobQuotas": {
+    "dnd-mapper": 4294967296
+  },
   "roomCodes": {
     "words": ["XQ"],
     "patterns": ["Q7*"]
@@ -557,6 +612,7 @@ All keys take the `KnockBox:` prefix (`KnockBox__Key` as an environment variable
 | `AdminPasswordPath` | `admin.secret` beside the app | The PBKDF2 password hash. Must be writable and persisted. |
 | `AdminSessionTtlHours` | `8` | Session cookie lifetime. Sessions also drop on restart. |
 | `AdminSettingsPath` | `admin-settings.json` beside the password | Persisted operator policy (§5). |
+| `AdminNotificationKeyPath` | `admin-notifications.key.json` beside the password | Persisted notification encryption keys (one per admin account). Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to clear stored notifications once; a corrupt file recovers the same way on its own. |
 | `AdminStaleLobbyMinutes` | `30` | Idle time before a lobby counts as stale. `0` judges staleness only by "nobody is connected". |
 | `AdminLogBufferSize` | `2000` | Events held for the live log view. |
 | `AdminDiskUsageCacheSeconds` | `60` | How long disk measurements are reused. `0` walks the directories on every read. |

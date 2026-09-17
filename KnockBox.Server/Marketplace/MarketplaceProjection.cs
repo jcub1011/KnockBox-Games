@@ -144,11 +144,10 @@ public static class MarketplaceProjection
                 location.Manifest.Id,
                 location.Manifest.Name,
                 Description: null, Author: null, Tags: null,
-                // No catalog entry to read, so these come from the installed manifest itself. Homepage
-                // and Bugs stay null because GameManifest has no equivalent — they exist only in a
-                // catalog entry, so an uploaded or folder game genuinely has none to show.
+                // No catalog entry to read, so these come from the installed manifest itself. Bugs
+                // stays null because GameManifest has no equivalent — it exists only in a catalog entry.
                 License: location.Manifest.License,
-                Homepage: null,
+                Homepage: location.Manifest.Homepage,
                 Bugs: null,
                 ContentRating: location.Manifest.ContentRating,
                 MinPlayers: location.Manifest.MinPlayers,

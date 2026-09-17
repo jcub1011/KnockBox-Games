@@ -8,18 +8,46 @@
 // display names are untrusted input.
 
 import {
-  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
+  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, BYTE_MULTIPLIERS, BYTE_UNITS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
-  filterPlugins, filterSettings, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
-  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
-  noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
-  scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
-  sparklinePath, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  filterPlugins, filterSettings, formatByteLimit, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
+  formatNotificationTime, formatNotificationTimeFull,
+  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isHttpUrl, isTerminalJob, jobProgress,
+  lifecycleLabel, logLevelClass, logLevelTag,   mergeJobs, mergePluginEntries, mergeSamples,
+  noLimitOverrides, playerRange, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
+  pluginStatusLabel, ratePerSecond,
+  seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
+  sortPlugins, sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  visibleTagCount,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
+
+import {
+  NOTIFICATION_DRAWER_MS,
+  NOTIF_DRAWER_EXIT_MS,
+  NOTIF_MODAL_EXIT_MS,
+  clearNotificationKey,
+  clearNotifications,
+  consumeDecryptFailure,
+  dismissOneNotification,
+  getNotification,
+  getNotifications,
+  getUnreadCount,
+  hasStoredBlob,
+  hasUnreadEncrypted,
+  initNotificationStore,
+  isMemoryOnly,
+  isPlaintextFallback,
+  loadNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+  notify,
+  refreshNotificationKey,
+  subscribe as subscribeNotifications,
+  unloadNotificationsForLogout,
+} from './admin-notifications.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -49,7 +77,7 @@ let logCursor = 0;
 let catalogData = null;
 let jobs = [];
 let jobCursor = 0;
-// jobIds whose terminal outcome has already been toasted, so each finished job raises exactly one —
+// jobIds whose terminal outcome has already been notified, so each finished job raises exactly one —
 // whenever the operator first sees it, however many polls later that is.
 const reportedJobs = new Set();
 let uploadXhr = null;
@@ -60,6 +88,27 @@ let announcementData = null;
 let webhookData = null;
 // The blocklist being edited, which is not what is saved until the operator says so.
 let codesDraft = { words: [], patterns: [] };
+
+// ── Plugins & Games tab state ─────────────────────────────────────────────────
+// The status tabs slice one merged list, and each remembers its own sort — switching tabs
+// restores that tab's last order rather than resetting it.
+const PLUGIN_TABS = ['installed', 'updates', 'available'];
+// filterPlugins status each tab shows. Problems have no tab of their own: an incompatible
+// installed game sits in Installed, an incompatible catalog-only entry in Available, both
+// surfaced by badge + the `status` sort rather than by a separate view.
+const PLUGIN_TAB_STATUS = { installed: 'installed', updates: 'updateAvailable', available: 'notInstalled' };
+let activePluginTab = 'installed';
+let pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
+// Frozen-list discipline (Visual Studio style): a background poll never moves the rows an
+// operator may be about to click. Polls update the caches + notifications and only raise the
+// stale pill; the list re-renders on tab switch, sort/search/source change, manual refresh,
+// or a user-initiated mutation's completion.
+let pluginsDirty = false;
+let pluginsRendered = false;
+let pluginsLoading = false;
+// Fetch generation: a tab switch or second refresh while a load is in flight makes the first
+// reply stale, and rendering it would swap the list under the operator's new tab.
+let pluginsFetchSeq = 0;
 
 // Previous counter samples, for the rates admin-core derives. `{ value, at }` pairs — see ratePerSecond.
 let cpuSample = null;
@@ -108,18 +157,18 @@ async function getJson(path) {
 }
 
 /**
- * POSTs an action and reports the outcome as a toast. Returns true when the server accepted it.
+ * POSTs an action and reports the outcome as a notification. Returns true when the server accepted it.
  *
  * The JSON content type is always sent because the server's mutation guard requires it — a plain form
  * post is the one shape SameSite=Strict historically leaked on, so the API refuses anything else.
  *
- * `errorEl` redirects the failure message into an inline element instead of a toast. A form's rejection
+ * `errorEl` redirects the failure message into an inline element instead of a notification. A form's rejection
  * belongs beside the fields that caused it and has to stay on screen while they are corrected, which a
- * toast that fades cannot do.
+ * transient notification cannot do.
  */
 async function postJson(path, body, { errorEl = null } = {}) {
   const fail = (message) => {
-    if (!errorEl) { toast(message, 'error'); return false; }
+    if (!errorEl) { notify(message, 'error'); return false; }
     errorEl.textContent = message;
     errorEl.classList.remove('hidden');
     return false;
@@ -140,8 +189,8 @@ async function postJson(path, body, { errorEl = null } = {}) {
     // Success with something worth saying: `detail` explains what the action did and did not do (chiefly
     // that disabling a game leaves its running lobbies alone), `warning` that a policy change is live but
     // wasn't written to disk.
-    if (data.warning) toast(data.warning, 'warning');
-    else toast(data.detail || 'Done.', 'success');
+    if (data.warning) notify(data.warning, 'warning');
+    else notify(data.detail || 'Done.', 'success');
     return true;
   } catch (err) {
     console.error(`POST ${path} failed:`, err);
@@ -164,17 +213,443 @@ function showErrorStatus(msg) {
   el('server-status-pill').hidden = false;
 }
 
-// ── Toasts ────────────────────────────────────────────────────────────────────
+// ── Notifications ─────────────────────────────────────────────────────────────
+// The persistent replacement for the toast system: a bell with an unread badge in the header, an
+// arrival drawer with the three newest, a full list modal, and a details modal for one
+// notification. The STORE (list, encryption, persistence) lives in admin-notifications.js, which
+// this module subscribes to; everything below is rendering over it. Read state changes via the
+// explicit buttons, and by opening the details modal (which marks the shown item read); the drawer
+// preview and opening the list never mark anything read.
 
-export function toast(message, kind = 'info') {
-  const host = el('toast-host');
+let notifDrawerTimer = null;
+let notifDrawerOpen = false;
+let notifDetailId = null;
+
+// Glyphs for the icon-only notification buttons, matching the header/tab icon treatment
+// (stroke currentColor). The toggle shows the envelope for the state it will move the item to:
+// open for "mark read", closed for "mark unread". Dismiss is an x like the modal-close icon.
+const NOTIF_ICON_MAIL_OPEN = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M6 12.0001V10.0001H18V12.0001M3.02832 10.0002L10.2246 14.8168C10.8661 15.2444 11.1869 15.4583 '
+  + '11.5336 15.5414C11.8399 15.6148 12.1593 15.6148 12.4657 15.5414C12.8124 15.4583 13.1332 15.2444 '
+  + '13.7747 14.8168L20.9709 10.0001M10.2981 4.06892L4.49814 7.71139C3.95121 8.05487 3.67775 8.2266 '
+  + '3.4794 8.45876C3.30385 8.66424 3.17176 8.90317 3.09111 9.16112C3 9.45256 3 9.77548 3 10.4213V16.8001C3 '
+  + '17.9202 3 18.4803 3.21799 18.9081C3.40973 19.2844 3.71569 19.5904 4.09202 19.7821C4.51984 20.0001 '
+  + '5.07989 20.0001 6.2 20.0001H17.8C18.9201 20.0001 19.4802 20.0001 19.908 19.7821C20.2843 19.5904 '
+  + '20.5903 19.2844 20.782 18.9081C21 18.4803 21 17.9202 21 16.8001V10.4213C21 9.77548 21 9.45256 '
+  + '20.9089 9.16112C20.8282 8.90317 20.6962 8.66424 20.5206 8.45876C20.3223 8.2266 20.0488 8.05487 '
+  + '19.5019 7.71139L13.7019 4.06891C13.0846 3.68129 12.776 3.48747 12.4449 3.41192C12.152 3.34512 11.848 '
+  + '3.34512 11.5551 3.41192C11.224 3.48747 10.9154 3.68129 10.2981 4.06892Z"/></svg>';
+const NOTIF_ICON_MAIL_CLOSED = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M21 8L17.4392 9.97822C15.454 11.0811 14.4614 11.6326 13.4102 11.8488C12.4798 12.0401 11.5202 '
+  + '12.0401 10.5898 11.8488C9.53864 11.6326 8.54603 11.0811 6.5608 9.97822L3 8M6.2 19H17.8C18.9201 19 '
+  + '19.4802 19 19.908 18.782C20.2843 18.5903 20.5903 18.2843 20.782 17.908C21 17.4802 21 16.9201 21 '
+  + '15.8V8.2C21 7.0799 21 6.51984 20.782 6.09202C20.5903 5.71569 20.2843 5.40973 19.908 5.21799C19.4802 5 '
+  + '18.9201 5 17.8 5H6.2C5.0799 5 4.51984 5 4.09202 5.21799C3.71569 5.40973 3.40973 5.71569 3.21799 '
+  + '6.09202C3 6.51984 3 7.07989 3 8.2V15.8C3 16.9201 3 17.4802 3.21799 17.908C3.40973 18.2843 3.71569 '
+  + '18.5903 4.09202 18.782C4.51984 19 5.07989 19 6.2 19Z"/></svg>';
+const NOTIF_ICON_X = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+
+/**
+ * Paints a mark read/unread toggle as the icon for the action it will take. Icon-only, so the
+ * accessible name carries the meaning the text used to.
+ */
+function paintNotifToggle(btn, read) {
+  btn.innerHTML = read ? NOTIF_ICON_MAIL_CLOSED : NOTIF_ICON_MAIL_OPEN;
+  const label = read ? 'Mark unread' : 'Mark read';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+}
+
+function notifKindLabel(kind) {
+  const name = String(kind ?? 'info');
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function refreshNotifBadge() {
+  const badge = el('notif-badge');
+  if (!badge) return;
+  const count = getUnreadCount();
+  badge.textContent = count > 99 ? '99+' : String(count);
+  badge.classList.toggle('hidden', count === 0);
+  el('notif-bell-btn')?.setAttribute(
+    'aria-label', count === 0 ? 'Notifications' : `Notifications, ${count} unread`);
+}
+
+/**
+ * Whether the arrival drawer is meaningful on this device. It is a hover-preview idiom: hover or
+ * keyboard focus opens it, leaving dismisses it. On touch devices there is no hover — a tap fires
+ * click (and sometimes emulated mouseenter first), so opening the drawer on tap races the modal the
+ * tap actually asked for, and the two visibly fight before the modal wins. There the bell skips the
+ * drawer entirely and opens the list, and arrivals only move the badge. Missing matchMedia (jsdom)
+ * reads as capable, so the test suite exercises the drawer path.
+ */
+export function canHoverPreview() {
+  try {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
+    return window.matchMedia('(hover: hover)').matches;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Opens the arrival preview. Always re-renders the three newest, even if they are the same ones
+ * the last opening showed — the drawer answers "what just happened", not "what is unread".
+ * Suppressed while the list modal owns the operator's attention (its badge still updates),
+ * before login (the bell is hidden there anyway), and on touch devices (see canHoverPreview).
+ */
+function openNotifDrawer() {
+  if (!canHoverPreview()) return;
+  if (el('dashboard-view')?.classList.contains('hidden')) return;
+  if (!el('notifications-backdrop')?.classList.contains('hidden')) return;
+  // An arrival while the details modal is open would pop the drawer underneath it (z-90 vs z-200):
+  // invisible, but arming the auto-dismiss timer and flipping open state behind the modal.
+  if (!el('notification-details-backdrop')?.classList.contains('hidden')) return;
+  renderNotifDrawer();
+  // A close in flight is cancelled: the exit timer is dropped and the closing class removed, so a
+  // reopen never inherits the fade-out it just interrupted.
+  notifDrawerExitTimer = clearNotifExitTimer(notifDrawerExitTimer);
+  const drawer = el('notif-drawer');
+  drawer?.classList.remove('notif-drawer-closing');
+  drawer?.classList.remove('hidden');
+  notifDrawerOpen = true;
+  el('notif-bell-btn')?.setAttribute('aria-expanded', 'true');
+  armNotifDrawerTimer();
+}
+
+/**
+ * Closes the drawer through its exit animation rather than hiding it outright, so dismissal reads
+ * the same as arrival. The `hidden` class lands when the animation ends (NOTIF_DRAWER_EXIT_MS,
+ * mirroring admin.css) — callers must not assume it is synchronous.
+ */
+export function closeNotifDrawer() {
+  stopNotifDrawerTimer();
+  const drawer = el('notif-drawer');
+  el('notif-bell-btn')?.setAttribute('aria-expanded', 'false');
+  if (!drawer || !notifDrawerOpen) {
+    notifDrawerOpen = false;
+    return;
+  }
+  notifDrawerOpen = false;
+  drawer.classList.add('notif-drawer-closing');
+  notifDrawerExitTimer = clearNotifExitTimer(notifDrawerExitTimer);
+  notifDrawerExitTimer = setTimeout(() => {
+    notifDrawerExitTimer = null;
+    drawer.classList.add('hidden');
+    drawer.classList.remove('notif-drawer-closing');
+  }, NOTIF_DRAWER_EXIT_MS);
+}
+
+/**
+ * Cancels the drawer's pending auto-dismiss. Exported for the jsdom tests, which reuse one window
+ * per file: a drawer armed by one test would otherwise fire into the next test's DOM — the same
+ * trap stopPolling() and stopScrollSettle() exist for.
+ */
+export function stopNotifDrawerTimer() {
+  if (notifDrawerTimer !== null) clearTimeout(notifDrawerTimer);
+  notifDrawerTimer = null;
+}
+
+let notifDrawerExitTimer = null;
+let notifListExitTimer = null;
+let notifDetailExitTimer = null;
+
+function clearNotifExitTimer(timer) {
+  if (timer !== null) clearTimeout(timer);
+  return null;
+}
+
+/**
+ * Cancels every in-flight exit animation. Exported alongside stopNotifDrawerTimer for the jsdom
+ * tests: an exit armed by one test must not hide the next test's freshly opened drawer or modal.
+ */
+export function stopNotifExitTimers() {
+  notifDrawerExitTimer = clearNotifExitTimer(notifDrawerExitTimer);
+  notifListExitTimer = clearNotifExitTimer(notifListExitTimer);
+  notifDetailExitTimer = clearNotifExitTimer(notifDetailExitTimer);
+}
+
+function armNotifDrawerTimer() {
+  stopNotifDrawerTimer();
+  notifDrawerTimer = setTimeout(closeNotifDrawer, NOTIFICATION_DRAWER_MS);
+}
+
+function drawerItem(n) {
+  const item = document.createElement('div');
+  item.className = `notif-item notif-${n.kind}${n.read ? '' : ' notif-item-unread'}`;
+  item.tabIndex = 0;
+  item.setAttribute('role', 'button');
+
+  const head = document.createElement('div');
+  head.className = 'notif-item-head';
+  const kind = document.createElement('span');
+  kind.className = 'notif-kind';
+  kind.textContent = notifKindLabel(n.kind);
+  const time = document.createElement('span');
+  time.className = 'notif-time';
+  time.textContent = formatNotificationTime(n.at);
+  head.append(kind, time);
+
+  const message = document.createElement('div');
+  message.className = 'notif-message';
+  message.textContent = n.message;
+  item.append(head, message);
+
+  const open = () => openNotificationDetails(n.id);
+  item.addEventListener('click', open);
+  item.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+  return item;
+}
+
+function renderNotifDrawer() {
+  const host = el('notif-drawer-items');
   if (!host) return;
-  const div = document.createElement('div');
-  div.className = `toast toast-${kind}`;
-  div.textContent = message;
-  host.appendChild(div);
-  // Matches the CSS fade-out duration; a longer hold for errors, which are the ones worth reading.
-  setTimeout(() => div.remove(), kind === 'error' ? 8000 : 4000);
+  host.innerHTML = '';
+  const latest = getNotifications().slice(0, 3);
+  if (latest.length === 0) {
+    const none = document.createElement('div');
+    none.className = 'notif-item';
+    none.textContent = 'No notifications.';
+    host.appendChild(none);
+    return;
+  }
+  for (const n of latest) host.appendChild(drawerItem(n));
+}
+
+export function openNotifications() {
+  closeNotifDrawer();
+  const bd = el('notifications-backdrop');
+  notifListExitTimer = clearNotifExitTimer(notifListExitTimer);
+  bd?.classList.remove('modal-closing');
+  bd?.classList.remove('hidden');
+  renderNotifications();
+  el('notifications-close')?.focus();
+}
+
+/**
+ * Animated like the drawer close: the backdrop takes `modal-closing` (NOTIF_MODAL_EXIT_MS, mirroring
+ * admin.css) and `hidden` lands when it ends. Guarded against double-arming, and reopening cancels.
+ */
+export function closeNotifications() {
+  const bd = el('notifications-backdrop');
+  if (!bd || bd.classList.contains('hidden') || bd.classList.contains('modal-closing')) return;
+  bd.classList.add('modal-closing');
+  notifListExitTimer = clearNotifExitTimer(notifListExitTimer);
+  notifListExitTimer = setTimeout(() => {
+    notifListExitTimer = null;
+    bd.classList.add('hidden');
+    bd.classList.remove('modal-closing');
+  }, NOTIF_MODAL_EXIT_MS);
+}
+
+function notificationRow(n) {
+  const row = document.createElement('div');
+  row.className = `notif-row notif-${n.kind}${n.read ? '' : ' notif-item-unread'}`;
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+
+  const main = document.createElement('div');
+  main.className = 'notif-row-main';
+  const head = document.createElement('div');
+  head.className = 'notif-item-head';
+  const kind = document.createElement('span');
+  kind.className = 'notif-kind';
+  kind.textContent = notifKindLabel(n.kind);
+  const time = document.createElement('span');
+  time.className = 'notif-time';
+  time.textContent = formatNotificationTime(n.at);
+  head.append(kind, time);
+  const message = document.createElement('div');
+  message.className = 'notif-message';
+  message.textContent = n.message;
+  main.append(head, message);
+
+  const actions = document.createElement('div');
+  actions.className = 'notif-row-actions';
+  // Disabled alongside the toolbar buttons while an unreadable encrypted blob is stored (see
+  // renderNotifications): a per-row delete here could not delete what is actually stored.
+  const rowLocked = hasUnreadEncrypted();
+  const toggle = document.createElement('button');
+  toggle.className = 'btn btn-secondary btn-small btn-icon-only';
+  toggle.type = 'button';
+  toggle.disabled = rowLocked;
+  paintNotifToggle(toggle, n.read);
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    markNotificationRead(n.id, !n.read);
+  });
+  const dismiss = document.createElement('button');
+  dismiss.className = 'btn btn-danger btn-small btn-icon-only';
+  dismiss.type = 'button';
+  dismiss.innerHTML = NOTIF_ICON_X;
+  dismiss.setAttribute('aria-label', 'Dismiss notification');
+  dismiss.title = 'Dismiss notification';
+  dismiss.disabled = rowLocked;
+  dismiss.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dismissOneNotification(n.id);
+  });
+  actions.append(toggle, dismiss);
+  row.append(main, actions);
+
+  const open = () => openNotificationDetails(n.id);
+  row.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    open();
+  });
+  row.addEventListener('keydown', (e) => {
+    if (e.target.closest('button')) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+  return row;
+}
+
+function renderNotifications() {
+  const list = getNotifications();
+  const unread = list.filter((n) => n.read !== true).length;
+  el('notifications-unread').textContent = `${unread} unread`;
+
+  const note = el('notifications-note');
+  const notes = [];
+  // While an encrypted blob is stored but unreadable on this origin, mutating controls stay disabled:
+  // any delete or mark-read would only touch memory while the stored blob survives, so the action
+  // could not do what its label promises.
+  const locked = hasUnreadEncrypted();
+  if (locked) {
+    notes.push('Encrypted notifications are stored on this browser but cannot be read on this connection '
+      + '(plain HTTP over LAN has no WebCrypto). They were left untouched — managing is disabled until '
+      + 'you revisit over loopback or HTTPS.');
+  } else if (isPlaintextFallback()) {
+    notes.push('Stored unencrypted on this connection: this browser cannot do WebCrypto here '
+      + '(plain HTTP over LAN), so anyone reading this browser profile can read these.');
+  } else if (isMemoryOnly()) {
+    notes.push('The encryption key is unavailable, so these live in memory for this session only '
+      + 'and will not survive a reload.');
+  }
+  note.textContent = notes.join(' ');
+  note.classList.toggle('hidden', notes.length === 0);
+
+  const host = el('notifications-list');
+  host.innerHTML = '';
+  for (const n of list) host.appendChild(notificationRow(n));
+  host.classList.toggle('hidden', list.length === 0);
+  el('notifications-empty').classList.toggle('hidden', list.length > 0);
+  el('notifications-mark-all').disabled = unread === 0 || locked;
+  el('notifications-dismiss-all').disabled = list.length === 0 || locked;
+}
+
+async function dismissAllNotificationsUI() {
+  if (getNotifications().length === 0) return;
+  // Buttons are disabled while an unreadable encrypted blob is stored; this is the keyboard/forced-click net.
+  if (hasUnreadEncrypted()) return;
+  if (!await confirmAction(
+    'Dismiss every notification? This deletes them permanently.', 'Dismiss All')) return;
+  clearNotifications();
+}
+
+export function openNotificationDetails(id) {
+  notifDetailId = id;
+  // Opening the dedicated modal counts as reading: mark unread items read so
+  // the badge/list reflect what the operator has now seen. The store emit
+  // re-renders badge + list; the explicit render below shows the Read status.
+  const current = getNotification(id);
+  if (current && !current.read) markNotificationRead(id, true);
+  if (!renderNotificationDetails()) return;
+  closeNotifDrawer();
+  const bd = el('notification-details-backdrop');
+  notifDetailExitTimer = clearNotifExitTimer(notifDetailExitTimer);
+  bd?.classList.remove('modal-closing');
+  bd?.classList.remove('hidden');
+}
+
+export function closeNotificationDetails() {
+  const bd = el('notification-details-backdrop');
+  if (!bd || bd.classList.contains('hidden') || bd.classList.contains('modal-closing')) {
+    if (!bd || bd.classList.contains('hidden')) notifDetailId = null;
+    return;
+  }
+  notifDetailId = null;
+  bd.classList.add('modal-closing');
+  notifDetailExitTimer = clearNotifExitTimer(notifDetailExitTimer);
+  notifDetailExitTimer = setTimeout(() => {
+    notifDetailExitTimer = null;
+    bd.classList.add('hidden');
+    bd.classList.remove('modal-closing');
+  }, NOTIF_MODAL_EXIT_MS);
+}
+
+function renderNotificationDetails() {
+  const n = getNotification(notifDetailId);
+  if (!n) {
+    // Dismissed from the list (or the detail modal itself) while open: close and re-sync the list.
+    closeNotificationDetails();
+    if (!el('notifications-backdrop')?.classList.contains('hidden')) renderNotifications();
+    return false;
+  }
+  const body = el('notification-details-body');
+  body.innerHTML = '';
+
+  const message = document.createElement('div');
+  message.className = 'notif-details-message';
+  message.textContent = n.message;
+
+  const grid = document.createElement('div');
+  grid.className = 'details-grid';
+  for (const [label, value] of [
+    ['Severity', notifKindLabel(n.kind)],
+    ['Status', n.read ? 'Read' : 'Unread'],
+    ['Received', formatNotificationTimeFull(n.at)],
+    ['Recorded', n.at],
+  ]) {
+    const field = document.createElement('div');
+    field.className = 'details-field';
+    const lab = document.createElement('div');
+    lab.className = 'details-label';
+    lab.textContent = label;
+    const val = document.createElement('div');
+    val.className = 'details-value';
+    val.textContent = value;
+    field.append(lab, val);
+    grid.appendChild(field);
+  }
+  body.append(message, grid);
+  paintNotifToggle(el('notification-details-toggle'), n.read);
+  // Same lock as the list rows: while an unreadable encrypted blob is stored, toggling or dismissing
+  // from the details modal could not touch what is actually stored.
+  const detailsLocked = hasUnreadEncrypted();
+  el('notification-details-toggle').disabled = detailsLocked;
+  el('notification-details-dismiss').disabled = detailsLocked;
+  return true;
+}
+
+/**
+ * After a successful login: fetch the store's encryption key, then read the store. A 401 from the
+ * key endpoint means the session went away mid-check, so it funnels back through the auth check
+ * rather than leaving the portal on a dashboard it is no longer entitled to.
+ */
+async function initNotificationsAfterAuth() {
+  const { key, unauthorized } = await refreshNotificationKey();
+  if (unauthorized) {
+    await checkAuthStatus();
+    return;
+  }
+  await loadNotifications();
+  if (consumeDecryptFailure()) {
+    notify('Stored notifications could not be decrypted, so they were cleared. '
+      + 'This happens when the admin password changes.', 'warning');
+  } else if (!key && (hasUnreadEncrypted() || isMemoryOnly() || hasStoredBlob())) {
+    // The key endpoint failed for a non-auth reason (network/500): the portal must not look simply
+    // empty — stored history is unreachable and anything new lives in memory for this session only.
+    notify('Could not fetch the notification encryption key, so stored notifications are unavailable '
+      + 'and new ones live in memory for this session only.', 'warning');
+  }
+  refreshNotifBadge();
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────────
@@ -246,6 +721,7 @@ export async function checkAuthStatus() {
       showErrorStatus('Server unreachable on admin port');
       el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn')?.classList.add('hidden');
+      el('notif-bell-wrap')?.classList.add('hidden');
       return;
     }
     const data = await res.json();
@@ -255,22 +731,27 @@ export async function checkAuthStatus() {
       showView('setup-view');
       el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn').classList.add('hidden');
+      el('notif-bell-wrap')?.classList.add('hidden');
       stopPolling();
     } else if (!data.authenticated) {
       showView('login-view');
       el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn').classList.add('hidden');
+      el('notif-bell-wrap')?.classList.add('hidden');
       stopPolling();
     } else {
       showView('dashboard-view');
       el('admin-top-tabs')?.classList.remove('hidden');
       el('logout-btn').classList.remove('hidden');
+      el('notif-bell-wrap')?.classList.remove('hidden');
       selectSetting(settingFromHash(location.hash), { replaceHash: false, scroll: Boolean(location.hash) });
+      await initNotificationsAfterAuth();
     }
   } catch (err) {
     showErrorStatus('Network Error');
     el('admin-top-tabs')?.classList.add('hidden');
     el('logout-btn')?.classList.add('hidden');
+    el('notif-bell-wrap')?.classList.add('hidden');
     console.error('Failed to check auth status:', err);
   }
 }
@@ -730,9 +1211,13 @@ function enterTab(tab, { force = false } = {}) {
     jobCursor = 0;
     jobs = [];
     // The one read that is NOT on the poll path — it reaches the network with a 30-second timeout —
-    // so arriving is one of the few moments it happens. Everything else this panel shows is
-    // refreshActiveTab's job; calling it here too just fetched each of them twice on entry.
-    refreshCatalog();
+    // so arriving is one of the few moments it happens. enterPluginsTab fetches every feed the cards
+    // read (games, catalog, jobs) and renders once through the skeleton path; the shared
+    // refreshActiveTab below is skipped so entry doesn't fetch the jobs feed twice. Poll ticks from
+    // here on only refresh the caches and raise the stale pill — never re-render.
+    enterPluginsTab();
+    startPolling();
+    return;
   }
   refreshActiveTab();
   startPolling();
@@ -826,6 +1311,9 @@ async function refreshActiveTab() {
   }
   const timeStr = `Updated ${new Date().toLocaleTimeString()}`;
   for (const ind of document.querySelectorAll('.refresh-indicator')) {
+    // The plugins list is frozen between explicit renders, so its indicator shows the last RENDER
+    // (owned by renderPlugins) — stamping it here would claim freshness the rows don't have.
+    if (ind.id === 'last-updated-plugins') continue;
     ind.textContent = timeStr;
   }
 }
@@ -1122,7 +1610,7 @@ async function kickPlayer(lobby, member) {
 
 async function closeAllLobbies() {
   const total = (lobbyData?.lobbies || []).length;
-  if (total === 0) { toast('There are no lobbies to close.', 'info'); return; }
+  if (total === 0) { notify('There are no lobbies to close.', 'info'); return; }
   if (!await confirmAction(
     `Close all ${total} lobby/lobbies on the server? Every player in them returns to the home page and `
     + 'loses any game in progress.', 'Close Everything')) return;
@@ -1149,6 +1637,8 @@ const pluginSelectedVersions = new Map();
 let lastGamesSummary = null;
 let lastSourceFilterSources = null;
 let renderPendingOnBlur = false;
+let renderPendingFresh = true;
+let renderPendingStale = false;
 
 function summarizeGames(games = []) {
   return (games || []).map((g) => `${g.id}:${g.version}:${g.availability}:${g.lifecycle}:${g.activeLobbies}:${g.activePlayers}`).join('|');
@@ -1160,29 +1650,156 @@ export function resetPluginStateForTests() {
   lastGamesSummary = null;
   lastSourceFilterSources = null;
   renderPendingOnBlur = false;
+  renderPendingFresh = true;
+  renderPendingStale = false;
+  activePluginTab = 'installed';
+  pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
+  pluginsDirty = false;
+  pluginsRendered = false;
+  pluginsLoading = false;
+  pluginsFetchSeq = 0;
 }
 
-async function refreshGames({ force = false } = {}) {
+async function refreshGames({ force = false, render = false } = {}) {
   const data = await getJson('/admin/api/games');
-  if (!data) return;
+  if (!data) return false;
   gameData = data;
   const summary = summarizeGames(data.games);
   const changed = force || summary !== lastGamesSummary;
   lastGamesSummary = summary;
   if (changed) {
-    renderPlugins();
+    // Background polls only raise the stale pill — re-rendering here is what moved rows under
+    // the cursor every few seconds. Explicit callers (manual refresh, availability/delete/quota
+    // saves) pass render: true for the re-render they asked for.
+    if (render) renderPlugins();
+    else markPluginsStale();
   }
+  return true;
 }
 
 export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
-  await Promise.all([
+  // The explicit refresh: skeleton, refetch everything, then one render. Poll ticks never come
+  // through here — they take refreshGames/refreshJobs directly, which only mark stale.
+  const seq = beginPluginsLoad();
+  const [gamesOk, catalogOk, jobsOk] = await Promise.all([
     refreshGames({ force: true }),
     refreshCatalog({ refresh: refreshCatalogNow }),
     refreshJobs(),
   ]);
+  if (seq !== pluginsFetchSeq) return;
+  pluginsLoading = false;
+  if (!gamesOk && !catalogOk && !jobsOk) {
+    // Every feed failed (getJson already showed the error pill): the skeletons hold no data, so
+    // there is nothing to render — and stamping "List updated" would bless an empty list as
+    // fresh. Raise stale instead (beginPluginsLoad hid it) and release the busy state.
+    const host = el('plugins-list') || el('mkt-list') || el('games-list');
+    host?.removeAttribute('aria-busy');
+    markPluginsStale();
+    return;
+  }
+  // A partial failure still renders what arrived, but stays stale on its old timestamp — only a
+  // full success claims freshness.
+  const fresh = Boolean(gamesOk && catalogOk && jobsOk);
+  renderPlugins({ fresh, stale: !fresh });
 }
 
-export function renderPlugins() {
+/**
+ * Entering the panel: skeleton first, then every feed the cards read (games, catalog — which
+ * also carries the job set — plus the jobs feed, which may be ahead of the catalog reply),
+ * then one render. Fire-and-forget (enterTab is sync) — the seq token drops the reply if the
+ * operator left or refreshed again first.
+ */
+async function enterPluginsTab() {
+  const seq = beginPluginsLoad();
+  const [gamesOk, catalogOk, jobsOk] = await Promise.all([refreshGames({ force: true }), refreshCatalog(), refreshJobs()]);
+  if (seq !== pluginsFetchSeq) return;
+  pluginsLoading = false;
+  if (!gamesOk && !catalogOk && !jobsOk) {
+    const host = el('plugins-list') || el('mkt-list') || el('games-list');
+    host?.removeAttribute('aria-busy');
+    markPluginsStale();
+    return;
+  }
+  const fresh = Boolean(gamesOk && catalogOk && jobsOk);
+  renderPlugins({ fresh, stale: !fresh });
+}
+
+/**
+ * Switches the visible status tab, restoring that tab's remembered sort into the sort control.
+ * Instant and fetch-free: it re-slices the cached merge, which is also why it does not clear a
+ * stale pill — the data is no fresher than it was, only the slice changed.
+ */
+export function setPluginTab(name) {
+  if (!PLUGIN_TABS.includes(name)) return;
+  activePluginTab = name;
+  for (const btn of document.querySelectorAll('.plugin-tab-btn')) {
+    const on = btn.dataset.ptab === name;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', String(on));
+    btn.tabIndex = on ? 0 : -1;
+  }
+  const sort = el('plugins-sort');
+  if (sort) sort.value = pluginSort[name] ?? 'name-az';
+  // Re-slice only: the data is no fresher than it was, so this render must neither clear a
+  // stale pill nor stamp the timestamp.
+  renderPlugins({ fresh: false });
+}
+
+/** Tab counts: each tab's share of the search+source-filtered merge, painted on every render. */
+function paintPluginCounts(base) {
+  const list = base || [];
+  for (const tab of PLUGIN_TABS) {
+    const countEl = el(`ptab-count-${tab}`);
+    if (!countEl) continue;
+    const status = PLUGIN_TAB_STATUS[tab];
+    const n = filterPlugins(list, { status }).length;
+    countEl.textContent = `(${n})`;
+  }
+}
+
+/** Background data moved behind a rendered list: say so without moving a single row. */
+function markPluginsStale() {
+  pluginsDirty = true;
+  if (!pluginsRendered || pluginsLoading) return;
+  el('plugins-stale')?.classList.remove('hidden');
+}
+
+function hidePluginsStale() {
+  pluginsDirty = false;
+  el('plugins-stale')?.classList.add('hidden');
+}
+
+function makePluginSkeleton() {
+  const skel = document.createElement('div');
+  skel.className = 'game-card plugin-card mkt-card plugin-skeleton-card';
+  skel.setAttribute('aria-hidden', 'true');
+  for (let i = 0; i < 3; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'plugin-skeleton-bar';
+    skel.appendChild(bar);
+  }
+  return skel;
+}
+
+/**
+ * Starts a fetch-driven load: skeleton rows + aria-busy, and a seq token the reply must still
+ * hold to render. Returns the token.
+ */
+function beginPluginsLoad() {
+  pluginsFetchSeq += 1;
+  pluginsLoading = true;
+  hidePluginsStale();
+  const host = el('plugins-list') || el('mkt-list') || el('games-list');
+  if (host) {
+    host.setAttribute('aria-busy', 'true');
+    host.replaceChildren(...Array.from({ length: 6 }, makePluginSkeleton));
+  }
+  const updatedEl = el('last-updated-plugins');
+  if (updatedEl) updatedEl.textContent = 'Loading…';
+  return pluginsFetchSeq;
+}
+
+export function renderPlugins({ fresh = true, stale = false } = {}) {
   renderSourceFilter();
   const host = el('plugins-list') || el('mkt-list') || el('games-list');
   if (!host) return;
@@ -1191,6 +1808,8 @@ export function renderPlugins() {
   // do NOT interrupt them. Defer rendering until they blur.
   if (host.contains(document.activeElement)) {
     renderPendingOnBlur = true;
+    renderPendingFresh = fresh;
+    renderPendingStale = stale;
     return;
   }
   renderPendingOnBlur = false;
@@ -1200,7 +1819,7 @@ export function renderPlugins() {
     host.addEventListener('focusout', () => {
       setTimeout(() => {
         if (!host.contains(document.activeElement) && renderPendingOnBlur) {
-          renderPlugins();
+          renderPlugins({ fresh: renderPendingFresh, stale: renderPendingStale });
         }
       }, 50);
     });
@@ -1220,9 +1839,13 @@ export function renderPlugins() {
 
   const q = (el('plugins-filter-q') || el('mkt-filter-q') || el('game-filter-q'))?.value || '';
   const source = (el('plugins-filter-source') || el('mkt-filter-source'))?.value || '';
-  const status = (el('plugins-filter-status') || el('mkt-filter-status') || el('game-filter-availability'))?.value || '';
+  // The status dropdown is gone: the active tab IS the status filter.
+  const status = PLUGIN_TAB_STATUS[activePluginTab] ?? PLUGIN_TAB_STATUS.installed;
 
-  const filtered = filterPlugins(allEntries, { q, source, status });
+  const base = filterPlugins(allEntries, { q, source, status: '' });
+  paintPluginCounts(base);
+  const filtered = filterPlugins(base, { status });
+  const sorted = sortPlugins(filtered, pluginSort[activePluginTab] ?? 'name-az');
 
   const totalInstalled = (gameData?.games || []).length;
   const emptyEl = el('plugins-empty') || el('mkt-empty') || el('games-empty');
@@ -1230,7 +1853,7 @@ export function renderPlugins() {
     emptyEl.textContent = allEntries.length === 0
       ? 'No plugins discovered or available.'
       : 'No plugins match these filters.';
-    emptyEl.classList.toggle('hidden', filtered.length > 0);
+    emptyEl.classList.toggle('hidden', sorted.length > 0);
   }
 
   // Preserve any card currently containing user focus (e.g. open select, active tap)
@@ -1242,7 +1865,7 @@ export function renderPlugins() {
   }
 
   const newCards = [];
-  for (const entry of filtered) {
+  for (const entry of sorted) {
     const existing = existingCards.get(entry.id);
     if (existing && existing.contains(document.activeElement)) {
       newCards.push(existing);
@@ -1258,6 +1881,11 @@ export function renderPlugins() {
   if (!isIdentical) {
     host.replaceChildren(...newCards);
   }
+  ensurePluginTagObserver(host);
+  // Cards are fit pre-insertion at creation (widths read 0 there) and observer delivery is
+  // async, so fit explicitly after insert — otherwise rows flash unfitted until the next resize.
+  for (const card of host.querySelectorAll('.plugin-row')) fitPluginTags(card);
+  host.removeAttribute('aria-busy');
 
   const disabledBanner = el('mkt-disabled');
   if (disabledBanner) {
@@ -1292,6 +1920,21 @@ export function renderPlugins() {
   setNavCount('plugins', updatesAvailable());
   setNavCount('marketplace', updatesAvailable());
   setNavCount('games', totalInstalled);
+
+  // The list now reflects the caches, whatever triggered this render — so the loading state
+  // (if this render ends one) resolves. A fully fresh render also answers any stale pill and
+  // records the render in the panel's timestamp; a partial one (fresh: false) leaves both alone —
+  // the rows show what arrived, but the missing feed(s) keep the panel stale. `stale: true`
+  // raises the pill for that case, including on a blur-deferred render.
+  pluginsRendered = true;
+  pluginsLoading = false;
+  if (fresh) {
+    hidePluginsStale();
+    const updatedEl = el('last-updated-plugins');
+    if (updatedEl) updatedEl.textContent = `List updated ${new Date().toLocaleTimeString()}`;
+  } else if (stale) {
+    markPluginsStale();
+  }
 }
 
 export function renderGames() {
@@ -1299,359 +1942,167 @@ export function renderGames() {
 }
 
 export function pluginCard(entry) {
+  // A compact fixed-height row: constant height regardless of content. All plugin controls live in
+  // the metadata modal (openPluginDetails) — the row itself is one big button that opens it,
+  // replacing the old ellipsis button. Only rows are built imperatively, always with textContent.
   const card = document.createElement('div');
-  card.className = 'game-card plugin-card mkt-card';
+  card.className = 'game-card plugin-card mkt-card plugin-row';
   card.dataset.id = entry.id;
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label', `View details for ${entry.name || entry.id}`);
+  card.addEventListener('click', () => openPluginDetails(entry));
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPluginDetails(entry); }
+  });
 
-  const header = document.createElement('div');
-  header.className = 'game-card-header';
+  const top = document.createElement('div');
+  top.className = 'plugin-row-top';
 
-  const title = document.createElement('h3');
-  title.textContent = entry.name;
-  const id = document.createElement('code');
-  id.textContent = entry.id;
-  header.append(title, id);
-
-  if (entry.installed) {
-    const state = document.createElement('span');
-    state.className = `badge badge-${entry.availability === 'available' ? 'ok' : 'warning'}`;
-    state.textContent = availabilityLabel(entry.availability);
-    header.appendChild(state);
-
-    if (entry.status === 'updateAvailable') {
-      const update = document.createElement('span');
-      update.className = 'badge badge-warning';
-      update.textContent = 'Update available';
-      update.title = pluginStatusHint('updateAvailable');
-      header.appendChild(update);
-    }
-
-    if (isBusyLifecycle(entry.lifecycle)) {
-      const lifecycle = document.createElement('span');
-      lifecycle.className = `badge ${lifecycleClass(entry.lifecycle)}`;
-      lifecycle.textContent = lifecycleLabel(entry.lifecycle);
-      header.appendChild(lifecycle);
-    }
-
-    const sdk = sdkBadge(entry, gameData?.serverSdkVersion);
-    if (sdk) {
-      const sdkEl = document.createElement('span');
-      sdkEl.className = sdk.className;
-      sdkEl.textContent = sdk.label;
-      sdkEl.title = sdk.title;
-      header.appendChild(sdkEl);
-    }
-
-    if (entry.serverAuthority) {
-      const authority = document.createElement('span');
-      authority.className = 'badge badge-muted';
-      authority.textContent = 'server authority';
-      header.appendChild(authority);
-    }
-  } else {
-    const status = document.createElement('span');
-    status.className = `badge ${pluginStatusClass(entry.status)}`;
-    status.textContent = pluginStatusLabel(entry.status);
-    status.title = pluginStatusHint(entry.status);
-    header.appendChild(status);
-  }
-
-  const ver = entry.installed ? entry.installedVersion : entry.availableVersion;
-  if (ver) {
-    const versionBadge = document.createElement('span');
-    versionBadge.className = 'badge badge-muted';
-    versionBadge.textContent = `v${ver}`;
-    header.appendChild(versionBadge);
-  }
-
-  if (entry.contentRating) {
-    const rating = document.createElement('span');
-    rating.className = 'badge badge-muted';
-    rating.textContent = entry.contentRating;
-    rating.title = 'Content rating declared by the game.';
-    header.appendChild(rating);
-  }
-
-  for (const tag of (entry.tags || []).slice(0, 3)) {
-    const chip = document.createElement('span');
-    chip.className = 'badge badge-muted';
-    chip.textContent = tag;
-    header.appendChild(chip);
-  }
-
-  // 3-dots button icon in the top right to see full game metadata in popup dialog
-  const dotsBtn = document.createElement('button');
-  dotsBtn.type = 'button';
-  dotsBtn.className = 'plugin-details-btn';
-  dotsBtn.title = 'View full metadata';
-  dotsBtn.setAttribute('aria-label', `View full metadata for ${entry.name}`);
-  dotsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="dots-icon"><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle><circle cx="5" cy="12" r="1.5"></circle></svg>';
-  dotsBtn.onclick = () => openPluginDetails(entry);
-  header.appendChild(dotsBtn);
-
-  card.appendChild(header);
-
-  if (entry.description) {
-    const description = document.createElement('p');
-    description.className = 'mkt-desc';
-    description.textContent = entry.description;
-    card.appendChild(description);
-  }
-
-  const facts = document.createElement('div');
-  facts.className = 'game-facts';
-
-  if (entry.installed) {
-    addFact(facts, 'Installed', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed', '');
-    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-      entry.sourceName || entry.sourceId || '');
-    addFact(facts, 'Disk', formatBytes(entry.diskBytes),
-      `Files ${formatBytes(entry.directoryBytes)} + compressed ${formatBytes(entry.compressedBytes)}`
-      + (entry.packageBacked ? ` + package ${formatBytes(entry.packageBytes)}` : ''));
-    if (entry.activeLobbies > 0 || entry.activePlayers > 0) {
-      addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, `${entry.activePlayers} player(s)`);
-    }
-  } else {
-    addFact(facts, 'Installed', 'Not installed', '');
-    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-      entry.sourceName || entry.sourceId || '');
-    if (entry.sizeBytes) {
-      addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
-    }
-  }
-
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'plugin-row-title';
+  const title = document.createElement('span');
+  title.className = 'plugin-row-name';
+  title.textContent = entry.name || entry.id;
+  titleWrap.appendChild(title);
   if (entry.author) {
-    addFact(facts, 'Author', entry.author, '');
+    const author = document.createElement('span');
+    author.className = 'plugin-row-author';
+    author.textContent = `by ${entry.author}`;
+    author.title = entry.author;
+    titleWrap.appendChild(author);
   }
+  top.appendChild(titleWrap);
 
-  const players = playerRange(entry) || (entry.maxPlayers ? String(entry.maxPlayers) : '');
-  if (players) {
-    addFact(facts, 'Players', players, '');
+  const tagStrip = document.createElement('div');
+  tagStrip.className = 'plugin-row-tags';
+  for (const tag of entry.tags || []) {
+    const chip = document.createElement('span');
+    chip.className = 'badge badge-muted plugin-tag-chip';
+    chip.textContent = tag;
+    tagStrip.appendChild(chip);
   }
+  const tagEllipsis = document.createElement('span');
+  tagEllipsis.className = 'badge badge-muted plugin-tag-ellipsis';
+  tagEllipsis.textContent = '…';
+  tagEllipsis.hidden = true;
+  tagStrip.appendChild(tagEllipsis);
+  if ((entry.tags || []).length > 0) tagStrip.title = entry.tags.join(', ');
+  top.appendChild(tagStrip);
 
-  if (entry.license) {
-    addFact(facts, 'License', entry.license, '');
+  const version = pluginRowVersion(entry);
+  const versionEl = document.createElement('span');
+  versionEl.className = `plugin-row-version${version.hasUpdate ? ' plugin-row-update' : ''}`;
+  versionEl.textContent = version.text;
+  versionEl.title = version.title;
+  top.appendChild(versionEl);
+
+  card.appendChild(top);
+
+  // (Status badges live bottom-right via pluginRowBadges; the version indicator above covers
+  // updates. Everything else — facts, links, controls — lives in the metadata modal.)
+
+  const bottom = document.createElement('div');
+  bottom.className = 'plugin-row-bottom';
+
+  const description = document.createElement('p');
+  description.className = 'plugin-row-desc';
+  description.textContent = entry.description || 'No description provided.';
+  if (entry.description) description.title = entry.description;
+  bottom.appendChild(description);
+
+  const meta = document.createElement('div');
+  meta.className = 'plugin-row-meta';
+  for (const badge of pluginRowBadges(entry, gameData?.serverSdkVersion)) {
+    const badgeEl = document.createElement('span');
+    badgeEl.className = `${badge.className} plugin-mini-badge`;
+    badgeEl.textContent = badge.label;
+    if (badge.title) badgeEl.title = badge.title;
+    meta.appendChild(badgeEl);
   }
-
-  addFact(facts, 'Game ID', entry.id, '');
-
-  addFact(facts, 'Source',
-    entry.sourceName || (entry.sourceKind === 'games' ? 'Games Folder' : 'Manual Upload'),
-    entry.directory || '');
-
-  card.appendChild(facts);
-
-  const links = marketplaceLinks(entry);
-  if (links) card.appendChild(links);
-
-  const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
-  const busy = isBusyLifecycle(entry.lifecycle);
-
-  const actions = document.createElement('div');
-  actions.className = 'game-actions';
-
-  // Version selection dropdown
-  const versionSelect = document.createElement('select');
-  versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
-  const populateVersionSelect = (preferredValue = null) => {
-    versionSelect.innerHTML = '';
-    for (const option of versionOptions(entry)) {
-      const opt = document.createElement('option');
-      opt.value = versionOptionValue(option);
-      opt.textContent = option.kind === 'loadMore'
-        ? 'Load older versions from repo…'
-        : `${formatVersion(option.version)} — ${option.kind}`;
-      versionSelect.appendChild(opt);
-    }
-    if (versionSelect.options.length === 0) {
-      versionSelect.disabled = true;
-    } else {
-      const saved = preferredValue ?? pluginSelectedVersions.get(entry.id);
-      if (saved && Array.from(versionSelect.options).some((o) => o.value === saved)) {
-        versionSelect.value = saved;
-      }
-    }
-  };
-  populateVersionSelect();
-  actions.appendChild(versionSelect);
-
-  // Status selection dropdown (hidden when not installed)
-  if (entry.installed) {
-    const availSelect = document.createElement('select');
-    availSelect.className = 'text-input filter-narrow plugin-availability';
-    for (const option of AVAILABILITY) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.availability) opt.selected = true;
-      availSelect.appendChild(opt);
-    }
-    availSelect.onchange = () => setAvailability(entry, availSelect.value);
-    if (busy) {
-      availSelect.disabled = true;
-      availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
-    }
-    actions.appendChild(availSelect);
+  const size = pluginRowSize(entry);
+  const sizeEl = document.createElement('span');
+  sizeEl.className = 'plugin-row-size';
+  sizeEl.textContent = size.text;
+  sizeEl.title = size.title;
+  // A package operation running against this game still shows on the list — as one mini badge
+  // with the live phase as its tooltip. Progress bar and cancel live in the modal (jobRow there),
+  // which is where the controls went; the row only signals that something is happening.
+  const pendingJob = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+  if (pendingJob) {
+    const working = document.createElement('span');
+    working.className = 'badge badge-warning plugin-mini-badge plugin-job-badge';
+    const status = String(pendingJob.status || 'working');
+    working.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    working.title = pendingJob.error ? `${pendingJob.phase} ${pendingJob.error}` : (pendingJob.phase || 'Package operation in progress.');
+    meta.appendChild(working);
   }
+  meta.appendChild(sizeEl);
+  bottom.appendChild(meta);
 
-  // Update mode dropdown
-  const modeSelect = document.createElement('select');
-  modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
-  for (const option of UPDATE_MODES) {
-    const opt = document.createElement('option');
-    opt.value = option.value;
-    opt.textContent = option.label;
-    opt.title = option.hint;
-    modeSelect.appendChild(opt);
-  }
-  if ((entry.activeLobbies || 0) === 0) {
-    modeSelect.disabled = true;
-    modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
-  }
-  actions.appendChild(modeSelect);
+  card.appendChild(bottom);
 
-  // Primary action button (Install, Reinstall, Update, Roll back)
-  const actionBtn = document.createElement('button');
-  actionBtn.type = 'button';
-  actionBtn.className = 'btn plugin-action mkt-action';
-  const refreshAction = () => {
-    const decided = versionAction(entry, versionSelect.value,
-      catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
-    actionBtn.textContent = decided.label;
-    actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
-    actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
-    actionBtn.title = decided.blockedReason || '';
-    actionBtn.onclick = () => runPackageAction(entry, decided, modeSelect.value);
-  };
-  versionSelect.onchange = async () => {
-    if (versionSelect.value === 'load:more') {
-      versionSelect.disabled = true;
-      try {
-        const res = await getJson(`/admin/api/marketplace/plugins/${encodeURIComponent(entry.id)}/versions`);
-        if (res?.versions?.length > 0) {
-          const versions = res.versions.map((v) => v.version);
-          entry.availableVersions = versions;
-          entry.repoReleases = res.versions;
-          pluginDiscoveredVersions.set(entry.id, {
-            availableVersions: versions,
-            repoReleases: res.versions,
-          });
-        }
-      } catch (err) {
-        showToast(err.message || 'Could not load older versions.', 'error');
-      } finally {
-        entry.versionsLoaded = true;
-        versionSelect.disabled = false;
-        if (entry.availableVersions?.length > 1) {
-          const nextVal = `available:${entry.availableVersions[1]}`;
-          pluginSelectedVersions.set(entry.id, nextVal);
-          populateVersionSelect(nextVal);
-        } else {
-          populateVersionSelect();
-          pluginSelectedVersions.set(entry.id, versionSelect.value);
-        }
-      }
-    } else {
-      pluginSelectedVersions.set(entry.id, versionSelect.value);
-    }
-    refreshAction();
-  };
-  refreshAction();
-  actions.appendChild(actionBtn);
-
-  // Update policy dropdown (installed & managed)
-  if (entry.installed && entry.managed) {
-    const policySelect = document.createElement('select');
-    policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
-    for (const option of UPDATE_POLICIES) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.updatePolicy) opt.selected = true;
-      policySelect.appendChild(opt);
-    }
-    policySelect.value = entry.updatePolicy || 'manual';
-    policySelect.disabled = Boolean(pending);
-    policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
-      { policy: policySelect.value });
-    actions.appendChild(policySelect);
-  }
-
-  // Staged launch link
-  if (entry.installed && entry.availability === 'staged') {
-    const copy = document.createElement('button');
-    copy.className = 'btn btn-secondary';
-    copy.type = 'button';
-    copy.textContent = 'Copy launch link';
-    copy.onclick = () => copyStagedLink(entry);
-    actions.appendChild(copy);
-  }
-
-  const spacer = document.createElement('span');
-  spacer.className = 'filter-spacer';
-  actions.appendChild(spacer);
-
-  // Export button (hidden when not installed)
-  if (entry.installed) {
-    const exportBtn = document.createElement('button');
-    exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
-    exportBtn.type = 'button';
-    exportBtn.textContent = 'Export';
-    exportBtn.onclick = () => exportGame(entry.id);
-    actions.appendChild(exportBtn);
-
-    // Delete / Uninstall button (hidden when not installed)
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
-    removeBtn.type = 'button';
-    removeBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
-    if (busy) {
-      removeBtn.disabled = true;
-      removeBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
-    } else if (!entry.deletable) {
-      removeBtn.disabled = true;
-      removeBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
-    } else if (entry.root === 'games') {
-      removeBtn.onclick = () => deleteGame(entry);
-    } else {
-      removeBtn.disabled = Boolean(pending);
-      removeBtn.onclick = () => uninstallGame(entry);
-    }
-    actions.appendChild(removeBtn);
-  }
-
-  card.appendChild(actions);
-
-  if (busy) {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = `${lifecycleLabel(entry.lifecycle)} — package operation in progress.`;
-    card.appendChild(why);
-  } else if (entry.installed && !entry.deletable && entry.deleteBlockedReason) {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = `Delete unavailable: ${entry.deleteBlockedReason} Disable the game instead.`;
-    card.appendChild(why);
-  }
-
-  if (entry.shadowedBy) {
-    const shadow = document.createElement('p');
-    shadow.className = 'game-hint game-hint-block';
-    shadow.textContent =
-      `Also offered by '${entry.shadowedBy}', which takes precedence — installing here uses that copy.`;
-    card.appendChild(shadow);
-  }
-  if (entry.reason && entry.status !== 'installedOnly') {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = entry.reason;
-    card.appendChild(why);
-  }
-  if (pending) card.appendChild(jobRow(pending, { compact: true }));
-
+  fitPluginTags(card);
   return card;
+}
+
+// One observer on the stable list host: when it resizes (window, sidebar, filter bar),
+// every row's tag strip is re-fit. The host outlives re-renders, so it is observed once —
+// per-strip observation leaked a detached target on every render, since detached nodes stay
+// registered until explicitly unobserved.
+const pluginTagObserver = typeof ResizeObserver === 'function'
+  ? new ResizeObserver((records) => {
+    for (const record of records) {
+      for (const card of record.target.querySelectorAll?.('.plugin-row') || []) fitPluginTags(card);
+    }
+  })
+  : null;
+
+function ensurePluginTagObserver(host) {
+  if (pluginTagObserver && host && !host._tagsObserved) {
+    host._tagsObserved = true;
+    pluginTagObserver.observe(host);
+  }
+}
+
+/**
+ * Hides the tag chips that overflow the strip, showing the `…` chip (with the full tag list as
+ * its tooltip) when any are hidden. Unhides everything first, because a hidden chip measures 0
+ * and a re-fit off stale measurements would hide one more chip every resize. The ellipsis is
+ * measured while visible for the same reason — hidden it reads 0 and no space is reserved for it.
+ *
+ * Runs after layout — where there is none (jsdom) every width reads 0 and all tags stay visible,
+ * which the unit tests assert structurally instead of by pixels.
+ */
+export function fitPluginTags(card) {
+  const strip = card?.querySelector?.('.plugin-row-tags');
+  if (!strip) return;
+  const chips = [...strip.querySelectorAll('.plugin-tag-chip')];
+  const ellipsis = strip.querySelector('.plugin-tag-ellipsis');
+  if (!ellipsis) return;
+  for (const chip of chips) chip.hidden = false;
+  ellipsis.hidden = false;
+  if (chips.length === 0 || strip.clientWidth === 0) {
+    ellipsis.hidden = true;
+    return;
+  }
+  const widths = chips.map((chip) => chip.offsetWidth);
+  const ellipsisWidth = ellipsis.offsetWidth || 0;
+  let gapWidth = 0;
+  try {
+    const rawGap = getComputedStyle(strip).columnGap;
+    const parsed = parseFloat(rawGap);
+    if (Number.isFinite(parsed) && parsed > 0) gapWidth = parsed;
+  } catch { /* jsdom or no layout — gap stays 0 */ }
+  ellipsis.hidden = true;
+  const visible = visibleTagCount(widths, strip.clientWidth, ellipsisWidth, gapWidth);
+  chips.forEach((chip, i) => { chip.hidden = i >= visible; });
+  if (visible < chips.length) {
+    const all = chips.map((chip) => chip.textContent).join(', ');
+    ellipsis.hidden = false;
+    ellipsis.title = all;
+    strip.title = all;
+  }
 }
 
 export function gameCard(game) {
@@ -1668,6 +2119,11 @@ export function openPluginDetails(entry) {
   const body = el('plugin-details-body');
   if (body) {
     body.innerHTML = '';
+
+    // A running package operation shows its live phase, progress and cancel button at the top of
+    // the modal — this is where the card's old inline job row moved with the rest of the controls.
+    const pendingBodyJob = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+    if (pendingBodyJob) body.appendChild(jobRow(pendingBodyJob, { compact: true }));
 
     // Section 1: Overview & Identity
     const secOverview = document.createElement('div');
@@ -1769,6 +2225,168 @@ export function openPluginDetails(entry) {
     }
     secStorage.appendChild(gridStorage);
     body.appendChild(secStorage);
+
+    // Section: Settings
+    if (entry.installed) {
+      const secSettings = document.createElement('div');
+      secSettings.className = 'details-section';
+      const hSettings = document.createElement('h4');
+      hSettings.className = 'details-section-title';
+      hSettings.textContent = 'Settings';
+      secSettings.appendChild(hSettings);
+
+      const row = document.createElement('div');
+      row.className = 'field-row';
+
+      const label = document.createElement('label');
+      label.className = 'limit-label';
+      label.textContent = 'Blob Quota Override';
+      label.htmlFor = 'plugin-blob-quota-bytes';
+
+      const group = document.createElement('div');
+      group.className = 'byte-input-group filter-narrow';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.className = 'text-input byte-input';
+      input.id = 'plugin-blob-quota-bytes';
+      input.placeholder = 'Quota (empty to disable)';
+      input.title = 'Per-game override of Blob quota per session. Leave empty to disable the override.';
+
+      const select = document.createElement('select');
+      select.className = 'text-input byte-scale-select';
+      select.id = 'plugin-blob-quota-scale';
+      select.title = 'Unit scaling';
+      for (const unit of BYTE_UNITS) {
+        const opt = document.createElement('option');
+        opt.value = unit;
+        opt.textContent = unit;
+        select.appendChild(opt);
+      }
+
+      group.append(input, select);
+
+      const setBtn = document.createElement('button');
+      setBtn.type = 'button';
+      setBtn.className = 'btn btn-secondary btn-small';
+      setBtn.id = 'plugin-blob-quota-set';
+      setBtn.textContent = 'Set';
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.id = 'plugin-blob-quota-hint';
+
+      let quota = (limitsData?.blobQuotas && Object.prototype.hasOwnProperty.call(limitsData.blobQuotas, entry.id))
+        ? limitsData.blobQuotas[entry.id]
+        : (entry.blobQuota ?? null);
+
+      const updateQuotaUI = () => {
+        const defaultBytes = limitsData?.effective?.blobLobbyQuotaBytes ?? limitsData?.defaults?.blobLobbyQuotaBytes;
+        const defaultDisplay = formatByteLimit(defaultBytes);
+
+        if (quota === null || quota === undefined) {
+          input.value = '';
+          select.value = 'BYTE';
+          hint.textContent = defaultDisplay !== '--'
+            ? `Disabled — uses server default (${defaultDisplay}). Leave empty to disable.`
+            : 'Disabled — uses server default. Leave empty to disable.';
+        } else if (quota < 0) {
+          input.value = String(quota);
+          select.value = 'BYTE';
+          hint.textContent = 'Overridden — no per-session blob quota cap for this game.';
+        } else {
+          const split = splitBytes(quota);
+          input.value = String(split.value);
+          select.value = split.unit;
+          hint.textContent = defaultDisplay !== '--'
+            ? `Overridden — server default is ${defaultDisplay}.`
+            : 'Overridden.';
+        }
+      };
+
+      updateQuotaUI();
+
+      if (!limitsData) {
+        getJson('/admin/api/limits').then((data) => {
+          if (!data) return;
+          limitsData = data;
+          if (document.activeElement !== input && document.activeElement !== select) {
+            if (limitsData.blobQuotas && Object.prototype.hasOwnProperty.call(limitsData.blobQuotas, entry.id)) {
+              quota = limitsData.blobQuotas[entry.id];
+            }
+            updateQuotaUI();
+          }
+        }).catch(() => {});
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'].includes(e.key)) return;
+        if (e.ctrlKey || e.metaKey) return;
+        if (e.key === '-' && input.selectionStart === 0 && !input.value.includes('-')) return;
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveQuota();
+          return;
+        }
+        if (!/^[0-9]$/.test(e.key)) {
+          e.preventDefault();
+        }
+      });
+
+      input.addEventListener('input', () => {
+        input.value = input.value.replace(/(?!^-)[^0-9]/g, '');
+      });
+
+      const saveQuota = async () => {
+        const text = input.value.trim();
+        let bytes = null;
+        if (text !== '') {
+          const rawNumber = Number(text);
+          if (!Number.isInteger(rawNumber)) {
+            notify('Quota must be a whole number.', 'error');
+            return;
+          }
+          if (rawNumber === 0) {
+            notify('Leave quota empty to disable the override, or use a negative value for no cap.', 'error');
+            return;
+          }
+          if (rawNumber < 0) {
+            bytes = -1;
+          } else {
+            const scale = select.value || 'BYTE';
+            const multiplier = BYTE_MULTIPLIERS[scale] || 1;
+            bytes = rawNumber * multiplier;
+          }
+        }
+
+        const res = await postJson('/admin/api/blob-quota', { gameId: entry.id, bytes });
+        if (!res) return;
+
+        quota = bytes;
+        entry.blobQuota = bytes;
+        if (limitsData?.blobQuotas) {
+          if (bytes === null) {
+            delete limitsData.blobQuotas[entry.id];
+          } else {
+            limitsData.blobQuotas[entry.id] = bytes;
+          }
+        }
+        if (gameData?.games) {
+          const g = gameData.games.find((x) => x.id === entry.id);
+          if (g) g.blobQuota = bytes;
+        }
+
+        updateQuotaUI();
+        refreshGames({ render: true });
+      };
+
+      setBtn.addEventListener('click', saveQuota);
+
+      row.append(label, group, setBtn, hint);
+      secSettings.appendChild(row);
+      body.appendChild(secSettings);
+    }
 
     // Section 5: Retained Backups
     if (entry.backups && entry.backups.length > 0) {
@@ -1914,7 +2532,7 @@ export function openPluginDetails(entry) {
     const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
 
     const versionSelect = document.createElement('select');
-    versionSelect.className = 'text-input filter-narrow mkt-version';
+    versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
     populateModalVersionSelect = (preferredValue = null) => {
       versionSelect.innerHTML = '';
       for (const option of versionOptions(entry)) {
@@ -1948,12 +2566,15 @@ export function openPluginDetails(entry) {
         availSelect.appendChild(opt);
       }
       availSelect.onchange = () => setAvailability(entry, availSelect.value);
-      if (isBusyLifecycle(entry.lifecycle)) availSelect.disabled = true;
+      if (isBusyLifecycle(entry.lifecycle)) {
+        availSelect.disabled = true;
+        availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
+      }
       actionsHost.appendChild(availSelect);
     }
 
     const modeSelect = document.createElement('select');
-    modeSelect.className = 'text-input filter-narrow mkt-mode';
+    modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
     for (const option of UPDATE_MODES) {
       const opt = document.createElement('option');
       opt.value = option.value;
@@ -1961,17 +2582,49 @@ export function openPluginDetails(entry) {
       opt.title = option.hint;
       modeSelect.appendChild(opt);
     }
-    if ((entry.activeLobbies || 0) === 0) modeSelect.disabled = true;
+    if ((entry.activeLobbies || 0) === 0) {
+      modeSelect.disabled = true;
+      modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
+    }
     actionsHost.appendChild(modeSelect);
+
+    // Update policy (installed & managed) — moved here with the rest of the controls.
+    if (entry.installed && entry.managed) {
+      const policySelect = document.createElement('select');
+      policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
+      for (const option of UPDATE_POLICIES) {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.label;
+        opt.title = option.hint;
+        if (option.value === entry.updatePolicy) opt.selected = true;
+        policySelect.appendChild(opt);
+      }
+      policySelect.value = entry.updatePolicy || 'manual';
+      policySelect.disabled = Boolean(pending);
+      policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
+        { policy: policySelect.value });
+      actionsHost.appendChild(policySelect);
+    }
+
+    // Staged launch link — moved here with the rest of the controls.
+    if (entry.installed && entry.availability === 'staged') {
+      const copyLink = document.createElement('button');
+      copyLink.type = 'button';
+      copyLink.className = 'btn btn-secondary mkt-staged-link';
+      copyLink.textContent = 'Copy launch link';
+      copyLink.onclick = () => copyStagedLink(entry);
+      actionsHost.appendChild(copyLink);
+    }
 
     const actionBtn = document.createElement('button');
     actionBtn.type = 'button';
-    actionBtn.className = 'btn mkt-action';
+    actionBtn.className = 'btn plugin-action mkt-action';
     refreshModalAction = () => {
       const decided = versionAction(entry, versionSelect.value,
         catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
       actionBtn.textContent = decided.label;
-      actionBtn.className = `btn mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
+      actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
       actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
       actionBtn.title = decided.blockedReason || '';
       actionBtn.onclick = () => {
@@ -1994,17 +2647,25 @@ export function openPluginDetails(entry) {
     if (entry.installed) {
       const exportBtn = document.createElement('button');
       exportBtn.type = 'button';
-      exportBtn.className = 'btn btn-primary mkt-export';
+      exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
       exportBtn.textContent = 'Export';
       exportBtn.onclick = () => exportGame(entry.id);
       actionsHost.appendChild(exportBtn);
 
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
-      deleteBtn.className = 'btn btn-danger mkt-uninstall';
+      deleteBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
       deleteBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
-      deleteBtn.disabled = Boolean(pending) || (entry.root === 'games' && !entry.deletable);
-      if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      if (isBusyLifecycle(entry.lifecycle)) {
+        deleteBtn.disabled = true;
+        deleteBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
+      } else if (!entry.deletable) {
+        deleteBtn.disabled = true;
+        deleteBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
+      } else {
+        deleteBtn.disabled = Boolean(pending);
+        if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      }
       deleteBtn.onclick = () => {
         modal.classList.add('hidden');
         if (entry.root === 'games') deleteGame(entry);
@@ -2079,25 +2740,6 @@ function marketplaceLinks(entry) {
   return row;
 }
 
-function addFact(host, label, value, sub) {
-  const fact = document.createElement('div');
-  fact.className = 'game-fact';
-  const l = document.createElement('span');
-  l.className = 'game-fact-label';
-  l.textContent = label;
-  const v = document.createElement('span');
-  v.className = 'game-fact-value';
-  v.textContent = value;
-  fact.append(l, v);
-  if (sub) {
-    const s = document.createElement('span');
-    s.className = 'game-fact-sub';
-    s.textContent = sub;
-    fact.appendChild(s);
-  }
-  host.appendChild(fact);
-}
-
 async function setAvailability(game, state) {
   if (state === game.availability) return;
   const running = game.activeLobbies;
@@ -2109,7 +2751,7 @@ async function setAvailability(game, state) {
     renderGames(); // put the select back where it was
     return;
   }
-  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/availability`, { state })) refreshGames();
+  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/availability`, { state })) refreshGames({ render: true });
   else renderGames();
 }
 
@@ -2135,9 +2777,9 @@ async function copyStagedLink(game) {
   const link = `/?game=${encodeURIComponent(game.id)}`;
   try {
     await navigator.clipboard.writeText(link);
-    toast(`Copied "${link}" — append it to your shell's address. Visibility only, not access control.`, 'success');
+    notify(`Copied "${link}" — append it to your shell's address. Visibility only, not access control.`, 'success');
   } catch {
-    toast(`Launch path: ${link}`, 'info');
+    notify(`Launch path: ${link}`, 'info');
   }
 }
 
@@ -2269,37 +2911,59 @@ async function openLogFiles() {
 // ── Marketplace & packages ────────────────────────────────────────────────────
 
 // The catalog can reach the network, so it is NEVER on the poll path — see POLL_MS.
-async function refreshCatalog({ refresh = false } = {}) {
+// Like refreshGames, it only re-renders for an explicit caller (render: true); background
+// arrivals (notably job completions) update the caches and raise the stale pill instead.
+async function refreshCatalog({ refresh = false, render = false } = {}) {
   const data = await getJson(`/admin/api/marketplace/catalog${refresh ? '?refresh=1' : ''}`);
-  if (!data) return;
+  if (!data) return false;
   catalogData = data;
   // The catalog reply carries the current job set too, so entering the tab costs one request rather
   // than two.
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
   jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
-  renderSourceFilter();
-  renderMarketplace();
-  renderJobs();
+  if (render) renderPlugins();
+  else markPluginsStale();
+  return true;
 }
 
 async function refreshJobs() {
-  const data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
-  if (!data) return;
+  let data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
+  if (!data) return false;
 
   // A sequence that went BACKWARDS means the server restarted: the registry is in-memory, so it begins
   // again at 1. Without this, every real job that follows sorts below the stale rows we are still
   // holding and is sliced away at JOB_VIEW_LIMIT, while the cursor — only ever clamped upward — asks
   // for everything after a sequence the new process will not reach for a long time. The log feed
   // already handles exactly this; the job feed is the same shape and did not.
-  const lastSequence = Number(data.lastSequence) || 0;
-  if (lastSequence < jobCursor) { jobs = []; jobCursor = 0; }
+  if ((Number(data.lastSequence) || 0) < jobCursor) {
+    jobs = [];
+    jobCursor = 0;
+    // Notified ids belong to the old process and will never reappear — drop them so the set cannot
+    // grow one entry per finished job for the lifetime of the page.
+    reportedJobs.clear();
+    // The fetch above used the old process's cursor, so jobs the new process already created were
+    // missed: re-read at zero in this same tick rather than leaving per-card progress absent until
+    // the next poll.
+    data = await getJson(`/admin/api/packages/jobs?after=0`);
+    if (!data) return false;
+  }
 
+  const lastSequence = Number(data.lastSequence) || 0;
   const before = new Set(jobs.filter((j) => j.terminal).map((j) => j.jobId));
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
   jobCursor = lastSequence || jobCursor;
+  // Bound the notified set to what is still in view: an id evicted at JOB_VIEW_LIMIT that later
+  // reappears notifies again, exactly as after a restart.
+  const inView = new Set(jobs.map((j) => j.jobId));
+  for (const id of reportedJobs) {
+    if (!inView.has(id)) reportedJobs.delete(id);
+  }
 
-  // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
-  // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
+  // A job reaching a terminal state is the moment the catalog's answer changed — but the frozen
+  // list does not flip on its own. The re-read below only refreshes the caches and raises the stale
+  // pill; the bell notification (see announceJob) is what tells the operator, and Refresh re-renders.
+  // There is no operations list anymore: the feed is polled silently and outcomes surface as
+  // notifications (see announceJob below).
   let finished = false;
   for (const job of jobs) {
     if (!job.terminal || before.has(job.jobId)) continue;
@@ -2310,19 +2974,19 @@ async function refreshJobs() {
     }
   }
 
-  renderJobs();
   setNavCount('marketplace', updatesAvailable());
   if (finished) {
     refreshGames();
     refreshCatalog();
   }
+  return true;
 }
 
 function announceJob(job) {
   const what = `${job.gameName || job.gameId}`;
-  if (job.status === 'succeeded') toast(`${what}: ${job.phase}`, 'success');
-  else if (job.status === 'failed') toast(`${what} failed: ${job.error || job.phase}`, 'error');
-  else toast(`${what}: ${job.phase}`, 'warning');
+  if (job.status === 'succeeded') notify(`${what}: ${job.phase}`, 'success');
+  else if (job.status === 'failed') notify(`${what} failed: ${job.error || job.phase}`, 'error');
+  else notify(`${what}: ${job.phase}`, 'warning');
 }
 
 function updatesAvailable() {
@@ -2448,13 +3112,10 @@ async function uninstallGame(entry) {
   if (await postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/uninstall`, {})) refreshJobs();
 }
 
-function renderJobs() {
-  const host = el('mkt-jobs');
-  host.textContent = '';
-  el('mkt-jobs-card').classList.toggle('hidden', jobs.length === 0);
-  for (const job of jobs) host.appendChild(jobRow(job));
-}
-
+// The per-card pending-job row: when a package operation is running against a game, its card
+// shows the live phase, progress and the cancel button inline. (The old standalone Operations
+// list is gone — outcomes surface as notifications — but progress and cancel belong to the card
+// being operated on, so this stays.)
 function jobRow(job, { compact = false } = {}) {
   const row = document.createElement('div');
   row.className = 'job-row';
@@ -2548,7 +3209,7 @@ function startUpload() {
   const file = uploadFile;
   const guard = uploadGuard(file, { maxBytes: catalogData?.maxUploadBytes ?? 0 });
   if (!guard.ok) {
-    // Inline, not a toast: the operator is looking at this modal and has to change the input.
+    // Inline, not a notification: the operator is looking at this modal and has to change the input.
     showUploadError(guard.error);
     return;
   }
@@ -2590,9 +3251,9 @@ function startUpload() {
     try { body = JSON.parse(xhr.responseText); } catch { /* a non-JSON error page */ }
     if (xhr.status >= 200 && xhr.status < 300 && body?.success) {
       el('upload-backdrop').classList.add('hidden');
-      toast(body.detail || 'Package accepted.', 'success');
+      notify(body.detail || 'Package accepted.', 'success');
       // Everything after this point happens inside the JOB — a bad archive, an id collision, a full
-      // disk. The request is over; the operations list owns the outcome.
+      // disk. The request is over; the outcome arrives as a notification.
       refreshJobs();
       return;
     }
@@ -2646,9 +3307,18 @@ function renderSources() {
     const name = document.createElement('span');
     name.className = 'source-name';
     name.textContent = source.name || source.id;
-    const url = document.createElement('span');
+    const url = document.createElement('a');
     url.className = 'source-url';
     url.textContent = source.catalogUrl;
+    // Stored settings are operator-controlled (hand-edited file, legacy data): only http(s)
+    // becomes a clickable link, anything else stays inert text. `javascript:`/`data:` URLs
+    // would otherwise be click-to-script for the admin.
+    if (source.catalogUrl && isHttpUrl(source.catalogUrl)) {
+      url.href = source.catalogUrl;
+      url.target = '_blank';
+      url.rel = 'noopener noreferrer';
+      url.title = source.catalogUrl;
+    }
     row.append(name, url);
 
     const count = document.createElement('span');
@@ -2666,12 +3336,13 @@ function renderSources() {
     toggle.type = 'button';
     toggle.className = 'btn btn-small source-toggle';
     toggle.textContent = source.enabled === false ? 'Enable' : 'Disable';
-    toggle.onclick = async () => {
-      const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
-      if (await postJson(url, { enabled: source.enabled === false })) {
-        refreshCatalog({ refresh: true });
-      }
-    };
+      toggle.onclick = async () => {
+        const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
+        if (await postJson(url, { enabled: source.enabled === false })) {
+          await refreshCatalog({ refresh: true, render: true });
+          renderSources();
+        }
+      };
     row.appendChild(toggle);
 
     if (!source.builtIn) {
@@ -2681,7 +3352,8 @@ function renderSources() {
       remove.textContent = 'Remove';
       remove.onclick = async () => {
         if (await postJson(`/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/delete`, {})) {
-          refreshCatalog({ refresh: true });
+          await refreshCatalog({ refresh: true, render: true });
+          renderSources();
         }
       };
       row.appendChild(remove);
@@ -2704,7 +3376,7 @@ async function addSource() {
     for (const id of ['mkt-source-id', 'mkt-source-name', 'mkt-source-url', 'mkt-source-download']) {
       el(id).value = '';
     }
-    await refreshCatalog({ refresh: true });
+    await refreshCatalog({ refresh: true, render: true });
     renderSources();
   }
 }
@@ -2752,8 +3424,11 @@ function renderLimits(data) {
   limitsData = data;
   const host = el('limits-fields');
   const focused = document.activeElement?.dataset?.limitKey || null;
+  const focusedScale = document.activeElement?.dataset?.limitScaleKey || null;
   const kept = new Map(
     [...host.querySelectorAll('input[data-limit-key]')].map((input) => [input.dataset.limitKey, input.value]));
+  const keptScales = new Map(
+    [...host.querySelectorAll('select[data-limit-scale-key]')].map((sel) => [sel.dataset.limitScaleKey, sel.value]));
   host.innerHTML = '';
 
   const overridden = new Set(data.overridden || []);
@@ -2766,28 +3441,89 @@ function renderLimits(data) {
     label.textContent = field.label;
     label.htmlFor = `limit-${field.key}`;
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.inputMode = 'decimal';
-    input.className = 'text-input filter-narrow';
-    input.id = `limit-${field.key}`;
-    input.dataset.limitKey = field.key;
-    input.placeholder = `Default: ${data.defaults?.[field.key] ?? '--'}`;
-    input.title = field.hint;
-    // Don't fight the operator's cursor — the same rule the maintenance message follows. On entry, or
-    // after a save, the server's value wins; a field being edited keeps what is in it.
-    input.value = focused === field.key
-      ? kept.get(field.key) ?? ''
-      : overridden.has(field.key) ? String(data.effective?.[field.key] ?? '') : '';
+    if (field.dataType === 'bytes') {
+      const group = document.createElement('div');
+      group.className = 'byte-input-group filter-narrow';
 
-    const hint = document.createElement('span');
-    hint.className = 'limit-hint';
-    hint.textContent = overridden.has(field.key)
-      ? `Overridden — the default is ${data.defaults?.[field.key] ?? '--'}`
-      : field.hint;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.className = 'text-input byte-input';
+      input.id = `limit-${field.key}`;
+      input.dataset.limitKey = field.key;
+      const defaultDisplay = formatByteLimit(data.defaults?.[field.key]);
+      input.placeholder = `Default: ${defaultDisplay}`;
+      input.title = field.hint;
 
-    row.append(label, input, hint);
-    host.appendChild(row);
+      const select = document.createElement('select');
+      select.className = 'text-input byte-scale-select';
+      select.id = `limit-${field.key}-scale`;
+      select.dataset.limitScaleKey = field.key;
+      select.title = 'Unit scaling';
+      for (const unit of BYTE_UNITS) {
+        const opt = document.createElement('option');
+        opt.value = unit;
+        opt.textContent = unit;
+        select.appendChild(opt);
+      }
+
+      if (focused === field.key || focusedScale === field.key) {
+        input.value = kept.get(field.key) ?? '';
+        select.value = keptScales.get(field.key) ?? 'BYTE';
+      } else if (overridden.has(field.key)) {
+        const split = splitBytes(data.effective?.[field.key]);
+        input.value = split.value === '' ? '' : String(split.value);
+        select.value = split.unit;
+      } else {
+        input.value = '';
+        select.value = 'BYTE';
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'].includes(e.key)) return;
+        if (e.ctrlKey || e.metaKey) return;
+        if (!/^[0-9]$/.test(e.key)) {
+          e.preventDefault();
+        }
+      });
+      input.addEventListener('input', () => {
+        input.value = input.value.replace(/[^0-9]/g, '');
+      });
+
+      group.append(input, select);
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.textContent = overridden.has(field.key)
+        ? `Overridden — the default is ${defaultDisplay}`
+        : field.hint;
+
+      row.append(label, group, hint);
+      host.appendChild(row);
+    } else {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = field.integer ? 'numeric' : 'decimal';
+      input.className = 'text-input filter-narrow';
+      input.id = `limit-${field.key}`;
+      input.dataset.limitKey = field.key;
+      input.placeholder = `Default: ${data.defaults?.[field.key] ?? '--'}`;
+      input.title = field.hint;
+      // Don't fight the operator's cursor — the same rule the maintenance message follows. On entry, or
+      // after a save, the server's value wins; a field being edited keeps what is in it.
+      input.value = focused === field.key
+        ? kept.get(field.key) ?? ''
+        : overridden.has(field.key) ? String(data.effective?.[field.key] ?? '') : '';
+
+      const hint = document.createElement('span');
+      hint.className = 'limit-hint';
+      hint.textContent = overridden.has(field.key)
+        ? `Overridden — the default is ${data.defaults?.[field.key] ?? '--'}`
+        : field.hint;
+
+      row.append(label, input, hint);
+      host.appendChild(row);
+    }
   }
 
   const anyOverridden = (data.overridden || []).length > 0;
@@ -2798,6 +3534,14 @@ function renderLimits(data) {
     ? `${data.overridden.length} of ${LIMIT_FIELDS.length} limits are overridden. `
       + `${formatCount(data.activeLobbies)} lobbies and ${formatCount(data.connectedPlayers)} players right now.`
     : 'Every limit is at its default.';
+  // Bytes actually held, against the aggregate cap. The only question anyone asks about a server-wide
+  // quota is whether it is close to biting, and an upload refused with 507 reaches an operator as "a
+  // player says their map will not load" -- which is not a clue.
+  if (data.blobsEnabled) {
+    const cap = data.effective?.blobTotalQuotaBytes;
+    el('limits-note').textContent += ` Blobs: ${formatBytes(data.blobBytesUsed || 0)} held`
+      + `${cap > 0 ? ` of ${formatBytes(cap)}` : ' (no server-wide cap)'}.`;
+  }
 
   const startupBody = el('limits-startup-body');
   startupBody.innerHTML = '';
@@ -2810,11 +3554,15 @@ function renderLimits(data) {
 
 async function saveLimits() {
   const raw = {};
+  const scales = {};
   for (const input of document.querySelectorAll('#limits-fields input[data-limit-key]')) {
     raw[input.dataset.limitKey] = input.value;
   }
-  const checked = validateLimits(raw);
-  if (!checked.ok) { toast(checked.error, 'error'); return; }
+  for (const select of document.querySelectorAll('#limits-fields select[data-limit-scale-key]')) {
+    scales[select.dataset.limitScaleKey] = select.value;
+  }
+  const checked = validateLimits(raw, LIMIT_FIELDS, scales);
+  if (!checked.ok) { notify(checked.error, 'error'); return; }
 
   // Tightening a limit is not destructive, but it is felt immediately by everyone connected, so the two
   // that can refuse a player outright get a confirmation naming what is running right now.
@@ -2856,9 +3604,6 @@ function renderSchedule(data) {
   el('schedule-badge').hidden = !data?.overridden;
 
   if (!available) {
-    el('schedule-note').textContent =
-      'The marketplace is switched off (KnockBox:MarketplaceEnabled=false), so nothing is checked on a '
-      + 'schedule.';
     return;
   }
 
@@ -2868,7 +3613,6 @@ function renderSchedule(data) {
   if (document.activeElement !== hour) hour.value = String(data.hourUtc ?? 3);
 
   applyScheduleCadence();
-  el('schedule-note').textContent = scheduleNote(data);
 }
 
 /** Greys out the fields the chosen cadence does not use. Driven by the select, not by the last save. */
@@ -2928,7 +3672,7 @@ function renderAnnouncement(data) {
 
 async function postAnnouncement() {
   const text = el('announce-text').value.trim();
-  if (!text) { toast('Enter the message players should see.', 'error'); return; }
+  if (!text) { notify('Enter the message players should see.', 'error'); return; }
 
   if (await postJson('/admin/api/announcement', {
     text,
@@ -3034,7 +3778,7 @@ function originOf(url) {
 
 async function addWebhook() {
   const checked = checkWebhook({ id: el('hook-id').value, url: el('hook-url').value });
-  if (!checked.ok) { toast(checked.error, 'error'); return; }
+  if (!checked.ok) { notify(checked.error, 'error'); return; }
 
   const events = [...document.querySelectorAll('#hook-events input[data-hook-event]')]
     .filter((box) => box.checked)
@@ -3062,7 +3806,7 @@ async function removeWebhook(endpoint) {
 }
 
 async function testWebhook(id) {
-  // Awaited by the server through the real delivery path, so the toast is the actual answer rather than
+  // Awaited by the server through the real delivery path, so the notification is the actual answer rather than
   // "queued" — which is what an operator clicking Test wants to know.
   if (await postJson(`/admin/api/webhooks/${encodeURIComponent(id)}/test`, {})) refreshPlatform();
 }
@@ -3132,15 +3876,15 @@ function renderRoomCodes() {
 function addRoomCode(pattern) {
   const input = el(pattern ? 'code-pattern' : 'code-word');
   const checked = checkCodeEntry(input.value, { pattern, alphabet: codesData?.alphabet });
-  if (!checked.ok) { toast(checked.error, 'error'); return; }
+  if (!checked.ok) { notify(checked.error, 'error'); return; }
 
   const list = pattern ? codesDraft.patterns : codesDraft.words;
-  if (list.includes(checked.value)) { toast(`${checked.value} is already blocked.`, 'warning'); return; }
+  if (list.includes(checked.value)) { notify(`${checked.value} is already blocked.`, 'warning'); return; }
   list.push(checked.value);
   input.value = '';
   // Said at the moment of typing, where it can still be changed, rather than as a footnote after saving.
   if (checked.unreachable) {
-    toast(`${checked.value} can never be generated — the code alphabet has no O, 0, I or 1.`, 'warning');
+    notify(`${checked.value} can never be generated — the code alphabet has no O, 0, I or 1.`, 'warning');
   }
   renderRoomCodes();
 }
@@ -3303,7 +4047,30 @@ function wire() {
 
   el('plugins-filter-q')?.addEventListener('input', renderPlugins);
   el('plugins-filter-source')?.addEventListener('change', renderPlugins);
-  el('plugins-filter-status')?.addEventListener('change', renderPlugins);
+  el('plugins-sort')?.addEventListener('change', (e) => {
+    // Per-tab memory: the choice belongs to the tab it was made on, and returning to that tab
+    // restores it (see setPluginTab).
+    pluginSort[activePluginTab] = e.target.value;
+    renderPlugins();
+  });
+  el('plugins-stale')?.addEventListener('click', () => refreshPlugins({ refreshCatalogNow: true }));
+  for (const btn of document.querySelectorAll('.plugin-tab-btn')) {
+    btn.addEventListener('click', () => setPluginTab(btn.dataset.ptab));
+    // WAI-APG tabs pattern with automatic activation: arrows move and select, Home/End jump.
+    btn.addEventListener('keydown', (e) => {
+      const order = [...document.querySelectorAll('.plugin-tab-btn')];
+      const at = order.indexOf(btn);
+      let next = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (at + 1) % order.length;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (at - 1 + order.length) % order.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = order.length - 1;
+      if (next < 0) return;
+      e.preventDefault();
+      order[next].focus();
+      setPluginTab(order[next].dataset.ptab);
+    });
+  }
 
   el('plugin-details-close')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));
   el('plugin-details-close-x')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));
@@ -3378,6 +4145,52 @@ function wire() {
   el('log-popout-btn')?.addEventListener('click', openTerminalWindow);
   el('files-close')?.addEventListener('click', () => el('files-backdrop').classList.add('hidden'));
 
+  // ── Notifications: bell, drawer, list and details modals ──
+  initNotificationStore({ onNew: () => openNotifDrawer() });
+  subscribeNotifications(() => {
+    refreshNotifBadge();
+    if (notifDrawerOpen) {
+      renderNotifDrawer();
+      armNotifDrawerTimer();
+    }
+    if (!el('notifications-backdrop')?.classList.contains('hidden')) renderNotifications();
+    if (notifDetailId !== null && !el('notification-details-backdrop')?.classList.contains('hidden')) {
+      renderNotificationDetails();
+    }
+  });
+  refreshNotifBadge();
+
+  el('notif-bell-btn')?.addEventListener('click', openNotifications);
+  // Hover or keyboard focus previews the three newest — the same drawer an arrival opens, so
+  // hovering the auto-opened one naturally holds it. Holding only pauses the dismiss timer: the
+  // moment hover or focus leaves, the drawer dismisses at once (through its exit animation) rather
+  // than starting a second grace period the operator never asked to wait through.
+  el('notif-bell-btn')?.addEventListener('mouseenter', openNotifDrawer);
+  el('notif-bell-btn')?.addEventListener('focus', openNotifDrawer);
+  const drawer = el('notif-drawer');
+  drawer?.addEventListener('mouseenter', stopNotifDrawerTimer);
+  drawer?.addEventListener('mouseleave', closeNotifDrawer);
+  drawer?.addEventListener('focusin', stopNotifDrawerTimer);
+  drawer?.addEventListener('focusout', closeNotifDrawer);
+  el('notif-drawer-close')?.addEventListener('click', closeNotifDrawer);
+  el('notif-drawer-all')?.addEventListener('click', openNotifications);
+
+  el('notifications-close')?.addEventListener('click', closeNotifications);
+  el('notifications-close-x')?.addEventListener('click', closeNotifications);
+  el('notifications-mark-all')?.addEventListener('click', () => markAllNotificationsRead());
+  el('notifications-dismiss-all')?.addEventListener('click', dismissAllNotificationsUI);
+
+  el('notification-details-close')?.addEventListener('click', closeNotificationDetails);
+  el('notification-details-close-x')?.addEventListener('click', closeNotificationDetails);
+  el('notification-details-toggle')?.addEventListener('click', () => {
+    if (notifDetailId === null || hasUnreadEncrypted()) return;
+    const current = getNotification(notifDetailId);
+    if (current) markNotificationRead(notifDetailId, !current.read);
+  });
+  el('notification-details-dismiss')?.addEventListener('click', () => {
+    if (notifDetailId !== null && !hasUnreadEncrypted()) dismissOneNotification(notifDetailId);
+  });
+
   el('confirm-ok')?.addEventListener('click', () => settleConfirm(true));
   el('confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
   el('confirm-backdrop')?.addEventListener('click', (e) => {
@@ -3388,12 +4201,22 @@ function wire() {
       if (e.target === el(id)) el(id).classList.add('hidden');
     });
   }
+  // The notification modals close through their animated close functions, not a bare hide, so a
+  // backdrop click dismisses them the same way their buttons do.
+  el('notifications-backdrop')?.addEventListener('click', (e) => {
+    if (e.target === el('notifications-backdrop')) closeNotifications();
+  });
+  el('notification-details-backdrop')?.addEventListener('click', (e) => {
+    if (e.target === el('notification-details-backdrop')) closeNotificationDetails();
+  });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!el('confirm-backdrop')?.classList.contains('hidden')) settleConfirm(false);
     el('files-backdrop')?.classList.add('hidden');
     el('mkt-settings-backdrop')?.classList.add('hidden');
     el('plugin-details-backdrop')?.classList.add('hidden');
+    closeNotificationDetails();
+    closeNotifications();
     // Not closeUpload(): Escape must not silently abort a transfer that is halfway through. The Cancel
     // button is the deliberate way out.
     if (!uploadXhr) el('upload-backdrop')?.classList.add('hidden');
@@ -3471,6 +4294,16 @@ async function onLogout() {
     console.error('Logout error:', err);
   }
   stopPolling();
+  // The store's encryption key is memory-only by design: dropping it here is what makes the stored
+  // ciphertext unreadable until the next login re-fetches it. Decrypted items are plaintext
+  // regardless of the at-rest form, so memory is dropped too (the stored blob is left intact for
+  // the next login; unsaved memory-only items are intentionally discarded). The unload emits, so
+  // the badge/list re-render empty behind the login view.
+  clearNotificationKey();
+  unloadNotificationsForLogout();
+  closeNotifDrawer();
+  closeNotifications();
+  closeNotificationDetails();
   await checkAuthStatus();
 }
 

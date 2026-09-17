@@ -64,7 +64,13 @@ public sealed class DiskUsageReporter(
         IReadOnlyList<GameDisk> Games,
         long CompressedCacheBytes,
         long LogsBytes,
-        long ManagedRootBytes)
+        long ManagedRootBytes,
+        // One member per server-written root, so leaving blobs out would be the odd one. Measured from
+        // the FILESYSTEM, which is deliberately a different number from IBlobStore.TotalBytes: that one
+        // is the accounted figure the quota is enforced against, and this one is what the volume actually
+        // holds. A gap between them is orphaned content the sweep has not collected yet, which is
+        // precisely the thing neither number tells you on its own.
+        long BlobsBytes)
     {
         /// <summary>Total across every game (folders, compressed variants, source packages and backups).</summary>
         public long TotalGameBytes => Games.Sum(g => g.TotalBytes);
@@ -153,7 +159,8 @@ public sealed class DiskUsageReporter(
             games,
             DirectoryBytes(paths.GamesCompressedRoot),
             DirectoryBytes(paths.LogsRoot),
-            DirectoryBytes(paths.GamesManagedRoot));
+            DirectoryBytes(paths.GamesManagedRoot),
+            DirectoryBytes(paths.BlobsRoot));
     }
 
     /// <summary>Total size of every file under a directory, or 0 if it doesn't exist or can't be read.</summary>

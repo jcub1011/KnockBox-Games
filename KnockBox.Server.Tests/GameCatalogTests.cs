@@ -84,6 +84,54 @@ public class GameCatalogTests : IDisposable
     }
 
     [Fact]
+    public void Keeps_a_valid_homepage_on_the_discovered_manifest()
+    {
+        WriteGame("linked", """
+        { "id": "linked", "name": "Linked", "entry": "index.html", "maxPlayers": 2,
+          "homepage": "https://github.com/jcub1011/Alpha-Chain-Phaser-" }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("linked", out var m));
+        Assert.Equal("https://github.com/jcub1011/Alpha-Chain-Phaser-", m.Homepage);
+    }
+
+    [Theory]
+    [InlineData("http://example.com/game")]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("/relative/path")]
+    [InlineData("not a url")]
+    public void Nulls_an_unsafe_homepage_but_keeps_the_game(string homepage)
+    {
+        // Display metadata must never take a game down: a bad link is dropped with a warning, and
+        // the game stays playable with a plain-text version badge.
+        WriteGame("badlink", $$"""
+        { "id": "badlink", "name": "Badlink", "entry": "index.html", "maxPlayers": 2,
+          "homepage": {{System.Text.Json.JsonSerializer.Serialize(homepage)}} }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("badlink", out var m));
+        Assert.Null(m.Homepage);
+    }
+
+    [Fact]
+    public void Trims_surrounding_whitespace_off_a_homepage()
+    {
+        WriteGame("padded", """
+        { "id": "padded", "name": "Padded", "entry": "index.html", "maxPlayers": 2,
+          "homepage": "  https://example.com/game  " }
+        """);
+        var catalog = NewCatalog();
+        catalog.Discover();
+
+        Assert.True(catalog.TryGet("padded", out var m));
+        Assert.Equal("https://example.com/game", m.Homepage);
+    }
+
+    [Fact]
     public void Derives_dates_that_are_usable_for_sorting_when_the_manifest_declares_none()
     {
         // The home page's default sort is createdAt-descending. A filesystem with no birthtime
