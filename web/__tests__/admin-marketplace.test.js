@@ -221,7 +221,7 @@ describe('marketplace catalog', () => {
     expect(catalogCalls()).toBe(1);
   });
 
-  it('re-reads the catalog and toasts once when a job finishes', async () => {
+  it('re-reads the catalog and notifies once when a job finishes', async () => {
     vi.useFakeTimers();
     let polls = 0;
     fake = installFakeFetch(routes({
@@ -253,8 +253,8 @@ describe('marketplace catalog', () => {
     await vi.advanceTimersByTimeAsync(3500);
     expect(catalogCalls()).toBe(2);
     expect(gameCalls()).toBeGreaterThan(1);
-    expect(el('toast-host').querySelectorAll('.toast')).toHaveLength(1);
-    expect(el('toast-host').textContent).toContain('Updated to 1.3.0');
+    expect(el('notif-drawer-items').querySelectorAll('.notif-item')).toHaveLength(1);
+    expect(el('notif-drawer-items').textContent).toContain('Updated to 1.3.0');
 
     // The same finished job keeps arriving on every subsequent poll, and must be announced exactly
     // once — and must not re-read the catalog again either. /admin/api/games is a different matter:
@@ -625,8 +625,8 @@ describe('marketplace actions', () => {
 
     // The URL rule lives in MarketplaceClient. A second copy in JS is exactly the drift this avoids.
     expect(fake.calls.some((c) => c.path === '/admin/api/marketplace/sources')).toBe(true);
-    // Inline beside the form, not as a toast: the operator has to read it while correcting the field it
-    // is about, and a toast fades. (The element was previously only ever HIDDEN on failure, so the reason
+    // Inline beside the form, not as a notification: the operator has to read it while correcting the field it
+    // is about, and a notification persists elsewhere. (The element was previously only ever HIDDEN on failure, so the reason
     // reached nobody at all.)
     const error = el('mkt-settings-error');
     expect(error.textContent).toContain('absolute https URL');
@@ -634,13 +634,27 @@ describe('marketplace actions', () => {
   });
 });
 
-describe('operations list', () => {
-  it('renders a running job with determinate progress and a cancel button', async () => {
+describe('per-card job progress', () => {
+  // The standalone Operations list is gone — outcomes surface as notifications — but a package
+  // operation running against a game still shows its live phase, progress and cancel button inline
+  // on that game's card. The card renders the row only for the job its entry names, so these cases
+  // point the alpha-chain entry at the job under test (jobs themselves arrive over the jobs feed).
+  function catalogNamingJob(entryJobId) {
+    return {
+      body: {
+        ...CATALOG,
+        entries: CATALOG.entries.map((e) => (e.id === 'alpha-chain' ? { ...e, pendingJobId: entryJobId } : e)),
+      },
+    };
+  }
+
+  it('renders a running job with determinate progress and a cancel button on its card', async () => {
     fake = await openMarketplace({
+      'GET /admin/api/marketplace/catalog': catalogNamingJob('j9'),
       'GET /admin/api/packages/jobs': { body: { jobs: [runningJob], lastSequence: 2, active: 1, retained: 1 } },
     });
 
-    const row = document.querySelector('.job-row[data-job="j9"]');
+    const row = card('alpha-chain').querySelector('.job-row[data-job="j9"]');
     expect(row.textContent).toContain('Downloading from owner/repo.');
     expect(row.querySelector('.job-bar-fill').style.width).toBe('50%');
 
@@ -653,6 +667,7 @@ describe('operations list', () => {
 
   it('renders indeterminate progress rather than a confident zero when the total is unknown', async () => {
     await openMarketplace({
+      'GET /admin/api/marketplace/catalog': catalogNamingJob('j8'),
       'GET /admin/api/packages/jobs': {
         body: {
           jobs: [{ ...runningJob, jobId: 'j8', status: 'verifying', bytesDone: 0, bytesTotal: 0 }],
@@ -661,12 +676,15 @@ describe('operations list', () => {
       },
     });
 
-    const fill = document.querySelector('.job-row[data-job="j8"] .job-bar-fill');
+    const fill = card('alpha-chain').querySelector('.job-row[data-job="j8"] .job-bar-fill');
     expect(fill.classList.contains('job-bar-indeterminate')).toBe(true);
     expect(fill.style.width).toBe('');
   });
 
-  it('keeps a failed job visible with its error', async () => {
+  it('announces a failed job as a notification instead of keeping a row', async () => {
+    // Terminal jobs never render inline (there is nothing to cancel and no progress to show), and
+    // the operations list that used to keep them is gone — so the failure must reach the operator
+    // as a notification, or it reaches nobody at all.
     await openMarketplace({
       'GET /admin/api/packages/jobs': {
         body: {
@@ -679,10 +697,12 @@ describe('operations list', () => {
       },
     });
 
-    const row = document.querySelector('.job-row[data-job="j7"]');
-    expect(row.classList.contains('job-failed')).toBe(true);
-    expect(row.textContent).toContain('modified after it was catalogued');
-    expect(row.querySelector('.job-cancel')).toBeNull();
+    expect(document.querySelector('.job-row[data-job="j7"]')).toBeNull();
+    expect(el('notif-badge').textContent).toBe('1');
+
+    el('notif-bell-btn').click();
+    await tick();
+    expect(el('notifications-list').textContent).toContain('modified after it was catalogued');
   });
 
   it('resets the job cursor on tab entry so a returning operator sees what they missed', async () => {
@@ -718,7 +738,7 @@ describe('package upload', () => {
     drop(makeKbgFile('game.zip', 1000));
     el('upload-submit').click();
 
-    // Inline, not a toast: the operator is looking at the modal and has to change the input.
+    // Inline, not a notification: the operator is looking at the modal and has to change the input.
     expect(el('upload-error').classList.contains('hidden')).toBe(false);
     expect(el('upload-error').textContent).toMatch(/knockbox-pack/);
     expect(xhr.instances).toHaveLength(0);
@@ -747,7 +767,7 @@ describe('package upload', () => {
     await tick();
 
     expect(el('upload-backdrop').classList.contains('hidden')).toBe(true);
-    expect(el('toast-host').textContent).toContain('Installing.');
+    expect(el('notif-drawer-items').textContent).toContain('Installing.');
   });
 
   it('shows the server refusal inline and keeps the modal open', async () => {
@@ -889,11 +909,12 @@ describe('scrolling is not arriving', () => {
 });
 
 describe('the job feed survives a server restart', () => {
-  it('drops stale rows when the sequence goes backwards', async () => {
-    // The registry is in-memory, so a restart begins again at 1. Holding the old rows meant every real
-    // job that followed sorted below them and was sliced away at the view limit, while the cursor —
-    // only ever clamped upward — asked for everything after a sequence the new process would not
-    // reach for a long time. The log feed already handled this; the job feed did not.
+  it('resets its cursor so polls keep reaching the new process, and still announces jobs', async () => {
+    // The registry is in-memory, so a restart begins again at 1. Without the reset, the cursor —
+    // only ever clamped upward — asks for everything after a sequence the new process will not
+    // reach for a long time. The log feed already handled this; the job feed is the same shape
+    // and did not. There is no operations list to read this off anymore (outcomes surface as
+    // notifications), so the test pins the poll cursor directly.
     // Driven through the POLL, not a tab re-entry: entering a tab resets the feed anyway, so a test
     // that switches tabs would pass with the bug still in place.
     vi.useFakeTimers();
@@ -910,15 +931,21 @@ describe('the job feed survives a server restart', () => {
     admin.selectTab('marketplace');
     await vi.advanceTimersByTimeAsync(1);
 
-    expect(el('mkt-jobs').textContent).toContain('Word Rush');
+    // The finished job is announced once, as a notification.
+    expect(el('notif-badge').textContent).toBe('1');
 
     // The restart: the same route now answers from sequence 1 again.
     fake.routes['GET /admin/api/packages/jobs'] =
       { body: { jobs: [{ ...runningJob, jobId: 'fresh', sequence: 1 }], lastSequence: 1, active: 1, retained: 1 } };
     await vi.advanceTimersByTimeAsync(3500);
 
-    expect(el('mkt-jobs').textContent).toContain('Alpha Chain');
-    expect(el('mkt-jobs').textContent).not.toContain('Word Rush');
+    // The poll after the restart re-reads at zero in the same tick — the first fetch used the old
+    // process's cursor, so without the re-fetch the new process's jobs would wait for the next poll.
+    const recent = fake.calls.filter((c) => c.path === '/admin/api/packages/jobs').slice(-2);
+    expect(recent[0].url).toContain('after=900');
+    expect(recent[1].url).toContain('after=0');
+    // …and the still-running fresh job raises no notification until it finishes.
+    expect(el('notif-badge').textContent).toBe('1');
   });
 });
 

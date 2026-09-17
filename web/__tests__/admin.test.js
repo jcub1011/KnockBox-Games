@@ -757,16 +757,16 @@ describe('lobby directory', () => {
     expect(post.body).toEqual({ playerId: 'p1' });
   });
 
-  it('reports a failed action as an error toast', async () => {
+  it('reports a failed action as an error notification', async () => {
     await openLobbies({ 'POST /admin/api/lobbies/AB12/close': { status: 404, body: { success: false, error: 'No active lobby with code AB12.' } } });
     el('lobbies-body').querySelector('tr .btn-danger').click();
     el('confirm-ok').click();
     await tick();
     await tick();
 
-    const toast = el('toast-host').querySelector('.toast-error');
-    expect(toast).not.toBeNull();
-    expect(toast.textContent).toContain('No active lobby');
+    const item = el('notif-drawer-items').querySelector('.notif-error');
+    expect(item).not.toBeNull();
+    expect(item.textContent).toContain('No active lobby');
   });
 });
 
@@ -856,9 +856,9 @@ describe('game catalog', () => {
     await tick();
     await tick();
 
-    const toast = el('toast-host').querySelector('.toast-warning');
-    expect(toast).not.toBeNull();
-    expect(toast.textContent).toMatch(/lost on restart/i);
+    const item = el('notif-drawer-items').querySelector('.notif-warning');
+    expect(item).not.toBeNull();
+    expect(item.textContent).toMatch(/lost on restart/i);
   });
 
   it('confirms a delete before sending it', async () => {
@@ -1056,6 +1056,9 @@ describe('top-bar tab navigation visibility with auth state', () => {
     expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
     expect(el('admin-top-tabs').classList.contains('hidden')).toBe(false);
     expect(el('logout-btn').classList.contains('hidden')).toBe(false);
+    // Icon-only: the accessible name carries the meaning the text used to.
+    expect(el('logout-btn').getAttribute('aria-label')).toBe('Log out');
+    expect(el('logout-btn').querySelector('svg')).not.toBeNull();
   });
 
   it('hides top-bar tabs on logout', async () => {

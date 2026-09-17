@@ -310,6 +310,14 @@ public sealed class AdminAuthService
     private byte[] CurrentSigningKey() => HMACSHA256.HashData(_sessionSigningSecret, SecretFingerprint());
 
     /// <summary>
+    /// The current secret fingerprint for services that must rotate when the password changes (see
+    /// <see cref="NotificationKeyService"/>). Internal, not exposed on any wire response: it is a hash
+    /// of credential material, and nothing client-side ever needs it — rotation is detected by comparing
+    /// successive values server-side.
+    /// </summary>
+    internal byte[] CurrentSecretFingerprint() => SecretFingerprint();
+
+    /// <summary>
     /// SHA-256 of the secret file's bytes, or empty when unconfigured. Deliberately NOT cached: the file is
     /// ~100 bytes and admin traffic is a trickle, so reading it costs microseconds — while a cache keyed on
     /// (mtime, length) would be unsound here, since every secret file is exactly the same length and
@@ -317,17 +325,34 @@ public sealed class AdminAuthService
     /// </summary>
     private byte[] SecretFingerprint()
     {
+        if (TryGetSecretFingerprint(out var fingerprint, logFailure: true))
+            return fingerprint;
+        // An unreadable secret must not authenticate anyone. Returning a random key makes every
+        // signature comparison fail closed, rather than falling back to a constant an attacker
+        // could rely on.
+        return RandomNumberGenerator.GetBytes(HashSizeBytes);
+    }
+
+    /// <summary>
+    /// Tries to read the SHA-256 of the secret file's bytes. Returns false (rather than throwing)
+    /// when the file cannot be read — a transient lock (AV/indexer) must be distinguishable from a
+    /// password change, so <see cref="NotificationKeyService"/> keeps its existing key on failure
+    /// instead of rotating. Session validation stays fail-closed via <see cref="SecretFingerprint"/>.
+    /// Empty (unconfigured) is a successful read of nothing, not a failure.
+    /// </summary>
+    internal bool TryGetSecretFingerprint(out byte[] fingerprint, bool logFailure = true)
+    {
         try
         {
-            return File.Exists(_secretFilePath) ? SHA256.HashData(File.ReadAllBytes(_secretFilePath)) : [];
+            fingerprint = File.Exists(_secretFilePath) ? SHA256.HashData(File.ReadAllBytes(_secretFilePath)) : [];
+            return true;
         }
         catch (Exception ex)
         {
-            // An unreadable secret must not authenticate anyone. Returning a random key makes every
-            // signature comparison fail closed, rather than falling back to a constant an attacker
-            // could rely on.
-            _logger.LogWarning(ex, "Could not read admin secret file at '{Path}' to validate a session.", _secretFilePath);
-            return RandomNumberGenerator.GetBytes(HashSizeBytes);
+            fingerprint = [];
+            if (logFailure)
+                _logger.LogWarning(ex, "Could not read admin secret file at '{Path}'.", _secretFilePath);
+            return false;
         }
     }
 

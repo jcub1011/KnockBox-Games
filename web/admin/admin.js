@@ -13,6 +13,7 @@ import {
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
   filterPlugins, filterSettings, formatByteLimit, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
+  formatNotificationTime, formatNotificationTimeFull,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
   lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
   noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
@@ -20,6 +21,31 @@ import {
   sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
+
+import {
+  NOTIFICATION_DRAWER_MS,
+  NOTIF_DRAWER_EXIT_MS,
+  NOTIF_MODAL_EXIT_MS,
+  clearNotificationKey,
+  clearNotifications,
+  consumeDecryptFailure,
+  dismissOneNotification,
+  getNotification,
+  getNotifications,
+  getUnreadCount,
+  hasStoredBlob,
+  hasUnreadEncrypted,
+  initNotificationStore,
+  isMemoryOnly,
+  isPlaintextFallback,
+  loadNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+  notify,
+  refreshNotificationKey,
+  subscribe as subscribeNotifications,
+  unloadNotificationsForLogout,
+} from './admin-notifications.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -49,7 +75,7 @@ let logCursor = 0;
 let catalogData = null;
 let jobs = [];
 let jobCursor = 0;
-// jobIds whose terminal outcome has already been toasted, so each finished job raises exactly one —
+// jobIds whose terminal outcome has already been notified, so each finished job raises exactly one —
 // whenever the operator first sees it, however many polls later that is.
 const reportedJobs = new Set();
 let uploadXhr = null;
@@ -108,18 +134,18 @@ async function getJson(path) {
 }
 
 /**
- * POSTs an action and reports the outcome as a toast. Returns true when the server accepted it.
+ * POSTs an action and reports the outcome as a notification. Returns true when the server accepted it.
  *
  * The JSON content type is always sent because the server's mutation guard requires it — a plain form
  * post is the one shape SameSite=Strict historically leaked on, so the API refuses anything else.
  *
- * `errorEl` redirects the failure message into an inline element instead of a toast. A form's rejection
+ * `errorEl` redirects the failure message into an inline element instead of a notification. A form's rejection
  * belongs beside the fields that caused it and has to stay on screen while they are corrected, which a
- * toast that fades cannot do.
+ * transient notification cannot do.
  */
 async function postJson(path, body, { errorEl = null } = {}) {
   const fail = (message) => {
-    if (!errorEl) { toast(message, 'error'); return false; }
+    if (!errorEl) { notify(message, 'error'); return false; }
     errorEl.textContent = message;
     errorEl.classList.remove('hidden');
     return false;
@@ -140,8 +166,8 @@ async function postJson(path, body, { errorEl = null } = {}) {
     // Success with something worth saying: `detail` explains what the action did and did not do (chiefly
     // that disabling a game leaves its running lobbies alone), `warning` that a policy change is live but
     // wasn't written to disk.
-    if (data.warning) toast(data.warning, 'warning');
-    else toast(data.detail || 'Done.', 'success');
+    if (data.warning) notify(data.warning, 'warning');
+    else notify(data.detail || 'Done.', 'success');
     return true;
   } catch (err) {
     console.error(`POST ${path} failed:`, err);
@@ -164,17 +190,443 @@ function showErrorStatus(msg) {
   el('server-status-pill').hidden = false;
 }
 
-// ── Toasts ────────────────────────────────────────────────────────────────────
+// ── Notifications ─────────────────────────────────────────────────────────────
+// The persistent replacement for the toast system: a bell with an unread badge in the header, an
+// arrival drawer with the three newest, a full list modal, and a details modal for one
+// notification. The STORE (list, encryption, persistence) lives in admin-notifications.js, which
+// this module subscribes to; everything below is rendering over it. Read state changes via the
+// explicit buttons, and by opening the details modal (which marks the shown item read); the drawer
+// preview and opening the list never mark anything read.
 
-export function toast(message, kind = 'info') {
-  const host = el('toast-host');
+let notifDrawerTimer = null;
+let notifDrawerOpen = false;
+let notifDetailId = null;
+
+// Glyphs for the icon-only notification buttons, matching the header/tab icon treatment
+// (stroke currentColor). The toggle shows the envelope for the state it will move the item to:
+// open for "mark read", closed for "mark unread". Dismiss is an x like the modal-close icon.
+const NOTIF_ICON_MAIL_OPEN = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M6 12.0001V10.0001H18V12.0001M3.02832 10.0002L10.2246 14.8168C10.8661 15.2444 11.1869 15.4583 '
+  + '11.5336 15.5414C11.8399 15.6148 12.1593 15.6148 12.4657 15.5414C12.8124 15.4583 13.1332 15.2444 '
+  + '13.7747 14.8168L20.9709 10.0001M10.2981 4.06892L4.49814 7.71139C3.95121 8.05487 3.67775 8.2266 '
+  + '3.4794 8.45876C3.30385 8.66424 3.17176 8.90317 3.09111 9.16112C3 9.45256 3 9.77548 3 10.4213V16.8001C3 '
+  + '17.9202 3 18.4803 3.21799 18.9081C3.40973 19.2844 3.71569 19.5904 4.09202 19.7821C4.51984 20.0001 '
+  + '5.07989 20.0001 6.2 20.0001H17.8C18.9201 20.0001 19.4802 20.0001 19.908 19.7821C20.2843 19.5904 '
+  + '20.5903 19.2844 20.782 18.9081C21 18.4803 21 17.9202 21 16.8001V10.4213C21 9.77548 21 9.45256 '
+  + '20.9089 9.16112C20.8282 8.90317 20.6962 8.66424 20.5206 8.45876C20.3223 8.2266 20.0488 8.05487 '
+  + '19.5019 7.71139L13.7019 4.06891C13.0846 3.68129 12.776 3.48747 12.4449 3.41192C12.152 3.34512 11.848 '
+  + '3.34512 11.5551 3.41192C11.224 3.48747 10.9154 3.68129 10.2981 4.06892Z"/></svg>';
+const NOTIF_ICON_MAIL_CLOSED = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M21 8L17.4392 9.97822C15.454 11.0811 14.4614 11.6326 13.4102 11.8488C12.4798 12.0401 11.5202 '
+  + '12.0401 10.5898 11.8488C9.53864 11.6326 8.54603 11.0811 6.5608 9.97822L3 8M6.2 19H17.8C18.9201 19 '
+  + '19.4802 19 19.908 18.782C20.2843 18.5903 20.5903 18.2843 20.782 17.908C21 17.4802 21 16.9201 21 '
+  + '15.8V8.2C21 7.0799 21 6.51984 20.782 6.09202C20.5903 5.71569 20.2843 5.40973 19.908 5.21799C19.4802 5 '
+  + '18.9201 5 17.8 5H6.2C5.0799 5 4.51984 5 4.09202 5.21799C3.71569 5.40973 3.40973 5.71569 3.21799 '
+  + '6.09202C3 6.51984 3 7.07989 3 8.2V15.8C3 16.9201 3 17.4802 3.21799 17.908C3.40973 18.2843 3.71569 '
+  + '18.5903 4.09202 18.782C4.51984 19 5.07989 19 6.2 19Z"/></svg>';
+const NOTIF_ICON_X = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+
+/**
+ * Paints a mark read/unread toggle as the icon for the action it will take. Icon-only, so the
+ * accessible name carries the meaning the text used to.
+ */
+function paintNotifToggle(btn, read) {
+  btn.innerHTML = read ? NOTIF_ICON_MAIL_CLOSED : NOTIF_ICON_MAIL_OPEN;
+  const label = read ? 'Mark unread' : 'Mark read';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+}
+
+function notifKindLabel(kind) {
+  const name = String(kind ?? 'info');
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function refreshNotifBadge() {
+  const badge = el('notif-badge');
+  if (!badge) return;
+  const count = getUnreadCount();
+  badge.textContent = count > 99 ? '99+' : String(count);
+  badge.classList.toggle('hidden', count === 0);
+  el('notif-bell-btn')?.setAttribute(
+    'aria-label', count === 0 ? 'Notifications' : `Notifications, ${count} unread`);
+}
+
+/**
+ * Whether the arrival drawer is meaningful on this device. It is a hover-preview idiom: hover or
+ * keyboard focus opens it, leaving dismisses it. On touch devices there is no hover — a tap fires
+ * click (and sometimes emulated mouseenter first), so opening the drawer on tap races the modal the
+ * tap actually asked for, and the two visibly fight before the modal wins. There the bell skips the
+ * drawer entirely and opens the list, and arrivals only move the badge. Missing matchMedia (jsdom)
+ * reads as capable, so the test suite exercises the drawer path.
+ */
+export function canHoverPreview() {
+  try {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
+    return window.matchMedia('(hover: hover)').matches;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Opens the arrival preview. Always re-renders the three newest, even if they are the same ones
+ * the last opening showed — the drawer answers "what just happened", not "what is unread".
+ * Suppressed while the list modal owns the operator's attention (its badge still updates),
+ * before login (the bell is hidden there anyway), and on touch devices (see canHoverPreview).
+ */
+function openNotifDrawer() {
+  if (!canHoverPreview()) return;
+  if (el('dashboard-view')?.classList.contains('hidden')) return;
+  if (!el('notifications-backdrop')?.classList.contains('hidden')) return;
+  // An arrival while the details modal is open would pop the drawer underneath it (z-90 vs z-200):
+  // invisible, but arming the auto-dismiss timer and flipping open state behind the modal.
+  if (!el('notification-details-backdrop')?.classList.contains('hidden')) return;
+  renderNotifDrawer();
+  // A close in flight is cancelled: the exit timer is dropped and the closing class removed, so a
+  // reopen never inherits the fade-out it just interrupted.
+  notifDrawerExitTimer = clearNotifExitTimer(notifDrawerExitTimer);
+  const drawer = el('notif-drawer');
+  drawer?.classList.remove('notif-drawer-closing');
+  drawer?.classList.remove('hidden');
+  notifDrawerOpen = true;
+  el('notif-bell-btn')?.setAttribute('aria-expanded', 'true');
+  armNotifDrawerTimer();
+}
+
+/**
+ * Closes the drawer through its exit animation rather than hiding it outright, so dismissal reads
+ * the same as arrival. The `hidden` class lands when the animation ends (NOTIF_DRAWER_EXIT_MS,
+ * mirroring admin.css) — callers must not assume it is synchronous.
+ */
+export function closeNotifDrawer() {
+  stopNotifDrawerTimer();
+  const drawer = el('notif-drawer');
+  el('notif-bell-btn')?.setAttribute('aria-expanded', 'false');
+  if (!drawer || !notifDrawerOpen) {
+    notifDrawerOpen = false;
+    return;
+  }
+  notifDrawerOpen = false;
+  drawer.classList.add('notif-drawer-closing');
+  notifDrawerExitTimer = clearNotifExitTimer(notifDrawerExitTimer);
+  notifDrawerExitTimer = setTimeout(() => {
+    notifDrawerExitTimer = null;
+    drawer.classList.add('hidden');
+    drawer.classList.remove('notif-drawer-closing');
+  }, NOTIF_DRAWER_EXIT_MS);
+}
+
+/**
+ * Cancels the drawer's pending auto-dismiss. Exported for the jsdom tests, which reuse one window
+ * per file: a drawer armed by one test would otherwise fire into the next test's DOM — the same
+ * trap stopPolling() and stopScrollSettle() exist for.
+ */
+export function stopNotifDrawerTimer() {
+  if (notifDrawerTimer !== null) clearTimeout(notifDrawerTimer);
+  notifDrawerTimer = null;
+}
+
+let notifDrawerExitTimer = null;
+let notifListExitTimer = null;
+let notifDetailExitTimer = null;
+
+function clearNotifExitTimer(timer) {
+  if (timer !== null) clearTimeout(timer);
+  return null;
+}
+
+/**
+ * Cancels every in-flight exit animation. Exported alongside stopNotifDrawerTimer for the jsdom
+ * tests: an exit armed by one test must not hide the next test's freshly opened drawer or modal.
+ */
+export function stopNotifExitTimers() {
+  notifDrawerExitTimer = clearNotifExitTimer(notifDrawerExitTimer);
+  notifListExitTimer = clearNotifExitTimer(notifListExitTimer);
+  notifDetailExitTimer = clearNotifExitTimer(notifDetailExitTimer);
+}
+
+function armNotifDrawerTimer() {
+  stopNotifDrawerTimer();
+  notifDrawerTimer = setTimeout(closeNotifDrawer, NOTIFICATION_DRAWER_MS);
+}
+
+function drawerItem(n) {
+  const item = document.createElement('div');
+  item.className = `notif-item notif-${n.kind}${n.read ? '' : ' notif-item-unread'}`;
+  item.tabIndex = 0;
+  item.setAttribute('role', 'button');
+
+  const head = document.createElement('div');
+  head.className = 'notif-item-head';
+  const kind = document.createElement('span');
+  kind.className = 'notif-kind';
+  kind.textContent = notifKindLabel(n.kind);
+  const time = document.createElement('span');
+  time.className = 'notif-time';
+  time.textContent = formatNotificationTime(n.at);
+  head.append(kind, time);
+
+  const message = document.createElement('div');
+  message.className = 'notif-message';
+  message.textContent = n.message;
+  item.append(head, message);
+
+  const open = () => openNotificationDetails(n.id);
+  item.addEventListener('click', open);
+  item.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+  return item;
+}
+
+function renderNotifDrawer() {
+  const host = el('notif-drawer-items');
   if (!host) return;
-  const div = document.createElement('div');
-  div.className = `toast toast-${kind}`;
-  div.textContent = message;
-  host.appendChild(div);
-  // Matches the CSS fade-out duration; a longer hold for errors, which are the ones worth reading.
-  setTimeout(() => div.remove(), kind === 'error' ? 8000 : 4000);
+  host.innerHTML = '';
+  const latest = getNotifications().slice(0, 3);
+  if (latest.length === 0) {
+    const none = document.createElement('div');
+    none.className = 'notif-item';
+    none.textContent = 'No notifications.';
+    host.appendChild(none);
+    return;
+  }
+  for (const n of latest) host.appendChild(drawerItem(n));
+}
+
+export function openNotifications() {
+  closeNotifDrawer();
+  const bd = el('notifications-backdrop');
+  notifListExitTimer = clearNotifExitTimer(notifListExitTimer);
+  bd?.classList.remove('modal-closing');
+  bd?.classList.remove('hidden');
+  renderNotifications();
+  el('notifications-close')?.focus();
+}
+
+/**
+ * Animated like the drawer close: the backdrop takes `modal-closing` (NOTIF_MODAL_EXIT_MS, mirroring
+ * admin.css) and `hidden` lands when it ends. Guarded against double-arming, and reopening cancels.
+ */
+export function closeNotifications() {
+  const bd = el('notifications-backdrop');
+  if (!bd || bd.classList.contains('hidden') || bd.classList.contains('modal-closing')) return;
+  bd.classList.add('modal-closing');
+  notifListExitTimer = clearNotifExitTimer(notifListExitTimer);
+  notifListExitTimer = setTimeout(() => {
+    notifListExitTimer = null;
+    bd.classList.add('hidden');
+    bd.classList.remove('modal-closing');
+  }, NOTIF_MODAL_EXIT_MS);
+}
+
+function notificationRow(n) {
+  const row = document.createElement('div');
+  row.className = `notif-row notif-${n.kind}${n.read ? '' : ' notif-item-unread'}`;
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+
+  const main = document.createElement('div');
+  main.className = 'notif-row-main';
+  const head = document.createElement('div');
+  head.className = 'notif-item-head';
+  const kind = document.createElement('span');
+  kind.className = 'notif-kind';
+  kind.textContent = notifKindLabel(n.kind);
+  const time = document.createElement('span');
+  time.className = 'notif-time';
+  time.textContent = formatNotificationTime(n.at);
+  head.append(kind, time);
+  const message = document.createElement('div');
+  message.className = 'notif-message';
+  message.textContent = n.message;
+  main.append(head, message);
+
+  const actions = document.createElement('div');
+  actions.className = 'notif-row-actions';
+  // Disabled alongside the toolbar buttons while an unreadable encrypted blob is stored (see
+  // renderNotifications): a per-row delete here could not delete what is actually stored.
+  const rowLocked = hasUnreadEncrypted();
+  const toggle = document.createElement('button');
+  toggle.className = 'btn btn-secondary btn-small btn-icon-only';
+  toggle.type = 'button';
+  toggle.disabled = rowLocked;
+  paintNotifToggle(toggle, n.read);
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    markNotificationRead(n.id, !n.read);
+  });
+  const dismiss = document.createElement('button');
+  dismiss.className = 'btn btn-danger btn-small btn-icon-only';
+  dismiss.type = 'button';
+  dismiss.innerHTML = NOTIF_ICON_X;
+  dismiss.setAttribute('aria-label', 'Dismiss notification');
+  dismiss.title = 'Dismiss notification';
+  dismiss.disabled = rowLocked;
+  dismiss.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dismissOneNotification(n.id);
+  });
+  actions.append(toggle, dismiss);
+  row.append(main, actions);
+
+  const open = () => openNotificationDetails(n.id);
+  row.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    open();
+  });
+  row.addEventListener('keydown', (e) => {
+    if (e.target.closest('button')) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+  return row;
+}
+
+function renderNotifications() {
+  const list = getNotifications();
+  const unread = list.filter((n) => n.read !== true).length;
+  el('notifications-unread').textContent = `${unread} unread`;
+
+  const note = el('notifications-note');
+  const notes = [];
+  // While an encrypted blob is stored but unreadable on this origin, mutating controls stay disabled:
+  // any delete or mark-read would only touch memory while the stored blob survives, so the action
+  // could not do what its label promises.
+  const locked = hasUnreadEncrypted();
+  if (locked) {
+    notes.push('Encrypted notifications are stored on this browser but cannot be read on this connection '
+      + '(plain HTTP over LAN has no WebCrypto). They were left untouched — managing is disabled until '
+      + 'you revisit over loopback or HTTPS.');
+  } else if (isPlaintextFallback()) {
+    notes.push('Stored unencrypted on this connection: this browser cannot do WebCrypto here '
+      + '(plain HTTP over LAN), so anyone reading this browser profile can read these.');
+  } else if (isMemoryOnly()) {
+    notes.push('The encryption key is unavailable, so these live in memory for this session only '
+      + 'and will not survive a reload.');
+  }
+  note.textContent = notes.join(' ');
+  note.classList.toggle('hidden', notes.length === 0);
+
+  const host = el('notifications-list');
+  host.innerHTML = '';
+  for (const n of list) host.appendChild(notificationRow(n));
+  host.classList.toggle('hidden', list.length === 0);
+  el('notifications-empty').classList.toggle('hidden', list.length > 0);
+  el('notifications-mark-all').disabled = unread === 0 || locked;
+  el('notifications-dismiss-all').disabled = list.length === 0 || locked;
+}
+
+async function dismissAllNotificationsUI() {
+  if (getNotifications().length === 0) return;
+  // Buttons are disabled while an unreadable encrypted blob is stored; this is the keyboard/forced-click net.
+  if (hasUnreadEncrypted()) return;
+  if (!await confirmAction(
+    'Dismiss every notification? This deletes them permanently.', 'Dismiss All')) return;
+  clearNotifications();
+}
+
+export function openNotificationDetails(id) {
+  notifDetailId = id;
+  // Opening the dedicated modal counts as reading: mark unread items read so
+  // the badge/list reflect what the operator has now seen. The store emit
+  // re-renders badge + list; the explicit render below shows the Read status.
+  const current = getNotification(id);
+  if (current && !current.read) markNotificationRead(id, true);
+  if (!renderNotificationDetails()) return;
+  closeNotifDrawer();
+  const bd = el('notification-details-backdrop');
+  notifDetailExitTimer = clearNotifExitTimer(notifDetailExitTimer);
+  bd?.classList.remove('modal-closing');
+  bd?.classList.remove('hidden');
+}
+
+export function closeNotificationDetails() {
+  const bd = el('notification-details-backdrop');
+  if (!bd || bd.classList.contains('hidden') || bd.classList.contains('modal-closing')) {
+    if (!bd || bd.classList.contains('hidden')) notifDetailId = null;
+    return;
+  }
+  notifDetailId = null;
+  bd.classList.add('modal-closing');
+  notifDetailExitTimer = clearNotifExitTimer(notifDetailExitTimer);
+  notifDetailExitTimer = setTimeout(() => {
+    notifDetailExitTimer = null;
+    bd.classList.add('hidden');
+    bd.classList.remove('modal-closing');
+  }, NOTIF_MODAL_EXIT_MS);
+}
+
+function renderNotificationDetails() {
+  const n = getNotification(notifDetailId);
+  if (!n) {
+    // Dismissed from the list (or the detail modal itself) while open: close and re-sync the list.
+    closeNotificationDetails();
+    if (!el('notifications-backdrop')?.classList.contains('hidden')) renderNotifications();
+    return false;
+  }
+  const body = el('notification-details-body');
+  body.innerHTML = '';
+
+  const message = document.createElement('div');
+  message.className = 'notif-details-message';
+  message.textContent = n.message;
+
+  const grid = document.createElement('div');
+  grid.className = 'details-grid';
+  for (const [label, value] of [
+    ['Severity', notifKindLabel(n.kind)],
+    ['Status', n.read ? 'Read' : 'Unread'],
+    ['Received', formatNotificationTimeFull(n.at)],
+    ['Recorded', n.at],
+  ]) {
+    const field = document.createElement('div');
+    field.className = 'details-field';
+    const lab = document.createElement('div');
+    lab.className = 'details-label';
+    lab.textContent = label;
+    const val = document.createElement('div');
+    val.className = 'details-value';
+    val.textContent = value;
+    field.append(lab, val);
+    grid.appendChild(field);
+  }
+  body.append(message, grid);
+  paintNotifToggle(el('notification-details-toggle'), n.read);
+  // Same lock as the list rows: while an unreadable encrypted blob is stored, toggling or dismissing
+  // from the details modal could not touch what is actually stored.
+  const detailsLocked = hasUnreadEncrypted();
+  el('notification-details-toggle').disabled = detailsLocked;
+  el('notification-details-dismiss').disabled = detailsLocked;
+  return true;
+}
+
+/**
+ * After a successful login: fetch the store's encryption key, then read the store. A 401 from the
+ * key endpoint means the session went away mid-check, so it funnels back through the auth check
+ * rather than leaving the portal on a dashboard it is no longer entitled to.
+ */
+async function initNotificationsAfterAuth() {
+  const { key, unauthorized } = await refreshNotificationKey();
+  if (unauthorized) {
+    await checkAuthStatus();
+    return;
+  }
+  await loadNotifications();
+  if (consumeDecryptFailure()) {
+    notify('Stored notifications could not be decrypted, so they were cleared. '
+      + 'This happens when the admin password changes.', 'warning');
+  } else if (!key && (hasUnreadEncrypted() || isMemoryOnly() || hasStoredBlob())) {
+    // The key endpoint failed for a non-auth reason (network/500): the portal must not look simply
+    // empty — stored history is unreachable and anything new lives in memory for this session only.
+    notify('Could not fetch the notification encryption key, so stored notifications are unavailable '
+      + 'and new ones live in memory for this session only.', 'warning');
+  }
+  refreshNotifBadge();
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────────
@@ -246,6 +698,7 @@ export async function checkAuthStatus() {
       showErrorStatus('Server unreachable on admin port');
       el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn')?.classList.add('hidden');
+      el('notif-bell-wrap')?.classList.add('hidden');
       return;
     }
     const data = await res.json();
@@ -255,22 +708,27 @@ export async function checkAuthStatus() {
       showView('setup-view');
       el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn').classList.add('hidden');
+      el('notif-bell-wrap')?.classList.add('hidden');
       stopPolling();
     } else if (!data.authenticated) {
       showView('login-view');
       el('admin-top-tabs')?.classList.add('hidden');
       el('logout-btn').classList.add('hidden');
+      el('notif-bell-wrap')?.classList.add('hidden');
       stopPolling();
     } else {
       showView('dashboard-view');
       el('admin-top-tabs')?.classList.remove('hidden');
       el('logout-btn').classList.remove('hidden');
+      el('notif-bell-wrap')?.classList.remove('hidden');
       selectSetting(settingFromHash(location.hash), { replaceHash: false, scroll: Boolean(location.hash) });
+      await initNotificationsAfterAuth();
     }
   } catch (err) {
     showErrorStatus('Network Error');
     el('admin-top-tabs')?.classList.add('hidden');
     el('logout-btn')?.classList.add('hidden');
+    el('notif-bell-wrap')?.classList.add('hidden');
     console.error('Failed to check auth status:', err);
   }
 }
@@ -1122,7 +1580,7 @@ async function kickPlayer(lobby, member) {
 
 async function closeAllLobbies() {
   const total = (lobbyData?.lobbies || []).length;
-  if (total === 0) { toast('There are no lobbies to close.', 'info'); return; }
+  if (total === 0) { notify('There are no lobbies to close.', 'info'); return; }
   if (!await confirmAction(
     `Close all ${total} lobby/lobbies on the server? Every player in them returns to the home page and `
     + 'loses any game in progress.', 'Close Everything')) return;
@@ -1539,7 +1997,7 @@ export function pluginCard(entry) {
           });
         }
       } catch (err) {
-        showToast(err.message || 'Could not load older versions.', 'error');
+        notify(err.message || 'Could not load older versions.', 'error');
       } finally {
         entry.versionsLoaded = true;
         versionSelect.disabled = false;
@@ -1888,11 +2346,11 @@ export function openPluginDetails(entry) {
         if (text !== '') {
           const rawNumber = Number(text);
           if (!Number.isInteger(rawNumber)) {
-            toast('Quota must be a whole number.', 'error');
+            notify('Quota must be a whole number.', 'error');
             return;
           }
           if (rawNumber === 0) {
-            toast('Leave quota empty to disable the override, or use a negative value for no cap.', 'error');
+            notify('Leave quota empty to disable the override, or use a negative value for no cap.', 'error');
             return;
           }
           if (rawNumber < 0) {
@@ -2297,9 +2755,9 @@ async function copyStagedLink(game) {
   const link = `/?game=${encodeURIComponent(game.id)}`;
   try {
     await navigator.clipboard.writeText(link);
-    toast(`Copied "${link}" — append it to your shell's address. Visibility only, not access control.`, 'success');
+    notify(`Copied "${link}" — append it to your shell's address. Visibility only, not access control.`, 'success');
   } catch {
-    toast(`Launch path: ${link}`, 'info');
+    notify(`Launch path: ${link}`, 'info');
   }
 }
 
@@ -2441,11 +2899,10 @@ async function refreshCatalog({ refresh = false } = {}) {
   jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
   renderSourceFilter();
   renderMarketplace();
-  renderJobs();
 }
 
 async function refreshJobs() {
-  const data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
+  let data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
   if (!data) return;
 
   // A sequence that went BACKWARDS means the server restarted: the registry is in-memory, so it begins
@@ -2453,15 +2910,34 @@ async function refreshJobs() {
   // holding and is sliced away at JOB_VIEW_LIMIT, while the cursor — only ever clamped upward — asks
   // for everything after a sequence the new process will not reach for a long time. The log feed
   // already handles exactly this; the job feed is the same shape and did not.
-  const lastSequence = Number(data.lastSequence) || 0;
-  if (lastSequence < jobCursor) { jobs = []; jobCursor = 0; }
+  if ((Number(data.lastSequence) || 0) < jobCursor) {
+    jobs = [];
+    jobCursor = 0;
+    // Notified ids belong to the old process and will never reappear — drop them so the set cannot
+    // grow one entry per finished job for the lifetime of the page.
+    reportedJobs.clear();
+    // The fetch above used the old process's cursor, so jobs the new process already created were
+    // missed: re-read at zero in this same tick rather than leaving per-card progress absent until
+    // the next poll.
+    data = await getJson(`/admin/api/packages/jobs?after=0`);
+    if (!data) return;
+  }
 
+  const lastSequence = Number(data.lastSequence) || 0;
   const before = new Set(jobs.filter((j) => j.terminal).map((j) => j.jobId));
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
   jobCursor = lastSequence || jobCursor;
+  // Bound the notified set to what is still in view: an id evicted at JOB_VIEW_LIMIT that later
+  // reappears notifies again, exactly as after a restart.
+  const inView = new Set(jobs.map((j) => j.jobId));
+  for (const id of reportedJobs) {
+    if (!inView.has(id)) reportedJobs.delete(id);
+  }
 
   // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
   // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
+  // There is no operations list anymore: the feed is polled silently and outcomes surface as
+  // notifications (see announceJob below).
   let finished = false;
   for (const job of jobs) {
     if (!job.terminal || before.has(job.jobId)) continue;
@@ -2472,7 +2948,6 @@ async function refreshJobs() {
     }
   }
 
-  renderJobs();
   setNavCount('marketplace', updatesAvailable());
   if (finished) {
     refreshGames();
@@ -2482,9 +2957,9 @@ async function refreshJobs() {
 
 function announceJob(job) {
   const what = `${job.gameName || job.gameId}`;
-  if (job.status === 'succeeded') toast(`${what}: ${job.phase}`, 'success');
-  else if (job.status === 'failed') toast(`${what} failed: ${job.error || job.phase}`, 'error');
-  else toast(`${what}: ${job.phase}`, 'warning');
+  if (job.status === 'succeeded') notify(`${what}: ${job.phase}`, 'success');
+  else if (job.status === 'failed') notify(`${what} failed: ${job.error || job.phase}`, 'error');
+  else notify(`${what}: ${job.phase}`, 'warning');
 }
 
 function updatesAvailable() {
@@ -2610,13 +3085,10 @@ async function uninstallGame(entry) {
   if (await postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/uninstall`, {})) refreshJobs();
 }
 
-function renderJobs() {
-  const host = el('mkt-jobs');
-  host.textContent = '';
-  el('mkt-jobs-card').classList.toggle('hidden', jobs.length === 0);
-  for (const job of jobs) host.appendChild(jobRow(job));
-}
-
+// The per-card pending-job row: when a package operation is running against a game, its card
+// shows the live phase, progress and the cancel button inline. (The old standalone Operations
+// list is gone — outcomes surface as notifications — but progress and cancel belong to the card
+// being operated on, so this stays.)
 function jobRow(job, { compact = false } = {}) {
   const row = document.createElement('div');
   row.className = 'job-row';
@@ -2710,7 +3182,7 @@ function startUpload() {
   const file = uploadFile;
   const guard = uploadGuard(file, { maxBytes: catalogData?.maxUploadBytes ?? 0 });
   if (!guard.ok) {
-    // Inline, not a toast: the operator is looking at this modal and has to change the input.
+    // Inline, not a notification: the operator is looking at this modal and has to change the input.
     showUploadError(guard.error);
     return;
   }
@@ -2752,9 +3224,9 @@ function startUpload() {
     try { body = JSON.parse(xhr.responseText); } catch { /* a non-JSON error page */ }
     if (xhr.status >= 200 && xhr.status < 300 && body?.success) {
       el('upload-backdrop').classList.add('hidden');
-      toast(body.detail || 'Package accepted.', 'success');
+      notify(body.detail || 'Package accepted.', 'success');
       // Everything after this point happens inside the JOB — a bad archive, an id collision, a full
-      // disk. The request is over; the operations list owns the outcome.
+      // disk. The request is over; the outcome arrives as a notification.
       refreshJobs();
       return;
     }
@@ -3052,7 +3524,7 @@ async function saveLimits() {
     scales[select.dataset.limitScaleKey] = select.value;
   }
   const checked = validateLimits(raw, LIMIT_FIELDS, scales);
-  if (!checked.ok) { toast(checked.error, 'error'); return; }
+  if (!checked.ok) { notify(checked.error, 'error'); return; }
 
   // Tightening a limit is not destructive, but it is felt immediately by everyone connected, so the two
   // that can refuse a player outright get a confirmation naming what is running right now.
@@ -3166,7 +3638,7 @@ function renderAnnouncement(data) {
 
 async function postAnnouncement() {
   const text = el('announce-text').value.trim();
-  if (!text) { toast('Enter the message players should see.', 'error'); return; }
+  if (!text) { notify('Enter the message players should see.', 'error'); return; }
 
   if (await postJson('/admin/api/announcement', {
     text,
@@ -3272,7 +3744,7 @@ function originOf(url) {
 
 async function addWebhook() {
   const checked = checkWebhook({ id: el('hook-id').value, url: el('hook-url').value });
-  if (!checked.ok) { toast(checked.error, 'error'); return; }
+  if (!checked.ok) { notify(checked.error, 'error'); return; }
 
   const events = [...document.querySelectorAll('#hook-events input[data-hook-event]')]
     .filter((box) => box.checked)
@@ -3300,7 +3772,7 @@ async function removeWebhook(endpoint) {
 }
 
 async function testWebhook(id) {
-  // Awaited by the server through the real delivery path, so the toast is the actual answer rather than
+  // Awaited by the server through the real delivery path, so the notification is the actual answer rather than
   // "queued" — which is what an operator clicking Test wants to know.
   if (await postJson(`/admin/api/webhooks/${encodeURIComponent(id)}/test`, {})) refreshPlatform();
 }
@@ -3370,15 +3842,15 @@ function renderRoomCodes() {
 function addRoomCode(pattern) {
   const input = el(pattern ? 'code-pattern' : 'code-word');
   const checked = checkCodeEntry(input.value, { pattern, alphabet: codesData?.alphabet });
-  if (!checked.ok) { toast(checked.error, 'error'); return; }
+  if (!checked.ok) { notify(checked.error, 'error'); return; }
 
   const list = pattern ? codesDraft.patterns : codesDraft.words;
-  if (list.includes(checked.value)) { toast(`${checked.value} is already blocked.`, 'warning'); return; }
+  if (list.includes(checked.value)) { notify(`${checked.value} is already blocked.`, 'warning'); return; }
   list.push(checked.value);
   input.value = '';
   // Said at the moment of typing, where it can still be changed, rather than as a footnote after saving.
   if (checked.unreachable) {
-    toast(`${checked.value} can never be generated — the code alphabet has no O, 0, I or 1.`, 'warning');
+    notify(`${checked.value} can never be generated — the code alphabet has no O, 0, I or 1.`, 'warning');
   }
   renderRoomCodes();
 }
@@ -3616,6 +4088,52 @@ function wire() {
   el('log-popout-btn')?.addEventListener('click', openTerminalWindow);
   el('files-close')?.addEventListener('click', () => el('files-backdrop').classList.add('hidden'));
 
+  // ── Notifications: bell, drawer, list and details modals ──
+  initNotificationStore({ onNew: () => openNotifDrawer() });
+  subscribeNotifications(() => {
+    refreshNotifBadge();
+    if (notifDrawerOpen) {
+      renderNotifDrawer();
+      armNotifDrawerTimer();
+    }
+    if (!el('notifications-backdrop')?.classList.contains('hidden')) renderNotifications();
+    if (notifDetailId !== null && !el('notification-details-backdrop')?.classList.contains('hidden')) {
+      renderNotificationDetails();
+    }
+  });
+  refreshNotifBadge();
+
+  el('notif-bell-btn')?.addEventListener('click', openNotifications);
+  // Hover or keyboard focus previews the three newest — the same drawer an arrival opens, so
+  // hovering the auto-opened one naturally holds it. Holding only pauses the dismiss timer: the
+  // moment hover or focus leaves, the drawer dismisses at once (through its exit animation) rather
+  // than starting a second grace period the operator never asked to wait through.
+  el('notif-bell-btn')?.addEventListener('mouseenter', openNotifDrawer);
+  el('notif-bell-btn')?.addEventListener('focus', openNotifDrawer);
+  const drawer = el('notif-drawer');
+  drawer?.addEventListener('mouseenter', stopNotifDrawerTimer);
+  drawer?.addEventListener('mouseleave', closeNotifDrawer);
+  drawer?.addEventListener('focusin', stopNotifDrawerTimer);
+  drawer?.addEventListener('focusout', closeNotifDrawer);
+  el('notif-drawer-close')?.addEventListener('click', closeNotifDrawer);
+  el('notif-drawer-all')?.addEventListener('click', openNotifications);
+
+  el('notifications-close')?.addEventListener('click', closeNotifications);
+  el('notifications-close-x')?.addEventListener('click', closeNotifications);
+  el('notifications-mark-all')?.addEventListener('click', () => markAllNotificationsRead());
+  el('notifications-dismiss-all')?.addEventListener('click', dismissAllNotificationsUI);
+
+  el('notification-details-close')?.addEventListener('click', closeNotificationDetails);
+  el('notification-details-close-x')?.addEventListener('click', closeNotificationDetails);
+  el('notification-details-toggle')?.addEventListener('click', () => {
+    if (notifDetailId === null || hasUnreadEncrypted()) return;
+    const current = getNotification(notifDetailId);
+    if (current) markNotificationRead(notifDetailId, !current.read);
+  });
+  el('notification-details-dismiss')?.addEventListener('click', () => {
+    if (notifDetailId !== null && !hasUnreadEncrypted()) dismissOneNotification(notifDetailId);
+  });
+
   el('confirm-ok')?.addEventListener('click', () => settleConfirm(true));
   el('confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
   el('confirm-backdrop')?.addEventListener('click', (e) => {
@@ -3626,12 +4144,22 @@ function wire() {
       if (e.target === el(id)) el(id).classList.add('hidden');
     });
   }
+  // The notification modals close through their animated close functions, not a bare hide, so a
+  // backdrop click dismisses them the same way their buttons do.
+  el('notifications-backdrop')?.addEventListener('click', (e) => {
+    if (e.target === el('notifications-backdrop')) closeNotifications();
+  });
+  el('notification-details-backdrop')?.addEventListener('click', (e) => {
+    if (e.target === el('notification-details-backdrop')) closeNotificationDetails();
+  });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!el('confirm-backdrop')?.classList.contains('hidden')) settleConfirm(false);
     el('files-backdrop')?.classList.add('hidden');
     el('mkt-settings-backdrop')?.classList.add('hidden');
     el('plugin-details-backdrop')?.classList.add('hidden');
+    closeNotificationDetails();
+    closeNotifications();
     // Not closeUpload(): Escape must not silently abort a transfer that is halfway through. The Cancel
     // button is the deliberate way out.
     if (!uploadXhr) el('upload-backdrop')?.classList.add('hidden');
@@ -3709,6 +4237,16 @@ async function onLogout() {
     console.error('Logout error:', err);
   }
   stopPolling();
+  // The store's encryption key is memory-only by design: dropping it here is what makes the stored
+  // ciphertext unreadable until the next login re-fetches it. Decrypted items are plaintext
+  // regardless of the at-rest form, so memory is dropped too (the stored blob is left intact for
+  // the next login; unsaved memory-only items are intentionally discarded). The unload emits, so
+  // the badge/list re-render empty behind the login view.
+  clearNotificationKey();
+  unloadNotificationsForLogout();
+  closeNotifDrawer();
+  closeNotifications();
+  closeNotificationDetails();
   await checkAuthStatus();
 }
 

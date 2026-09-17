@@ -245,8 +245,8 @@ the hash and attack it offline — if you bind-mount a host directory, don't loo
 
 **Where operator policy lives.** Alongside it, in `KnockBox__AdminSettingsPath` —
 `/app/data/admin-settings.json` in the image, on the same volume for the same reason. It holds per-game
-availability and maintenance mode. It is **not** a secret (nothing in it is sensitive) but it *is* the one
-piece of state this server keeps across a restart, so back up the volume if your policy is non-trivial. It
+availability and maintenance mode. It is **not** a secret (nothing in it is sensitive) but it *is*
+operator state this server keeps across a restart, so back up the volume if your policy is non-trivial. It
 is indented and safe to hand-edit while the server is stopped; if it can't be read, the server boots with
 platform defaults and says so on the portal's Overview tab rather than failing.
 
@@ -670,6 +670,7 @@ separators (`KnockBox__GamesRoot`). The full table is in
 | `AdminPasswordPath` | `admin.secret` next to the exe (`/app/data/admin.secret` Docker) | Where the admin password hash is stored. Must be **writable** and, in Docker, on a **persisted volume** — otherwise the password is lost on every image update. Delete the file to reset the password. **Back this up** — see “Updating KnockBox”. |
 | `AdminSessionTtlHours` | `8` | Admin session-cookie lifetime. A restart also ends every admin session. |
 | `AdminSettingsPath` | `admin-settings.json` next to the password file | Persisted operator policy: per-game availability and maintenance mode. Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to reset all policy. **Back this up** — see “Updating KnockBox”. |
+| `AdminNotificationKeyPath` | `admin-notifications.key.json` next to the password file (`/app/data/…` Docker, same volume) | Persisted notification encryption keys, one per admin account. Same requirements as the password file; created mode `600`. Delete it to clear stored notifications once — a corrupt file recovers the same way on its own. |
 | `AdminStaleLobbyMinutes` | `30` | Idle minutes before the portal calls a lobby stale (and "Purge Stale" collects it). `0` judges staleness only by "nobody in it is connected". |
 | `AdminLogBufferSize` | `2000` | Log events kept in memory for the portal's live log view. Older entries are only in the rolling files under `LogsRoot`. |
 | `AdminDiskUsageCacheSeconds` | `60` | How long per-game disk measurements are reused before a background refresh. `0` measures on every read. |

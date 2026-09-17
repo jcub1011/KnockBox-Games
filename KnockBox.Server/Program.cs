@@ -164,14 +164,41 @@ if (containerMounts is not null)
     // files are actually written.
     var adminSecretPath = AdminAuthService.ResolveSecretPath(builder.Configuration);
     var adminSettingsPath = AdminSettingsStore.ResolveFilePath(builder.Configuration, adminSecretPath);
+    var adminNotificationKeyPath = NotificationKeyService.ResolveKeyPath(builder.Configuration, adminSecretPath);
+
+    var adminStateDir = Path.GetDirectoryName(adminSecretPath) ?? adminSecretPath;
+    var adminSettingsDir = Path.GetDirectoryName(adminSettingsPath) ?? adminSettingsPath;
+    var adminKeyDir = Path.GetDirectoryName(adminNotificationKeyPath) ?? adminNotificationKeyPath;
 
     List<(string Path, string Title, string Lost)> persistentState =
     [
-        (Path.GetDirectoryName(adminSecretPath) ?? adminSecretPath, "Admin state is not persisted",
-            $"the admin password ('{adminSecretPath}') and every saved operator policy decision " +
+        (adminStateDir, "Admin state is not persisted",
+            $"the admin password ('{adminSecretPath}'), every saved operator policy decision " +
             $"('{adminSettingsPath}') — disabled and staged games, maintenance mode, runtime limit " +
-            "overrides, banned room codes, the announcement, registered marketplaces and webhooks"),
+            "overrides, banned room codes, the announcement, registered marketplaces and webhooks — " +
+            $"and the notification encryption keys ('{adminNotificationKeyPath}')"),
     ];
+    // A custom AdminSettingsPath / AdminNotificationKeyPath can live on a different mount than the
+    // secret file. The base entry above only checks the secret's directory, so an ephemeral key or
+    // settings dir would be lost on the next image update with no warning. Warn per distinct dir.
+    var settingsSharesSecretDir =
+        string.Equals(adminSettingsDir, adminStateDir, StringComparison.OrdinalIgnoreCase);
+    var keySharesSecretDir =
+        string.Equals(adminKeyDir, adminStateDir, StringComparison.OrdinalIgnoreCase);
+    var keySharesSettingsDir =
+        string.Equals(adminKeyDir, adminSettingsDir, StringComparison.OrdinalIgnoreCase);
+    if (!settingsSharesSecretDir)
+    {
+        var lost = $"saved operator policy decisions ('{adminSettingsPath}')";
+        if (!keySharesSecretDir && keySharesSettingsDir)
+            lost += $" and the notification encryption keys ('{adminNotificationKeyPath}')";
+        persistentState.Add((adminSettingsDir, "Admin settings are not persisted", lost));
+    }
+    if (!keySharesSecretDir && (settingsSharesSecretDir || !keySharesSettingsDir))
+    {
+        persistentState.Add((adminKeyDir, "Notification keys are not persisted",
+            $"the notification encryption keys ('{adminNotificationKeyPath}')"));
+    }
     if (managedPackagesEnabled)
         persistentState.Add((gamesManagedRoot, "Installed packages are not persisted",
             "every game the admin portal installed. A marketplace package can be downloaded again; " +
@@ -436,6 +463,13 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
+// The notification store's at-rest encryption key, one random key per admin account persisted
+// beside the secret file so history survives restarts, rotating only when the admin password
+// changes, and served to signed-in portal pages only (see NotificationKeyService).
+builder.Services.AddSingleton(sp => new NotificationKeyService(
+    sp.GetRequiredService<AdminAuthService>(),
+    sp.GetRequiredService<IConfiguration>(),
+    sp.GetRequiredService<ILogger<NotificationKeyService>>()));
 builder.Services.AddSingleton<AdminSettingsStore>();
 // The relay asks the policy questions through the narrow IPlatformPolicy. Two layers answer them: the
 // settings store (persisted operator policy) and the lifecycle gate laid over it (transient "this game
@@ -1148,13 +1182,14 @@ StaticFileOptions GamesCompressedStaticOptions() => new()
 // Platform files (shell, admin portal) are versioned by CONTENT HASH, not by a hand-bumped query
 // string: the carrier pages hold ?v= placeholders the middleware below substitutes with the
 // provider's current token, and a versioned URL carrying the current token is immutable (see
-// VersionedCacheHeaders). Transitive ES imports (kb-core.js, kb-protocol.js, admin-core.js) and
-// the game SDK are never versioned in a URL, so they always revalidate via ETag.
+// VersionedCacheHeaders). Transitive ES imports (kb-core.js, kb-protocol.js, admin-core.js,
+// admin-notifications.js) and the game SDK are never versioned in a URL, so they always
+// revalidate via ETag.
 var shellVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "/shell.js", "/home.css" };
 var adminVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "/admin.js", "/admin.css", "/terminal.js" };
 var noVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 var shellContent = new ContentHashProvider(webRoot, "shell.js", "kb-core.js", "kb-protocol.js", "home.css");
-var adminContent = new ContentHashProvider(adminWebRoot, "admin.js", "admin-core.js", "admin.css", "terminal.js");
+var adminContent = new ContentHashProvider(adminWebRoot, "admin.js", "admin-core.js", "admin-notifications.js", "admin.css", "terminal.js");
 
 StaticFileOptions WebStaticOptions(HashSet<string> versionedPaths, Func<string> currentToken) => new()
 {
@@ -1324,7 +1359,8 @@ app.MapWhen(
             // An https admin origin means a proxy terminates TLS in front of us, so the session cookie
             // must be Secure even though the request reaching Kestrel is plain HTTP.
             CookieAlwaysSecure: adminOrigin?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) == true,
-            StaleAfter: adminStaleAfter));
+            StaleAfter: adminStaleAfter,
+            NotificationKeys: app.Services.GetRequiredService<NotificationKeyService>()));
 
         // No web/admin in the web root ⇒ the portal's files aren't there. Say so at the origin itself:
         // this is reported through DeploymentDiagnostics too, but the warning PAGE only replaces the

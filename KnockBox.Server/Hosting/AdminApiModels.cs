@@ -12,6 +12,14 @@ public sealed record AdminPasswordRequest(string Password);
 public sealed record AdminApiResponse(bool Success, string? Error = null);
 
 /// <summary>
+/// The at-rest encryption key for the portal's notification store, base64. Served only to an
+/// authenticated session (the key endpoint sits behind <c>RequireSession</c> like every other read),
+/// held in the page's memory only, and never written to any client-side storage — see
+/// <c>NotificationKeyService</c> for the rotation contract.
+/// </summary>
+public sealed record AdminNotificationKeyResponse(string Key);
+
+/// <summary>
 /// Result of an operator action.
 /// </summary>
 /// <param name="Affected">How many things the action touched (lobbies closed, for the bulk operations).</param>

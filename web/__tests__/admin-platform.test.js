@@ -366,7 +366,7 @@ describe('limits form', () => {
     await tick();
 
     expect(fake.calls.some((c) => c.method === 'POST')).toBe(false);
-    expect(el('toast-host').textContent).toContain('at least 1');
+    expect(el('notif-drawer-items').textContent).toContain('at least 1');
   });
 
   it('refuses a fractional connection cap, and a negative anything', async () => {
@@ -375,7 +375,7 @@ describe('limits form', () => {
     el('limits-save').click();
     await tick();
     expect(fake.calls.some((c) => c.method === 'POST')).toBe(false);
-    expect(el('toast-host').textContent).toContain('whole number');
+    expect(el('notif-drawer-items').textContent).toContain('whole number');
 
     limitInput('maxConnectionsPerIp').value = '-1';
     el('limits-save').click();
@@ -422,7 +422,7 @@ describe('limits form', () => {
     await tick();
     await tick();
 
-    expect(el('toast-host').textContent).toContain('maxLobbies must be between');
+    expect(el('notif-drawer-items').textContent).toContain('maxLobbies must be between');
   });
 
   it('keeps a field the operator is editing when the panel re-renders', async () => {
@@ -481,7 +481,7 @@ describe('banned room codes', () => {
     el('code-word-add').click();
     await tick();
     expect(chips('code-words')).toEqual([]);
-    expect(el('toast-host').textContent).toContain('pattern field');
+    expect(el('notif-drawer-items').textContent).toContain('pattern field');
 
     el('code-word').value = 'TOOLONG';
     el('code-word-add').click();
@@ -498,7 +498,7 @@ describe('banned room codes', () => {
     await tick();
 
     expect(chips('code-words')).toEqual(['XO']);
-    expect(el('toast-host').textContent).toContain('never be generated');
+    expect(el('notif-drawer-items').textContent).toContain('never be generated');
     expect(el('code-words').querySelector('.chip-unreachable')).not.toBeNull();
   });
 
@@ -520,7 +520,7 @@ describe('banned room codes', () => {
     await tick();
 
     expect(chips('code-words')).toEqual(['XQ']);
-    expect(el('toast-host').textContent).toContain('already blocked');
+    expect(el('notif-drawer-items').textContent).toContain('already blocked');
   });
 
   it('confirms clearing everything, and cancelling changes nothing', async () => {
@@ -550,7 +550,7 @@ describe('banned room codes', () => {
     await tick();
     await tick();
 
-    expect(el('toast-host').textContent).toContain('Could not save.');
+    expect(el('notif-drawer-items').textContent).toContain('Could not save.');
     expect(chips('code-words')).toEqual(['XQ']);
     expect(chips('code-patterns')).toEqual(['Q7*']);
 
@@ -579,7 +579,7 @@ describe('banned room codes', () => {
     await tick();
 
     // The client deliberately doesn't try to compute this — only the server walks the code space.
-    expect(el('toast-host').textContent).toContain('over the 50% limit');
+    expect(el('notif-drawer-items').textContent).toContain('over the 50% limit');
   });
 });
 
@@ -728,7 +728,7 @@ describe('player announcement', () => {
     expect(post.body).toEqual({
       text: 'Trivia Clash retires on the 15th.', severity: 'warning', gameId: 'ttt',
     });
-    expect(el('toast-host').textContent).toContain('Posted to 3');
+    expect(el('notif-drawer-items').textContent).toContain('Posted to 3');
   });
 
   it('sends a null scope for a platform-wide notice', async () => {
@@ -751,7 +751,7 @@ describe('player announcement', () => {
     await tick();
 
     expect(fake.calls.some((c) => c.method === 'POST')).toBe(false);
-    expect(el('toast-host').textContent).toContain('Enter the message');
+    expect(el('notif-drawer-items').textContent).toContain('Enter the message');
   });
 
   it('confirms clearing, because every reader loses it at once', async () => {
@@ -832,7 +832,7 @@ describe('webhooks', () => {
     el('hook-add').click();
     await tick();
     expect(fake.calls.some((c) => c.method === 'POST')).toBe(false);
-    expect(el('toast-host').textContent).toContain('https');
+    expect(el('notif-drawer-items').textContent).toContain('https');
 
     el('hook-id').value = 'not a valid id!';
     el('hook-url').value = 'https://example.com/hook';
@@ -884,7 +884,7 @@ describe('webhooks', () => {
     await tick();
     await tick();
 
-    expect(el('toast-host').textContent).toContain('Delivery failed (404)');
+    expect(el('notif-drawer-items').textContent).toContain('Delivery failed (404)');
   });
 
   it('confirms removal, naming that the URL is not stored elsewhere', async () => {

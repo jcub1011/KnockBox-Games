@@ -993,7 +993,7 @@ export function filterCatalog(entries, { q = '', status = '', source = '' } = {}
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 
-/** Statuses a job stays in. Reaching one is what triggers a toast and a catalog re-read. */
+/** Statuses a job stays in. Reaching one is what triggers a notification and a catalog re-read. */
 export const TERMINAL_JOB_STATUSES = ['succeeded', 'failed', 'cancelled'];
 
 export function isTerminalJob(status) {
@@ -1642,6 +1642,162 @@ export function uploadGuard(file, { maxBytes = 0 } = {}) {
     return { ok: false, error: `That package is ${formatBytes(file.size)}, over the ${formatBytes(maxBytes)} limit.` };
   }
   return { ok: true, error: null };
+}
+
+// ── Notifications ───────────────────────────────────────────────────────────
+
+/**
+ * The severities a notification can carry. Same four as the toast system this replaces, so every
+ * existing call site maps across without re-deciding how serious it is.
+ */
+export const NOTIFICATION_KINDS = ['info', 'success', 'warning', 'error'];
+
+/** How many notifications the portal keeps. Past this, pushing a new one drops the oldest. */
+export const NOTIFICATION_LIMIT = 50;
+
+/** The localStorage key for the (encrypted — see admin-notifications.js) notification store. */
+export const NOTIFICATION_STORAGE_KEY = 'kb.admin.notifications';
+
+export function normalizeNotificationKind(kind) {
+  const name = String(kind ?? 'info').toLowerCase();
+  return NOTIFICATION_KINDS.includes(name) ? name : 'info';
+}
+
+function notificationId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Non-secure contexts may hide crypto: fall through to the Math.random id.
+  }
+  return `n-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffff).toString(36)}`;
+}
+
+/**
+ * An ISO 8601 instant stamped with the LOCAL numeric offset (e.g. `...+02:00`), not UTC-normalized.
+ * `Date.toISOString()` always renders Zulu, which records the same instant but discards the offset the
+ * operator's clock reported — and the requirement is that the stored value carries its offset while
+ * display respects the reader's own culture and timezone (see formatNotificationTime).
+ */
+export function localOffsetIso(date = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return localOffsetIso(new Date());
+  const eastMin = -d.getTimezoneOffset();
+  const sign = eastMin >= 0 ? '+' : '-';
+  const abs = Math.abs(eastMin);
+  const p = (n) => String(n).padStart(2, '0');
+  const hh = p(Math.floor(abs / 60));
+  const mm = p(abs % 60);
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T`
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
+    + `${sign}${hh}:${mm}`;
+}
+
+/** A notification record. `at` is always offset-stamped (see localOffsetIso). */
+export function createNotification({ message, kind = 'info', at = null } = {}) {
+  const text = String(message ?? '').trim();
+  return {
+    id: notificationId(),
+    message: text,
+    kind: normalizeNotificationKind(kind),
+    at: at === null || at === undefined ? localOffsetIso() : localOffsetIso(at),
+    read: false,
+  };
+}
+
+/** Epoch millis for ordering. Unparseable timestamps sort as the oldest, never as NaN. */
+export function notificationEpoch(item) {
+  const at = new Date(item?.at).getTime();
+  return Number.isFinite(at) ? at : 0;
+}
+
+/**
+ * Newest first. Returns a new array. Ties keep their existing order rather than breaking on id:
+ * `Array.sort` is stable, so a fresh push prepended before sorting stays ahead of its
+ * same-millisecond siblings, and a stored list re-sorts without shuffling. (An id tiebreak was tried
+ * and rejected: ids are random, so it ordered same-instant notifications randomly — and same-instant
+ * pushes are the common case, e.g. two validation errors raised in one handler.)
+ */
+export function sortNotifications(list) {
+  return [...(list || [])].sort((a, b) => notificationEpoch(b) - notificationEpoch(a));
+}
+
+/** Keeps the newest `limit` (already ordered or not — this sorts first). */
+export function capNotifications(list, limit = NOTIFICATION_LIMIT) {
+  const sorted = sortNotifications(list);
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 0) return sorted;
+  return sorted.slice(0, Math.floor(n));
+}
+
+export function unreadCount(list) {
+  return (list || []).filter((n) => n && n.read !== true).length;
+}
+
+/** New arrays throughout: the store publishes immutable snapshots, like GameCatalog does. */
+export function markAllRead(list) {
+  return (list || []).map((n) => ({ ...n, read: true }));
+}
+
+export function toggleRead(list, id) {
+  return (list || []).map((n) => (n && n.id === id ? { ...n, read: n.read !== true } : n));
+}
+
+export function dismissNotification(list, id) {
+  return (list || []).filter((n) => n && n.id !== id);
+}
+
+export function dismissAllNotifications() {
+  return [];
+}
+
+/**
+ * Untrusted input (a decrypted blob, a legacy plaintext array, or a half-written value) into
+ * notification records. Drops entries with no message, repairs kind/id/at/read, then sorts and caps
+ * — so a corrupt or tampered store degrades to a shorter list, never a thrown exception mid-render.
+ */
+export function sanitizeNotifications(raw, limit = NOTIFICATION_LIMIT) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const message = String(item.message ?? '').trim().slice(0, 2000);
+    if (!message) continue;
+    const at = typeof item.at === 'string' && !Number.isNaN(new Date(item.at).getTime())
+      ? item.at
+      : localOffsetIso();
+    out.push({
+      id: typeof item.id === 'string' && item.id ? item.id : notificationId(),
+      message,
+      kind: normalizeNotificationKind(item.kind),
+      at,
+      read: item.read === true,
+    });
+  }
+  return capNotifications(out, limit);
+}
+
+/**
+ * An absolute timestamp in the READER's culture and timezone — the stored offset records when it
+ * happened, display answers "when was that for me". Short form for list rows; '--' when unparseable,
+ * the same contract formatClock and formatDateTime keep.
+ */
+export function formatNotificationTime(iso) {
+  // new Date(null) is the epoch, not an invalid date — so null/blank must be refused outright, the
+  // same reason toNumber checks for them before calling Number().
+  if (iso === null || iso === undefined || iso === '') return '--';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '--';
+  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** Full form with seconds, for the dedicated notification-details modal. */
+export function formatNotificationTimeFull(iso) {
+  if (iso === null || iso === undefined || iso === '') return '--';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '--';
+  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
 }
 
 // ── Sidebar State ─────────────────────────────────────────────────────────────

@@ -97,7 +97,11 @@ internal static class AdminApi
         int LoginAttemptsPerMinutePerIp,
         int LoginAttemptsPerMinuteGlobal,
         bool CookieAlwaysSecure,
-        TimeSpan StaleAfter);
+        TimeSpan StaleAfter,
+        // Trailing and optional so existing constructions (including tests) compile untouched. Null
+        // means the key endpoint answers 503 rather than the whole origin failing to build — the same
+        // nullable-dependency precedent as Marketplace and Authorities above it.
+        Security.NotificationKeyService? NotificationKeys = null);
 
     /// <summary>Registers the throttle, then the <c>/admin/api/*</c> routes. Anything unmatched falls
     /// through to the caller's next middleware (the portal's static files).</summary>
@@ -152,6 +156,11 @@ internal static class AdminApi
             routes.MapGet("/admin/api/webhooks", RequireSession(options, ctx => Webhooks(ctx, options)));
             routes.MapGet("/admin/api/updates/schedule",
                 RequireSession(options, ctx => UpdateScheduleRead(ctx, options)));
+            // The at-rest encryption key for the portal's notification store. A GET behind
+            // RequireSession like every other read: only a signed-in admin's page may hold it, and the
+            // page keeps it in memory only. No WriteGuard — that wrapper is for mutations.
+            routes.MapGet("/admin/api/notifications/key",
+                RequireSession(options, ctx => NotificationKey(ctx, options)));
 
             // ── Mutations ──
             // Every one of these is gated by RequireSession AND by the mutation guard inside WriteGuard,
@@ -265,6 +274,23 @@ internal static class AdminApi
             && options.Auth.ValidateSessionToken(session);
         return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminAuthStatusResponse,
             new AdminAuthStatusResponse(options.Auth.IsConfigured, authenticated));
+    }
+
+    /// <summary>
+    /// The notification store's encryption key, base64. Only reachable with a valid session (the route
+    /// sits behind <c>RequireSession</c>), and the page holds the answer in memory only — persisting it
+    /// anywhere client-side would put the key next to the ciphertext it protects. Rotation on password
+    /// change happens inside <c>NotificationKeyService</c>; this handler just serves the current key.
+    /// Single-account today, so the default account id: when sessions carry an account id, this will be
+    /// the one call site that passes it through instead.
+    /// </summary>
+    internal static Task NotificationKey(HttpContext ctx, Options options)
+    {
+        if (options.NotificationKeys is null)
+            return Refuse(ctx, StatusCodes.Status503ServiceUnavailable,
+                "Notification encryption is unavailable on this server.");
+        return WriteJson(ctx, KnockBoxProtocolContext.Default.AdminNotificationKeyResponse,
+            new AdminNotificationKeyResponse(options.NotificationKeys.GetKeyBase64()));
     }
 
     private static async Task Setup(HttpContext ctx, Options options)
