@@ -14,11 +14,13 @@ import {
   checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
   filterPlugins, filterSettings, formatByteLimit, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   formatNotificationTime, formatNotificationTimeFull,
-  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
-  noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
-  scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
-  sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isHttpUrl, isTerminalJob, jobProgress,
+  lifecycleLabel, logLevelClass, logLevelTag,   mergeJobs, mergePluginEntries, mergeSamples,
+  noLimitOverrides, playerRange, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
+  pluginStatusLabel, ratePerSecond,
+  seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
+  sortPlugins, sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  visibleTagCount,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
@@ -86,6 +88,27 @@ let announcementData = null;
 let webhookData = null;
 // The blocklist being edited, which is not what is saved until the operator says so.
 let codesDraft = { words: [], patterns: [] };
+
+// ── Plugins & Games tab state ─────────────────────────────────────────────────
+// The status tabs slice one merged list, and each remembers its own sort — switching tabs
+// restores that tab's last order rather than resetting it.
+const PLUGIN_TABS = ['installed', 'updates', 'available'];
+// filterPlugins status each tab shows. Problems have no tab of their own: an incompatible
+// installed game sits in Installed, an incompatible catalog-only entry in Available, both
+// surfaced by badge + the `status` sort rather than by a separate view.
+const PLUGIN_TAB_STATUS = { installed: 'installed', updates: 'updateAvailable', available: 'notInstalled' };
+let activePluginTab = 'installed';
+let pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
+// Frozen-list discipline (Visual Studio style): a background poll never moves the rows an
+// operator may be about to click. Polls update the caches + notifications and only raise the
+// stale pill; the list re-renders on tab switch, sort/search/source change, manual refresh,
+// or a user-initiated mutation's completion.
+let pluginsDirty = false;
+let pluginsRendered = false;
+let pluginsLoading = false;
+// Fetch generation: a tab switch or second refresh while a load is in flight makes the first
+// reply stale, and rendering it would swap the list under the operator's new tab.
+let pluginsFetchSeq = 0;
 
 // Previous counter samples, for the rates admin-core derives. `{ value, at }` pairs — see ratePerSecond.
 let cpuSample = null;
@@ -1188,9 +1211,13 @@ function enterTab(tab, { force = false } = {}) {
     jobCursor = 0;
     jobs = [];
     // The one read that is NOT on the poll path — it reaches the network with a 30-second timeout —
-    // so arriving is one of the few moments it happens. Everything else this panel shows is
-    // refreshActiveTab's job; calling it here too just fetched each of them twice on entry.
-    refreshCatalog();
+    // so arriving is one of the few moments it happens. enterPluginsTab fetches every feed the cards
+    // read (games, catalog, jobs) and renders once through the skeleton path; the shared
+    // refreshActiveTab below is skipped so entry doesn't fetch the jobs feed twice. Poll ticks from
+    // here on only refresh the caches and raise the stale pill — never re-render.
+    enterPluginsTab();
+    startPolling();
+    return;
   }
   refreshActiveTab();
   startPolling();
@@ -1284,6 +1311,9 @@ async function refreshActiveTab() {
   }
   const timeStr = `Updated ${new Date().toLocaleTimeString()}`;
   for (const ind of document.querySelectorAll('.refresh-indicator')) {
+    // The plugins list is frozen between explicit renders, so its indicator shows the last RENDER
+    // (owned by renderPlugins) — stamping it here would claim freshness the rows don't have.
+    if (ind.id === 'last-updated-plugins') continue;
     ind.textContent = timeStr;
   }
 }
@@ -1607,6 +1637,8 @@ const pluginSelectedVersions = new Map();
 let lastGamesSummary = null;
 let lastSourceFilterSources = null;
 let renderPendingOnBlur = false;
+let renderPendingFresh = true;
+let renderPendingStale = false;
 
 function summarizeGames(games = []) {
   return (games || []).map((g) => `${g.id}:${g.version}:${g.availability}:${g.lifecycle}:${g.activeLobbies}:${g.activePlayers}`).join('|');
@@ -1618,29 +1650,156 @@ export function resetPluginStateForTests() {
   lastGamesSummary = null;
   lastSourceFilterSources = null;
   renderPendingOnBlur = false;
+  renderPendingFresh = true;
+  renderPendingStale = false;
+  activePluginTab = 'installed';
+  pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
+  pluginsDirty = false;
+  pluginsRendered = false;
+  pluginsLoading = false;
+  pluginsFetchSeq = 0;
 }
 
-async function refreshGames({ force = false } = {}) {
+async function refreshGames({ force = false, render = false } = {}) {
   const data = await getJson('/admin/api/games');
-  if (!data) return;
+  if (!data) return false;
   gameData = data;
   const summary = summarizeGames(data.games);
   const changed = force || summary !== lastGamesSummary;
   lastGamesSummary = summary;
   if (changed) {
-    renderPlugins();
+    // Background polls only raise the stale pill — re-rendering here is what moved rows under
+    // the cursor every few seconds. Explicit callers (manual refresh, availability/delete/quota
+    // saves) pass render: true for the re-render they asked for.
+    if (render) renderPlugins();
+    else markPluginsStale();
   }
+  return true;
 }
 
 export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
-  await Promise.all([
+  // The explicit refresh: skeleton, refetch everything, then one render. Poll ticks never come
+  // through here — they take refreshGames/refreshJobs directly, which only mark stale.
+  const seq = beginPluginsLoad();
+  const [gamesOk, catalogOk, jobsOk] = await Promise.all([
     refreshGames({ force: true }),
     refreshCatalog({ refresh: refreshCatalogNow }),
     refreshJobs(),
   ]);
+  if (seq !== pluginsFetchSeq) return;
+  pluginsLoading = false;
+  if (!gamesOk && !catalogOk && !jobsOk) {
+    // Every feed failed (getJson already showed the error pill): the skeletons hold no data, so
+    // there is nothing to render — and stamping "List updated" would bless an empty list as
+    // fresh. Raise stale instead (beginPluginsLoad hid it) and release the busy state.
+    const host = el('plugins-list') || el('mkt-list') || el('games-list');
+    host?.removeAttribute('aria-busy');
+    markPluginsStale();
+    return;
+  }
+  // A partial failure still renders what arrived, but stays stale on its old timestamp — only a
+  // full success claims freshness.
+  const fresh = Boolean(gamesOk && catalogOk && jobsOk);
+  renderPlugins({ fresh, stale: !fresh });
 }
 
-export function renderPlugins() {
+/**
+ * Entering the panel: skeleton first, then every feed the cards read (games, catalog — which
+ * also carries the job set — plus the jobs feed, which may be ahead of the catalog reply),
+ * then one render. Fire-and-forget (enterTab is sync) — the seq token drops the reply if the
+ * operator left or refreshed again first.
+ */
+async function enterPluginsTab() {
+  const seq = beginPluginsLoad();
+  const [gamesOk, catalogOk, jobsOk] = await Promise.all([refreshGames({ force: true }), refreshCatalog(), refreshJobs()]);
+  if (seq !== pluginsFetchSeq) return;
+  pluginsLoading = false;
+  if (!gamesOk && !catalogOk && !jobsOk) {
+    const host = el('plugins-list') || el('mkt-list') || el('games-list');
+    host?.removeAttribute('aria-busy');
+    markPluginsStale();
+    return;
+  }
+  const fresh = Boolean(gamesOk && catalogOk && jobsOk);
+  renderPlugins({ fresh, stale: !fresh });
+}
+
+/**
+ * Switches the visible status tab, restoring that tab's remembered sort into the sort control.
+ * Instant and fetch-free: it re-slices the cached merge, which is also why it does not clear a
+ * stale pill — the data is no fresher than it was, only the slice changed.
+ */
+export function setPluginTab(name) {
+  if (!PLUGIN_TABS.includes(name)) return;
+  activePluginTab = name;
+  for (const btn of document.querySelectorAll('.plugin-tab-btn')) {
+    const on = btn.dataset.ptab === name;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', String(on));
+    btn.tabIndex = on ? 0 : -1;
+  }
+  const sort = el('plugins-sort');
+  if (sort) sort.value = pluginSort[name] ?? 'name-az';
+  // Re-slice only: the data is no fresher than it was, so this render must neither clear a
+  // stale pill nor stamp the timestamp.
+  renderPlugins({ fresh: false });
+}
+
+/** Tab counts: each tab's share of the search+source-filtered merge, painted on every render. */
+function paintPluginCounts(base) {
+  const list = base || [];
+  for (const tab of PLUGIN_TABS) {
+    const countEl = el(`ptab-count-${tab}`);
+    if (!countEl) continue;
+    const status = PLUGIN_TAB_STATUS[tab];
+    const n = filterPlugins(list, { status }).length;
+    countEl.textContent = `(${n})`;
+  }
+}
+
+/** Background data moved behind a rendered list: say so without moving a single row. */
+function markPluginsStale() {
+  pluginsDirty = true;
+  if (!pluginsRendered || pluginsLoading) return;
+  el('plugins-stale')?.classList.remove('hidden');
+}
+
+function hidePluginsStale() {
+  pluginsDirty = false;
+  el('plugins-stale')?.classList.add('hidden');
+}
+
+function makePluginSkeleton() {
+  const skel = document.createElement('div');
+  skel.className = 'game-card plugin-card mkt-card plugin-skeleton-card';
+  skel.setAttribute('aria-hidden', 'true');
+  for (let i = 0; i < 3; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'plugin-skeleton-bar';
+    skel.appendChild(bar);
+  }
+  return skel;
+}
+
+/**
+ * Starts a fetch-driven load: skeleton rows + aria-busy, and a seq token the reply must still
+ * hold to render. Returns the token.
+ */
+function beginPluginsLoad() {
+  pluginsFetchSeq += 1;
+  pluginsLoading = true;
+  hidePluginsStale();
+  const host = el('plugins-list') || el('mkt-list') || el('games-list');
+  if (host) {
+    host.setAttribute('aria-busy', 'true');
+    host.replaceChildren(...Array.from({ length: 6 }, makePluginSkeleton));
+  }
+  const updatedEl = el('last-updated-plugins');
+  if (updatedEl) updatedEl.textContent = 'Loading…';
+  return pluginsFetchSeq;
+}
+
+export function renderPlugins({ fresh = true, stale = false } = {}) {
   renderSourceFilter();
   const host = el('plugins-list') || el('mkt-list') || el('games-list');
   if (!host) return;
@@ -1649,6 +1808,8 @@ export function renderPlugins() {
   // do NOT interrupt them. Defer rendering until they blur.
   if (host.contains(document.activeElement)) {
     renderPendingOnBlur = true;
+    renderPendingFresh = fresh;
+    renderPendingStale = stale;
     return;
   }
   renderPendingOnBlur = false;
@@ -1658,7 +1819,7 @@ export function renderPlugins() {
     host.addEventListener('focusout', () => {
       setTimeout(() => {
         if (!host.contains(document.activeElement) && renderPendingOnBlur) {
-          renderPlugins();
+          renderPlugins({ fresh: renderPendingFresh, stale: renderPendingStale });
         }
       }, 50);
     });
@@ -1678,9 +1839,13 @@ export function renderPlugins() {
 
   const q = (el('plugins-filter-q') || el('mkt-filter-q') || el('game-filter-q'))?.value || '';
   const source = (el('plugins-filter-source') || el('mkt-filter-source'))?.value || '';
-  const status = (el('plugins-filter-status') || el('mkt-filter-status') || el('game-filter-availability'))?.value || '';
+  // The status dropdown is gone: the active tab IS the status filter.
+  const status = PLUGIN_TAB_STATUS[activePluginTab] ?? PLUGIN_TAB_STATUS.installed;
 
-  const filtered = filterPlugins(allEntries, { q, source, status });
+  const base = filterPlugins(allEntries, { q, source, status: '' });
+  paintPluginCounts(base);
+  const filtered = filterPlugins(base, { status });
+  const sorted = sortPlugins(filtered, pluginSort[activePluginTab] ?? 'name-az');
 
   const totalInstalled = (gameData?.games || []).length;
   const emptyEl = el('plugins-empty') || el('mkt-empty') || el('games-empty');
@@ -1688,7 +1853,7 @@ export function renderPlugins() {
     emptyEl.textContent = allEntries.length === 0
       ? 'No plugins discovered or available.'
       : 'No plugins match these filters.';
-    emptyEl.classList.toggle('hidden', filtered.length > 0);
+    emptyEl.classList.toggle('hidden', sorted.length > 0);
   }
 
   // Preserve any card currently containing user focus (e.g. open select, active tap)
@@ -1700,7 +1865,7 @@ export function renderPlugins() {
   }
 
   const newCards = [];
-  for (const entry of filtered) {
+  for (const entry of sorted) {
     const existing = existingCards.get(entry.id);
     if (existing && existing.contains(document.activeElement)) {
       newCards.push(existing);
@@ -1716,6 +1881,11 @@ export function renderPlugins() {
   if (!isIdentical) {
     host.replaceChildren(...newCards);
   }
+  ensurePluginTagObserver(host);
+  // Cards are fit pre-insertion at creation (widths read 0 there) and observer delivery is
+  // async, so fit explicitly after insert — otherwise rows flash unfitted until the next resize.
+  for (const card of host.querySelectorAll('.plugin-row')) fitPluginTags(card);
+  host.removeAttribute('aria-busy');
 
   const disabledBanner = el('mkt-disabled');
   if (disabledBanner) {
@@ -1750,6 +1920,21 @@ export function renderPlugins() {
   setNavCount('plugins', updatesAvailable());
   setNavCount('marketplace', updatesAvailable());
   setNavCount('games', totalInstalled);
+
+  // The list now reflects the caches, whatever triggered this render — so the loading state
+  // (if this render ends one) resolves. A fully fresh render also answers any stale pill and
+  // records the render in the panel's timestamp; a partial one (fresh: false) leaves both alone —
+  // the rows show what arrived, but the missing feed(s) keep the panel stale. `stale: true`
+  // raises the pill for that case, including on a blur-deferred render.
+  pluginsRendered = true;
+  pluginsLoading = false;
+  if (fresh) {
+    hidePluginsStale();
+    const updatedEl = el('last-updated-plugins');
+    if (updatedEl) updatedEl.textContent = `List updated ${new Date().toLocaleTimeString()}`;
+  } else if (stale) {
+    markPluginsStale();
+  }
 }
 
 export function renderGames() {
@@ -1757,359 +1942,167 @@ export function renderGames() {
 }
 
 export function pluginCard(entry) {
+  // A compact fixed-height row: constant height regardless of content. All plugin controls live in
+  // the metadata modal (openPluginDetails) — the row itself is one big button that opens it,
+  // replacing the old ellipsis button. Only rows are built imperatively, always with textContent.
   const card = document.createElement('div');
-  card.className = 'game-card plugin-card mkt-card';
+  card.className = 'game-card plugin-card mkt-card plugin-row';
   card.dataset.id = entry.id;
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label', `View details for ${entry.name || entry.id}`);
+  card.addEventListener('click', () => openPluginDetails(entry));
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPluginDetails(entry); }
+  });
 
-  const header = document.createElement('div');
-  header.className = 'game-card-header';
+  const top = document.createElement('div');
+  top.className = 'plugin-row-top';
 
-  const title = document.createElement('h3');
-  title.textContent = entry.name;
-  const id = document.createElement('code');
-  id.textContent = entry.id;
-  header.append(title, id);
-
-  if (entry.installed) {
-    const state = document.createElement('span');
-    state.className = `badge badge-${entry.availability === 'available' ? 'ok' : 'warning'}`;
-    state.textContent = availabilityLabel(entry.availability);
-    header.appendChild(state);
-
-    if (entry.status === 'updateAvailable') {
-      const update = document.createElement('span');
-      update.className = 'badge badge-warning';
-      update.textContent = 'Update available';
-      update.title = pluginStatusHint('updateAvailable');
-      header.appendChild(update);
-    }
-
-    if (isBusyLifecycle(entry.lifecycle)) {
-      const lifecycle = document.createElement('span');
-      lifecycle.className = `badge ${lifecycleClass(entry.lifecycle)}`;
-      lifecycle.textContent = lifecycleLabel(entry.lifecycle);
-      header.appendChild(lifecycle);
-    }
-
-    const sdk = sdkBadge(entry, gameData?.serverSdkVersion);
-    if (sdk) {
-      const sdkEl = document.createElement('span');
-      sdkEl.className = sdk.className;
-      sdkEl.textContent = sdk.label;
-      sdkEl.title = sdk.title;
-      header.appendChild(sdkEl);
-    }
-
-    if (entry.serverAuthority) {
-      const authority = document.createElement('span');
-      authority.className = 'badge badge-muted';
-      authority.textContent = 'server authority';
-      header.appendChild(authority);
-    }
-  } else {
-    const status = document.createElement('span');
-    status.className = `badge ${pluginStatusClass(entry.status)}`;
-    status.textContent = pluginStatusLabel(entry.status);
-    status.title = pluginStatusHint(entry.status);
-    header.appendChild(status);
-  }
-
-  const ver = entry.installed ? entry.installedVersion : entry.availableVersion;
-  if (ver) {
-    const versionBadge = document.createElement('span');
-    versionBadge.className = 'badge badge-muted';
-    versionBadge.textContent = `v${ver}`;
-    header.appendChild(versionBadge);
-  }
-
-  if (entry.contentRating) {
-    const rating = document.createElement('span');
-    rating.className = 'badge badge-muted';
-    rating.textContent = entry.contentRating;
-    rating.title = 'Content rating declared by the game.';
-    header.appendChild(rating);
-  }
-
-  for (const tag of (entry.tags || []).slice(0, 3)) {
-    const chip = document.createElement('span');
-    chip.className = 'badge badge-muted';
-    chip.textContent = tag;
-    header.appendChild(chip);
-  }
-
-  // 3-dots button icon in the top right to see full game metadata in popup dialog
-  const dotsBtn = document.createElement('button');
-  dotsBtn.type = 'button';
-  dotsBtn.className = 'plugin-details-btn';
-  dotsBtn.title = 'View full metadata';
-  dotsBtn.setAttribute('aria-label', `View full metadata for ${entry.name}`);
-  dotsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="dots-icon"><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle><circle cx="5" cy="12" r="1.5"></circle></svg>';
-  dotsBtn.onclick = () => openPluginDetails(entry);
-  header.appendChild(dotsBtn);
-
-  card.appendChild(header);
-
-  if (entry.description) {
-    const description = document.createElement('p');
-    description.className = 'mkt-desc';
-    description.textContent = entry.description;
-    card.appendChild(description);
-  }
-
-  const facts = document.createElement('div');
-  facts.className = 'game-facts';
-
-  if (entry.installed) {
-    addFact(facts, 'Installed', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed', '');
-    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-      entry.sourceName || entry.sourceId || '');
-    addFact(facts, 'Disk', formatBytes(entry.diskBytes),
-      `Files ${formatBytes(entry.directoryBytes)} + compressed ${formatBytes(entry.compressedBytes)}`
-      + (entry.packageBacked ? ` + package ${formatBytes(entry.packageBytes)}` : ''));
-    if (entry.activeLobbies > 0 || entry.activePlayers > 0) {
-      addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, `${entry.activePlayers} player(s)`);
-    }
-  } else {
-    addFact(facts, 'Installed', 'Not installed', '');
-    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-      entry.sourceName || entry.sourceId || '');
-    if (entry.sizeBytes) {
-      addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
-    }
-  }
-
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'plugin-row-title';
+  const title = document.createElement('span');
+  title.className = 'plugin-row-name';
+  title.textContent = entry.name || entry.id;
+  titleWrap.appendChild(title);
   if (entry.author) {
-    addFact(facts, 'Author', entry.author, '');
+    const author = document.createElement('span');
+    author.className = 'plugin-row-author';
+    author.textContent = `by ${entry.author}`;
+    author.title = entry.author;
+    titleWrap.appendChild(author);
   }
+  top.appendChild(titleWrap);
 
-  const players = playerRange(entry) || (entry.maxPlayers ? String(entry.maxPlayers) : '');
-  if (players) {
-    addFact(facts, 'Players', players, '');
+  const tagStrip = document.createElement('div');
+  tagStrip.className = 'plugin-row-tags';
+  for (const tag of entry.tags || []) {
+    const chip = document.createElement('span');
+    chip.className = 'badge badge-muted plugin-tag-chip';
+    chip.textContent = tag;
+    tagStrip.appendChild(chip);
   }
+  const tagEllipsis = document.createElement('span');
+  tagEllipsis.className = 'badge badge-muted plugin-tag-ellipsis';
+  tagEllipsis.textContent = '…';
+  tagEllipsis.hidden = true;
+  tagStrip.appendChild(tagEllipsis);
+  if ((entry.tags || []).length > 0) tagStrip.title = entry.tags.join(', ');
+  top.appendChild(tagStrip);
 
-  if (entry.license) {
-    addFact(facts, 'License', entry.license, '');
+  const version = pluginRowVersion(entry);
+  const versionEl = document.createElement('span');
+  versionEl.className = `plugin-row-version${version.hasUpdate ? ' plugin-row-update' : ''}`;
+  versionEl.textContent = version.text;
+  versionEl.title = version.title;
+  top.appendChild(versionEl);
+
+  card.appendChild(top);
+
+  // (Status badges live bottom-right via pluginRowBadges; the version indicator above covers
+  // updates. Everything else — facts, links, controls — lives in the metadata modal.)
+
+  const bottom = document.createElement('div');
+  bottom.className = 'plugin-row-bottom';
+
+  const description = document.createElement('p');
+  description.className = 'plugin-row-desc';
+  description.textContent = entry.description || 'No description provided.';
+  if (entry.description) description.title = entry.description;
+  bottom.appendChild(description);
+
+  const meta = document.createElement('div');
+  meta.className = 'plugin-row-meta';
+  for (const badge of pluginRowBadges(entry, gameData?.serverSdkVersion)) {
+    const badgeEl = document.createElement('span');
+    badgeEl.className = `${badge.className} plugin-mini-badge`;
+    badgeEl.textContent = badge.label;
+    if (badge.title) badgeEl.title = badge.title;
+    meta.appendChild(badgeEl);
   }
-
-  addFact(facts, 'Game ID', entry.id, '');
-
-  addFact(facts, 'Source',
-    entry.sourceName || (entry.sourceKind === 'games' ? 'Games Folder' : 'Manual Upload'),
-    entry.directory || '');
-
-  card.appendChild(facts);
-
-  const links = marketplaceLinks(entry);
-  if (links) card.appendChild(links);
-
-  const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
-  const busy = isBusyLifecycle(entry.lifecycle);
-
-  const actions = document.createElement('div');
-  actions.className = 'game-actions';
-
-  // Version selection dropdown
-  const versionSelect = document.createElement('select');
-  versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
-  const populateVersionSelect = (preferredValue = null) => {
-    versionSelect.innerHTML = '';
-    for (const option of versionOptions(entry)) {
-      const opt = document.createElement('option');
-      opt.value = versionOptionValue(option);
-      opt.textContent = option.kind === 'loadMore'
-        ? 'Load older versions from repo…'
-        : `${formatVersion(option.version)} — ${option.kind}`;
-      versionSelect.appendChild(opt);
-    }
-    if (versionSelect.options.length === 0) {
-      versionSelect.disabled = true;
-    } else {
-      const saved = preferredValue ?? pluginSelectedVersions.get(entry.id);
-      if (saved && Array.from(versionSelect.options).some((o) => o.value === saved)) {
-        versionSelect.value = saved;
-      }
-    }
-  };
-  populateVersionSelect();
-  actions.appendChild(versionSelect);
-
-  // Status selection dropdown (hidden when not installed)
-  if (entry.installed) {
-    const availSelect = document.createElement('select');
-    availSelect.className = 'text-input filter-narrow plugin-availability';
-    for (const option of AVAILABILITY) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.availability) opt.selected = true;
-      availSelect.appendChild(opt);
-    }
-    availSelect.onchange = () => setAvailability(entry, availSelect.value);
-    if (busy) {
-      availSelect.disabled = true;
-      availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
-    }
-    actions.appendChild(availSelect);
+  const size = pluginRowSize(entry);
+  const sizeEl = document.createElement('span');
+  sizeEl.className = 'plugin-row-size';
+  sizeEl.textContent = size.text;
+  sizeEl.title = size.title;
+  // A package operation running against this game still shows on the list — as one mini badge
+  // with the live phase as its tooltip. Progress bar and cancel live in the modal (jobRow there),
+  // which is where the controls went; the row only signals that something is happening.
+  const pendingJob = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+  if (pendingJob) {
+    const working = document.createElement('span');
+    working.className = 'badge badge-warning plugin-mini-badge plugin-job-badge';
+    const status = String(pendingJob.status || 'working');
+    working.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    working.title = pendingJob.error ? `${pendingJob.phase} ${pendingJob.error}` : (pendingJob.phase || 'Package operation in progress.');
+    meta.appendChild(working);
   }
+  meta.appendChild(sizeEl);
+  bottom.appendChild(meta);
 
-  // Update mode dropdown
-  const modeSelect = document.createElement('select');
-  modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
-  for (const option of UPDATE_MODES) {
-    const opt = document.createElement('option');
-    opt.value = option.value;
-    opt.textContent = option.label;
-    opt.title = option.hint;
-    modeSelect.appendChild(opt);
-  }
-  if ((entry.activeLobbies || 0) === 0) {
-    modeSelect.disabled = true;
-    modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
-  }
-  actions.appendChild(modeSelect);
+  card.appendChild(bottom);
 
-  // Primary action button (Install, Reinstall, Update, Roll back)
-  const actionBtn = document.createElement('button');
-  actionBtn.type = 'button';
-  actionBtn.className = 'btn plugin-action mkt-action';
-  const refreshAction = () => {
-    const decided = versionAction(entry, versionSelect.value,
-      catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
-    actionBtn.textContent = decided.label;
-    actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
-    actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
-    actionBtn.title = decided.blockedReason || '';
-    actionBtn.onclick = () => runPackageAction(entry, decided, modeSelect.value);
-  };
-  versionSelect.onchange = async () => {
-    if (versionSelect.value === 'load:more') {
-      versionSelect.disabled = true;
-      try {
-        const res = await getJson(`/admin/api/marketplace/plugins/${encodeURIComponent(entry.id)}/versions`);
-        if (res?.versions?.length > 0) {
-          const versions = res.versions.map((v) => v.version);
-          entry.availableVersions = versions;
-          entry.repoReleases = res.versions;
-          pluginDiscoveredVersions.set(entry.id, {
-            availableVersions: versions,
-            repoReleases: res.versions,
-          });
-        }
-      } catch (err) {
-        notify(err.message || 'Could not load older versions.', 'error');
-      } finally {
-        entry.versionsLoaded = true;
-        versionSelect.disabled = false;
-        if (entry.availableVersions?.length > 1) {
-          const nextVal = `available:${entry.availableVersions[1]}`;
-          pluginSelectedVersions.set(entry.id, nextVal);
-          populateVersionSelect(nextVal);
-        } else {
-          populateVersionSelect();
-          pluginSelectedVersions.set(entry.id, versionSelect.value);
-        }
-      }
-    } else {
-      pluginSelectedVersions.set(entry.id, versionSelect.value);
-    }
-    refreshAction();
-  };
-  refreshAction();
-  actions.appendChild(actionBtn);
-
-  // Update policy dropdown (installed & managed)
-  if (entry.installed && entry.managed) {
-    const policySelect = document.createElement('select');
-    policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
-    for (const option of UPDATE_POLICIES) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.updatePolicy) opt.selected = true;
-      policySelect.appendChild(opt);
-    }
-    policySelect.value = entry.updatePolicy || 'manual';
-    policySelect.disabled = Boolean(pending);
-    policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
-      { policy: policySelect.value });
-    actions.appendChild(policySelect);
-  }
-
-  // Staged launch link
-  if (entry.installed && entry.availability === 'staged') {
-    const copy = document.createElement('button');
-    copy.className = 'btn btn-secondary';
-    copy.type = 'button';
-    copy.textContent = 'Copy launch link';
-    copy.onclick = () => copyStagedLink(entry);
-    actions.appendChild(copy);
-  }
-
-  const spacer = document.createElement('span');
-  spacer.className = 'filter-spacer';
-  actions.appendChild(spacer);
-
-  // Export button (hidden when not installed)
-  if (entry.installed) {
-    const exportBtn = document.createElement('button');
-    exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
-    exportBtn.type = 'button';
-    exportBtn.textContent = 'Export';
-    exportBtn.onclick = () => exportGame(entry.id);
-    actions.appendChild(exportBtn);
-
-    // Delete / Uninstall button (hidden when not installed)
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
-    removeBtn.type = 'button';
-    removeBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
-    if (busy) {
-      removeBtn.disabled = true;
-      removeBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
-    } else if (!entry.deletable) {
-      removeBtn.disabled = true;
-      removeBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
-    } else if (entry.root === 'games') {
-      removeBtn.onclick = () => deleteGame(entry);
-    } else {
-      removeBtn.disabled = Boolean(pending);
-      removeBtn.onclick = () => uninstallGame(entry);
-    }
-    actions.appendChild(removeBtn);
-  }
-
-  card.appendChild(actions);
-
-  if (busy) {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = `${lifecycleLabel(entry.lifecycle)} — package operation in progress.`;
-    card.appendChild(why);
-  } else if (entry.installed && !entry.deletable && entry.deleteBlockedReason) {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = `Delete unavailable: ${entry.deleteBlockedReason} Disable the game instead.`;
-    card.appendChild(why);
-  }
-
-  if (entry.shadowedBy) {
-    const shadow = document.createElement('p');
-    shadow.className = 'game-hint game-hint-block';
-    shadow.textContent =
-      `Also offered by '${entry.shadowedBy}', which takes precedence — installing here uses that copy.`;
-    card.appendChild(shadow);
-  }
-  if (entry.reason && entry.status !== 'installedOnly') {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = entry.reason;
-    card.appendChild(why);
-  }
-  if (pending) card.appendChild(jobRow(pending, { compact: true }));
-
+  fitPluginTags(card);
   return card;
+}
+
+// One observer on the stable list host: when it resizes (window, sidebar, filter bar),
+// every row's tag strip is re-fit. The host outlives re-renders, so it is observed once —
+// per-strip observation leaked a detached target on every render, since detached nodes stay
+// registered until explicitly unobserved.
+const pluginTagObserver = typeof ResizeObserver === 'function'
+  ? new ResizeObserver((records) => {
+    for (const record of records) {
+      for (const card of record.target.querySelectorAll?.('.plugin-row') || []) fitPluginTags(card);
+    }
+  })
+  : null;
+
+function ensurePluginTagObserver(host) {
+  if (pluginTagObserver && host && !host._tagsObserved) {
+    host._tagsObserved = true;
+    pluginTagObserver.observe(host);
+  }
+}
+
+/**
+ * Hides the tag chips that overflow the strip, showing the `…` chip (with the full tag list as
+ * its tooltip) when any are hidden. Unhides everything first, because a hidden chip measures 0
+ * and a re-fit off stale measurements would hide one more chip every resize. The ellipsis is
+ * measured while visible for the same reason — hidden it reads 0 and no space is reserved for it.
+ *
+ * Runs after layout — where there is none (jsdom) every width reads 0 and all tags stay visible,
+ * which the unit tests assert structurally instead of by pixels.
+ */
+export function fitPluginTags(card) {
+  const strip = card?.querySelector?.('.plugin-row-tags');
+  if (!strip) return;
+  const chips = [...strip.querySelectorAll('.plugin-tag-chip')];
+  const ellipsis = strip.querySelector('.plugin-tag-ellipsis');
+  if (!ellipsis) return;
+  for (const chip of chips) chip.hidden = false;
+  ellipsis.hidden = false;
+  if (chips.length === 0 || strip.clientWidth === 0) {
+    ellipsis.hidden = true;
+    return;
+  }
+  const widths = chips.map((chip) => chip.offsetWidth);
+  const ellipsisWidth = ellipsis.offsetWidth || 0;
+  let gapWidth = 0;
+  try {
+    const rawGap = getComputedStyle(strip).columnGap;
+    const parsed = parseFloat(rawGap);
+    if (Number.isFinite(parsed) && parsed > 0) gapWidth = parsed;
+  } catch { /* jsdom or no layout — gap stays 0 */ }
+  ellipsis.hidden = true;
+  const visible = visibleTagCount(widths, strip.clientWidth, ellipsisWidth, gapWidth);
+  chips.forEach((chip, i) => { chip.hidden = i >= visible; });
+  if (visible < chips.length) {
+    const all = chips.map((chip) => chip.textContent).join(', ');
+    ellipsis.hidden = false;
+    ellipsis.title = all;
+    strip.title = all;
+  }
 }
 
 export function gameCard(game) {
@@ -2126,6 +2119,11 @@ export function openPluginDetails(entry) {
   const body = el('plugin-details-body');
   if (body) {
     body.innerHTML = '';
+
+    // A running package operation shows its live phase, progress and cancel button at the top of
+    // the modal — this is where the card's old inline job row moved with the rest of the controls.
+    const pendingBodyJob = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+    if (pendingBodyJob) body.appendChild(jobRow(pendingBodyJob, { compact: true }));
 
     // Section 1: Overview & Identity
     const secOverview = document.createElement('div');
@@ -2380,7 +2378,7 @@ export function openPluginDetails(entry) {
         }
 
         updateQuotaUI();
-        refreshGames();
+        refreshGames({ render: true });
       };
 
       setBtn.addEventListener('click', saveQuota);
@@ -2534,7 +2532,7 @@ export function openPluginDetails(entry) {
     const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
 
     const versionSelect = document.createElement('select');
-    versionSelect.className = 'text-input filter-narrow mkt-version';
+    versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
     populateModalVersionSelect = (preferredValue = null) => {
       versionSelect.innerHTML = '';
       for (const option of versionOptions(entry)) {
@@ -2568,12 +2566,15 @@ export function openPluginDetails(entry) {
         availSelect.appendChild(opt);
       }
       availSelect.onchange = () => setAvailability(entry, availSelect.value);
-      if (isBusyLifecycle(entry.lifecycle)) availSelect.disabled = true;
+      if (isBusyLifecycle(entry.lifecycle)) {
+        availSelect.disabled = true;
+        availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
+      }
       actionsHost.appendChild(availSelect);
     }
 
     const modeSelect = document.createElement('select');
-    modeSelect.className = 'text-input filter-narrow mkt-mode';
+    modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
     for (const option of UPDATE_MODES) {
       const opt = document.createElement('option');
       opt.value = option.value;
@@ -2581,17 +2582,49 @@ export function openPluginDetails(entry) {
       opt.title = option.hint;
       modeSelect.appendChild(opt);
     }
-    if ((entry.activeLobbies || 0) === 0) modeSelect.disabled = true;
+    if ((entry.activeLobbies || 0) === 0) {
+      modeSelect.disabled = true;
+      modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
+    }
     actionsHost.appendChild(modeSelect);
+
+    // Update policy (installed & managed) — moved here with the rest of the controls.
+    if (entry.installed && entry.managed) {
+      const policySelect = document.createElement('select');
+      policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
+      for (const option of UPDATE_POLICIES) {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.label;
+        opt.title = option.hint;
+        if (option.value === entry.updatePolicy) opt.selected = true;
+        policySelect.appendChild(opt);
+      }
+      policySelect.value = entry.updatePolicy || 'manual';
+      policySelect.disabled = Boolean(pending);
+      policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
+        { policy: policySelect.value });
+      actionsHost.appendChild(policySelect);
+    }
+
+    // Staged launch link — moved here with the rest of the controls.
+    if (entry.installed && entry.availability === 'staged') {
+      const copyLink = document.createElement('button');
+      copyLink.type = 'button';
+      copyLink.className = 'btn btn-secondary mkt-staged-link';
+      copyLink.textContent = 'Copy launch link';
+      copyLink.onclick = () => copyStagedLink(entry);
+      actionsHost.appendChild(copyLink);
+    }
 
     const actionBtn = document.createElement('button');
     actionBtn.type = 'button';
-    actionBtn.className = 'btn mkt-action';
+    actionBtn.className = 'btn plugin-action mkt-action';
     refreshModalAction = () => {
       const decided = versionAction(entry, versionSelect.value,
         catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
       actionBtn.textContent = decided.label;
-      actionBtn.className = `btn mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
+      actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
       actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
       actionBtn.title = decided.blockedReason || '';
       actionBtn.onclick = () => {
@@ -2614,17 +2647,25 @@ export function openPluginDetails(entry) {
     if (entry.installed) {
       const exportBtn = document.createElement('button');
       exportBtn.type = 'button';
-      exportBtn.className = 'btn btn-primary mkt-export';
+      exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
       exportBtn.textContent = 'Export';
       exportBtn.onclick = () => exportGame(entry.id);
       actionsHost.appendChild(exportBtn);
 
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
-      deleteBtn.className = 'btn btn-danger mkt-uninstall';
+      deleteBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
       deleteBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
-      deleteBtn.disabled = Boolean(pending) || (entry.root === 'games' && !entry.deletable);
-      if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      if (isBusyLifecycle(entry.lifecycle)) {
+        deleteBtn.disabled = true;
+        deleteBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
+      } else if (!entry.deletable) {
+        deleteBtn.disabled = true;
+        deleteBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
+      } else {
+        deleteBtn.disabled = Boolean(pending);
+        if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      }
       deleteBtn.onclick = () => {
         modal.classList.add('hidden');
         if (entry.root === 'games') deleteGame(entry);
@@ -2699,25 +2740,6 @@ function marketplaceLinks(entry) {
   return row;
 }
 
-function addFact(host, label, value, sub) {
-  const fact = document.createElement('div');
-  fact.className = 'game-fact';
-  const l = document.createElement('span');
-  l.className = 'game-fact-label';
-  l.textContent = label;
-  const v = document.createElement('span');
-  v.className = 'game-fact-value';
-  v.textContent = value;
-  fact.append(l, v);
-  if (sub) {
-    const s = document.createElement('span');
-    s.className = 'game-fact-sub';
-    s.textContent = sub;
-    fact.appendChild(s);
-  }
-  host.appendChild(fact);
-}
-
 async function setAvailability(game, state) {
   if (state === game.availability) return;
   const running = game.activeLobbies;
@@ -2729,7 +2751,7 @@ async function setAvailability(game, state) {
     renderGames(); // put the select back where it was
     return;
   }
-  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/availability`, { state })) refreshGames();
+  if (await postJson(`/admin/api/games/${encodeURIComponent(game.id)}/availability`, { state })) refreshGames({ render: true });
   else renderGames();
 }
 
@@ -2889,21 +2911,24 @@ async function openLogFiles() {
 // ── Marketplace & packages ────────────────────────────────────────────────────
 
 // The catalog can reach the network, so it is NEVER on the poll path — see POLL_MS.
-async function refreshCatalog({ refresh = false } = {}) {
+// Like refreshGames, it only re-renders for an explicit caller (render: true); background
+// arrivals (notably job completions) update the caches and raise the stale pill instead.
+async function refreshCatalog({ refresh = false, render = false } = {}) {
   const data = await getJson(`/admin/api/marketplace/catalog${refresh ? '?refresh=1' : ''}`);
-  if (!data) return;
+  if (!data) return false;
   catalogData = data;
   // The catalog reply carries the current job set too, so entering the tab costs one request rather
   // than two.
   jobs = mergeJobs(jobs, data.jobs, JOB_VIEW_LIMIT);
   jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
-  renderSourceFilter();
-  renderMarketplace();
+  if (render) renderPlugins();
+  else markPluginsStale();
+  return true;
 }
 
 async function refreshJobs() {
   let data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
-  if (!data) return;
+  if (!data) return false;
 
   // A sequence that went BACKWARDS means the server restarted: the registry is in-memory, so it begins
   // again at 1. Without this, every real job that follows sorts below the stale rows we are still
@@ -2920,7 +2945,7 @@ async function refreshJobs() {
     // missed: re-read at zero in this same tick rather than leaving per-card progress absent until
     // the next poll.
     data = await getJson(`/admin/api/packages/jobs?after=0`);
-    if (!data) return;
+    if (!data) return false;
   }
 
   const lastSequence = Number(data.lastSequence) || 0;
@@ -2934,8 +2959,9 @@ async function refreshJobs() {
     if (!inView.has(id)) reportedJobs.delete(id);
   }
 
-  // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
-  // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
+  // A job reaching a terminal state is the moment the catalog's answer changed — but the frozen
+  // list does not flip on its own. The re-read below only refreshes the caches and raises the stale
+  // pill; the bell notification (see announceJob) is what tells the operator, and Refresh re-renders.
   // There is no operations list anymore: the feed is polled silently and outcomes surface as
   // notifications (see announceJob below).
   let finished = false;
@@ -2953,6 +2979,7 @@ async function refreshJobs() {
     refreshGames();
     refreshCatalog();
   }
+  return true;
 }
 
 function announceJob(job) {
@@ -3280,9 +3307,18 @@ function renderSources() {
     const name = document.createElement('span');
     name.className = 'source-name';
     name.textContent = source.name || source.id;
-    const url = document.createElement('span');
+    const url = document.createElement('a');
     url.className = 'source-url';
     url.textContent = source.catalogUrl;
+    // Stored settings are operator-controlled (hand-edited file, legacy data): only http(s)
+    // becomes a clickable link, anything else stays inert text. `javascript:`/`data:` URLs
+    // would otherwise be click-to-script for the admin.
+    if (source.catalogUrl && isHttpUrl(source.catalogUrl)) {
+      url.href = source.catalogUrl;
+      url.target = '_blank';
+      url.rel = 'noopener noreferrer';
+      url.title = source.catalogUrl;
+    }
     row.append(name, url);
 
     const count = document.createElement('span');
@@ -3300,12 +3336,13 @@ function renderSources() {
     toggle.type = 'button';
     toggle.className = 'btn btn-small source-toggle';
     toggle.textContent = source.enabled === false ? 'Enable' : 'Disable';
-    toggle.onclick = async () => {
-      const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
-      if (await postJson(url, { enabled: source.enabled === false })) {
-        refreshCatalog({ refresh: true });
-      }
-    };
+      toggle.onclick = async () => {
+        const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
+        if (await postJson(url, { enabled: source.enabled === false })) {
+          await refreshCatalog({ refresh: true, render: true });
+          renderSources();
+        }
+      };
     row.appendChild(toggle);
 
     if (!source.builtIn) {
@@ -3315,7 +3352,8 @@ function renderSources() {
       remove.textContent = 'Remove';
       remove.onclick = async () => {
         if (await postJson(`/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/delete`, {})) {
-          refreshCatalog({ refresh: true });
+          await refreshCatalog({ refresh: true, render: true });
+          renderSources();
         }
       };
       row.appendChild(remove);
@@ -3338,7 +3376,7 @@ async function addSource() {
     for (const id of ['mkt-source-id', 'mkt-source-name', 'mkt-source-url', 'mkt-source-download']) {
       el(id).value = '';
     }
-    await refreshCatalog({ refresh: true });
+    await refreshCatalog({ refresh: true, render: true });
     renderSources();
   }
 }
@@ -3566,9 +3604,6 @@ function renderSchedule(data) {
   el('schedule-badge').hidden = !data?.overridden;
 
   if (!available) {
-    el('schedule-note').textContent =
-      'The marketplace is switched off (KnockBox:MarketplaceEnabled=false), so nothing is checked on a '
-      + 'schedule.';
     return;
   }
 
@@ -3578,7 +3613,6 @@ function renderSchedule(data) {
   if (document.activeElement !== hour) hour.value = String(data.hourUtc ?? 3);
 
   applyScheduleCadence();
-  el('schedule-note').textContent = scheduleNote(data);
 }
 
 /** Greys out the fields the chosen cadence does not use. Driven by the select, not by the last save. */
@@ -4013,7 +4047,30 @@ function wire() {
 
   el('plugins-filter-q')?.addEventListener('input', renderPlugins);
   el('plugins-filter-source')?.addEventListener('change', renderPlugins);
-  el('plugins-filter-status')?.addEventListener('change', renderPlugins);
+  el('plugins-sort')?.addEventListener('change', (e) => {
+    // Per-tab memory: the choice belongs to the tab it was made on, and returning to that tab
+    // restores it (see setPluginTab).
+    pluginSort[activePluginTab] = e.target.value;
+    renderPlugins();
+  });
+  el('plugins-stale')?.addEventListener('click', () => refreshPlugins({ refreshCatalogNow: true }));
+  for (const btn of document.querySelectorAll('.plugin-tab-btn')) {
+    btn.addEventListener('click', () => setPluginTab(btn.dataset.ptab));
+    // WAI-APG tabs pattern with automatic activation: arrows move and select, Home/End jump.
+    btn.addEventListener('keydown', (e) => {
+      const order = [...document.querySelectorAll('.plugin-tab-btn')];
+      const at = order.indexOf(btn);
+      let next = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (at + 1) % order.length;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (at - 1 + order.length) % order.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = order.length - 1;
+      if (next < 0) return;
+      e.preventDefault();
+      order[next].focus();
+      setPluginTab(order[next].dataset.ptab);
+    });
+  }
 
   el('plugin-details-close')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));
   el('plugin-details-close-x')?.addEventListener('click', () => el('plugin-details-backdrop')?.classList.add('hidden'));

@@ -74,7 +74,8 @@ public class AdminApiSerializationTests
             ActiveLobbies: 0, ActivePlayers: 0, Deletable: true, DeleteBlockedReason: null,
             Lifecycle: "ready", UpdatePolicy: "manual", PendingJobId: null,
             Sdk: new Dictionary<string, string> { ["godot"] = "1.0.0" }, SdkStatus: "current",
-            BlobQuota: 4_294_967_296);
+            BlobQuota: 4_294_967_296,
+            CreatedAt: "2026-02-01T00:00:00.0000000Z", UpdatedAt: "2026-03-01T00:00:00.0000000Z");
         var response = new AdminGamesResponse(
             [summary], "/games", "/games-unpacked", null, "2026-01-01T00:00:00.0000000Z", 0, 0,
             "/games-managed", 0, "/blobs", 0, ServerSdkVersion: "1.0.0");
@@ -94,5 +95,10 @@ public class AdminApiSerializationTests
         // camelCase on the wire, per the context's naming policy.
         Assert.Contains("\"packageRoot\":", json, StringComparison.Ordinal);
         Assert.Contains("\"blobQuota\":", json, StringComparison.Ordinal);
+        // Per-game dates for the portal's Newest / Recently-updated sorts.
+        Assert.Equal("2026-02-01T00:00:00.0000000Z", back.Games[0].CreatedAt);
+        Assert.Equal("2026-03-01T00:00:00.0000000Z", back.Games[0].UpdatedAt);
+        Assert.Contains("\"createdAt\":", json, StringComparison.Ordinal);
+        Assert.Contains("\"updatedAt\":", json, StringComparison.Ordinal);
     }
 }

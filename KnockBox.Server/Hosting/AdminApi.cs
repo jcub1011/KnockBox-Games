@@ -576,7 +576,9 @@ internal static class AdminApi
                 options.Packages.Jobs.ActiveFor(manifest.Id)?.JobId,
                 manifest.Sdk,
                 KnockBoxSdk.StatusOf(manifest.Sdk),
-                BlobQuota: blobQuota));
+                BlobQuota: blobQuota,
+                CreatedAt: manifest.CreatedAt?.UtcDateTime.ToString("O"),
+                UpdatedAt: manifest.UpdatedAt?.UtcDateTime.ToString("O")));
         }
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
@@ -1328,7 +1330,7 @@ internal static class AdminApi
         }
 
         await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
-            Detail: enabled ? "Enabled." : "Disabled; it offers nothing until you switch it back on."));
+            Detail: enabled ? $"Marketplace source '{id}' enabled." : $"Marketplace source '{id}' disabled."));
     }
 
     private static async Task SetUpdatePolicy(HttpContext ctx, Options options)

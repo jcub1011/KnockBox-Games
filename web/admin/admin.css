@@ -83,6 +83,9 @@
   /* ── Layout Dimensions ─────────────────────────────────────────────────── */
   --admin-header-height: 60px;
   --logs-view-padding: 3rem;
+  /* Compact plugin rows: one fixed height for rows and skeletons alike, so content
+     size and list↔skeleton swaps never move the rows below. */
+  --plugin-row-height: 5.25rem;
 }
 
 /* ── Base Reset ──────────────────────────────────────────────────────────── */
@@ -1341,6 +1344,14 @@ code, pre {
   color: var(--text-dim);
 }
 
+/* Title-row action cluster (the Plugins & Games card header): the panel's icon buttons,
+   right-aligned via a filter-spacer ahead of this wrapper. */
+.panel-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* ── Dashboard Tabs ──────────────────────────────────────────────────────── */
 .tab-panel {
   display: flex;
@@ -1501,6 +1512,117 @@ code, pre {
 
 .filter-narrow { flex: 0 1 12rem; }
 .filter-spacer { flex: 1 1 auto; }
+
+/* ── Plugins & Games status tabs ───────────────────────────────────────────
+   The status filter as tabs rather than a dropdown (same visual language as the
+   top-bar tabs, smaller). The list below is frozen between explicit renders, so these
+   never move on their own — no layout shift under the cursor. */
+.plugin-tabs {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.plugin-tab-btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.plugin-tab-btn:hover {
+  color: var(--text-main);
+  background-color: var(--bg-hover);
+  border-color: var(--border-subtle);
+}
+
+.plugin-tab-btn.active {
+  color: var(--accent-mint);
+  background-color: var(--bg-card);
+  border-color: var(--border-strong);
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.plugin-tab-count {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.plugin-tab-btn.active .plugin-tab-count {
+  color: var(--accent-mint);
+}
+
+/* Stale pill: the frozen list's only self-announcement. A button (click = refresh), styled
+   as a warning rather than a badge, sitting in the tab row's reserved spacer so appearing
+   never shifts the rows below. */
+.stale-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  background-color: var(--accent-amber-bg);
+  border: 1px solid var(--accent-amber-border);
+  border-radius: var(--radius-sm);
+  color: var(--accent-amber-text);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stale-pill:hover {
+  border-color: var(--accent-amber-text);
+}
+
+/* Skeleton rows for fetch-driven plugins loads (initial entry, manual refresh). Same card
+   footprint as a real row so the swap doesn't shift the page; the shimmer is motion, so it
+   goes static under prefers-reduced-motion. Skeleton nodes are never focusable. */
+.plugin-skeleton-card {
+  pointer-events: none;
+  user-select: none;
+  height: var(--plugin-row-height);
+  min-height: var(--plugin-row-height);
+  max-height: var(--plugin-row-height);
+  justify-content: center;
+  overflow: hidden;
+}
+
+.plugin-skeleton-bar {
+  height: 0.85rem;
+  border-radius: var(--radius-xs);
+  background: linear-gradient(90deg, var(--bg-well) 25%, var(--bg-hover) 50%, var(--bg-well) 75%);
+  background-size: 200% 100%;
+  animation: plugin-skeleton-shimmer 1.2s ease-in-out infinite;
+  margin: 0.5rem 0;
+}
+
+.plugin-skeleton-bar:first-child { width: 45%; }
+.plugin-skeleton-bar:nth-child(2) { width: 90%; }
+.plugin-skeleton-bar:nth-child(3) { width: 70%; }
+
+@keyframes plugin-skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-skeleton-bar { animation: none; }
+}
 
 .byte-input-group {
   display: flex;
@@ -1795,103 +1917,139 @@ code, pre {
   box-shadow: var(--shadow-sm);
 }
 
-.game-card-header {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.9rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.game-card-header h3 {
-  font-family: var(--font-display);
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: var(--text-main);
-  letter-spacing: -0.01em;
-}
-
-.game-card-header code {
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  background-color: var(--bg-well);
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--border-subtle);
-}
-
-.plugin-details-btn {
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  padding: 0.25rem 0.45rem;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.plugin-details-btn:hover {
-  color: var(--text-main);
-  background-color: var(--bg-hover);
-  border-color: var(--border-default);
-}
-
-.plugin-details-btn .dots-icon {
-  width: 1.15rem;
-  height: 1.15rem;
-}
-
-.game-facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.game-fact {
+/* ── Compact plugin rows ───────────────────────────────────────────────────
+   Fixed two-line rows with constant height regardless of content: the top line carries
+   name + author, the tag strip, and the version indicator; the bottom line carries the
+   single-line description plus mini status badges and the size readout. The row is one big
+   button (see pluginCard) that opens the metadata modal, where all controls live. Every
+   truncation is ellipsis + a `title` tooltip holding the full text. */
+.plugin-row {
+  height: var(--plugin-row-height);
+  min-height: var(--plugin-row-height);
+  max-height: var(--plugin-row-height);
+  padding: 0.6rem 0.9rem;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  min-width: 0;
+  justify-content: center;
+  gap: 0.3rem;
+  overflow: hidden;
+  cursor: pointer;
 }
 
-.game-fact-label {
-  font-family: var(--font-display);
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
+.plugin-row:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
 }
 
-.game-fact-value {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-main);
-  font-variant-numeric: tabular-nums;
+.plugin-row:focus-visible {
+  outline: 2px solid var(--accent-mint);
+  outline-offset: 2px;
 }
 
-.game-fact-sub {
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
-  color: var(--text-muted);
-  overflow-wrap: anywhere;
-}
-
-.game-actions {
+.plugin-row-top,
+.plugin-row-bottom {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  flex-wrap: wrap;
-  padding-top: 0.9rem;
-  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.plugin-row-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.plugin-row-name {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-row-author {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 2;
+}
+
+/* The tag strip takes the flexible middle: chips never wrap, overflow is hidden, and
+   fitPluginTags hides what doesn't fit behind the `…` chip (full list as its tooltip). */
+.plugin-row-tags {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.plugin-row-tags .badge {
+  flex-shrink: 0;
+}
+
+.plugin-row-version {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.plugin-row-update {
+  color: var(--accent-amber-text);
+  font-weight: 700;
+}
+
+.plugin-row-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-row-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.plugin-mini-badge {
+  font-size: 0.62rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.plugin-row-size {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  /* The author is the most expendable top-line item on a narrow viewport. */
+  .plugin-row-author {
+    display: none;
+  }
 }
 
 .game-hint {
@@ -2635,6 +2793,20 @@ code, pre {
 
 .source-name { font-family: var(--font-display); color: var(--text-main); font-weight: 700; }
 .source-url { color: var(--text-muted); flex: 1 1 10rem; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8rem; }
+/* Source catalog URLs truncate to two lines with an ellipsis: the full URL stays on the
+   title tooltip and is one click away, so a long URL must not stretch its row open.
+   Scoped to the marketplace list — the webhook table reuses .source-url for its
+   origin-only display. */
+#mkt-sources .source-url {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+a.source-url { text-decoration: none; }
+a.source-url:hover { text-decoration: underline; }
 
 .source-form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .source-form .text-input { flex: 1 1 10rem; }

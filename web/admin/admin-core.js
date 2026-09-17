@@ -438,28 +438,6 @@ export function hourOptionLabel(hourUtc, reference = new Date()) {
   return `${utc} (${local} local${suffix})`;
 }
 
-/**
- * The sentence under the update-schedule form.
- *
- * The next run is stated in the operator's OWN time zone even though the schedule is set in UTC: the
- * point of the line is "will this happen when I think it will", and answering it in the same zone they
- * just typed proves nothing. The enrolment count is here because a schedule with nothing enrolled makes
- * no request at all — an operator who set one and saw no activity would otherwise assume it was broken.
- */
-export function scheduleNote(schedule) {
-  if (!schedule) return '';
-  const parts = [`Checks run ${schedule.summary || 'on no schedule'}.`];
-  parts.push(schedule.nextRunUtc
-    ? `Next check ${formatDateTime(schedule.nextRunUtc)} (your time).`
-    : 'No check is scheduled.');
-  const enrolled = toNumber(schedule.enrolled) ?? 0;
-  parts.push(enrolled > 0
-    ? `${formatCount(enrolled)} game(s) enrolled in automatic updates.`
-    : 'No game is enrolled in automatic updates, so a check currently installs nothing — '
-      + 'set a game’s update policy on the Marketplace tab.');
-  return parts.join(' ');
-}
-
 // ── Rates from cumulative counters ────────────────────────────────────────────
 
 /**
@@ -578,7 +556,7 @@ export function appendLogEntries(existing, incoming, limit = 500) {
 export const AVAILABILITY = [
   { value: 'available', label: 'Available', hint: 'Listed for players and startable.' },
   { value: 'disabled', label: 'Disabled', hint: 'Hidden, and new lobbies are refused. Running lobbies continue.' },
-  { value: 'staged', label: 'Staged', hint: 'Hidden, but still startable via its direct link. Visibility only — not access control.' },
+  { value: 'staged', label: 'Staged', hint: 'Hidden, but still startable via its direct link.' },
 ];
 
 export function availabilityLabel(value) {
@@ -644,8 +622,7 @@ export function sdkBadge(game, serverSdkVersion) {
       return {
         label: 'SDK newer',
         className: 'badge badge-muted',
-        title: `Built against ${stamped}; this server ships ${serverSdkVersion}. `
-          + 'It will still run — the wire protocol is versioned separately — but this server is the older side.',
+        title: `Built against ${stamped}; this server ships ${serverSdkVersion}.`,
       };
     default:
       return null;
@@ -672,9 +649,9 @@ export const PLUGIN_STATUS = [
   { value: 'notInstalled', label: 'Not installed', badge: 'badge-muted', hint: 'Offered by a marketplace but not installed here.' },
   { value: 'upToDate', label: 'Up to date', badge: 'badge-ok', hint: 'The installed version matches what the marketplace offers.' },
   { value: 'updateAvailable', label: 'Update available', badge: 'badge-warning', hint: 'A newer version is published.' },
-  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered — usually a hand-built package.' },
-  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version, so there is nothing to compare. Common for hand-made games.' },
-  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version. It is never installed automatically, and installing it by hand stages it rather than publishing it to players.' },
+  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered.' },
+  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version.' },
+  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version.' },
   { value: 'unusable', label: 'Unusable', badge: 'badge-danger', hint: 'The catalog entry is malformed and cannot be acted on.' },
   { value: 'installedOnly', label: 'Installed', badge: 'badge-ok', hint: 'Installed here, but no registered marketplace offers it.' },
 ];
@@ -799,6 +776,8 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       pendingJobId: game.pendingJobId || entry?.pendingJobId || null,
       serverAuthority: Boolean(game.serverAuthority),
       blobQuota: game.blobQuota ?? null,
+      createdAt: game.createdAt || null,
+      updatedAt: game.updatedAt || null,
       reason: entry?.reason || null,
       shadowedBy: entry?.shadowedBy || null,
     });
@@ -853,6 +832,8 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
         pendingJobId: entry.pendingJobId || null,
         serverAuthority: false,
         blobQuota: entry.blobQuota ?? null,
+        createdAt: entry.createdAt || null,
+        updatedAt: entry.updatedAt || null,
         reason: entry.reason || null,
         shadowedBy: entry.shadowedBy || null,
       });
@@ -904,10 +885,12 @@ export function mergePluginEntries(games = [], catalogEntries = []) {
       sourceName: entry.sourceName || entry.sourceId || '',
       sourceKind: entry.sourceId || 'marketplace',
       pendingJobId: entry.pendingJobId || null,
-      serverAuthority: false,
-      reason: entry.reason || null,
-      shadowedBy: entry.shadowedBy || null,
-    });
+        serverAuthority: false,
+        reason: entry.reason || null,
+        shadowedBy: entry.shadowedBy || null,
+        createdAt: null,
+        updatedAt: null,
+      });
   }
 
   installedList.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
@@ -988,6 +971,129 @@ export function filterCatalog(entries, { q = '', status = '', source = '' } = {}
         && !matches(e.id, needle)
         && !(e.tags || []).some((t) => matches(t, needle))) return false;
     return true;
+  });
+}
+
+// ── Plugin sorting ────────────────────────────────────────────────────────────
+
+/**
+ * The sort options offered on every Plugins & Games status tab. One shared list rather than
+ * per-tab options: the entries are one shape regardless of which tab shows them, and a second
+ * list to keep in sync with this one is exactly the kind of duplication that drifts.
+ *
+ * Direction is embedded in the option (A–Z vs Z–A) rather than a separate asc/desc toggle:
+ * a single select stays one control, and the magnitude sorts only have one useful direction
+ * (nobody hunts for their smallest game first).
+ */
+export const PLUGIN_SORTS = [
+  { value: 'name-az', label: 'Name (A–Z)' },
+  { value: 'name-za', label: 'Name (Z–A)' },
+  { value: 'status', label: 'Status (problems first)' },
+  { value: 'newest', label: 'Newest first' },
+  { value: 'updated', label: 'Recently updated' },
+  { value: 'version', label: 'Version (highest first)' },
+  { value: 'size', label: 'Largest first' },
+  { value: 'active', label: 'Most active first' },
+];
+
+/**
+ * Severity rank for the `status` sort: the entries an operator must act on float above the
+ * ones that are merely listed. Unknown statuses sink below the known-bad but above the known
+ * fine — a server that grew a status should read oddly near the top, not vanish at the bottom.
+ * An outdated SDK stamp promotes an otherwise-fine row, since that is actionable too.
+ */
+export function pluginStatusSeverity(entry) {
+  const status = String(entry?.status ?? '');
+  if (status === 'incompatible' || status === 'unusable') return 0;
+  if (status === 'updateAvailable') return 1;
+  if (String(entry?.sdkStatus ?? '').toLowerCase() === 'behind') return 1;
+  if (status === 'installedOnly' || status === 'upToDate' || status === 'installedAhead'
+      || status === 'installedVersionUnknown' || status === 'notInstalled') return 2;
+  return 1;
+}
+
+function comparePluginNames(a, b) {
+  return String(a?.name || a?.id || '').localeCompare(String(b?.name || b?.id || ''),
+    undefined, { sensitivity: 'base' });
+}
+
+/** Epoch millis, or null when the value is absent or unparseable — never NaN. */
+function pluginEpoch(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const at = new Date(value).getTime();
+  return Number.isFinite(at) ? at : null;
+}
+
+/**
+ * Orders already-filtered plugin entries for display. Pure — the caller (`renderPlugins`)
+ * filters first, then sorts, so each tab slices the same merged list and only the order differs.
+ *
+ * Nulls/unknowns always sort LAST within a magnitude (a missing date is not the oldest date;
+ * claiming otherwise would pile every hand-made game at one end), and every key tie-breaks by
+ * name so the order is total and re-renders don't shuffle equal rows.
+ */
+export function sortPlugins(entries, sortKey = 'name-az') {
+  const list = Array.isArray(entries) ? [...entries] : [];
+  const key = String(sortKey || 'name-az').toLowerCase();
+
+  const versionOf = (e) => e?.installedVersion ?? e?.availableVersion ?? null;
+  const sizeOf = (e) => {
+    const raw = e?.diskBytes ?? e?.sizeBytes ?? null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  return list.sort((a, b) => {
+    switch (key) {
+      case 'name-za':
+        return comparePluginNames(b, a);
+      case 'status': {
+        const rank = pluginStatusSeverity(a) - pluginStatusSeverity(b);
+        if (rank !== 0) return rank;
+        return comparePluginNames(a, b);
+      }
+      case 'newest':
+      case 'updated': {
+        const prop = key === 'newest' ? 'createdAt' : 'updatedAt';
+        const ta = pluginEpoch(a?.[prop]);
+        const tb = pluginEpoch(b?.[prop]);
+        if (ta === null && tb === null) return comparePluginNames(a, b);
+        if (ta === null) return 1;
+        if (tb === null) return -1;
+        if (ta !== tb) return tb - ta;
+        return comparePluginNames(a, b);
+      }
+      case 'version': {
+        const va = versionOf(a);
+        const vb = versionOf(b);
+        if (!va && !vb) return comparePluginNames(a, b);
+        if (!va) return 1;
+        if (!vb) return -1;
+        const cmp = compareSemVer(vb, va);
+        return cmp !== 0 ? cmp : comparePluginNames(a, b);
+      }
+      case 'size': {
+        const sa = sizeOf(a);
+        const sb = sizeOf(b);
+        if (sa === null && sb === null) return comparePluginNames(a, b);
+        if (sa === null) return 1;
+        if (sb === null) return -1;
+        if (sa !== sb) return sb - sa;
+        return comparePluginNames(a, b);
+      }
+      case 'active': {
+        const la = Number(a?.activeLobbies) || 0;
+        const lb = Number(b?.activeLobbies) || 0;
+        if (la !== lb) return lb - la;
+        const pa = Number(a?.activePlayers) || 0;
+        const pb = Number(b?.activePlayers) || 0;
+        if (pa !== pb) return pb - pa;
+        return comparePluginNames(a, b);
+      }
+      case 'name-az':
+      default:
+        return comparePluginNames(a, b);
+    }
   });
 }
 
@@ -1234,6 +1340,127 @@ export function formatVersion(version) {
   return text ? `v${text.replace(/^v/i, '')}` : '--';
 }
 
+// ── Compact plugin rows ─────────────────────────────────────────────────────
+
+/**
+ * The version indicator for a compact plugin row (top right).
+ *
+ * Installed: the installed version, with ` → <available>` appended when an update is pending
+ * (`status === 'updateAvailable'` with a differing available version). Not installed: the
+ * available version. `{ text, title, hasUpdate }` — `hasUpdate` lets the row style the
+ * indicator without re-deriving the comparison.
+ */
+export function pluginRowVersion(entry) {
+  if (entry?.installed) {
+    const installed = formatVersion(entry.installedVersion);
+    const available = String(entry.availableVersion ?? '').trim();
+    const hasUpdate = entry.status === 'updateAvailable'
+      && available !== ''
+      && available !== String(entry.installedVersion ?? '').trim();
+    if (hasUpdate) {
+      const to = formatVersion(available);
+      return {
+        text: `${installed} → ${to}`,
+        title: `Installed ${installed} — ${to} available`
+          + (entry.sourceName ? ` from ${entry.sourceName}` : ''),
+        hasUpdate: true,
+      };
+    }
+    return { text: installed, title: `Installed version ${installed}`, hasUpdate: false };
+  }
+  const available = formatVersion(entry?.availableVersion);
+  return {
+    text: available,
+    title: available === '--' ? 'No version offered' : `Available version ${available}`,
+    hasUpdate: false,
+  };
+}
+
+/**
+ * The size readout for a compact plugin row (bottom right).
+ *
+ * Installed: total disk usage (files + compressed cache + package), with the breakdown as the
+ * tooltip. Not installed: the download size. `{ text, title }`.
+ */
+export function pluginRowSize(entry) {
+  if (entry?.installed) {
+    const parts = [`Files ${formatBytes(entry.directoryBytes)}`,
+      `compressed ${formatBytes(entry.compressedBytes)}`];
+    if (entry.packageBacked) parts.push(`package ${formatBytes(entry.packageBytes)}`);
+    return { text: formatBytes(entry.diskBytes), title: `On disk: ${parts.join(' + ')}` };
+  }
+  return { text: formatBytes(entry?.sizeBytes), title: 'Download size' };
+}
+
+/**
+ * How many leading tags fit in a tag strip of `containerWidth` px.
+ *
+ * `tagWidths` is the measured width of each chip in order; when not every tag fits, a trailing
+ * `...` chip of `ellipsisWidth` px takes the last slot, so the count is the largest `n` with
+ * `sum(widths[0..n-1]) + ellipsisWidth + gapWidth * n <= containerWidth` (one gap between each
+ * visible chip and one more before the ellipsis). Returns all tags when they fit
+ * (`sum + gapWidth * (n-1) <= containerWidth`), 0 when even the ellipsis alone overflows (the
+ * row then shows just `...` with the full list as its tooltip). Pure so it is unit-testable —
+ * jsdom has no layout.
+ */
+export function visibleTagCount(tagWidths, containerWidth, ellipsisWidth = 0, gapWidth = 0) {
+  const widths = Array.isArray(tagWidths) ? tagWidths : [];
+  const container = Number(containerWidth);
+  const ellipsis = Number(ellipsisWidth);
+  if (!Number.isFinite(container) || container < 0) return 0;
+  const gapValue = Number(gapWidth);
+  const gap = Number.isFinite(gapValue) && gapValue > 0 ? gapValue : 0;
+  const total = widths.reduce((sum, w) => sum + (Number(w) || 0), 0) + gap * Math.max(0, widths.length - 1);
+  if (total <= container) return widths.length;
+  const ell = Number.isFinite(ellipsis) && ellipsis > 0 ? ellipsis : 0;
+  let used = 0;
+  let count = 0;
+  for (const w of widths) {
+    if (used + (Number(w) || 0) + ell + gap * (count + 1) > container) break;
+    used += Number(w) || 0;
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Mini status badges for the bottom-right of a compact plugin row, left of the size readout.
+ *
+ * Only states that are NOT already visible elsewhere on the row: the version arrow covers
+ * update-available, and title/author/tags/description/size cover the rest. Each badge carries a
+ * tooltip (`title`), since the label is abbreviated. `{ label, title, className }` items.
+ */
+export function pluginRowBadges(entry, serverSdkVersion) {
+  const badges = [];
+  if (!entry) return badges;
+  if (isBusyLifecycle(entry.lifecycle)) {
+    const hint = LIFECYCLE.find((l) => l.value === String(entry.lifecycle).toLowerCase())?.hint || '';
+    badges.push({
+      label: lifecycleLabel(entry.lifecycle),
+      title: hint,
+      className: `badge ${lifecycleClass(entry.lifecycle)}`,
+    });
+  }
+  if (entry.status === 'incompatible' || entry.status === 'unusable') {
+    badges.push({
+      label: pluginStatusLabel(entry.status),
+      title: pluginStatusHint(entry.status),
+      className: `badge ${pluginStatusClass(entry.status)}`,
+    });
+  }
+  if (entry.installed && entry.availability && String(entry.availability).toLowerCase() !== 'available') {
+    const name = String(entry.availability).toLowerCase();
+    badges.push({
+      label: availabilityLabel(entry.availability),
+      title: AVAILABILITY.find((a) => a.value === name)?.hint || '',
+      className: `badge ${name === 'staged' ? 'badge-staged' : 'badge-warning'}`,
+    });
+  }
+  const sdk = sdkBadge(entry, serverSdkVersion);
+  if (sdk) badges.push(sdk);
+  return badges;
+}
+
 // ── Platform limits ───────────────────────────────────────────────────────────
 
 /**
@@ -1246,7 +1473,7 @@ export function formatVersion(version) {
 export const LIMIT_FIELDS = [
   {
     key: 'controlMessagesPerSecond', label: 'Control messages / second', integer: false,
-    hint: 'Lobby operations from one shell socket. Sustained spam past the burst closes the connection.',
+    hint: 'Lobby operations from one shell socket.',
   },
   {
     key: 'controlMessagesBurst', label: 'Control burst', integer: false,
@@ -1254,7 +1481,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'gameMessagesPerSecond', label: 'Game messages / second', integer: false,
-    hint: 'Per game socket. A host broadcasting state ~20x/s sits well under the default of 30.',
+    hint: 'Per game socket.',
   },
   {
     key: 'gameMessagesBurst', label: 'Game burst', integer: false,
@@ -1262,7 +1489,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'lobbyCreatesPerMinute', label: 'Lobby creates / minute', integer: true,
-    hint: 'Per player. Refuses the operation without closing the connection — codes are a shared namespace.',
+    hint: 'Per player.',
   },
   {
     key: 'maxConnectionsPerIp', label: 'Connections per IP', integer: true,
@@ -1270,7 +1497,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'maxLobbies', label: 'Max lobbies (platform)', integer: true,
-    hint: 'Total simultaneous lobbies across every game. Existing lobbies are never closed by a cap.',
+    hint: 'Total simultaneous lobbies across every game. Existing lobbies are not closed by a cap.',
   },
   {
     key: 'maxLobbiesPerGame', label: 'Max lobbies per game', integer: true,
@@ -1282,14 +1509,11 @@ export const LIMIT_FIELDS = [
   // it, and the hints have to keep those two apart because nothing else on screen does.
   {
     key: 'authorityMaxLobbies', label: 'Max lobbies (server-authority)', integer: true,
-    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine — not the '
-      + 'platform cap above. Empty or 0 means unlimited, which is the default: the host (in Docker, the '
-      + 'container memory limit) is what bounds them until you set this.',
+    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine. Empty or 0 means unlimited.',
   },
   {
     key: 'authorityModuleCacheIdleMinutes', label: 'Authority module cache idle (min)', integer: true,
-    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. '
-      + 'Costs one re-parse when someone next plays it. 0 keeps it until the server restarts.',
+    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. 0 keeps it until the server restarts.',
   },
   // The blob-store caps, from a THIRD provider (BlobOptionsProvider). Same flat wire, same rule: a knob
   // is one entry here and nothing else client-side. These are sizes in bytes rather than rates, and the
@@ -1297,29 +1521,23 @@ export const LIMIT_FIELDS = [
   // reaches the operator as "a player says their map will not load".
   {
     key: 'blobMaxBytes', label: 'Max blob size', dataType: 'bytes', integer: true,
-    hint: 'Largest single file a game may upload for its session to share — a map image, a sound. '
-      + 'Enforced while streaming, not on the declared length. 0 means no limit.',
+    hint: 'Largest single file a game may upload for its session to share. 0 means no limit.',
   },
   {
     key: 'blobLobbyQuotaBytes', label: 'Blob quota per session', dataType: 'bytes', integer: true,
-    hint: 'Total a single lobby’s blobs may occupy. Identical files are stored once and charged once, '
-      + 'however many names reference them. Per-game overrides live in each plugin’s settings. 0 means no limit.',
+    hint: 'Total a single lobby’s blobs may occupy. Files are deduplicated. Per-game overrides live in each plugin’s settings. 0 means no limit.',
   },
   {
     key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide', dataType: 'bytes', integer: true,
-    hint: 'The aggregate cap, and the one that actually bounds disk use — without it the per-session '
-      + 'figure is only that times the number of sessions. Full means new uploads are refused; nothing '
-      + 'already registered is deleted. 0 means no limit.',
+    hint: 'The aggregate cap among all lobbies. 0 means no limit.',
   },
   {
     key: 'blobGraceMinutes', label: 'Blob grace window (min)', integer: true,
-    hint: 'How long freshly uploaded bytes are protected before the game claims them. Covers the round '
-      + 'trip between upload and register; nothing else. Lower it only if abandoned uploads are a problem.',
+    hint: 'How long freshly uploaded bytes are preserved before the game claims them.',
   },
   {
     key: 'blobMaxUploadsPerLobby', label: 'Concurrent uploads per session', integer: true,
-    hint: 'Bounds how many uploads one lobby may have open at once, which is what stops an abandoned '
-      + 'upload being used to churn the store. 0 means unlimited.',
+    hint: 'Bounds how many uploads one lobby may have open at once. 0 means unlimited.',
   },
 ];
 
@@ -1582,6 +1800,18 @@ export const WEBHOOK_EVENTS = [
 
 export function webhookEventLabel(value) {
   return WEBHOOK_EVENTS.find((e) => e.value === value)?.label ?? value;
+}
+
+/**
+ * Whether a stored URL is safe to render as a clickable link. Only http(s) qualifies — stored
+ * settings are operator-controlled (hand-edited file, legacy data), so a `javascript:`/`data:`
+ * URL would otherwise be click-to-script for the admin. Display hardening only; the server
+ * remains the authority on what is fetchable.
+ */
+export function isHttpUrl(value) {
+  let parsed;
+  try { parsed = new URL(String(value ?? '').trim()); } catch { return false; }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:';
 }
 
 /**

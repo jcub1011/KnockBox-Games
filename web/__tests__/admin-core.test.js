@@ -9,13 +9,16 @@ import {
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
   BYTE_MULTIPLIERS, BYTE_SCALES, BYTE_UNITS, formatByteLimit, splitBytes,
   cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
-  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
+  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isHttpUrl, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
   playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
+  pluginRowBadges, pluginRowSize, pluginRowVersion,
   tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptionValue, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
-  webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
-  seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
+  visibleTagCount,
+  webhookEventLabel, checkWebhook, webhookLastDelivery,   mergeSamples, seriesRate, seriesValue,
+  seriesCpuPercent, downsample, sparklinePath, formatDateTime, hourOptionLabel,
+  PLUGIN_SORTS, pluginStatusSeverity, sortPlugins,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge, compareSemVer,
   NOTIFICATION_KINDS, NOTIFICATION_LIMIT, NOTIFICATION_STORAGE_KEY, normalizeNotificationKind,
   createNotification, localOffsetIso, notificationEpoch, sortNotifications, capNotifications, unreadCount,
@@ -247,37 +250,6 @@ describe('formatCount and formatClock', () => {
   });
 });
 
-describe('scheduleNote', () => {
-  const base = {
-    summary: 'weekly, Sundays at 03:00 UTC',
-    nextRunUtc: '2026-08-16T03:00:00.000Z',
-    enrolled: 2,
-  };
-
-  it('states the schedule, the next run and the enrolment', () => {
-    const note = scheduleNote(base);
-
-    expect(note).toContain('weekly, Sundays at 03:00 UTC');
-    expect(note).toContain('(your time)');
-    expect(note).toContain('2 game(s) enrolled');
-  });
-
-  it('says nothing is scheduled when checks are off', () => {
-    expect(scheduleNote({ ...base, summary: 'never (scheduled checks are off)', nextRunUtc: null }))
-      .toContain('No check is scheduled.');
-  });
-
-  it('warns when a schedule has nothing to act on', () => {
-    // A pass with an empty enrolment makes no request at all, so the schedule alone does nothing —
-    // an operator who set one and saw no activity would reasonably think it was broken.
-    expect(scheduleNote({ ...base, enrolled: 0 })).toContain('No game is enrolled');
-  });
-
-  it('renders nothing at all when the marketplace is off', () => {
-    expect(scheduleNote(null)).toBe('');
-  });
-});
-
 describe('hourOptionLabel', () => {
   // Pinned against a fixed reference date so the assertions don't move with the calendar. The LOCAL half
   // is whatever zone the test host is in, so it is asserted structurally rather than by value.
@@ -457,8 +429,9 @@ describe('availability metadata', () => {
 
   it('explains what each state does, since the difference is not obvious', () => {
     for (const option of AVAILABILITY) expect(option.hint.length).toBeGreaterThan(10);
-    // The one that most needs saying out loud: staged is visibility, not access control.
-    expect(AVAILABILITY.find((a) => a.value === 'staged').hint).toMatch(/not access control/i);
+    // The one that most needs saying out loud: staged hides the game from players but the
+    // direct link still starts it.
+    expect(AVAILABILITY.find((a) => a.value === 'staged').hint).toMatch(/direct link/i);
   });
 
   it('labels a known state and passes through an unknown one', () => {
@@ -850,6 +823,152 @@ describe('formatVersion', () => {
   it('dashes when there is no version, which is normal for a hand-made game', () => {
     expect(formatVersion(null)).toBe('--');
     expect(formatVersion('')).toBe('--');
+  });
+});
+
+describe('compact plugin rows', () => {
+  describe('pluginRowVersion', () => {
+    it('shows installed → available when an update is pending', () => {
+      const row = pluginRowVersion({
+        installed: true, installedVersion: '1.2.0', availableVersion: '1.3.0',
+        status: 'updateAvailable', sourceName: 'Official',
+      });
+      expect(row.text).toBe('v1.2.0 → v1.3.0');
+      expect(row.hasUpdate).toBe(true);
+      expect(row.title).toContain('v1.2.0');
+      expect(row.title).toContain('v1.3.0');
+    });
+
+    it('shows just the installed version when up to date, even with an available version present', () => {
+      const row = pluginRowVersion({
+        installed: true, installedVersion: '1.3.0', availableVersion: '1.3.0', status: 'upToDate',
+      });
+      expect(row.text).toBe('v1.3.0');
+      expect(row.hasUpdate).toBe(false);
+    });
+
+    it('shows the available version for a game that is not installed', () => {
+      const row = pluginRowVersion({ installed: false, availableVersion: '2.0.0', status: 'notInstalled' });
+      expect(row.text).toBe('v2.0.0');
+      expect(row.hasUpdate).toBe(false);
+    });
+
+    it('dashes when there is nothing to show', () => {
+      expect(pluginRowVersion({ installed: true, installedVersion: null, status: 'installedOnly' }).text).toBe('--');
+      expect(pluginRowVersion({ installed: false, availableVersion: null }).text).toBe('--');
+    });
+  });
+
+  describe('pluginRowSize', () => {
+    it('reports total disk usage with the files/compressed/package breakdown as tooltip', () => {
+      const row = pluginRowSize({
+        installed: true, diskBytes: 1000, directoryBytes: 800,
+        compressedBytes: 100, packageBytes: 100, packageBacked: true,
+      });
+      expect(row.text).toBe('1000 B');
+      expect(row.title).toContain('800 B');
+      expect(row.title).toContain('100 B');
+    });
+
+    it('omits the package part for a plain folder game', () => {
+      const row = pluginRowSize({
+        installed: true, diskBytes: 12000, directoryBytes: 8000,
+        compressedBytes: 4000, packageBacked: false,
+      });
+      expect(row.text).toContain('KB');
+      expect(row.title).not.toContain('package');
+    });
+
+    it('reports the download size for a game that is not installed', () => {
+      const row = pluginRowSize({ installed: false, sizeBytes: 1_000_000 });
+      expect(row.text).toBe('977 KB');
+      expect(row.title).toMatch(/download/i);
+    });
+  });
+
+  describe('visibleTagCount', () => {
+    it('fits all tags when they fit', () => {
+      expect(visibleTagCount([40, 50, 30], 200, 20)).toBe(3);
+    });
+
+    it('reserves room for the ellipsis chip when tags overflow', () => {
+      // 40 + 50 + ellipsis 20 = 110 <= 110, but adding the 30 tag needs 140.
+      expect(visibleTagCount([40, 50, 30], 110, 20)).toBe(2);
+    });
+
+    it('returns 0 when even the ellipsis alone overflows', () => {
+      expect(visibleTagCount([40, 50], 10, 20)).toBe(0);
+    });
+
+    it('treats missing or nonsense widths as no tags', () => {
+      expect(visibleTagCount(null, 200, 20)).toBe(0);
+      expect(visibleTagCount([40], -1, 20)).toBe(0);
+    });
+
+    it('accounts for the gap between chips and before the ellipsis', () => {
+      // No gap: 40 + 50 + ellipsis 20 = 110 <= 110 → 2.
+      expect(visibleTagCount([40, 50, 30], 110, 20)).toBe(2);
+      // A 6px gap: 40 + 50 + 20 + 2 gaps (12) = 122 > 110 → 1.
+      expect(visibleTagCount([40, 50, 30], 110, 20, 6)).toBe(1);
+      // All fit including inter-chip gaps: 40 + 50 + 30 + 2*6 = 132 <= 140 → 3.
+      expect(visibleTagCount([40, 50, 30], 140, 20, 6)).toBe(3);
+      // Zero/negative/nonsense gaps behave like no gap.
+      expect(visibleTagCount([40, 50, 30], 110, 20, 0)).toBe(2);
+      expect(visibleTagCount([40, 50, 30], 110, 20, -4)).toBe(2);
+      expect(visibleTagCount([40, 50, 30], 110, 20, NaN)).toBe(2);
+    });
+  });
+
+  describe('isHttpUrl', () => {
+    it('accepts http and https URLs', () => {
+      expect(isHttpUrl('https://example.com/CATALOG.json')).toBe(true);
+      expect(isHttpUrl('http://localhost:8080/catalog.json')).toBe(true);
+    });
+
+    it('rejects script-capable and unparseable URLs', () => {
+      expect(isHttpUrl('javascript:alert(1)')).toBe(false);
+      expect(isHttpUrl('data:text/html,<h1>x</h1>')).toBe(false);
+      expect(isHttpUrl('not a url')).toBe(false);
+      expect(isHttpUrl('')).toBe(false);
+      expect(isHttpUrl(null)).toBe(false);
+      expect(isHttpUrl(undefined)).toBe(false);
+    });
+  });
+
+  describe('pluginRowBadges', () => {
+    it('is empty for an ordinary available game — the row already shows its state', () => {
+      expect(pluginRowBadges(
+        { installed: true, availability: 'available', lifecycle: 'ready', status: 'upToDate', sdkStatus: 'unknown' },
+        '1.0.0')).toEqual([]);
+    });
+
+    it('surfaces a busy lifecycle, a problem status, and a non-default availability', () => {
+      const badges = pluginRowBadges(
+        { installed: true, availability: 'staged', lifecycle: 'draining', status: 'upToDate', sdkStatus: 'unknown' },
+        '1.0.0');
+      expect(badges.map((b) => b.label)).toEqual(['Draining', 'Staged']);
+      for (const badge of badges) expect(badge.title).toBeTruthy();
+    });
+
+    it('badges incompatible entries and an outdated SDK stamp', () => {
+      const badges = pluginRowBadges(
+        {
+          installed: false, status: 'incompatible', sdkStatus: 'behind',
+          sdk: { godot: '0.9.0' }, availability: null, lifecycle: 'ready',
+        },
+        '1.0.0');
+      expect(badges.map((b) => b.label)).toEqual(['Incompatible', 'SDK outdated']);
+    });
+
+    it('never badges update-available — the version arrow already says that', () => {
+      const badges = pluginRowBadges(
+        {
+          installed: true, availability: 'available', lifecycle: 'ready',
+          status: 'updateAvailable', sdkStatus: 'unknown',
+        },
+        '1.0.0');
+      expect(badges).toEqual([]);
+    });
   });
 });
 
@@ -1293,11 +1412,12 @@ describe('sdkBadge', () => {
     expect(badge.title).toContain('1.0.0');
   });
 
-  it('reports ahead without alarm, since the game still runs', () => {
+  it('reports ahead without alarm, naming what it was built against', () => {
     const badge = sdkBadge({ sdkStatus: 'ahead', sdk: { phaser: '2.0.0' } }, SERVER);
     expect(badge.label).toBe('SDK newer');
     expect(badge.className).toContain('badge-muted');
-    expect(badge.title).toMatch(/still run/);
+    expect(badge.title).toContain('phaser 2.0.0');
+    expect(badge.title).toContain('1.0.0');
   });
 
   it('lists several stamped addons in a stable order', () => {
@@ -1386,6 +1506,19 @@ describe('mergePluginEntries', () => {
     expect(merged[3].id).toBe('custom-card');
     expect(merged[3].installed).toBe(false);
   });
+
+  it('carries per-game dates through for the date sorts, null for catalog-only rows', () => {
+    const merged = mergePluginEntries(
+      [{
+        id: 'g', name: 'G', root: 'games',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z',
+      }],
+      [{ id: 'h', name: 'H', status: 'notInstalled', installed: false }]);
+    expect(merged.find((e) => e.id === 'g').createdAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(merged.find((e) => e.id === 'g').updatedAt).toBe('2026-02-01T00:00:00.000Z');
+    expect(merged.find((e) => e.id === 'h').createdAt).toBeNull();
+    expect(merged.find((e) => e.id === 'h').updatedAt).toBeNull();
+  });
 });
 
 describe('filterPlugins', () => {
@@ -1417,6 +1550,65 @@ describe('filterPlugins', () => {
     expect(filterPlugins(entries, { q: 'Author B' })).toEqual([entries[2]]);
     expect(filterPlugins(entries, { q: 'Fast word' })).toEqual([entries[1]]);
     expect(filterPlugins(entries, { q: 'words' })).toEqual([entries[1], entries[2]]);
+  });
+});
+
+describe('sortPlugins', () => {
+  const entries = [
+    { id: 'c-game', name: 'C Game', status: 'upToDate', installed: true, installedVersion: '1.0.0', createdAt: '2026-03-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z', diskBytes: 3000, activeLobbies: 1, activePlayers: 2 },
+    { id: 'a-game', name: 'A Game', status: 'updateAvailable', installed: true, installedVersion: '2.0.0', availableVersion: '2.1.0', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-06-01T00:00:00.000Z', diskBytes: 1000, activeLobbies: 0, activePlayers: 0 },
+    { id: 'b-game', name: 'B Game', status: 'incompatible', installed: false, availableVersion: '3.0.0', createdAt: null, updatedAt: null, sizeBytes: 9000, activeLobbies: 0, activePlayers: 0 },
+    { id: 'd-game', name: 'D Game', status: 'notInstalled', installed: false, availableVersion: null, createdAt: null, updatedAt: 'not-a-date', diskBytes: null, sizeBytes: null, activeLobbies: 5, activePlayers: 9 },
+  ];
+  const ids = (list) => list.map((e) => e.id);
+
+  it('offers one shared option list for every tab', () => {
+    expect(PLUGIN_SORTS.map((s) => s.value)).toEqual(
+      ['name-az', 'name-za', 'status', 'newest', 'updated', 'version', 'size', 'active']);
+  });
+
+  it('sorts names A–Z by default and Z–A on request', () => {
+    expect(ids(sortPlugins(entries))).toEqual(['a-game', 'b-game', 'c-game', 'd-game']);
+    expect(ids(sortPlugins(entries, 'name-az'))).toEqual(['a-game', 'b-game', 'c-game', 'd-game']);
+    expect(ids(sortPlugins(entries, 'name-za'))).toEqual(['d-game', 'c-game', 'b-game', 'a-game']);
+  });
+
+  it('floats problems first, then updates, then the fine — unknowns read oddly near the top', () => {
+    expect(ids(sortPlugins(entries, 'status'))).toEqual(['b-game', 'a-game', 'c-game', 'd-game']);
+    expect(pluginStatusSeverity({ status: 'incompatible' })).toBe(0);
+    expect(pluginStatusSeverity({ status: 'unusable' })).toBe(0);
+    expect(pluginStatusSeverity({ status: 'updateAvailable' })).toBe(1);
+    expect(pluginStatusSeverity({ status: 'upToDate' })).toBe(2);
+    // An outdated SDK stamp promotes an otherwise-fine row.
+    expect(pluginStatusSeverity({ status: 'upToDate', sdkStatus: 'behind' })).toBe(1);
+  });
+
+  it('sorts dates newest first with unknowns last, never as oldest', () => {
+    expect(ids(sortPlugins(entries, 'newest'))).toEqual(['c-game', 'a-game', 'b-game', 'd-game']);
+    expect(ids(sortPlugins(entries, 'updated'))).toEqual(['a-game', 'c-game', 'b-game', 'd-game']);
+  });
+
+  it('sorts versions highest first using semver, not strings', () => {
+    const vers = [
+      { id: 'x', name: 'X', installedVersion: '0.9.0' },
+      { id: 'y', name: 'Y', installedVersion: '0.10.0' },
+      { id: 'z', name: 'Z', installedVersion: null, availableVersion: null },
+    ];
+    expect(ids(sortPlugins(vers, 'version'))).toEqual(['y', 'x', 'z']);
+  });
+
+  it('sorts sizes largest first from diskBytes then sizeBytes, unknowns last', () => {
+    expect(ids(sortPlugins(entries, 'size'))).toEqual(['b-game', 'c-game', 'a-game', 'd-game']);
+  });
+
+  it('sorts activity by lobbies then players with a name tiebreak', () => {
+    expect(ids(sortPlugins(entries, 'active'))).toEqual(['d-game', 'c-game', 'a-game', 'b-game']);
+  });
+
+  it('does not mutate the input', () => {
+    const before = entries.map((e) => e.id);
+    sortPlugins(entries, 'size');
+    expect(entries.map((e) => e.id)).toEqual(before);
   });
 });
 
