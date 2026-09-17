@@ -89,8 +89,7 @@
       <section id="setup-view" class="view-card hidden">
         <div class="card-header">
           <h2>Initialize Admin Password</h2>
-          <p>This server is unconfigured. Set an administrative password to secure this portal &mdash; until
-             you do, anyone who can reach this page can claim it. Minimum 12 characters.</p>
+          <p>This server is unconfigured. Set an administrative password. Minimum 12 characters.</p>
         </div>
         <form id="setup-form" class="auth-form">
           <div class="form-group">
@@ -108,8 +107,7 @@
         </form>
         <div class="info-note">
           <strong>Password Reset Note:</strong> In server environments, deleting the <code>admin.secret</code> file on disk resets authentication state back to setup mode.
-          Setting a new password also clears locally stored portal notifications &mdash; they are encrypted
-          against the old password and can no longer be read.
+          Setting a new password also clears locally stored portal notifications.
         </div>
       </section>
 
@@ -203,13 +201,7 @@
 
               <!-- Setting: Per-Game Server Cost -->
               <div class="setting-card panel-card" id="setting-cost" data-setting-id="setting-cost">
-                <div class="panel-card-header"><h3>Per-Game Server Cost</h3></div>
-                <p class="panel-card-note">
-                  Games run in the player's browser, but relaying for them is not free: every socket holds a
-                  queued outbound channel and a writer task, and a broadcast serializes once then sends once
-                  per recipient. Totals are cumulative since the server started; rates are measured between
-                  polls. Server-authority games additionally run their logic here.
-                </p>
+                <div class="panel-card-header"><h3>Per-Game Server Utilization</h3></div>
                 <div class="table-scroll">
                   <table class="data-table" id="metrics-table">
                     <thead>
@@ -540,8 +532,7 @@
                 <span class="badge" id="maintenance-badge">Off</span>
               </div>
               <p class="panel-card-note">
-                Blocks new lobbies across every game. Sessions already running are left alone and finish
-                normally &mdash; use it to drain the platform before a restart, not to stop it dead.
+                Blocks new lobbies across every game. Sessions already running are left alone and finish normally.
               </p>
               <div class="field-row">
                 <input type="text" id="maintenance-message" class="text-input"
@@ -557,9 +548,7 @@
                 <span class="badge" id="announce-badge">None</span>
               </div>
               <p class="panel-card-note">
-                One banner, shown on the player home page until they dismiss it or you clear it. Everyone
-                connected sees it immediately, and anyone arriving later gets it too. Purely informational
-                &mdash; it stops nothing; maintenance mode is the control that blocks new lobbies.
+                One banner, shown on the player home page until they dismiss it or you clear it.
               </p>
               <div class="field-row">
                 <input type="text" id="announce-text" class="text-input" maxlength="200"
@@ -586,10 +575,8 @@
                 <span class="badge" id="limits-badge" hidden>Overridden</span>
               </div>
               <p class="panel-card-note">
-                Abuse protection and capacity. A change applies immediately &mdash; including to sockets
-                that are already open &mdash; and is saved, so it survives a restart. Leave a field empty to
-                use its default; <strong>0</strong> is different, and disables that limit entirely. A lowered
-                cap never disconnects anyone: it refuses the next connection or lobby.
+                Abuse protection and capacity. A change applies immediately. Leave a field empty to
+                use its default; <strong>0</strong> disables that limit entirely.
               </p>
               <div id="limits-fields"></div>
               <div class="field-row">
@@ -609,10 +596,7 @@
               </div>
               <p class="panel-card-note">
                 When this server checks its marketplaces for newer versions of the games you enrolled in
-                automatic updates (Marketplace tab). Times are <strong>UTC</strong>, so the schedule does
-                not move with a host's time zone or with daylight saving. A check also runs shortly after
-                every start; <strong>Refresh Catalog</strong> on the Marketplace tab checks right now
-                regardless of this.
+                automatic updates (Marketplace tab). A check also runs shortly after every start.
               </p>
               <div class="field-row">
                 <select id="schedule-cadence" class="text-input filter-narrow">
@@ -638,7 +622,6 @@
                 <span class="filter-spacer"></span>
                 <button class="btn btn-secondary btn-small" id="schedule-refresh">Refresh</button>
               </div>
-              <p class="panel-card-note" id="schedule-note"></p>
             </div>
 
             <!-- Setting: Banned Room Codes -->
@@ -711,10 +694,7 @@
             <div class="setting-card panel-card" id="setting-startup-config" data-setting-id="setting-startup-config">
               <div class="panel-card-header"><h3>Set in Configuration</h3></div>
               <p class="panel-card-note">
-                These are deliberately not editable here. The reconnect and handshake windows are read when
-                the server starts (the reaper's own interval comes from the grace window), and the admin
-                login caps bound the CPU an unauthenticated caller can spend on password hashing &mdash; a
-                lock that opens from inside the room it protects is not a lock. Change them with
+                These are deliberately not editable here. Change them with
                 <code>KnockBox:*</code> configuration and restart.
               </p>
               <div class="table-scroll">
@@ -722,13 +702,6 @@
                   <thead><tr><th>Setting</th><th>Value</th></tr></thead>
                   <tbody id="limits-startup-body"></tbody>
                 </table>
-              </div>
-              <div class="info-card">
-                <h3>Network Port Isolation Active</h3>
-                <p>This administrative portal is executing on a dedicated network port. Admin APIs and portal static pages are strictly inaccessible over public player or game origin ports.</p>
-                <p style="margin-top: 0.5rem;">Changing the admin password (by deleting the secret file and
-                setting a new one) also clears locally stored portal notifications: they are encrypted against
-                the old password and become unreadable.</p>
               </div>
             </div>
           </section>
@@ -777,9 +750,7 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
       <h3 id="upload-title">Upload a game package</h3>
       <p class="panel-card-note">
-        A <code>.kbg</code> package, as produced by <code>knockbox-pack</code>. It is validated exactly
-        like one downloaded from a marketplace — but nothing published its hash, so the bytes you supply
-        are the only thing vouching for it.
+        A <code>.kbg</code> package, as produced by <code>knockbox-pack</code>.
       </p>
       <div class="upload-drop" id="upload-drop" tabindex="0" role="button">
         <span id="upload-name">Drop a .kbg here, or click to choose one</span>

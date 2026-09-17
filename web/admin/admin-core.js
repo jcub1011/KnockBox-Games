@@ -578,7 +578,7 @@ export function appendLogEntries(existing, incoming, limit = 500) {
 export const AVAILABILITY = [
   { value: 'available', label: 'Available', hint: 'Listed for players and startable.' },
   { value: 'disabled', label: 'Disabled', hint: 'Hidden, and new lobbies are refused. Running lobbies continue.' },
-  { value: 'staged', label: 'Staged', hint: 'Hidden, but still startable via its direct link. Visibility only — not access control.' },
+  { value: 'staged', label: 'Staged', hint: 'Hidden, but still startable via its direct link.' },
 ];
 
 export function availabilityLabel(value) {
@@ -644,8 +644,7 @@ export function sdkBadge(game, serverSdkVersion) {
       return {
         label: 'SDK newer',
         className: 'badge badge-muted',
-        title: `Built against ${stamped}; this server ships ${serverSdkVersion}. `
-          + 'It will still run — the wire protocol is versioned separately — but this server is the older side.',
+        title: `Built against ${stamped}; this server ships ${serverSdkVersion}.`,
       };
     default:
       return null;
@@ -672,9 +671,9 @@ export const PLUGIN_STATUS = [
   { value: 'notInstalled', label: 'Not installed', badge: 'badge-muted', hint: 'Offered by a marketplace but not installed here.' },
   { value: 'upToDate', label: 'Up to date', badge: 'badge-ok', hint: 'The installed version matches what the marketplace offers.' },
   { value: 'updateAvailable', label: 'Update available', badge: 'badge-warning', hint: 'A newer version is published.' },
-  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered — usually a hand-built package.' },
-  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version, so there is nothing to compare. Common for hand-made games.' },
-  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version. It is never installed automatically, and installing it by hand stages it rather than publishing it to players.' },
+  { value: 'installedAhead', label: 'Ahead of catalog', badge: 'badge-muted', hint: 'The installed version is newer than the one offered.' },
+  { value: 'installedVersionUnknown', label: 'Version unknown', badge: 'badge-muted', hint: 'This game declares no version.' },
+  { value: 'incompatible', label: 'Incompatible', badge: 'badge-danger', hint: 'The offered version declares it does not run on this server version.' },
   { value: 'unusable', label: 'Unusable', badge: 'badge-danger', hint: 'The catalog entry is malformed and cannot be acted on.' },
   { value: 'installedOnly', label: 'Installed', badge: 'badge-ok', hint: 'Installed here, but no registered marketplace offers it.' },
 ];
@@ -1492,7 +1491,7 @@ export function pluginRowBadges(entry, serverSdkVersion) {
 export const LIMIT_FIELDS = [
   {
     key: 'controlMessagesPerSecond', label: 'Control messages / second', integer: false,
-    hint: 'Lobby operations from one shell socket. Sustained spam past the burst closes the connection.',
+    hint: 'Lobby operations from one shell socket.',
   },
   {
     key: 'controlMessagesBurst', label: 'Control burst', integer: false,
@@ -1500,7 +1499,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'gameMessagesPerSecond', label: 'Game messages / second', integer: false,
-    hint: 'Per game socket. A host broadcasting state ~20x/s sits well under the default of 30.',
+    hint: 'Per game socket.',
   },
   {
     key: 'gameMessagesBurst', label: 'Game burst', integer: false,
@@ -1508,7 +1507,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'lobbyCreatesPerMinute', label: 'Lobby creates / minute', integer: true,
-    hint: 'Per player. Refuses the operation without closing the connection — codes are a shared namespace.',
+    hint: 'Per player.',
   },
   {
     key: 'maxConnectionsPerIp', label: 'Connections per IP', integer: true,
@@ -1516,7 +1515,7 @@ export const LIMIT_FIELDS = [
   },
   {
     key: 'maxLobbies', label: 'Max lobbies (platform)', integer: true,
-    hint: 'Total simultaneous lobbies across every game. Existing lobbies are never closed by a cap.',
+    hint: 'Total simultaneous lobbies across every game. Existing lobbies are not closed by a cap.',
   },
   {
     key: 'maxLobbiesPerGame', label: 'Max lobbies per game', integer: true,
@@ -1528,14 +1527,11 @@ export const LIMIT_FIELDS = [
   // it, and the hints have to keep those two apart because nothing else on screen does.
   {
     key: 'authorityMaxLobbies', label: 'Max lobbies (server-authority)', integer: true,
-    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine — not the '
-      + 'platform cap above. Empty or 0 means unlimited, which is the default: the host (in Docker, the '
-      + 'container memory limit) is what bounds them until you set this.',
+    hint: 'Only lobbies whose game runs server-side logic, each holding its own JS engine. Empty or 0 means unlimited.',
   },
   {
     key: 'authorityModuleCacheIdleMinutes', label: 'Authority module cache idle (min)', integer: true,
-    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. '
-      + 'Costs one re-parse when someone next plays it. 0 keeps it until the server restarts.',
+    hint: 'How long a game’s shared parsed server logic is kept after the last lobby using it ends. 0 keeps it until the server restarts.',
   },
   // The blob-store caps, from a THIRD provider (BlobOptionsProvider). Same flat wire, same rule: a knob
   // is one entry here and nothing else client-side. These are sizes in bytes rather than rates, and the
@@ -1543,29 +1539,23 @@ export const LIMIT_FIELDS = [
   // reaches the operator as "a player says their map will not load".
   {
     key: 'blobMaxBytes', label: 'Max blob size', dataType: 'bytes', integer: true,
-    hint: 'Largest single file a game may upload for its session to share — a map image, a sound. '
-      + 'Enforced while streaming, not on the declared length. 0 means no limit.',
+    hint: 'Largest single file a game may upload for its session to share. 0 means no limit.',
   },
   {
     key: 'blobLobbyQuotaBytes', label: 'Blob quota per session', dataType: 'bytes', integer: true,
-    hint: 'Total a single lobby’s blobs may occupy. Identical files are stored once and charged once, '
-      + 'however many names reference them. Per-game overrides live in each plugin’s settings. 0 means no limit.',
+    hint: 'Total a single lobby’s blobs may occupy. Files are deduplicated. Per-game overrides live in each plugin’s settings. 0 means no limit.',
   },
   {
     key: 'blobTotalQuotaBytes', label: 'Blob quota, server-wide', dataType: 'bytes', integer: true,
-    hint: 'The aggregate cap, and the one that actually bounds disk use — without it the per-session '
-      + 'figure is only that times the number of sessions. Full means new uploads are refused; nothing '
-      + 'already registered is deleted. 0 means no limit.',
+    hint: 'The aggregate cap among all lobbies. 0 means no limit.',
   },
   {
     key: 'blobGraceMinutes', label: 'Blob grace window (min)', integer: true,
-    hint: 'How long freshly uploaded bytes are protected before the game claims them. Covers the round '
-      + 'trip between upload and register; nothing else. Lower it only if abandoned uploads are a problem.',
+    hint: 'How long freshly uploaded bytes are preserved before the game claims them.',
   },
   {
     key: 'blobMaxUploadsPerLobby', label: 'Concurrent uploads per session', integer: true,
-    hint: 'Bounds how many uploads one lobby may have open at once, which is what stops an abandoned '
-      + 'upload being used to churn the store. 0 means unlimited.',
+    hint: 'Bounds how many uploads one lobby may have open at once. 0 means unlimited.',
   },
 ];
 
