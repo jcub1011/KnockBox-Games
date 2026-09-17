@@ -598,8 +598,7 @@ describe('encrypted store', () => {
     expect(notifs.hasStoredBlob()).toBe(false);
   });
 
-  it('drops memory without touching storage on logout unload', async () => {    vi.useFakeTimers();
-    const storage = memoryStorage();
+  it('drops memory without touching storage on logout unload', async () => {    vi.useFakeTimers();    const storage = memoryStorage();
     notifs.resetNotificationsForTests();
     notifs.initNotificationStore({ storage });
     notifs.setNotificationKey(keyA);
@@ -617,6 +616,33 @@ describe('encrypted store', () => {
     notifs.unloadNotificationsForLogout();
     await vi.advanceTimersByTimeAsync(500);
     expect(storage.getItem('kb.admin.notifications')).toBe(before);
+  });
+
+  it('namespaces the store per account id, leaving the default key alone', async () => {
+    const storage = memoryStorage();
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage, accountId: 'alice' });
+    notifs.setNotificationKey(keyA);
+    notifs.notify('Alice note', 'info');
+    await notifs.persistNow();
+
+    // The namespaced blob holds the item; the historical default key is untouched.
+    expect(storage.getItem('kb.admin.notifications.alice')).toContain('"v":1');
+    expect(storage.getItem('kb.admin.notifications')).toBeNull();
+
+    // The same account reads it back; another account starts empty and silent.
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage, accountId: 'alice' });
+    notifs.setNotificationKey(keyA);
+    await notifs.loadNotifications();
+    expect(notifs.getNotifications().map((n) => n.message)).toContain('Alice note');
+
+    notifs.resetNotificationsForTests();
+    notifs.initNotificationStore({ storage, accountId: 'bob' });
+    notifs.setNotificationKey(keyB);
+    await notifs.loadNotifications();
+    expect(notifs.getNotifications()).toHaveLength(0);
+    expect(notifs.consumeDecryptFailure()).toBe(false);
   });
 });
 

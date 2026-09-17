@@ -32,6 +32,9 @@ public class NotificationKeyServiceTests : IDisposable
         {
             if (File.Exists(_tempSecretPath)) File.Delete(_tempSecretPath);
             else if (Directory.Exists(_tempSecretPath)) Directory.Delete(_tempSecretPath);
+            var defaultKeyPath = Path.Combine(
+                Path.GetDirectoryName(_tempSecretPath) ?? Path.GetTempPath(), "admin-notifications.key.json");
+            if (File.Exists(defaultKeyPath)) File.Delete(defaultKeyPath);
         }
         catch { /* best effort */ }
         GC.SuppressFinalize(this);
@@ -70,6 +73,93 @@ public class NotificationKeyServiceTests : IDisposable
         Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("SecondPassword456"));
 
         Assert.NotEqual(before, keys.GetKeyBase64());
+    }
+
+    [Fact]
+    public void Key_survives_a_restart_while_the_password_stands()
+    {
+        // The reported bug: the key lived in process memory only, so every restart minted a fresh one
+        // and the portal's stored notifications stopped decrypting (blamed on a password change that
+        // never happened). A new service over the same files must serve the same key.
+        var auth = Auth();
+        Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("FirstPassword123"));
+        var before = new NotificationKeyService(auth).GetKeyBase64();
+
+        var after = new NotificationKeyService(Auth()).GetKeyBase64();
+
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
+    public void Different_accounts_get_independent_keys_that_each_survive_a_restart()
+    {
+        // The multi-account seam: one entry per account id, so a second account is a new entry rather
+        // than a schema change — and neither account's calls disturb the other's key.
+        var auth = Auth();
+        Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("FirstPassword123"));
+        var keys = new NotificationKeyService(auth);
+        var mine = keys.GetKeyBase64("alice");
+        var other = keys.GetKeyBase64("bob");
+        var current = keys.GetKeyBase64();
+
+        Assert.NotEqual(mine, other);
+        Assert.Equal(mine, keys.GetKeyBase64("alice"));
+
+        var restarted = new NotificationKeyService(Auth());
+        Assert.Equal(mine, restarted.GetKeyBase64("alice"));
+        Assert.Equal(other, restarted.GetKeyBase64("bob"));
+        Assert.Equal(current, restarted.GetKeyBase64());
+    }
+
+    [Fact]
+    public void Corrupt_key_file_recovers_with_a_fresh_stable_key()
+    {
+        var auth = Auth();
+        Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("FirstPassword123"));
+        var keys = new NotificationKeyService(auth);
+        var before = keys.GetKeyBase64();
+
+        File.WriteAllText(keys.KeyFilePath, "{not json");
+
+        var recovered = new NotificationKeyService(Auth());
+        var fresh = recovered.GetKeyBase64();
+        Assert.NotEqual(before, fresh);
+        Assert.Equal(fresh, recovered.GetKeyBase64());
+    }
+
+    [Fact]
+    public void Unwritable_key_path_serves_an_in_memory_key_rather_than_failing()
+    {
+        // A directory at the key path makes every persist throw (portably, on Windows and Linux).
+        // The key endpoint must keep answering; the cost is "stable until restart", warned about.
+        var dir = Path.Combine(Path.GetTempPath(), $"notif-key-dir-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var auth = Auth();
+            Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("FirstPassword123"));
+            var keys = new NotificationKeyService(auth, keyFilePath: dir);
+
+            Assert.Equal(keys.GetKeyBase64(), keys.GetKeyBase64());
+        }
+        finally
+        {
+            Directory.Delete(dir);
+        }
+    }
+
+    [Fact]
+    public void Key_file_is_readable_only_by_its_owner()
+    {
+        // Unix-only, like the secret file itself: these keys decrypt operator history.
+        if (OperatingSystem.IsWindows()) return;
+
+        var auth = Auth();
+        Assert.Equal(AdminAuthService.SetupOutcome.Success, auth.SetupPassword("FirstPassword123"));
+        var keys = new NotificationKeyService(auth);
+        _ = keys.GetKeyBase64();
+
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(keys.KeyFilePath));
     }
 
     [Fact]

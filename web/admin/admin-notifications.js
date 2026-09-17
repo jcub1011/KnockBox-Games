@@ -43,6 +43,10 @@ export const NOTIF_MODAL_EXIT_MS = 180;
 let items = [];
 let listeners = new Set();
 let storage = null;
+// The localStorage key for this login's blob. Namespaced per account id so N accounts sharing one
+// browser profile keep individual histories; the default is the un-suffixed key, which is what the
+// single-account portal has always used (so existing history carries over untouched).
+let storeKey = NOTIFICATION_STORAGE_KEY;
 let keyBytes = null;
 let onNewCallback = null;
 let persistTimer = null;
@@ -113,11 +117,13 @@ async function decryptEnvelope(env, key, subtle) {
 
 /**
  * Points the store at a storage backend and an arrival callback. Called once from admin.js's wire();
- * tests pass a fake storage and no callback.
+ * tests pass a fake storage and no callback. `accountId` namespaces the localStorage key for the
+ * future multi-account portal — today admin.js passes none and the store uses the historical key.
  */
-export function initNotificationStore({ storage: s = defaultStorage(), onNew = null } = {}) {
+export function initNotificationStore({ storage: s = defaultStorage(), onNew = null, accountId = null } = {}) {
   storage = s;
   onNewCallback = onNew;
+  storeKey = accountId ? `${NOTIFICATION_STORAGE_KEY}.${accountId}` : NOTIFICATION_STORAGE_KEY;
 }
 
 /** The data key, held in memory only. Null clears it (logout). */
@@ -199,7 +205,7 @@ export function isMemoryOnly() {
 export function hasStoredBlob() {
   let raw = null;
   try {
-    raw = storage?.getItem(NOTIFICATION_STORAGE_KEY) ?? null;
+    raw = storage?.getItem(storeKey) ?? null;
   } catch {
     return false;
   }
@@ -272,7 +278,7 @@ export function clearNotifications() {
 export async function loadNotifications() {
   let raw = null;
   try {
-    raw = storage?.getItem(NOTIFICATION_STORAGE_KEY) ?? null;
+    raw = storage?.getItem(storeKey) ?? null;
   } catch {
     raw = null;
   }
@@ -330,7 +336,7 @@ function corrupted() {
   unreadEncrypted = false;
   items = [];
   try {
-    storage?.removeItem(NOTIFICATION_STORAGE_KEY);
+    storage?.removeItem(storeKey);
   } catch {
     // A storage that can't be read may not be writable either; in-memory state stays authoritative.
   }
@@ -356,7 +362,7 @@ export async function persistNow() {
   const subtle = resolveSubtle();
   try {
     if (subtle && keyBytes) {
-      storage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(await encryptItems(items, keyBytes, subtle)));
+      storage.setItem(storeKey, JSON.stringify(await encryptItems(items, keyBytes, subtle)));
       if (plaintextFallback) {
         plaintextFallback = false;
         emit();
@@ -364,7 +370,7 @@ export async function persistNow() {
     } else if (!subtle) {
       if (unreadEncrypted) return; // an unread v1 blob is stored: stay memory-only, never clobber it
       plaintextFallback = true;
-      storage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify({ v: 0, items }));
+      storage.setItem(storeKey, JSON.stringify({ v: 0, items }));
     }
     // Else: crypto available but no key (logged out, or the key endpoint failed) — memory-only.
     // Writing plaintext here would silently downgrade the store, so nothing is written.
@@ -401,6 +407,7 @@ export function resetNotificationsForTests() {
   items = [];
   listeners = new Set();
   storage = null;
+  storeKey = NOTIFICATION_STORAGE_KEY;
   keyBytes = null;
   onNewCallback = null;
   subtleOverride = undefined;

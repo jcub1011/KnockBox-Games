@@ -164,13 +164,15 @@ if (containerMounts is not null)
     // files are actually written.
     var adminSecretPath = AdminAuthService.ResolveSecretPath(builder.Configuration);
     var adminSettingsPath = AdminSettingsStore.ResolveFilePath(builder.Configuration, adminSecretPath);
+    var adminNotificationKeyPath = NotificationKeyService.ResolveKeyPath(builder.Configuration, adminSecretPath);
 
     List<(string Path, string Title, string Lost)> persistentState =
     [
         (Path.GetDirectoryName(adminSecretPath) ?? adminSecretPath, "Admin state is not persisted",
-            $"the admin password ('{adminSecretPath}') and every saved operator policy decision " +
+            $"the admin password ('{adminSecretPath}'), every saved operator policy decision " +
             $"('{adminSettingsPath}') — disabled and staged games, maintenance mode, runtime limit " +
-            "overrides, banned room codes, the announcement, registered marketplaces and webhooks"),
+            "overrides, banned room codes, the announcement, registered marketplaces and webhooks — " +
+            $"and the notification encryption keys ('{adminNotificationKeyPath}')"),
     ];
     if (managedPackagesEnabled)
         persistentState.Add((gamesManagedRoot, "Installed packages are not persisted",
@@ -436,9 +438,13 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
-// The notification store's at-rest encryption key. Lives as long as the process, rotates when the
-// admin password changes, and is served to signed-in portal pages only (see NotificationKeyService).
-builder.Services.AddSingleton<NotificationKeyService>();
+// The notification store's at-rest encryption key, one random key per admin account persisted
+// beside the secret file so history survives restarts, rotating only when the admin password
+// changes, and served to signed-in portal pages only (see NotificationKeyService).
+builder.Services.AddSingleton(sp => new NotificationKeyService(
+    sp.GetRequiredService<AdminAuthService>(),
+    sp.GetRequiredService<IConfiguration>(),
+    sp.GetRequiredService<ILogger<NotificationKeyService>>()));
 builder.Services.AddSingleton<AdminSettingsStore>();
 // The relay asks the policy questions through the narrow IPlatformPolicy. Two layers answer them: the
 // settings store (persisted operator policy) and the lifecycle gate laid over it (transient "this game

@@ -56,7 +56,8 @@ outcomes, failed saves, delivery results — becomes a persistent notification i
 - Up to **50** notifications are kept in `localStorage`; older ones fall off as new ones arrive.
 
 The stored notifications are **encrypted** (AES-GCM) under a key the server mints and hands only to a
-signed-in portal page — it lives in page memory, never in storage. The key is bound to the admin
+signed-in portal page — it lives in page memory, never in storage. The key is persisted server-side
+beside the password file, so history survives restarts, and bound to the admin
 password: **changing the password clears stored notifications**, because the old ones can no longer be
 read. (On a plain-HTTP LAN connection the browser cannot do WebCrypto, so the store falls back to
 plaintext and the list says so rather than pretending otherwise.)
@@ -600,6 +601,7 @@ All keys take the `KnockBox:` prefix (`KnockBox__Key` as an environment variable
 | `AdminPasswordPath` | `admin.secret` beside the app | The PBKDF2 password hash. Must be writable and persisted. |
 | `AdminSessionTtlHours` | `8` | Session cookie lifetime. Sessions also drop on restart. |
 | `AdminSettingsPath` | `admin-settings.json` beside the password | Persisted operator policy (§5). |
+| `AdminNotificationKeyPath` | `admin-notifications.key.json` beside the password | Persisted notification encryption keys (one per admin account). Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to clear stored notifications once; a corrupt file recovers the same way on its own. |
 | `AdminStaleLobbyMinutes` | `30` | Idle time before a lobby counts as stale. `0` judges staleness only by "nobody is connected". |
 | `AdminLogBufferSize` | `2000` | Events held for the live log view. |
 | `AdminDiskUsageCacheSeconds` | `60` | How long disk measurements are reused. `0` walks the directories on every read. |

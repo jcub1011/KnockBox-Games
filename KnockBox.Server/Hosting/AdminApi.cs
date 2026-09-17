@@ -281,6 +281,8 @@ internal static class AdminApi
     /// sits behind <c>RequireSession</c>), and the page holds the answer in memory only — persisting it
     /// anywhere client-side would put the key next to the ciphertext it protects. Rotation on password
     /// change happens inside <c>NotificationKeyService</c>; this handler just serves the current key.
+    /// Single-account today, so the default account id: when sessions carry an account id, this is the
+    /// one call site that passes it through instead.
     /// </summary>
     internal static Task NotificationKey(HttpContext ctx, Options options)
     {
