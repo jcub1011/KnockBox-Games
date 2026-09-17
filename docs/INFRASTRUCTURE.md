@@ -344,11 +344,11 @@ inherited by the admin origin, which never opens one.
 
 | URL (origin) | Source | Notes |
 |---|---|---|
-| `/`, `/shell.js`, `/knockbox.js` (shell origin) | `web/` | Platform shell + SDK. |
+| `/`, `/shell.js`, `/knockbox.js` (shell origin) | `web/` | Platform shell + SDK. `/` and `/index.html` are rendered per request with the shell bundle's content-hash token substituted into their `?v=` placeholders; a versioned URL carrying the current token is served immutable, anything else revalidates. There is no manual version to bump. |
 | `/games/{id}/<thumbnail>` (shell origin) | `games/{id}/<thumbnail>` | **Only** the manifest's declared thumbnail for the lobby browser; every other `/games/*` path 404s here (the full build is reachable only on the game origin). |
 | `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
 | `/games/*.kbg` (any origin) | — | Always **404**. The package's contents are public (they are the game), but serving a multi-megabyte uncacheable archive at a guessable URL is a needless bandwidth amplifier. |
-| `/`, `/admin.js`, `/admin-core.js`, `/admin.css` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. `admin-core.js` is the pure, DOM-free half (formatting, filtering, rate arithmetic), the same split `kb-core.js` has from `shell.js`. |
+| `/`, `/admin.js`, `/admin-core.js`, `/admin.css`, `/terminal.js`, `/terminal.html` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. `admin-core.js` is the pure, DOM-free half (formatting, filtering, rate arithmetic), the same split `kb-core.js` has from `shell.js`. Carrier pages (`/`, `/index.html`, `/terminal.html`) carry the admin bundle's content-hash token exactly like the shell — no manual version. |
 | `/admin*` (shell **or** game origin) | — | Always **404**, so the portal is unreachable from any origin a player can browse. |
 
 Game assets resolve through a `CompositeFileProvider` over `games/` then `GamesUnpackedRoot`, in the

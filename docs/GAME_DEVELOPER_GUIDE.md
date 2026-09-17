@@ -59,6 +59,7 @@ can be dropped into a server's games directory.
   "maxPlayers": 2,             // joins are rejected beyond this
   "tags": ["party", "word"],   // optional; searchable chips on your game's tile
   "description": "…",          // optional; searchable
+  "homepage": "https://github.com/you/your-game", // optional; absolute https:// link rendered as the in-game version badge
   "crossOriginIsolated": false // set true ONLY for threaded engine exports (see §11)
 }
 ```
@@ -74,6 +75,7 @@ can be dropped into a server's games directory.
 | `maxPlayers` | ✅ | The platform refuses joins past this count. |
 | `tags` | — | Category/genre labels (`["party", "word-game"]`). Rendered as chips on your tile and matched by the search box. Never validated; blank and non-text entries are dropped rather than drawn. |
 | `description` | — | One short line about your game. Not shown on the tile, but matched by the search box, so it is worth filling in. |
+| `homepage` | — | Link to your game's own page or repository. Must be an absolute `https://` URL — anything else is dropped with a warning and the badge stays plain text. Rendered as the in-game version badge's link (opens in a new tab) and shown in the marketplace listing. `knockbox pack` rejects a non-https value so you fix it here. |
 | `createdAt` / `updatedAt` | — | ISO 8601 timestamps (`"2026-01-15T10:00:00Z"`) backing the home page's **Newest** and **Recently Updated** sorts. When you omit them the server derives them from your `GAME.json` file's own timestamps — which for a `.kbg` means *when this build was installed on that server*, and a `.kbg` update resets it, since the game folder is re-extracted. Set `createdAt` yourself if you want your game to hold a stable position under "Newest" across releases. |
 | `crossOriginIsolated` | — | `true` makes the platform serve your game with COOP/COEP so a **threaded** Godot/Unity export can use `SharedArrayBuffer`. Leave `false` for hand-written games and single-threaded exports. |
 

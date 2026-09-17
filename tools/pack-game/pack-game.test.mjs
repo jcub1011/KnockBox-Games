@@ -209,6 +209,18 @@ describe("pack (contract validation — mirrors GameCatalog)", () => {
       .rejects.toThrow(/'version' must be a non-empty string/);
   });
 
+  it("accepts a homepage that is an absolute https URL, and rejects the rest", async () => {
+    // The server keeps only absolute https:// homepages (dropping the rest with a warning), so the
+    // author fails fast here instead of shipping a version badge that silently stays plain text.
+    await pack({ in: work.src, manifest: manifest({ ...VALID, homepage: "https://github.com/owner/repo" }), dir: work.out });
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, homepage: "http://example.com/game" }), dir: work.out }))
+      .rejects.toThrow(/'homepage' must be an absolute https:\/\/ URL/);
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, homepage: "javascript:alert(1)" }), dir: work.out }))
+      .rejects.toThrow(/'homepage' must be an absolute https:\/\/ URL/);
+    await expect(pack({ in: work.src, manifest: manifest({ ...VALID, homepage: 123 }), dir: work.out }))
+      .rejects.toThrow(/'homepage' must be a non-empty string/);
+  });
+
   it("rejects an entry file that does not exist in --in", async () => {
     await expect(pack({ in: work.src, manifest: manifest({ ...VALID, entry: "missing.html" }), dir: work.out }))
       .rejects.toThrow(/entry file not found/);

@@ -350,6 +350,30 @@ public sealed class GameCatalog : IDisposable
                 manifest = manifest with { MinPlayers = clamped };
             }
 
+            // Homepage is author-supplied link text the shell renders as a version-badge link, so
+            // keep only absolute https:// URLs and drop the rest with a warning — never skip the
+            // game over a display field (same discipline as the minPlayers clamp above).
+            if (!string.IsNullOrWhiteSpace(manifest.Homepage))
+            {
+                var homepage = manifest.Homepage.Trim();
+                if (!Uri.TryCreate(homepage, UriKind.Absolute, out var uri)
+                    || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                {
+                    pass.Add(LogLevel.Warning,
+                        "Game '{Id}': homepage '{Homepage}' is not an absolute https:// URL — ignoring it.",
+                        manifest.Id, manifest.Homepage);
+                    manifest = manifest with { Homepage = null };
+                }
+                else if (!string.Equals(homepage, manifest.Homepage, StringComparison.Ordinal))
+                {
+                    manifest = manifest with { Homepage = homepage };
+                }
+            }
+            else if (manifest.Homepage is not null)
+            {
+                manifest = manifest with { Homepage = null };
+            }
+
             // Dates the author didn't declare are derived from the manifest file. For a package-backed
             // game the folder is re-extracted on every update, so a derived createdAt means "when this
             // build appeared on this server", not when the game was authored — an author who wants a

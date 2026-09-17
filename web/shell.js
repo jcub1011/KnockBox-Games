@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -469,12 +469,21 @@ export function renderGames() {
 
     // Normalized once, so the chips, the tooltip and the search all agree about what a tag is —
     // nothing validates `tags` server-side, and a raw iteration renders a bordered chip for `""`.
+    // The version chip is display metadata, not a tag: it leads the row but never joins the tooltip
+    // or the search, which both stay purely tag-derived.
     const tags = normalizeTags(g.tags);
-    if (tags.length > 0) {
+    const tileVersion = formatGameVersion(g.version);
+    if (tileVersion || tags.length > 0) {
       const tagsEl = document.createElement('span');
       tagsEl.className = 'game-chin-tags';
       const tooltip = formatTagsTooltip(tags);
       if (tooltip) tagsEl.title = tooltip;
+      if (tileVersion) {
+        const versionChip = document.createElement('span');
+        versionChip.className = 'game-chin-tag game-chin-tag-version';
+        versionChip.textContent = tileVersion;
+        tagsEl.appendChild(versionChip);
+      }
       for (const tag of tags) {
         const tagChip = document.createElement('span');
         tagChip.className = 'game-chin-tag';
@@ -594,10 +603,54 @@ function setDocumentTitle(gameName) {
   document.title = gameName ? `KnockBox Games - ${gameName}` : 'KnockBox Games';
 }
 
+// Game version subtitle under the in-game header title. The version is optional, unvalidated
+// author input (like tags), so it is written via textContent and formatted through the shared
+// kb-core helper. A missing/blank version renders as "Version Undeclared" here — the header slot
+// is always present while in-game, unlike the home-page tile chip, which is omitted when
+// unversioned (an undeclared version must never read as a real "v0.0.0").
+//
+// The badge is a link to the game's own page when the manifest declares a safe `homepage`
+// (absolute https://, re-checked client-side — the wire is untrusted): new tab, opener
+// unlinked, with the URL as the tooltip so the destination stays inspectable. Without one it
+// stays plain text with a tooltip saying so.
+const GAME_VERSION_UNKNOWN = 'Version Undeclared';
+const GAME_VERSION_NO_SOURCE_TITLE = 'Game does not provide a source link.';
+
+export function setGameVersion(manifest) {
+  const badge = el('game-version');
+  if (!badge) return; // header markup not present (some test fixtures)
+  badge.textContent = formatGameVersion(manifest?.version) ?? GAME_VERSION_UNKNOWN;
+  const homepage = typeof manifest?.homepage === 'string' ? manifest.homepage.trim() : '';
+  if (homepage && isSafeHomepageUrl(homepage)) {
+    badge.href = homepage;
+    badge.target = '_blank';
+    badge.rel = 'noopener noreferrer';
+    badge.title = homepage;
+  } else {
+    badge.removeAttribute('href');
+    badge.removeAttribute('target');
+    badge.removeAttribute('rel');
+    badge.title = GAME_VERSION_NO_SOURCE_TITLE;
+  }
+  badge.hidden = false;
+}
+
+export function clearGameVersion() {
+  const badge = el('game-version');
+  if (!badge) return;
+  badge.textContent = '';
+  badge.removeAttribute('href');
+  badge.removeAttribute('target');
+  badge.removeAttribute('rel');
+  badge.removeAttribute('title');
+  badge.hidden = true;
+}
+
 export function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
   const displayName = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
   el('game-title').textContent = displayName;
+  setGameVersion(manifest);
   setDocumentTitle(displayName);
   el('lobby-code').textContent = lobby.lobbyId;
   el('frame-host').innerHTML = ''; // no iframe until EnterGame
@@ -628,6 +681,7 @@ export async function enterGame(starting) {
   };
 
   el('game-title').textContent = manifest.name;
+  setGameVersion(manifest);
   setDocumentTitle(manifest.name);
   el('lobby-code').textContent = starting.lobbyId;
   themeHeader(manifest);
@@ -649,7 +703,6 @@ export async function enterGame(starting) {
       reply.ticket,
       gameWsEndpoint(gameOrigin),
       manifest?.version,
-      manifest?.updatedAt || manifest?.createdAt,
     );
   } catch {
     // gameOrigin is sanitized at the source (Welcome), so this is defensive: surface it like every
@@ -684,6 +737,7 @@ export function showLobbyView() {
   clearGameMorph();   // leaving mid-expand must not strand a transform on the game view
   closeCodeModal();
   resetHeaderTheme();
+  clearGameVersion();
   setDocumentTitle(null);
   el('frame-host').innerHTML = '';
   document.body.classList.remove('in-game');

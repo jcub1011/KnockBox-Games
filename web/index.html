@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KnockBox Games</title>
   <link rel="icon" type="image/png" href="/favicons/cat-orange.png" />
-  <link rel="stylesheet" href="/home.css" />
+  <link rel="stylesheet" href="/home.css?v=__KB_SHELL_HASH__" />
 </head>
 <body>
   <!-- Operator announcement. Fixed toast at the top of the screen, persistent and dismissible: "maintenance in
@@ -136,7 +136,10 @@
   <section id="game-view">
     <div class="game-shell">
       <header class="game-header">
-        <a class="game-header-title" id="game-title" href="/"></a>
+        <div class="game-title-stack">
+          <a class="game-header-title" id="game-title" href="/"></a>
+          <a class="game-header-version" id="game-version" hidden></a>
+        </div>
         <div class="header-actions">
           <button type="button" class="room-code-btn" id="room-code-btn" title="Click to reveal · double-click to enlarge · right-click/long-press to copy · middle-click to join in a new tab">
             <span class="room-code-face room-code-label">Room Code</span>
@@ -200,6 +203,6 @@
 
   <span id="conn" hidden>connecting…</span>
 
-  <script type="module">import { bootstrap } from '/shell.js?v=18'; bootstrap();</script>
+  <script type="module">import { bootstrap } from '/shell.js?v=__KB_SHELL_HASH__'; bootstrap();</script>
 </body>
 </html>

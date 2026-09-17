@@ -43,6 +43,8 @@ import {
   sortGames,
   formatPlayerCapacity,
   formatTagsTooltip,
+  formatGameVersion,
+  isSafeHomepageUrl,
   normalizeTags,
   filterAndSortGames,
 } from '../kb-core.js';
@@ -283,7 +285,7 @@ describe('buildGameSrc', () => {
   it('puts the ticket in the fragment, not the query string', () => {
     const src = buildGameSrc('http://localhost:5115', 'ttt', 'index.html', 'tok+/=', 'ws://localhost:5115/ws');
     expect(src.startsWith('http://localhost:5115/games/ttt/index.html#')).toBe(true);
-    expect(src.includes('?')).toBe(false); // no query when version/timestamp are omitted
+    expect(src.includes('?')).toBe(false); // no query when the version is omitted
     // The ticket is URL-encoded in the fragment.
     const frag = src.split('#')[1];
     const params = new URLSearchParams(frag);
@@ -291,7 +293,7 @@ describe('buildGameSrc', () => {
     expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
   });
 
-  it('appends version and timestamp query parameters for cache-busting while preserving fragment credentials', () => {
+  it('appends the version release label while preserving fragment credentials', () => {
     const src = buildGameSrc(
       'http://localhost:5115',
       'ttt',
@@ -299,10 +301,9 @@ describe('buildGameSrc', () => {
       'tok+/=',
       'ws://localhost:5115/ws',
       '1.2.0',
-      '2026-09-02T10:00:00Z',
     );
     const [urlPart, fragPart] = src.split('#');
-    expect(urlPart).toBe('http://localhost:5115/games/ttt/index.html?v=1.2.0&t=1788343200000');
+    expect(urlPart).toBe('http://localhost:5115/games/ttt/index.html?v=1.2.0');
     const params = new URLSearchParams(fragPart);
     expect(params.get('kbTicket')).toBe('tok+/=');
     expect(params.get('kbEndpoint')).toBe('ws://localhost:5115/ws');
@@ -818,6 +819,46 @@ describe('formatTagsTooltip', () => {
     expect(formatTagsTooltip([])).toBe('');
     expect(formatTagsTooltip(null)).toBe('');
     expect(formatTagsTooltip(undefined)).toBe('');
+  });
+});
+
+describe('formatGameVersion', () => {
+  it('prefixes a bare version with v', () => {
+    expect(formatGameVersion('1.2.3')).toBe('v1.2.3');
+  });
+
+  it('does not double the v when the author declared one', () => {
+    expect(formatGameVersion('v1.2.3')).toBe('v1.2.3');
+    expect(formatGameVersion('  2.0.0-beta.1  ')).toBe('v2.0.0-beta.1');
+  });
+
+  it('returns null for anything absent, blank or non-string', () => {
+    expect(formatGameVersion(null)).toBeNull();
+    expect(formatGameVersion(undefined)).toBeNull();
+    expect(formatGameVersion('')).toBeNull();
+    expect(formatGameVersion('   ')).toBeNull();
+    expect(formatGameVersion('v')).toBeNull();
+    expect(formatGameVersion(123)).toBeNull();
+  });
+});
+
+describe('isSafeHomepageUrl', () => {
+  it('accepts absolute https URLs', () => {
+    expect(isSafeHomepageUrl('https://github.com/jcub1011/Alpha-Chain-Phaser-')).toBe(true);
+    expect(isSafeHomepageUrl('  https://example.com/game  ')).toBe(true);
+  });
+
+  it('rejects anything that is not an absolute https URL', () => {
+    expect(isSafeHomepageUrl('http://example.com/game')).toBe(false);
+    expect(isSafeHomepageUrl('javascript:alert(1)')).toBe(false);
+    expect(isSafeHomepageUrl('data:text/html,<b>x</b>')).toBe(false);
+    expect(isSafeHomepageUrl('/relative/path')).toBe(false);
+    expect(isSafeHomepageUrl('not a url')).toBe(false);
+    expect(isSafeHomepageUrl('')).toBe(false);
+    expect(isSafeHomepageUrl('   ')).toBe(false);
+    expect(isSafeHomepageUrl(null)).toBe(false);
+    expect(isSafeHomepageUrl(undefined)).toBe(false);
+    expect(isSafeHomepageUrl(123)).toBe(false);
   });
 });
 

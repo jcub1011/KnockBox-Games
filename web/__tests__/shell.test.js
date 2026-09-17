@@ -201,6 +201,60 @@ describe('game catalog rendering', () => {
     expect(chips[1].textContent).toBe('party');
   });
 
+  it('leads the tag chips with the version chip, leaving tooltip and search tag-only', async () => {
+    await importShell();
+    await bootWithGames([
+      {
+        id: 'alpha-chain',
+        name: 'Alpha Chain',
+        minPlayers: 2,
+        maxPlayers: 8,
+        version: '1.2.3',
+        tags: ['word-game', 'party'],
+      },
+    ]);
+
+    const tagsEl = el('games').querySelector('.game-chin-tags');
+    const chips = tagsEl.querySelectorAll('.game-chin-tag');
+    expect(chips).toHaveLength(3);
+    expect(chips[0].textContent).toBe('v1.2.3');
+    expect(chips[0].classList.contains('game-chin-tag-version')).toBe(true);
+    expect(chips[1].textContent).toBe('word-game');
+    expect(chips[2].textContent).toBe('party');
+    // The version is display metadata, not a tag: the hover tooltip stays purely tag-derived.
+    expect(tagsEl.title).toBe('word-game, party');
+  });
+
+  it('renders a version-only chip when the game declares no tags', async () => {
+    await importShell();
+    await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', version: 'v2.0.0' }]);
+
+    const tagsEl = el('games').querySelector('.game-chin-tags');
+    expect(tagsEl).toBeTruthy();
+    const chips = tagsEl.querySelectorAll('.game-chin-tag');
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toBe('v2.0.0');
+  });
+
+  it('omits the version chip when the game declares no version', async () => {
+    await importShell();
+    await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', tags: ['classic'] }]);
+
+    const chips = el('games').querySelectorAll('.game-chin-tag');
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toBe('classic');
+    expect(el('games').querySelector('.game-chin-tag-version')).toBeNull();
+  });
+
+  it('renders a hostile version string as inert text, never markup', async () => {
+    await importShell();
+    await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', version: '<img src=x onerror=alert(1)>' }]);
+
+    const chip = el('games').querySelector('.game-chin-tag-version');
+    expect(chip.textContent).toBe('v<img src=x onerror=alert(1)>');
+    expect(chip.querySelector('img')).toBeNull();
+  });
+
   it('filters games list dynamically with search input', async () => {
     await importShell();
     await bootWithGames([
@@ -706,6 +760,92 @@ describe('enterGame (EnterGame)', () => {
     ws._recv({ cid: req.cid, type: 'Ticket', ticket: 't' });
     await tick();
     expect(el('game-frame').allow).toBe('cross-origin-isolated');
+  });
+});
+
+describe('game version subtitle', () => {
+  beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
+
+  it('shows the version under the title on create, and clears it on leave', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3' }]);
+
+    expect(el('game-version').hidden).toBe(true);
+    await createLobbySuccess(ws);
+    expect(el('game-title').textContent).toBe('Tic Tac Toe');
+    expect(el('game-version').hidden).toBe(false);
+    expect(el('game-version').textContent).toBe('v1.2.3');
+
+    shell.showLobbyView();
+    expect(el('game-version').hidden).toBe(true);
+    expect(el('game-version').textContent).toBe('');
+  });
+
+  it('links the version to the game source when the manifest declares a homepage', async () => {
+    await importShell();
+    const ws = await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
+      homepage: 'https://github.com/jcub1011/Alpha-Chain-Phaser-',
+    }]);
+
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.textContent).toBe('v1.2.3');
+    expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+    expect(badge.getAttribute('target')).toBe('_blank');
+    expect(badge.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(badge.getAttribute('title')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+
+    shell.showLobbyView();
+    expect(badge.getAttribute('href')).toBeNull();
+    expect(badge.getAttribute('target')).toBeNull();
+  });
+
+  it('leaves the version as plain text with a tooltip when the game provides no source link', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3' }]);
+
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.textContent).toBe('v1.2.3');
+    expect(badge.getAttribute('href')).toBeNull();
+    expect(badge.title).toBe('Game does not provide a source link.');
+  });
+
+  it('falls back to Version Undeclared when the manifest declares no version', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws);
+    expect(el('game-version').hidden).toBe(false);
+    expect(el('game-version').textContent).toBe('Version Undeclared');
+  });
+
+  it('updates the subtitle on enterGame and renders hostile input as inert text', async () => {
+    await importShell();
+    const ws = await bootWithGames([
+      { id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '<b>9.9' },
+    ]);
+    shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+    const req = ws.sent.find((f) => f.type === 'RequestTicket');
+    ws._recv({ cid: req.cid, type: 'Ticket', ticket: 't' });
+    await tick();
+    expect(el('game-version').textContent).toBe('v<b>9.9');
+    expect(el('game-version').querySelector('b')).toBeNull();
+  });
+
+  it('never links a hostile homepage — an unsafe URL stays plain text with the tooltip', async () => {
+    await importShell();
+    const ws = await bootWithGames([
+      {
+        id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
+        homepage: 'javascript:alert(1)',
+      },
+    ]);
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.textContent).toBe('v1.2.3');
+    expect(badge.getAttribute('href')).toBeNull();
+    expect(badge.title).toBe('Game does not provide a source link.');
   });
 });
 
