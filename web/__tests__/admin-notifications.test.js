@@ -172,15 +172,23 @@ describe('list modal', () => {
     expect(rows).toHaveLength(2);
     expect(el('notifications-unread').textContent).toBe('2 unread');
 
-    // Per-item toggle.
+    // Per-item toggle (icon-only: the accessible name carries the meaning). An unread item
+    // offers the open envelope ("mark read") — pinned by the letter lines only that glyph has.
     const firstToggle = rows[0].querySelectorAll('button')[0];
-    expect(firstToggle.textContent).toBe('Mark read');
+    expect(firstToggle.getAttribute('aria-label')).toBe('Mark read');
+    expect(firstToggle.querySelector('path').getAttribute('d')).toContain('M6 12.0001V10.0001H18V12.0001');
     firstToggle.click();
     expect(el('notifications-unread').textContent).toBe('1 unread');
     expect(el('notif-badge').textContent).toBe('1');
+    // Now read, it offers the closed envelope ("mark unread").
+    const retoggled = el('notifications-list').querySelectorAll('.notif-row')[0].querySelectorAll('button')[0];
+    expect(retoggled.getAttribute('aria-label')).toBe('Mark unread');
+    expect(retoggled.querySelector('path').getAttribute('d')).toContain('M21 8L17.4392 9.97822');
 
-    // Per-item dismiss.
+    // Per-item dismiss (icon-only).
     const firstDismiss = rows[0].querySelectorAll('button')[1];
+    expect(firstDismiss.getAttribute('aria-label')).toBe('Dismiss notification');
+    expect(firstDismiss.querySelector('svg')).not.toBeNull();
     firstDismiss.click();
     expect(el('notifications-list').querySelectorAll('.notif-row')).toHaveLength(1);
   });
@@ -234,10 +242,17 @@ describe('details modal', () => {
     expect(body.textContent).not.toContain('Unread');
     expect(el('notif-badge').classList.contains('hidden')).toBe(true);
 
+    // Read, so the toggle offers the closed envelope ("mark unread").
+    expect(el('notification-details-toggle').getAttribute('aria-label')).toBe('Mark unread');
+    expect(el('notification-details-toggle').querySelector('path').getAttribute('d'))
+      .toContain('M21 8L17.4392 9.97822');
+
     el('notification-details-toggle').click();
     expect(el('notif-badge').classList.contains('hidden')).toBe(false);
     expect(el('notif-badge').textContent).toBe('1');
-    expect(el('notification-details-toggle').textContent).toBe('Mark read');
+    expect(el('notification-details-toggle').getAttribute('aria-label')).toBe('Mark read');
+    expect(el('notification-details-toggle').querySelector('path').getAttribute('d'))
+      .toContain('M6 12.0001V10.0001H18V12.0001');
 
     el('notification-details-dismiss').click();
     await vi.advanceTimersByTimeAsync(200);

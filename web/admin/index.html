@@ -72,7 +72,13 @@
           <span class="status-dot"></span>
           <span id="server-status-text"></span>
         </div>
-        <button id="logout-btn" class="btn btn-secondary hidden">Log Out</button>
+        <button id="logout-btn" class="btn btn-secondary btn-icon-only hidden" aria-label="Log out" title="Log out">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -338,11 +344,8 @@
                   </p>
                 </div>
 
-                <!-- In-flight and recently finished operations -->
-                <div class="panel-card hidden" id="mkt-jobs-card">
-                  <div class="panel-card-header"><h4>Operations</h4></div>
-                  <div id="mkt-jobs"></div>
-                </div>
+                <!-- In-flight and recently finished operations now surface as notifications
+                     (bell icon, above): job outcomes are announced there, so no inline list is needed. -->
 
                 <div class="filter-bar">
                   <input type="search" id="plugins-filter-q" class="text-input" placeholder="Filter by name, id, tag, or description" />
@@ -832,8 +835,17 @@
       </div>
       <div class="modal-body notif-details-body" id="notification-details-body"></div>
       <div class="modal-actions">
-        <button class="btn btn-secondary" id="notification-details-toggle" type="button">Mark unread</button>
-        <button class="btn btn-danger" id="notification-details-dismiss" type="button">Dismiss</button>
+        <button class="btn btn-secondary btn-icon-only" id="notification-details-toggle" type="button" aria-label="Mark unread" title="Mark unread">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 8L17.4392 9.97822C15.454 11.0811 14.4614 11.6326 13.4102 11.8488C12.4798 12.0401 11.5202 12.0401 10.5898 11.8488C9.53864 11.6326 8.54603 11.0811 6.5608 9.97822L3 8M6.2 19H17.8C18.9201 19 19.4802 19 19.908 18.782C20.2843 18.5903 20.5903 18.2843 20.782 17.908C21 17.4802 21 16.9201 21 15.8V8.2C21 7.0799 21 6.51984 20.782 6.09202C20.5903 5.71569 20.2843 5.40973 19.908 5.21799C19.4802 5 18.9201 5 17.8 5H6.2C5.0799 5 4.51984 5 4.09202 5.21799C3.71569 5.40973 3.40973 5.71569 3.21799 6.09202C3 6.51984 3 7.07989 3 8.2V15.8C3 16.9201 3 17.4802 3.21799 17.908C3.40973 18.2843 3.71569 18.5903 4.09202 18.782C4.51984 19 5.07989 19 6.2 19Z"></path>
+          </svg>
+        </button>
+        <button class="btn btn-danger btn-icon-only" id="notification-details-dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">
+          <svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
         <button class="btn btn-secondary" id="notification-details-close" type="button">Close</button>
       </div>
     </div>

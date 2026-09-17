@@ -1056,6 +1056,9 @@ describe('top-bar tab navigation visibility with auth state', () => {
     expect(el('dashboard-view').classList.contains('hidden')).toBe(false);
     expect(el('admin-top-tabs').classList.contains('hidden')).toBe(false);
     expect(el('logout-btn').classList.contains('hidden')).toBe(false);
+    // Icon-only: the accessible name carries the meaning the text used to.
+    expect(el('logout-btn').getAttribute('aria-label')).toBe('Log out');
+    expect(el('logout-btn').querySelector('svg')).not.toBeNull();
   });
 
   it('hides top-bar tabs on logout', async () => {

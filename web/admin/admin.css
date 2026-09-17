@@ -326,6 +326,29 @@ code, pre {
   font-size: 0.78rem;
 }
 
+/* Icon-only buttons (header log-out, notification read/dismiss): square, with the accessible
+   name on aria-label/title since there is no text to read. Padding matches .btn/.btn-small and
+   the glyph fills the text row's height, so an icon button stands as tall as its text sibling. */
+.btn-icon-only {
+  padding: 0.55rem;
+  line-height: 0;
+}
+
+.btn-icon-only .btn-icon-svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.btn-small.btn-icon-only {
+  padding: 0.3rem;
+}
+
+.btn-small.btn-icon-only .btn-icon-svg {
+  width: 18px;
+  height: 18px;
+}
+
 .btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -2353,20 +2376,30 @@ code, pre {
   font-size: 0.86rem;
   line-height: 1.45;
   overflow-wrap: anywhere;
+  /* Two lines, then an ellipsis: the full text lives one click away in the details modal, so a
+     long message must not stretch its row (or drawer item) open. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
-.notif-unread-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background-color: var(--accent-mint);
-  margin-right: 0.45rem;
-  flex-shrink: 0;
-}
+/* Unread notifications are set in semibold; the wash itself lives with the row rules below,
+   where it must beat .notif-row's own background. */
 
 .notif-item-unread .notif-message {
   font-weight: 600;
+}
+
+/* The wash drops the dimmest text below readable contrast, so unread rows promote the kind
+   label and the timestamp up the ink hierarchy while it is on. */
+.notif-item-unread .notif-kind {
+  color: var(--text-main);
+}
+
+.notif-item-unread .notif-time {
+  color: var(--text-muted);
 }
 
 @keyframes notif-in {
@@ -2420,6 +2453,32 @@ code, pre {
   border-color: var(--border-strong);
   background-color: var(--bg-hover);
 }
+
+/* Unread wash, tinted by severity instead of one mint wash for everything: mint reads as
+   "good news" in this palette, which is the wrong impression on a warning or an error, so each
+   kind brings its own tint and mint only ever means success. Info has no accent tint, so it gets
+   --text-muted at the same 12% alpha the accent washes use. These pair the severity class with
+   the unread class, so they cover drawer items and modal rows alike, and sit after :hover so the
+   wash (not the hover gray) is what an unread row shows. */
+.notif-info.notif-item-unread { background-color: rgba(158, 151, 175, 0.12); }
+.notif-success.notif-item-unread { background-color: var(--accent-mint-bg); }
+.notif-warning.notif-item-unread { background-color: var(--accent-amber-bg); }
+.notif-error.notif-item-unread { background-color: var(--accent-magenta-bg); }
+
+/* The modal rows pair the same severity classes with their own bordered box, but .notif-row's
+   border shorthand sits later in the file than the severity rules and wipes the left-line color —
+   restate it per row so the modal matches the drawer. Placed after :hover as well, so the line
+   keeps its severity color while hovering too. */
+.notif-row.notif-info { border-left-color: var(--border-strong); }
+.notif-row.notif-success { border-left-color: var(--accent-mint); }
+.notif-row.notif-warning { border-left-color: var(--accent-amber); }
+.notif-row.notif-error { border-left-color: var(--accent-magenta); }
+
+/* Severity-tinted kind labels, matching the log stream: WARNING reads amber, errors rose,
+   successes mint; info stays dim. After the unread promotion above, so the tint wins there too. */
+.notif-warning .notif-kind { color: var(--accent-amber-text); }
+.notif-error .notif-kind { color: #ffa0be; }
+.notif-success .notif-kind { color: var(--accent-mint); }
 
 .notif-row-main {
   flex: 1 1 auto;
@@ -2806,6 +2865,12 @@ code, pre {
 
   .log-line { grid-template-columns: 4.5rem 2.2rem minmax(0, 1fr); }
   .log-category { display: none; }
+
+  /* Modals give back their desktop padding: at 360px wide, 1.75rem a side costs nearly a fifth
+     of the viewport before any content renders. */
+  .modal {
+    padding: 1.25rem 1rem;
+  }
 
   .status-pill { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
   .brand-title { font-size: 1.15rem; }

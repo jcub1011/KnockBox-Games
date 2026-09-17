@@ -200,6 +200,45 @@ let notifDrawerTimer = null;
 let notifDrawerOpen = false;
 let notifDetailId = null;
 
+// Glyphs for the icon-only notification buttons, matching the header/tab icon treatment
+// (stroke currentColor). The toggle shows the envelope for the state it will move the item to:
+// open for "mark read", closed for "mark unread". Dismiss is an x like the modal-close icon.
+const NOTIF_ICON_MAIL_OPEN = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M6 12.0001V10.0001H18V12.0001M3.02832 10.0002L10.2246 14.8168C10.8661 15.2444 11.1869 15.4583 '
+  + '11.5336 15.5414C11.8399 15.6148 12.1593 15.6148 12.4657 15.5414C12.8124 15.4583 13.1332 15.2444 '
+  + '13.7747 14.8168L20.9709 10.0001M10.2981 4.06892L4.49814 7.71139C3.95121 8.05487 3.67775 8.2266 '
+  + '3.4794 8.45876C3.30385 8.66424 3.17176 8.90317 3.09111 9.16112C3 9.45256 3 9.77548 3 10.4213V16.8001C3 '
+  + '17.9202 3 18.4803 3.21799 18.9081C3.40973 19.2844 3.71569 19.5904 4.09202 19.7821C4.51984 20.0001 '
+  + '5.07989 20.0001 6.2 20.0001H17.8C18.9201 20.0001 19.4802 20.0001 19.908 19.7821C20.2843 19.5904 '
+  + '20.5903 19.2844 20.782 18.9081C21 18.4803 21 17.9202 21 16.8001V10.4213C21 9.77548 21 9.45256 '
+  + '20.9089 9.16112C20.8282 8.90317 20.6962 8.66424 20.5206 8.45876C20.3223 8.2266 20.0488 8.05487 '
+  + '19.5019 7.71139L13.7019 4.06891C13.0846 3.68129 12.776 3.48747 12.4449 3.41192C12.152 3.34512 11.848 '
+  + '3.34512 11.5551 3.41192C11.224 3.48747 10.9154 3.68129 10.2981 4.06892Z"/></svg>';
+const NOTIF_ICON_MAIL_CLOSED = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M21 8L17.4392 9.97822C15.454 11.0811 14.4614 11.6326 13.4102 11.8488C12.4798 12.0401 11.5202 '
+  + '12.0401 10.5898 11.8488C9.53864 11.6326 8.54603 11.0811 6.5608 9.97822L3 8M6.2 19H17.8C18.9201 19 '
+  + '19.4802 19 19.908 18.782C20.2843 18.5903 20.5903 18.2843 20.782 17.908C21 17.4802 21 16.9201 21 '
+  + '15.8V8.2C21 7.0799 21 6.51984 20.782 6.09202C20.5903 5.71569 20.2843 5.40973 19.908 5.21799C19.4802 5 '
+  + '18.9201 5 17.8 5H6.2C5.0799 5 4.51984 5 4.09202 5.21799C3.71569 5.40973 3.40973 5.71569 3.21799 '
+  + '6.09202C3 6.51984 3 7.07989 3 8.2V15.8C3 16.9201 3 17.4802 3.21799 17.908C3.40973 18.2843 3.71569 '
+  + '18.5903 4.09202 18.782C4.51984 19 5.07989 19 6.2 19Z"/></svg>';
+const NOTIF_ICON_X = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+
+/**
+ * Paints a mark read/unread toggle as the icon for the action it will take. Icon-only, so the
+ * accessible name carries the meaning the text used to.
+ */
+function paintNotifToggle(btn, read) {
+  btn.innerHTML = read ? NOTIF_ICON_MAIL_CLOSED : NOTIF_ICON_MAIL_OPEN;
+  const label = read ? 'Mark unread' : 'Mark read';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+}
+
 function notifKindLabel(kind) {
   const name = String(kind ?? 'info');
   return name.charAt(0).toUpperCase() + name.slice(1);
@@ -319,12 +358,6 @@ function drawerItem(n) {
 
   const head = document.createElement('div');
   head.className = 'notif-item-head';
-  if (!n.read) {
-    const dot = document.createElement('span');
-    dot.className = 'notif-unread-dot';
-    dot.setAttribute('aria-hidden', 'true');
-    head.appendChild(dot);
-  }
   const kind = document.createElement('span');
   kind.className = 'notif-kind';
   kind.textContent = notifKindLabel(n.kind);
@@ -389,7 +422,7 @@ export function closeNotifications() {
 
 function notificationRow(n) {
   const row = document.createElement('div');
-  row.className = `notif-row notif-${n.kind}`;
+  row.className = `notif-row notif-${n.kind}${n.read ? '' : ' notif-item-unread'}`;
   row.tabIndex = 0;
   row.setAttribute('role', 'button');
 
@@ -397,12 +430,6 @@ function notificationRow(n) {
   main.className = 'notif-row-main';
   const head = document.createElement('div');
   head.className = 'notif-item-head';
-  if (!n.read) {
-    const dot = document.createElement('span');
-    dot.className = 'notif-unread-dot';
-    dot.setAttribute('aria-hidden', 'true');
-    head.appendChild(dot);
-  }
   const kind = document.createElement('span');
   kind.className = 'notif-kind';
   kind.textContent = notifKindLabel(n.kind);
@@ -411,24 +438,26 @@ function notificationRow(n) {
   time.textContent = formatNotificationTime(n.at);
   head.append(kind, time);
   const message = document.createElement('div');
-  message.className = `notif-message${n.read ? '' : ' notif-item-unread'}`;
+  message.className = 'notif-message';
   message.textContent = n.message;
   main.append(head, message);
 
   const actions = document.createElement('div');
   actions.className = 'notif-row-actions';
   const toggle = document.createElement('button');
-  toggle.className = 'btn btn-secondary btn-small';
+  toggle.className = 'btn btn-secondary btn-small btn-icon-only';
   toggle.type = 'button';
-  toggle.textContent = n.read ? 'Mark unread' : 'Mark read';
+  paintNotifToggle(toggle, n.read);
   toggle.addEventListener('click', (e) => {
     e.stopPropagation();
     markNotificationRead(n.id, !n.read);
   });
   const dismiss = document.createElement('button');
-  dismiss.className = 'btn btn-danger btn-small';
+  dismiss.className = 'btn btn-danger btn-small btn-icon-only';
   dismiss.type = 'button';
-  dismiss.textContent = 'Dismiss';
+  dismiss.innerHTML = NOTIF_ICON_X;
+  dismiss.setAttribute('aria-label', 'Dismiss notification');
+  dismiss.title = 'Dismiss notification';
   dismiss.addEventListener('click', (e) => {
     e.stopPropagation();
     dismissOneNotification(n.id);
@@ -550,7 +579,7 @@ function renderNotificationDetails() {
     grid.appendChild(field);
   }
   body.append(message, grid);
-  el('notification-details-toggle').textContent = n.read ? 'Mark unread' : 'Mark read';
+  paintNotifToggle(el('notification-details-toggle'), n.read);
   return true;
 }
 
@@ -2843,7 +2872,6 @@ async function refreshCatalog({ refresh = false } = {}) {
   jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
   renderSourceFilter();
   renderMarketplace();
-  renderJobs();
 }
 
 async function refreshJobs() {
@@ -2864,6 +2892,8 @@ async function refreshJobs() {
 
   // A job reaching a terminal state is the moment the catalog's answer changed — re-read it so the
   // card flips from "Update to 1.3.0" to "Up to date" now rather than on the next tab entry.
+  // There is no operations list anymore: the feed is polled silently and outcomes surface as
+  // notifications (see announceJob below).
   let finished = false;
   for (const job of jobs) {
     if (!job.terminal || before.has(job.jobId)) continue;
@@ -2874,7 +2904,6 @@ async function refreshJobs() {
     }
   }
 
-  renderJobs();
   setNavCount('marketplace', updatesAvailable());
   if (finished) {
     refreshGames();
@@ -3012,13 +3041,10 @@ async function uninstallGame(entry) {
   if (await postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/uninstall`, {})) refreshJobs();
 }
 
-function renderJobs() {
-  const host = el('mkt-jobs');
-  host.textContent = '';
-  el('mkt-jobs-card').classList.toggle('hidden', jobs.length === 0);
-  for (const job of jobs) host.appendChild(jobRow(job));
-}
-
+// The per-card pending-job row: when a package operation is running against a game, its card
+// shows the live phase, progress and the cancel button inline. (The old standalone Operations
+// list is gone — outcomes surface as notifications — but progress and cancel belong to the card
+// being operated on, so this stays.)
 function jobRow(job, { compact = false } = {}) {
   const row = document.createElement('div');
   row.className = 'job-row';
@@ -3156,7 +3182,7 @@ function startUpload() {
       el('upload-backdrop').classList.add('hidden');
       notify(body.detail || 'Package accepted.', 'success');
       // Everything after this point happens inside the JOB — a bad archive, an id collision, a full
-      // disk. The request is over; the operations list owns the outcome.
+      // disk. The request is over; the outcome arrives as a notification.
       refreshJobs();
       return;
     }
