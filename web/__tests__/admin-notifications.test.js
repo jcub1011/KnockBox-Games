@@ -306,7 +306,7 @@ describe('notification stacking (CSS contract)', () => {
     return m ? Number(m[1]) : null;
   }
 
-  it('paints the confirm dialog above every notification surface, still below the header', () => {
+  it('paints the confirm dialog above every notification surface and the header', () => {
     const css = adminCss();
     const backdrop = zIndexOf(css, '\\.modal-backdrop');
     const drawer = zIndexOf(css, '\\.notif-drawer');
@@ -319,7 +319,8 @@ describe('notification stacking (CSS contract)', () => {
     expect(header).not.toBeNull();
     expect(confirm).toBeGreaterThan(backdrop);
     expect(confirm).toBeGreaterThan(drawer);
-    expect(header).toBeGreaterThan(confirm);
+    expect(backdrop).toBeGreaterThan(header);
+    expect(backdrop).toBeGreaterThan(drawer);
   });
 
   it('docks the drawer to the bottom on mobile so the header cannot cover its buttons', () => {

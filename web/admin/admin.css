@@ -1973,15 +1973,16 @@ code, pre {
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  z-index: 50;
+  z-index: 200;
 }
 
 /* The confirm dialog is reused by every destructive action — including Dismiss all inside the
    notification modal — so it must paint above every other backdrop, not just the page. All
-   backdrops share z-index 50 and later DOM wins ties, which put the confirm (first in the
-   document) behind the notification modal. Still below the header, like the rest. */
+   backdrops share z-index 200 and later DOM wins ties, which put the confirm (first in the
+   document) behind the notification modal. All backdrops paint above the header (z 100),
+   so an open modal owns the screen and the header is not clickable behind it. */
 #confirm-backdrop {
-  z-index: 95;
+  z-index: 210;
 }
 
 /* Entrance and exit for the notification modals only (180ms — see NOTIF_MODAL_EXIT_MS): the modal
@@ -2022,6 +2023,28 @@ code, pre {
   width: 100%;
   max-height: 85vh;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-mint-border) transparent;
+}
+
+.modal::-webkit-scrollbar {
+  width: 10px;
+}
+
+.modal::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.modal::-webkit-scrollbar-thumb {
+  background-color: var(--accent-mint-border);
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.modal::-webkit-scrollbar-thumb:hover {
+  background-color: var(--accent-mint-hover);
+  background-clip: content-box;
 }
 
 .modal h3 {
