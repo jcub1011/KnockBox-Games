@@ -21,6 +21,7 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(IdentityPayload))]
 [JsonSerializable(typeof(AdminSessionPayload))]
 [JsonSerializable(typeof(AdminAuthStatusResponse))]
+[JsonSerializable(typeof(AdminNotificationKeyResponse))]
 [JsonSerializable(typeof(AdminPasswordRequest))]
 [JsonSerializable(typeof(AdminApiResponse))]
 [JsonSerializable(typeof(AdminActionResponse))]

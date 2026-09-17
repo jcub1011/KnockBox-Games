@@ -221,7 +221,7 @@ describe('marketplace catalog', () => {
     expect(catalogCalls()).toBe(1);
   });
 
-  it('re-reads the catalog and toasts once when a job finishes', async () => {
+  it('re-reads the catalog and notifies once when a job finishes', async () => {
     vi.useFakeTimers();
     let polls = 0;
     fake = installFakeFetch(routes({
@@ -253,8 +253,8 @@ describe('marketplace catalog', () => {
     await vi.advanceTimersByTimeAsync(3500);
     expect(catalogCalls()).toBe(2);
     expect(gameCalls()).toBeGreaterThan(1);
-    expect(el('toast-host').querySelectorAll('.toast')).toHaveLength(1);
-    expect(el('toast-host').textContent).toContain('Updated to 1.3.0');
+    expect(el('notif-drawer-items').querySelectorAll('.notif-item')).toHaveLength(1);
+    expect(el('notif-drawer-items').textContent).toContain('Updated to 1.3.0');
 
     // The same finished job keeps arriving on every subsequent poll, and must be announced exactly
     // once — and must not re-read the catalog again either. /admin/api/games is a different matter:
@@ -625,8 +625,8 @@ describe('marketplace actions', () => {
 
     // The URL rule lives in MarketplaceClient. A second copy in JS is exactly the drift this avoids.
     expect(fake.calls.some((c) => c.path === '/admin/api/marketplace/sources')).toBe(true);
-    // Inline beside the form, not as a toast: the operator has to read it while correcting the field it
-    // is about, and a toast fades. (The element was previously only ever HIDDEN on failure, so the reason
+    // Inline beside the form, not as a notification: the operator has to read it while correcting the field it
+    // is about, and a notification persists elsewhere. (The element was previously only ever HIDDEN on failure, so the reason
     // reached nobody at all.)
     const error = el('mkt-settings-error');
     expect(error.textContent).toContain('absolute https URL');
@@ -718,7 +718,7 @@ describe('package upload', () => {
     drop(makeKbgFile('game.zip', 1000));
     el('upload-submit').click();
 
-    // Inline, not a toast: the operator is looking at the modal and has to change the input.
+    // Inline, not a notification: the operator is looking at the modal and has to change the input.
     expect(el('upload-error').classList.contains('hidden')).toBe(false);
     expect(el('upload-error').textContent).toMatch(/knockbox-pack/);
     expect(xhr.instances).toHaveLength(0);
@@ -747,7 +747,7 @@ describe('package upload', () => {
     await tick();
 
     expect(el('upload-backdrop').classList.contains('hidden')).toBe(true);
-    expect(el('toast-host').textContent).toContain('Installing.');
+    expect(el('notif-drawer-items').textContent).toContain('Installing.');
   });
 
   it('shows the server refusal inline and keeps the modal open', async () => {

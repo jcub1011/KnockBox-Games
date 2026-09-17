@@ -17,6 +17,10 @@ import {
   webhookEventLabel, checkWebhook, webhookLastDelivery, mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge, compareSemVer,
+  NOTIFICATION_KINDS, NOTIFICATION_LIMIT, NOTIFICATION_STORAGE_KEY, normalizeNotificationKind,
+  createNotification, localOffsetIso, notificationEpoch, sortNotifications, capNotifications, unreadCount,
+  markAllRead, toggleRead, dismissNotification, dismissAllNotifications, sanitizeNotifications,
+  formatNotificationTime, formatNotificationTimeFull,
 } from '../admin/admin-core.js';
 
 describe('topTabFromHash & TOP_TABS', () => {
@@ -1419,6 +1423,103 @@ describe('filterPlugins', () => {
 describe('ADMIN_FAVICON', () => {
   it('points exclusively to the cat-sketch variant', () => {
     expect(ADMIN_FAVICON).toBe('/favicons/cat-sketch.png');
+  });
+});
+
+describe('notifications (pure helpers)', () => {
+  it('exposes the four toast-compatible kinds and a 50-item cap', () => {
+    expect(NOTIFICATION_KINDS).toEqual(['info', 'success', 'warning', 'error']);
+    expect(NOTIFICATION_LIMIT).toBe(50);
+    expect(NOTIFICATION_STORAGE_KEY).toBe('kb.admin.notifications');
+  });
+
+  it('normalizes unknown kinds to info', () => {
+    expect(normalizeNotificationKind('error')).toBe('error');
+    expect(normalizeNotificationKind('ERROR')).toBe('error');
+    expect(normalizeNotificationKind('bogus')).toBe('info');
+    expect(normalizeNotificationKind(null)).toBe('info');
+  });
+
+  it('creates unread offset-stamped records with unique ids', () => {
+    const a = createNotification({ message: '  hello  ', kind: 'success' });
+    const b = createNotification({ message: 'hello', kind: 'success' });
+    expect(a.message).toBe('hello');
+    expect(a.kind).toBe('success');
+    expect(a.read).toBe(false);
+    expect(a.id).not.toBe(b.id);
+    // Offset-stamped, not Zulu: carries +HH:MM/-HH:MM (or Z never appears here).
+    expect(a.at).toMatch(/T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
+    expect(new Date(a.at).getTime()).not.toBeNaN();
+  });
+
+  it('localOffsetIso round-trips the instant it was given', () => {
+    const at = new Date('2026-09-17T10:32:00.000Z');
+    expect(new Date(localOffsetIso(at)).getTime()).toBe(at.getTime());
+  });
+
+  it('sorts newest first and caps at the limit by dropping the oldest', () => {
+    const mk = (iso) => ({ id: iso, message: 'm', kind: 'info', at: iso, read: false });
+    const list = [mk('2026-01-01T00:00:00.000Z'), mk('2026-06-01T00:00:00.000Z'), mk('2026-03-01T00:00:00.000Z')];
+    expect(sortNotifications(list).map((n) => n.id)).toEqual([
+      '2026-06-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+    ]);
+    expect(capNotifications(list, 2)).toHaveLength(2);
+    expect(capNotifications(list, 2)[0].id).toBe('2026-06-01T00:00:00.000Z');
+    // Unparseable timestamps sort oldest, never NaN the comparator.
+    const bad = [...list, { id: 'bad', message: 'm', kind: 'info', at: 'not-a-date', read: false }];
+    expect(sortNotifications(bad).at(-1).id).toBe('bad');
+    // Same-millisecond ties keep insertion order (stable sort), so rapid pushes newest-first.
+    const tied = [
+      { id: 'first', message: 'm', kind: 'info', at: '2026-09-17T10:32:00.000Z', read: false },
+      { id: 'second', message: 'm', kind: 'info', at: '2026-09-17T10:32:00.000Z', read: false },
+    ];
+    expect(sortNotifications(tied).map((n) => n.id)).toEqual(['first', 'second']);
+    expect(capNotifications([{ id: 'new', message: 'm', kind: 'info', at: '2026-09-17T10:32:00.000Z', read: false }, ...tied], 2)
+      .map((n) => n.id)).toEqual(['new', 'first']);
+  });
+
+  it('counts unread, marks all read, toggles one, dismisses one and all', () => {
+    const list = [
+      { id: 'a', message: 'a', kind: 'info', at: localOffsetIso(), read: false },
+      { id: 'b', message: 'b', kind: 'error', at: localOffsetIso(), read: true },
+    ];
+    expect(unreadCount(list)).toBe(1);
+    expect(markAllRead(list).every((n) => n.read)).toBe(true);
+    expect(toggleRead(list, 'a')[0].read).toBe(true);
+    expect(toggleRead(list, 'b')[1].read).toBe(false);
+    expect(dismissNotification(list, 'a')).toHaveLength(1);
+    expect(dismissAllNotifications()).toEqual([]);
+    // Immutable snapshots: the input is untouched.
+    expect(list[0].read).toBe(false);
+  });
+
+  it('sanitizes untrusted store input without throwing', () => {
+    expect(sanitizeNotifications(null)).toEqual([]);
+    expect(sanitizeNotifications('nope')).toEqual([]);
+    const out = sanitizeNotifications([
+      null, 42, { message: '   ' },
+      { id: 'ok', message: 'fine', kind: 'weird', at: '2026-09-17T10:32:00.000+02:00', read: 'yes' },
+      { message: 'repaired', kind: 'warning', at: 'garbage', read: true },
+    ]);
+    expect(out).toHaveLength(2);
+    const ok = out.find((n) => n.id === 'ok');
+    const repaired = out.find((n) => n.id !== 'ok');
+    expect(ok.kind).toBe('info');
+    expect(ok.at).toBe('2026-09-17T10:32:00.000+02:00');
+    expect(ok.read).toBe(false);
+    expect(repaired.kind).toBe('warning');
+    expect(repaired.read).toBe(true);
+    expect(repaired.id).toBeTruthy();
+  });
+
+  it('formats absolute times and degrades to --', () => {
+    expect(formatNotificationTime('not-a-date')).toBe('--');
+    expect(formatNotificationTimeFull(null)).toBe('--');
+    const iso = '2026-09-17T10:32:00.000+02:00';
+    expect(formatNotificationTime(iso)).not.toBe('--');
+    expect(formatNotificationTimeFull(iso)).not.toBe('--');
+    // The full form carries seconds; the short form must not be the same string.
+    expect(formatNotificationTimeFull('2026-09-17T10:32:05.000Z')).toContain('32');
   });
 });
 

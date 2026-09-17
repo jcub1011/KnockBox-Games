@@ -436,6 +436,9 @@ builder.Services.AddSingleton(sp => new ServerAuthorityManager(
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<WebSocketHandler>();
 builder.Services.AddSingleton<AdminAuthService>();
+// The notification store's at-rest encryption key. Lives as long as the process, rotates when the
+// admin password changes, and is served to signed-in portal pages only (see NotificationKeyService).
+builder.Services.AddSingleton<NotificationKeyService>();
 builder.Services.AddSingleton<AdminSettingsStore>();
 // The relay asks the policy questions through the narrow IPlatformPolicy. Two layers answer them: the
 // settings store (persisted operator policy) and the lifecycle gate laid over it (transient "this game
@@ -1148,13 +1151,14 @@ StaticFileOptions GamesCompressedStaticOptions() => new()
 // Platform files (shell, admin portal) are versioned by CONTENT HASH, not by a hand-bumped query
 // string: the carrier pages hold ?v= placeholders the middleware below substitutes with the
 // provider's current token, and a versioned URL carrying the current token is immutable (see
-// VersionedCacheHeaders). Transitive ES imports (kb-core.js, kb-protocol.js, admin-core.js) and
-// the game SDK are never versioned in a URL, so they always revalidate via ETag.
+// VersionedCacheHeaders). Transitive ES imports (kb-core.js, kb-protocol.js, admin-core.js,
+// admin-notifications.js) and the game SDK are never versioned in a URL, so they always
+// revalidate via ETag.
 var shellVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "/shell.js", "/home.css" };
 var adminVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "/admin.js", "/admin.css", "/terminal.js" };
 var noVersionedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 var shellContent = new ContentHashProvider(webRoot, "shell.js", "kb-core.js", "kb-protocol.js", "home.css");
-var adminContent = new ContentHashProvider(adminWebRoot, "admin.js", "admin-core.js", "admin.css", "terminal.js");
+var adminContent = new ContentHashProvider(adminWebRoot, "admin.js", "admin-core.js", "admin-notifications.js", "admin.css", "terminal.js");
 
 StaticFileOptions WebStaticOptions(HashSet<string> versionedPaths, Func<string> currentToken) => new()
 {
@@ -1324,7 +1328,8 @@ app.MapWhen(
             // An https admin origin means a proxy terminates TLS in front of us, so the session cookie
             // must be Secure even though the request reaching Kestrel is plain HTTP.
             CookieAlwaysSecure: adminOrigin?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) == true,
-            StaleAfter: adminStaleAfter));
+            StaleAfter: adminStaleAfter,
+            NotificationKeys: app.Services.GetRequiredService<NotificationKeyService>()));
 
         // No web/admin in the web root ⇒ the portal's files aren't there. Say so at the origin itself:
         // this is reported through DeploymentDiagnostics too, but the warning PAGE only replaces the

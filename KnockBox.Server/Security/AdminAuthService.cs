@@ -310,6 +310,14 @@ public sealed class AdminAuthService
     private byte[] CurrentSigningKey() => HMACSHA256.HashData(_sessionSigningSecret, SecretFingerprint());
 
     /// <summary>
+    /// The current secret fingerprint for services that must rotate when the password changes (see
+    /// <see cref="NotificationKeyService"/>). Internal, not exposed on any wire response: it is a hash
+    /// of credential material, and nothing client-side ever needs it — rotation is detected by comparing
+    /// successive values server-side.
+    /// </summary>
+    internal byte[] CurrentSecretFingerprint() => SecretFingerprint();
+
+    /// <summary>
     /// SHA-256 of the secret file's bytes, or empty when unconfigured. Deliberately NOT cached: the file is
     /// ~100 bytes and admin traffic is a trickle, so reading it costs microseconds — while a cache keyed on
     /// (mtime, length) would be unsound here, since every secret file is exactly the same length and

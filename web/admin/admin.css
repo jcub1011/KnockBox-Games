@@ -1976,6 +1976,42 @@ code, pre {
   z-index: 50;
 }
 
+/* The confirm dialog is reused by every destructive action — including Dismiss all inside the
+   notification modal — so it must paint above every other backdrop, not just the page. All
+   backdrops share z-index 50 and later DOM wins ties, which put the confirm (first in the
+   document) behind the notification modal. Still below the header, like the rest. */
+#confirm-backdrop {
+  z-index: 95;
+}
+
+/* Entrance and exit for the notification modals only (180ms — see NOTIF_MODAL_EXIT_MS): the modal
+   rises as it opens and settles back as it closes. Scoped by id so the confirm/files/upload
+   dialogs — and the tests that assert on them synchronously — keep their instant behaviour. */
+#notifications-backdrop .modal, #notification-details-backdrop .modal {
+  animation: notif-modal-in 180ms ease;
+}
+
+@keyframes notif-modal-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+#notifications-backdrop.modal-closing, #notification-details-backdrop.modal-closing {
+  animation: notif-fade-out 180ms ease forwards;
+}
+
+#notifications-backdrop.modal-closing .modal, #notification-details-backdrop.modal-closing .modal {
+  animation: notif-modal-out 180ms ease forwards;
+}
+
+@keyframes notif-fade-out {
+  to { opacity: 0; }
+}
+
+@keyframes notif-modal-out {
+  to { opacity: 0; transform: translateY(8px); }
+}
+
 .modal {
   background-color: var(--bg-card);
   border: 1px solid var(--border-strong);
@@ -2141,38 +2177,250 @@ code, pre {
   white-space: nowrap;
 }
 
-/* ── Toasts ──────────────────────────────────────────────────────────────── */
-.toast-host {
+/* ── Notifications (bell, drawer, list) ──────────────────────────────────── */
+.notif-bell-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.notif-bell-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.notif-bell-btn:hover, .notif-bell-btn:focus-visible {
+  background-color: var(--bg-hover);
+  color: var(--text-main);
+  border-color: var(--border-default);
+  outline: none;
+}
+
+.notif-bell-icon {
+  width: 19px;
+  height: 19px;
+}
+
+.notif-badge {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  line-height: 1.15rem;
+  padding: 0 0.25rem;
+  border-radius: var(--radius-pill);
+  background-color: var(--accent-magenta);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 1px 1px 0 #000;
+}
+
+/* Arrival preview anchored under the header, above page content but below open modals. */
+.notif-drawer {
   position: fixed;
-  bottom: 1.25rem;
-  right: 1.25rem;
+  top: calc(var(--admin-header-height, 60px) + 0.5rem);
+  right: 1rem;
+  width: min(24rem, calc(100vw - 2rem));
+  background-color: var(--bg-card-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  z-index: 90;
+  overflow: hidden;
+  animation: notif-in 160ms ease;
+}
+
+.notif-drawer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.9rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.notif-drawer-title {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.notif-link {
+  background: transparent;
+  border: none;
+  color: var(--accent-mint);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: var(--radius-xs);
+}
+
+.notif-link:hover {
+  text-decoration: underline;
+}
+
+.notif-drawer-items {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  z-index: 60;
-  max-width: min(28rem, calc(100vw - 2.5rem));
+  max-height: 22rem;
+  overflow-y: auto;
 }
 
-.toast {
-  padding: 0.75rem 1.1rem;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-card-elevated);
-  border: 1px solid var(--border-default);
+.notif-item {
+  padding: 0.6rem 0.9rem;
   border-left: 4px solid var(--border-strong);
-  box-shadow: var(--shadow-modal);
-  color: var(--text-main);
-  font-size: 0.88rem;
-  font-family: var(--font-body);
-  animation: toast-in 160ms ease;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
 }
 
-.toast-success { border-left-color: var(--accent-mint); }
-.toast-warning { border-left-color: var(--accent-amber); }
-.toast-error { border-left-color: var(--accent-magenta); }
+.notif-item:last-child {
+  border-bottom: none;
+}
 
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(6px); }
+.notif-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.notif-info { border-left-color: var(--border-strong); }
+.notif-success { border-left-color: var(--accent-mint); }
+.notif-warning { border-left-color: var(--accent-amber); }
+.notif-error { border-left-color: var(--accent-magenta); }
+
+.notif-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.notif-kind {
+  font-family: var(--font-display);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.notif-time {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.notif-message {
+  color: var(--text-main);
+  font-size: 0.86rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.notif-unread-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--accent-mint);
+  margin-right: 0.45rem;
+  flex-shrink: 0;
+}
+
+.notif-item-unread .notif-message {
+  font-weight: 600;
+}
+
+@keyframes notif-in {
+  from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: none; }
+}
+
+/* Exit mirrors the entrance (160ms — see NOTIF_DRAWER_EXIT_MS): the drawer fades back the way it
+   came instead of vanishing. `to`-only so it starts from whatever state it is in, and `forwards`
+   so the faded end state holds until the timeout applies `hidden` — without it the drawer snaps
+   back to full opacity for any frames between animation end and timeout, which reads as a stutter. */
+.notif-drawer.notif-drawer-closing {
+  animation: notif-out 160ms ease forwards;
+}
+
+@keyframes notif-out {
+  to { opacity: 0; transform: translateY(-4px); }
+}
+
+/* List modal rows: message + time on the left, read/dismiss on the right. */
+.notif-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.9rem 0 0.75rem;
+  flex-wrap: wrap;
+}
+
+.notif-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-default);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-well);
+  cursor: pointer;
+}
+
+.notif-row:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
+}
+
+.notif-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.notif-row-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.notif-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.notif-details-message {
+  color: var(--text-main);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 /* ── Marketplace & Packages ──────────────────────────────────────────────── */
@@ -2330,7 +2578,12 @@ code, pre {
 
 /* ── Motion & Responsive Adjustments ─────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .toast { animation: none; }
+  .notif-drawer, .notif-drawer.notif-drawer-closing,
+  #notifications-backdrop .modal, #notification-details-backdrop .modal,
+  #notifications-backdrop.modal-closing, #notification-details-backdrop.modal-closing,
+  #notifications-backdrop.modal-closing .modal, #notification-details-backdrop.modal-closing .modal {
+    animation: none;
+  }
   .job-bar-indeterminate { animation: none; width: 100%; opacity: 0.5; }
   .btn, .metric-card, .sidebar-toggle-icon { transition: none; }
 }
@@ -2533,4 +2786,16 @@ code, pre {
 
   .status-pill { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
   .brand-title { font-size: 1.15rem; }
+
+  /* Bottom sheet instead of a top-anchored drawer: the wrapped mobile header (tabs drop to their
+     own row) grows past --admin-header-height, so a fixed top offset slides the drawer underneath
+     it — the header paints above (z 100 over the drawer's 90) and covers the drawer header row
+     with its View all and close buttons. Bottom-anchoring avoids guessing the wrapped height. */
+  .notif-drawer {
+    top: auto;
+    bottom: 1rem;
+    left: 1rem;
+    right: 1rem;
+    width: auto;
+  }
 }

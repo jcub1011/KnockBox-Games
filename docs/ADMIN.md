@@ -39,6 +39,27 @@ replace the *shell's* home page when they're blocking; they're repeated here so 
 player site to find out something is wrong. They re-evaluate on every poll, so a fixed problem disappears
 without a restart.
 
+### Notifications
+
+The bell in the header replaces the old toast popups. Anything the portal used to toast about — job
+outcomes, failed saves, delivery results — becomes a persistent notification instead:
+
+- The badge counts **unread** (hidden at zero). Hovering or tapping the bell previews the three newest;
+  clicking it opens the full list, newest first.
+- The preview dismisses itself after five seconds unless you're hovering it or it has keyboard focus.
+  On touch devices there is no hover, so the bell skips the preview and opens the list directly.
+  Previewing, opening, or clicking a notification never marks it read — only the explicit **Mark read** /
+  **Mark unread** buttons do, per notification or via **Mark all read**.
+- **Dismiss** deletes one notification; **Dismiss all** (behind a confirm) deletes everything. Clicking a
+  notification opens a details view with the full text and the exact received time, with seconds.
+- Up to **50** notifications are kept in `localStorage`; older ones fall off as new ones arrive.
+
+The stored notifications are **encrypted** (AES-GCM) under a key the server mints and hands only to a
+signed-in portal page — it lives in page memory, never in storage. The key is bound to the admin
+password: **changing the password clears stored notifications**, because the old ones can no longer be
+read. (On a plain-HTTP LAN connection the browser cannot do WebCrypto, so the store falls back to
+plaintext and the list says so rather than pretending otherwise.)
+
 ### Per-Game Server Cost
 
 Games are HTML5/WASM and run in the player's browser, so it's tempting to treat them as free server-side.
