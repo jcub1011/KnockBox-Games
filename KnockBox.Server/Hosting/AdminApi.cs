@@ -1330,7 +1330,7 @@ internal static class AdminApi
         }
 
         await WriteAction(ctx, new AdminActionResponse(true, Warning: warning,
-            Detail: enabled ? "Enabled." : "Disabled; it offers nothing until you switch it back on."));
+            Detail: enabled ? $"Marketplace source '{id}' enabled." : $"Marketplace source '{id}' disabled."));
     }
 
     private static async Task SetUpdatePolicy(HttpContext ctx, Options options)
