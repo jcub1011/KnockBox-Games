@@ -684,6 +684,65 @@ describe('marketplace actions', () => {
     expect(error.textContent).toContain('absolute https URL');
     expect(error.classList.contains('hidden')).toBe(false);
   });
+
+  it('re-renders the sources modal in place after disable/enable', async () => {
+    // The toggle used to refresh the catalog caches without re-rendering the open modal, so the
+    // button kept its old label until the modal was closed and reopened.
+    let enabled = true;
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/catalog': () => ({
+        body: { ...CATALOG, sources: [{ ...CATALOG.sources[0], enabled }] },
+      }),
+      'POST /admin/api/marketplace/sources/official/enabled': (call) => {
+        enabled = call.body.enabled;
+        return { body: { success: true, detail: enabled ? 'enabled.' : 'disabled.' } };
+      },
+    });
+
+    el('mkt-settings-btn').click();
+    const row = () => document.querySelector('.source-row[data-id="official"]');
+    expect(row().querySelector('.source-toggle').textContent).toBe('Disable');
+
+    row().querySelector('.source-toggle').click();
+    for (let i = 0; i < 6; i += 1) await tick();
+
+    // Modal stays open, button and badge reflect the new state from the re-fetched catalog.
+    expect(el('mkt-settings-backdrop').classList.contains('hidden')).toBe(false);
+    expect(row().querySelector('.source-toggle').textContent).toBe('Enable');
+    expect(row().querySelector('.badge').textContent).toBe('disabled');
+
+    row().querySelector('.source-toggle').click();
+    for (let i = 0; i < 6; i += 1) await tick();
+
+    expect(row().querySelector('.source-toggle').textContent).toBe('Disable');
+  });
+
+  it('removes the source row in place without closing the modal', async () => {
+    let sources = [
+      { ...CATALOG.sources[0] },
+      {
+        id: 'staging', name: 'Staging', catalogUrl: 'https://example.com/staging.json',
+        downloadBaseUrl: 'https://github.com', enabled: true, builtIn: false, entries: 1, error: null,
+      },
+    ];
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/catalog': () => ({ body: { ...CATALOG, sources } }),
+      'POST /admin/api/marketplace/sources/staging/delete': () => {
+        sources = sources.filter((s) => s.id !== 'staging');
+        return { body: { success: true, detail: 'Removed.' } };
+      },
+    });
+
+    el('mkt-settings-btn').click();
+    expect(document.querySelector('.source-row[data-id="staging"]')).not.toBeNull();
+
+    document.querySelector('.source-row[data-id="staging"] .source-remove').click();
+    for (let i = 0; i < 6; i += 1) await tick();
+
+    expect(el('mkt-settings-backdrop').classList.contains('hidden')).toBe(false);
+    expect(document.querySelector('.source-row[data-id="staging"]')).toBeNull();
+    expect(document.querySelector('.source-row[data-id="official"]')).not.toBeNull();
+  });
 });
 
 describe('job progress on rows and in the dialog', () => {

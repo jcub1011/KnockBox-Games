@@ -2793,6 +2793,20 @@ code, pre {
 
 .source-name { font-family: var(--font-display); color: var(--text-main); font-weight: 700; }
 .source-url { color: var(--text-muted); flex: 1 1 10rem; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8rem; }
+/* Source catalog URLs truncate to two lines with an ellipsis: the full URL stays on the
+   title tooltip and is one click away, so a long URL must not stretch its row open.
+   Scoped to the marketplace list — the webhook table reuses .source-url for its
+   origin-only display. */
+#mkt-sources .source-url {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+a.source-url { text-decoration: none; }
+a.source-url:hover { text-decoration: underline; }
 
 .source-form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .source-form .text-input { flex: 1 1 10rem; }

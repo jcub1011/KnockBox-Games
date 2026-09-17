@@ -3251,9 +3251,15 @@ function renderSources() {
     const name = document.createElement('span');
     name.className = 'source-name';
     name.textContent = source.name || source.id;
-    const url = document.createElement('span');
+    const url = document.createElement('a');
     url.className = 'source-url';
     url.textContent = source.catalogUrl;
+    if (source.catalogUrl) {
+      url.href = source.catalogUrl;
+      url.target = '_blank';
+      url.rel = 'noopener noreferrer';
+      url.title = source.catalogUrl;
+    }
     row.append(name, url);
 
     const count = document.createElement('span');
@@ -3274,7 +3280,8 @@ function renderSources() {
       toggle.onclick = async () => {
         const url = `/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/enabled`;
         if (await postJson(url, { enabled: source.enabled === false })) {
-          refreshCatalog({ refresh: true, render: true });
+          await refreshCatalog({ refresh: true, render: true });
+          renderSources();
         }
       };
     row.appendChild(toggle);
@@ -3286,7 +3293,8 @@ function renderSources() {
       remove.textContent = 'Remove';
       remove.onclick = async () => {
         if (await postJson(`/admin/api/marketplace/sources/${encodeURIComponent(source.id)}/delete`, {})) {
-          refreshCatalog({ refresh: true, render: true });
+          await refreshCatalog({ refresh: true, render: true });
+          renderSources();
         }
       };
       row.appendChild(remove);
