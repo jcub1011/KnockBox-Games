@@ -15,10 +15,12 @@ import {
   filterPlugins, filterSettings, formatByteLimit, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   formatNotificationTime, formatNotificationTimeFull,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
-  lifecycleClass, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, mergeSamples, sdkBadge,
-  noLimitOverrides, playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusHint, pluginStatusLabel, ratePerSecond,
+  lifecycleLabel, logLevelClass, logLevelTag,   mergeJobs, mergePluginEntries, mergeSamples,
+  noLimitOverrides, playerRange, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
+  pluginStatusLabel, ratePerSecond,
   scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
   sortPlugins, sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
+  visibleTagCount,
   webhookEventLabel, webhookLastDelivery,
 } from './admin-core.js';
 
@@ -1901,359 +1903,152 @@ export function renderGames() {
 }
 
 export function pluginCard(entry) {
+  // A compact fixed-height row: constant height regardless of content. All plugin controls live in
+  // the metadata modal (openPluginDetails) — the row itself is one big button that opens it,
+  // replacing the old ellipsis button. Only rows are built imperatively, always with textContent.
   const card = document.createElement('div');
-  card.className = 'game-card plugin-card mkt-card';
+  card.className = 'game-card plugin-card mkt-card plugin-row';
   card.dataset.id = entry.id;
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label', `View details for ${entry.name || entry.id}`);
+  card.addEventListener('click', () => openPluginDetails(entry));
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPluginDetails(entry); }
+  });
 
-  const header = document.createElement('div');
-  header.className = 'game-card-header';
+  const top = document.createElement('div');
+  top.className = 'plugin-row-top';
 
-  const title = document.createElement('h3');
-  title.textContent = entry.name;
-  const id = document.createElement('code');
-  id.textContent = entry.id;
-  header.append(title, id);
-
-  if (entry.installed) {
-    const state = document.createElement('span');
-    state.className = `badge badge-${entry.availability === 'available' ? 'ok' : 'warning'}`;
-    state.textContent = availabilityLabel(entry.availability);
-    header.appendChild(state);
-
-    if (entry.status === 'updateAvailable') {
-      const update = document.createElement('span');
-      update.className = 'badge badge-warning';
-      update.textContent = 'Update available';
-      update.title = pluginStatusHint('updateAvailable');
-      header.appendChild(update);
-    }
-
-    if (isBusyLifecycle(entry.lifecycle)) {
-      const lifecycle = document.createElement('span');
-      lifecycle.className = `badge ${lifecycleClass(entry.lifecycle)}`;
-      lifecycle.textContent = lifecycleLabel(entry.lifecycle);
-      header.appendChild(lifecycle);
-    }
-
-    const sdk = sdkBadge(entry, gameData?.serverSdkVersion);
-    if (sdk) {
-      const sdkEl = document.createElement('span');
-      sdkEl.className = sdk.className;
-      sdkEl.textContent = sdk.label;
-      sdkEl.title = sdk.title;
-      header.appendChild(sdkEl);
-    }
-
-    if (entry.serverAuthority) {
-      const authority = document.createElement('span');
-      authority.className = 'badge badge-muted';
-      authority.textContent = 'server authority';
-      header.appendChild(authority);
-    }
-  } else {
-    const status = document.createElement('span');
-    status.className = `badge ${pluginStatusClass(entry.status)}`;
-    status.textContent = pluginStatusLabel(entry.status);
-    status.title = pluginStatusHint(entry.status);
-    header.appendChild(status);
-  }
-
-  const ver = entry.installed ? entry.installedVersion : entry.availableVersion;
-  if (ver) {
-    const versionBadge = document.createElement('span');
-    versionBadge.className = 'badge badge-muted';
-    versionBadge.textContent = `v${ver}`;
-    header.appendChild(versionBadge);
-  }
-
-  if (entry.contentRating) {
-    const rating = document.createElement('span');
-    rating.className = 'badge badge-muted';
-    rating.textContent = entry.contentRating;
-    rating.title = 'Content rating declared by the game.';
-    header.appendChild(rating);
-  }
-
-  for (const tag of (entry.tags || []).slice(0, 3)) {
-    const chip = document.createElement('span');
-    chip.className = 'badge badge-muted';
-    chip.textContent = tag;
-    header.appendChild(chip);
-  }
-
-  // 3-dots button icon in the top right to see full game metadata in popup dialog
-  const dotsBtn = document.createElement('button');
-  dotsBtn.type = 'button';
-  dotsBtn.className = 'plugin-details-btn';
-  dotsBtn.title = 'View full metadata';
-  dotsBtn.setAttribute('aria-label', `View full metadata for ${entry.name}`);
-  dotsBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="dots-icon"><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle><circle cx="5" cy="12" r="1.5"></circle></svg>';
-  dotsBtn.onclick = () => openPluginDetails(entry);
-  header.appendChild(dotsBtn);
-
-  card.appendChild(header);
-
-  if (entry.description) {
-    const description = document.createElement('p');
-    description.className = 'mkt-desc';
-    description.textContent = entry.description;
-    card.appendChild(description);
-  }
-
-  const facts = document.createElement('div');
-  facts.className = 'game-facts';
-
-  if (entry.installed) {
-    addFact(facts, 'Installed', entry.installed ? formatVersion(entry.installedVersion) : 'Not installed', '');
-    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-      entry.sourceName || entry.sourceId || '');
-    addFact(facts, 'Disk', formatBytes(entry.diskBytes),
-      `Files ${formatBytes(entry.directoryBytes)} + compressed ${formatBytes(entry.compressedBytes)}`
-      + (entry.packageBacked ? ` + package ${formatBytes(entry.packageBytes)}` : ''));
-    if (entry.activeLobbies > 0 || entry.activePlayers > 0) {
-      addFact(facts, 'Running now', `${entry.activeLobbies} lobby/lobbies`, `${entry.activePlayers} player(s)`);
-    }
-  } else {
-    addFact(facts, 'Installed', 'Not installed', '');
-    addFact(facts, 'Available', entry.availableVersion ? formatVersion(entry.availableVersion) : 'Not offered',
-      entry.sourceName || entry.sourceId || '');
-    if (entry.sizeBytes) {
-      addFact(facts, 'Download', formatBytes(entry.sizeBytes), '');
-    }
-  }
-
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'plugin-row-title';
+  const title = document.createElement('span');
+  title.className = 'plugin-row-name';
+  title.textContent = entry.name || entry.id;
+  titleWrap.appendChild(title);
   if (entry.author) {
-    addFact(facts, 'Author', entry.author, '');
+    const author = document.createElement('span');
+    author.className = 'plugin-row-author';
+    author.textContent = `by ${entry.author}`;
+    author.title = entry.author;
+    titleWrap.appendChild(author);
   }
+  top.appendChild(titleWrap);
 
-  const players = playerRange(entry) || (entry.maxPlayers ? String(entry.maxPlayers) : '');
-  if (players) {
-    addFact(facts, 'Players', players, '');
+  const tagStrip = document.createElement('div');
+  tagStrip.className = 'plugin-row-tags';
+  for (const tag of entry.tags || []) {
+    const chip = document.createElement('span');
+    chip.className = 'badge badge-muted plugin-tag-chip';
+    chip.textContent = tag;
+    tagStrip.appendChild(chip);
   }
+  const tagEllipsis = document.createElement('span');
+  tagEllipsis.className = 'badge badge-muted plugin-tag-ellipsis';
+  tagEllipsis.textContent = '…';
+  tagEllipsis.hidden = true;
+  tagStrip.appendChild(tagEllipsis);
+  if ((entry.tags || []).length > 0) tagStrip.title = entry.tags.join(', ');
+  top.appendChild(tagStrip);
 
-  if (entry.license) {
-    addFact(facts, 'License', entry.license, '');
+  const version = pluginRowVersion(entry);
+  const versionEl = document.createElement('span');
+  versionEl.className = `plugin-row-version${version.hasUpdate ? ' plugin-row-update' : ''}`;
+  versionEl.textContent = version.text;
+  versionEl.title = version.title;
+  top.appendChild(versionEl);
+
+  card.appendChild(top);
+
+  // (Status badges live bottom-right via pluginRowBadges; the version indicator above covers
+  // updates. Everything else — facts, links, controls — lives in the metadata modal.)
+
+  const bottom = document.createElement('div');
+  bottom.className = 'plugin-row-bottom';
+
+  const description = document.createElement('p');
+  description.className = 'plugin-row-desc';
+  description.textContent = entry.description || 'No description provided.';
+  if (entry.description) description.title = entry.description;
+  bottom.appendChild(description);
+
+  const meta = document.createElement('div');
+  meta.className = 'plugin-row-meta';
+  for (const badge of pluginRowBadges(entry, gameData?.serverSdkVersion)) {
+    const badgeEl = document.createElement('span');
+    badgeEl.className = `${badge.className} plugin-mini-badge`;
+    badgeEl.textContent = badge.label;
+    if (badge.title) badgeEl.title = badge.title;
+    meta.appendChild(badgeEl);
   }
-
-  addFact(facts, 'Game ID', entry.id, '');
-
-  addFact(facts, 'Source',
-    entry.sourceName || (entry.sourceKind === 'games' ? 'Games Folder' : 'Manual Upload'),
-    entry.directory || '');
-
-  card.appendChild(facts);
-
-  const links = marketplaceLinks(entry);
-  if (links) card.appendChild(links);
-
-  const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
-  const busy = isBusyLifecycle(entry.lifecycle);
-
-  const actions = document.createElement('div');
-  actions.className = 'game-actions';
-
-  // Version selection dropdown
-  const versionSelect = document.createElement('select');
-  versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
-  const populateVersionSelect = (preferredValue = null) => {
-    versionSelect.innerHTML = '';
-    for (const option of versionOptions(entry)) {
-      const opt = document.createElement('option');
-      opt.value = versionOptionValue(option);
-      opt.textContent = option.kind === 'loadMore'
-        ? 'Load older versions from repo…'
-        : `${formatVersion(option.version)} — ${option.kind}`;
-      versionSelect.appendChild(opt);
-    }
-    if (versionSelect.options.length === 0) {
-      versionSelect.disabled = true;
-    } else {
-      const saved = preferredValue ?? pluginSelectedVersions.get(entry.id);
-      if (saved && Array.from(versionSelect.options).some((o) => o.value === saved)) {
-        versionSelect.value = saved;
-      }
-    }
-  };
-  populateVersionSelect();
-  actions.appendChild(versionSelect);
-
-  // Status selection dropdown (hidden when not installed)
-  if (entry.installed) {
-    const availSelect = document.createElement('select');
-    availSelect.className = 'text-input filter-narrow plugin-availability';
-    for (const option of AVAILABILITY) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.availability) opt.selected = true;
-      availSelect.appendChild(opt);
-    }
-    availSelect.onchange = () => setAvailability(entry, availSelect.value);
-    if (busy) {
-      availSelect.disabled = true;
-      availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
-    }
-    actions.appendChild(availSelect);
+  const size = pluginRowSize(entry);
+  const sizeEl = document.createElement('span');
+  sizeEl.className = 'plugin-row-size';
+  sizeEl.textContent = size.text;
+  sizeEl.title = size.title;
+  // A package operation running against this game still shows on the list — as one mini badge
+  // with the live phase as its tooltip. Progress bar and cancel live in the modal (jobRow there),
+  // which is where the controls went; the row only signals that something is happening.
+  const pendingJob = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+  if (pendingJob) {
+    const working = document.createElement('span');
+    working.className = 'badge badge-warning plugin-mini-badge plugin-job-badge';
+    const status = String(pendingJob.status || 'working');
+    working.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    working.title = pendingJob.error ? `${pendingJob.phase} ${pendingJob.error}` : (pendingJob.phase || 'Package operation in progress.');
+    meta.appendChild(working);
   }
+  meta.appendChild(sizeEl);
+  bottom.appendChild(meta);
 
-  // Update mode dropdown
-  const modeSelect = document.createElement('select');
-  modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
-  for (const option of UPDATE_MODES) {
-    const opt = document.createElement('option');
-    opt.value = option.value;
-    opt.textContent = option.label;
-    opt.title = option.hint;
-    modeSelect.appendChild(opt);
-  }
-  if ((entry.activeLobbies || 0) === 0) {
-    modeSelect.disabled = true;
-    modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
-  }
-  actions.appendChild(modeSelect);
+  card.appendChild(bottom);
 
-  // Primary action button (Install, Reinstall, Update, Roll back)
-  const actionBtn = document.createElement('button');
-  actionBtn.type = 'button';
-  actionBtn.className = 'btn plugin-action mkt-action';
-  const refreshAction = () => {
-    const decided = versionAction(entry, versionSelect.value,
-      catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
-    actionBtn.textContent = decided.label;
-    actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
-    actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
-    actionBtn.title = decided.blockedReason || '';
-    actionBtn.onclick = () => runPackageAction(entry, decided, modeSelect.value);
-  };
-  versionSelect.onchange = async () => {
-    if (versionSelect.value === 'load:more') {
-      versionSelect.disabled = true;
-      try {
-        const res = await getJson(`/admin/api/marketplace/plugins/${encodeURIComponent(entry.id)}/versions`);
-        if (res?.versions?.length > 0) {
-          const versions = res.versions.map((v) => v.version);
-          entry.availableVersions = versions;
-          entry.repoReleases = res.versions;
-          pluginDiscoveredVersions.set(entry.id, {
-            availableVersions: versions,
-            repoReleases: res.versions,
-          });
-        }
-      } catch (err) {
-        notify(err.message || 'Could not load older versions.', 'error');
-      } finally {
-        entry.versionsLoaded = true;
-        versionSelect.disabled = false;
-        if (entry.availableVersions?.length > 1) {
-          const nextVal = `available:${entry.availableVersions[1]}`;
-          pluginSelectedVersions.set(entry.id, nextVal);
-          populateVersionSelect(nextVal);
-        } else {
-          populateVersionSelect();
-          pluginSelectedVersions.set(entry.id, versionSelect.value);
-        }
-      }
-    } else {
-      pluginSelectedVersions.set(entry.id, versionSelect.value);
-    }
-    refreshAction();
-  };
-  refreshAction();
-  actions.appendChild(actionBtn);
-
-  // Update policy dropdown (installed & managed)
-  if (entry.installed && entry.managed) {
-    const policySelect = document.createElement('select');
-    policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
-    for (const option of UPDATE_POLICIES) {
-      const opt = document.createElement('option');
-      opt.value = option.value;
-      opt.textContent = option.label;
-      opt.title = option.hint;
-      if (option.value === entry.updatePolicy) opt.selected = true;
-      policySelect.appendChild(opt);
-    }
-    policySelect.value = entry.updatePolicy || 'manual';
-    policySelect.disabled = Boolean(pending);
-    policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
-      { policy: policySelect.value });
-    actions.appendChild(policySelect);
-  }
-
-  // Staged launch link
-  if (entry.installed && entry.availability === 'staged') {
-    const copy = document.createElement('button');
-    copy.className = 'btn btn-secondary';
-    copy.type = 'button';
-    copy.textContent = 'Copy launch link';
-    copy.onclick = () => copyStagedLink(entry);
-    actions.appendChild(copy);
-  }
-
-  const spacer = document.createElement('span');
-  spacer.className = 'filter-spacer';
-  actions.appendChild(spacer);
-
-  // Export button (hidden when not installed)
-  if (entry.installed) {
-    const exportBtn = document.createElement('button');
-    exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
-    exportBtn.type = 'button';
-    exportBtn.textContent = 'Export';
-    exportBtn.onclick = () => exportGame(entry.id);
-    actions.appendChild(exportBtn);
-
-    // Delete / Uninstall button (hidden when not installed)
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
-    removeBtn.type = 'button';
-    removeBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
-    if (busy) {
-      removeBtn.disabled = true;
-      removeBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
-    } else if (!entry.deletable) {
-      removeBtn.disabled = true;
-      removeBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
-    } else if (entry.root === 'games') {
-      removeBtn.onclick = () => deleteGame(entry);
-    } else {
-      removeBtn.disabled = Boolean(pending);
-      removeBtn.onclick = () => uninstallGame(entry);
-    }
-    actions.appendChild(removeBtn);
-  }
-
-  card.appendChild(actions);
-
-  if (busy) {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = `${lifecycleLabel(entry.lifecycle)} — package operation in progress.`;
-    card.appendChild(why);
-  } else if (entry.installed && !entry.deletable && entry.deleteBlockedReason) {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = `Delete unavailable: ${entry.deleteBlockedReason} Disable the game instead.`;
-    card.appendChild(why);
-  }
-
-  if (entry.shadowedBy) {
-    const shadow = document.createElement('p');
-    shadow.className = 'game-hint game-hint-block';
-    shadow.textContent =
-      `Also offered by '${entry.shadowedBy}', which takes precedence — installing here uses that copy.`;
-    card.appendChild(shadow);
-  }
-  if (entry.reason && entry.status !== 'installedOnly') {
-    const why = document.createElement('p');
-    why.className = 'game-hint game-hint-block';
-    why.textContent = entry.reason;
-    card.appendChild(why);
-  }
-  if (pending) card.appendChild(jobRow(pending, { compact: true }));
-
+  fitPluginTags(card);
   return card;
+}
+
+// One observer for every compact row's tag strip: when a row resizes (window, sidebar, filter
+// bar), its visible tags are re-fit. Observed nodes are looked up back to their card, so a
+// re-render that replaces the node simply stops being observed — no other state to clean up.
+const pluginTagObserver = typeof ResizeObserver === 'function'
+  ? new ResizeObserver((records) => {
+    for (const record of records) {
+      const card = record.target.closest?.('.plugin-row');
+      if (card) fitPluginTags(card);
+    }
+  })
+  : null;
+
+/**
+ * Hides the tag chips that overflow the strip, showing the `…` chip (with the full tag list as
+ * its tooltip) when any are hidden. Unhides everything first, because a hidden chip measures 0
+ * and a re-fit off stale measurements would hide one more chip every resize.
+ *
+ * Runs after layout — where there is none (jsdom) every width reads 0 and all tags stay visible,
+ * which the unit tests assert structurally instead of by pixels.
+ */
+export function fitPluginTags(card) {
+  const strip = card?.querySelector?.('.plugin-row-tags');
+  if (!strip) return;
+  if (pluginTagObserver && !strip._fitObserved) {
+    strip._fitObserved = true;
+    pluginTagObserver.observe(strip);
+  }
+  const chips = [...strip.querySelectorAll('.plugin-tag-chip')];
+  const ellipsis = strip.querySelector('.plugin-tag-ellipsis');
+  if (!ellipsis) return;
+  for (const chip of chips) chip.hidden = false;
+  ellipsis.hidden = true;
+  if (chips.length === 0 || strip.clientWidth === 0) return;
+  const widths = chips.map((chip) => chip.offsetWidth);
+  const visible = visibleTagCount(widths, strip.clientWidth, ellipsis.offsetWidth || 0);
+  chips.forEach((chip, i) => { chip.hidden = i >= visible; });
+  if (visible < chips.length) {
+    const all = chips.map((chip) => chip.textContent).join(', ');
+    ellipsis.hidden = false;
+    ellipsis.title = all;
+    strip.title = all;
+  }
 }
 
 export function gameCard(game) {
@@ -2270,6 +2065,11 @@ export function openPluginDetails(entry) {
   const body = el('plugin-details-body');
   if (body) {
     body.innerHTML = '';
+
+    // A running package operation shows its live phase, progress and cancel button at the top of
+    // the modal — this is where the card's old inline job row moved with the rest of the controls.
+    const pendingBodyJob = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
+    if (pendingBodyJob) body.appendChild(jobRow(pendingBodyJob, { compact: true }));
 
     // Section 1: Overview & Identity
     const secOverview = document.createElement('div');
@@ -2678,7 +2478,7 @@ export function openPluginDetails(entry) {
     const pending = jobs.find((j) => j.jobId === entry.pendingJobId && !j.terminal);
 
     const versionSelect = document.createElement('select');
-    versionSelect.className = 'text-input filter-narrow mkt-version';
+    versionSelect.className = 'text-input filter-narrow plugin-version mkt-version';
     populateModalVersionSelect = (preferredValue = null) => {
       versionSelect.innerHTML = '';
       for (const option of versionOptions(entry)) {
@@ -2712,12 +2512,15 @@ export function openPluginDetails(entry) {
         availSelect.appendChild(opt);
       }
       availSelect.onchange = () => setAvailability(entry, availSelect.value);
-      if (isBusyLifecycle(entry.lifecycle)) availSelect.disabled = true;
+      if (isBusyLifecycle(entry.lifecycle)) {
+        availSelect.disabled = true;
+        availSelect.title = `${lifecycleLabel(entry.lifecycle)} — availability can't change mid-update.`;
+      }
       actionsHost.appendChild(availSelect);
     }
 
     const modeSelect = document.createElement('select');
-    modeSelect.className = 'text-input filter-narrow mkt-mode';
+    modeSelect.className = 'text-input filter-narrow plugin-mode mkt-mode';
     for (const option of UPDATE_MODES) {
       const opt = document.createElement('option');
       opt.value = option.value;
@@ -2725,17 +2528,49 @@ export function openPluginDetails(entry) {
       opt.title = option.hint;
       modeSelect.appendChild(opt);
     }
-    if ((entry.activeLobbies || 0) === 0) modeSelect.disabled = true;
+    if ((entry.activeLobbies || 0) === 0) {
+      modeSelect.disabled = true;
+      modeSelect.title = 'Nobody is playing this game right now, so it applies immediately either way.';
+    }
     actionsHost.appendChild(modeSelect);
+
+    // Update policy (installed & managed) — moved here with the rest of the controls.
+    if (entry.installed && entry.managed) {
+      const policySelect = document.createElement('select');
+      policySelect.className = 'text-input filter-narrow plugin-policy mkt-policy';
+      for (const option of UPDATE_POLICIES) {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.label;
+        opt.title = option.hint;
+        if (option.value === entry.updatePolicy) opt.selected = true;
+        policySelect.appendChild(opt);
+      }
+      policySelect.value = entry.updatePolicy || 'manual';
+      policySelect.disabled = Boolean(pending);
+      policySelect.onchange = () => postJson(`/admin/api/packages/${encodeURIComponent(entry.id)}/update-policy`,
+        { policy: policySelect.value });
+      actionsHost.appendChild(policySelect);
+    }
+
+    // Staged launch link — moved here with the rest of the controls.
+    if (entry.installed && entry.availability === 'staged') {
+      const copyLink = document.createElement('button');
+      copyLink.type = 'button';
+      copyLink.className = 'btn btn-secondary mkt-staged-link';
+      copyLink.textContent = 'Copy launch link';
+      copyLink.onclick = () => copyStagedLink(entry);
+      actionsHost.appendChild(copyLink);
+    }
 
     const actionBtn = document.createElement('button');
     actionBtn.type = 'button';
-    actionBtn.className = 'btn mkt-action';
+    actionBtn.className = 'btn plugin-action mkt-action';
     refreshModalAction = () => {
       const decided = versionAction(entry, versionSelect.value,
         catalogData?.canInstall === false ? catalogData?.installBlockedReason || 'Installs are unavailable.' : null);
       actionBtn.textContent = decided.label;
-      actionBtn.className = `btn mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
+      actionBtn.className = `btn plugin-action mkt-action ${decided.danger ? 'btn-danger' : 'btn-primary'}`;
       actionBtn.disabled = Boolean(pending) || decided.kind === 'none' || Boolean(decided.blockedReason);
       actionBtn.title = decided.blockedReason || '';
       actionBtn.onclick = () => {
@@ -2758,17 +2593,25 @@ export function openPluginDetails(entry) {
     if (entry.installed) {
       const exportBtn = document.createElement('button');
       exportBtn.type = 'button';
-      exportBtn.className = 'btn btn-primary mkt-export';
+      exportBtn.className = 'btn btn-primary plugin-export game-export mkt-export';
       exportBtn.textContent = 'Export';
       exportBtn.onclick = () => exportGame(entry.id);
       actionsHost.appendChild(exportBtn);
 
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
-      deleteBtn.className = 'btn btn-danger mkt-uninstall';
+      deleteBtn.className = 'btn btn-danger plugin-delete mkt-uninstall';
       deleteBtn.textContent = entry.root === 'games' ? 'Delete' : 'Uninstall';
-      deleteBtn.disabled = Boolean(pending) || (entry.root === 'games' && !entry.deletable);
-      if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      if (isBusyLifecycle(entry.lifecycle)) {
+        deleteBtn.disabled = true;
+        deleteBtn.title = `${lifecycleLabel(entry.lifecycle)} — wait for the update to finish.`;
+      } else if (!entry.deletable) {
+        deleteBtn.disabled = true;
+        deleteBtn.title = entry.deleteBlockedReason || 'This game cannot be deleted on this deployment.';
+      } else {
+        deleteBtn.disabled = Boolean(pending);
+        if (entry.deleteBlockedReason) deleteBtn.title = entry.deleteBlockedReason;
+      }
       deleteBtn.onclick = () => {
         modal.classList.add('hidden');
         if (entry.root === 'games') deleteGame(entry);
@@ -2841,25 +2684,6 @@ function marketplaceLinks(entry) {
     row.appendChild(link);
   }
   return row;
-}
-
-function addFact(host, label, value, sub) {
-  const fact = document.createElement('div');
-  fact.className = 'game-fact';
-  const l = document.createElement('span');
-  l.className = 'game-fact-label';
-  l.textContent = label;
-  const v = document.createElement('span');
-  v.className = 'game-fact-value';
-  v.textContent = value;
-  fact.append(l, v);
-  if (sub) {
-    const s = document.createElement('span');
-    s.className = 'game-fact-sub';
-    s.textContent = sub;
-    fact.appendChild(s);
-  }
-  host.appendChild(fact);
 }
 
 async function setAvailability(game, state) {

@@ -1363,6 +1363,123 @@ export function formatVersion(version) {
   return text ? `v${text.replace(/^v/i, '')}` : '--';
 }
 
+// ── Compact plugin rows ─────────────────────────────────────────────────────
+
+/**
+ * The version indicator for a compact plugin row (top right).
+ *
+ * Installed: the installed version, with ` → <available>` appended when an update is pending
+ * (`status === 'updateAvailable'` with a differing available version). Not installed: the
+ * available version. `{ text, title, hasUpdate }` — `hasUpdate` lets the row style the
+ * indicator without re-deriving the comparison.
+ */
+export function pluginRowVersion(entry) {
+  if (entry?.installed) {
+    const installed = formatVersion(entry.installedVersion);
+    const available = String(entry.availableVersion ?? '').trim();
+    const hasUpdate = entry.status === 'updateAvailable'
+      && available !== ''
+      && available !== String(entry.installedVersion ?? '').trim();
+    if (hasUpdate) {
+      const to = formatVersion(available);
+      return {
+        text: `${installed} → ${to}`,
+        title: `Installed ${installed} — ${to} available`
+          + (entry.sourceName ? ` from ${entry.sourceName}` : ''),
+        hasUpdate: true,
+      };
+    }
+    return { text: installed, title: `Installed version ${installed}`, hasUpdate: false };
+  }
+  const available = formatVersion(entry?.availableVersion);
+  return {
+    text: available,
+    title: available === '--' ? 'No version offered' : `Available version ${available}`,
+    hasUpdate: false,
+  };
+}
+
+/**
+ * The size readout for a compact plugin row (bottom right).
+ *
+ * Installed: total disk usage (files + compressed cache + package), with the breakdown as the
+ * tooltip. Not installed: the download size. `{ text, title }`.
+ */
+export function pluginRowSize(entry) {
+  if (entry?.installed) {
+    const parts = [`Files ${formatBytes(entry.directoryBytes)}`,
+      `compressed ${formatBytes(entry.compressedBytes)}`];
+    if (entry.packageBacked) parts.push(`package ${formatBytes(entry.packageBytes)}`);
+    return { text: formatBytes(entry.diskBytes), title: `On disk: ${parts.join(' + ')}` };
+  }
+  return { text: formatBytes(entry?.sizeBytes), title: 'Download size' };
+}
+
+/**
+ * How many leading tags fit in a tag strip of `containerWidth` px.
+ *
+ * `tagWidths` is the measured width of each chip in order; when not every tag fits, a trailing
+ * `...` chip of `ellipsisWidth` px takes the last slot, so the count is the largest `n` with
+ * `sum(widths[0..n-1]) + ellipsisWidth <= containerWidth`. Returns all tags when they fit, 0
+ * when even the ellipsis alone overflows (the row then shows just `...` with the full list as
+ * its tooltip). Pure so it is unit-testable — jsdom has no layout.
+ */
+export function visibleTagCount(tagWidths, containerWidth, ellipsisWidth = 0) {
+  const widths = Array.isArray(tagWidths) ? tagWidths : [];
+  const container = Number(containerWidth);
+  const ellipsis = Number(ellipsisWidth);
+  if (!Number.isFinite(container) || container < 0) return 0;
+  const total = widths.reduce((sum, w) => sum + (Number(w) || 0), 0);
+  if (total <= container) return widths.length;
+  const gap = Number.isFinite(ellipsis) && ellipsis > 0 ? ellipsis : 0;
+  let used = 0;
+  let count = 0;
+  for (const w of widths) {
+    if (used + (Number(w) || 0) + gap > container) break;
+    used += Number(w) || 0;
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Mini status badges for the bottom-right of a compact plugin row, left of the size readout.
+ *
+ * Only states that are NOT already visible elsewhere on the row: the version arrow covers
+ * update-available, and title/author/tags/description/size cover the rest. Each badge carries a
+ * tooltip (`title`), since the label is abbreviated. `{ label, title, className }` items.
+ */
+export function pluginRowBadges(entry, serverSdkVersion) {
+  const badges = [];
+  if (!entry) return badges;
+  if (isBusyLifecycle(entry.lifecycle)) {
+    const hint = LIFECYCLE.find((l) => l.value === String(entry.lifecycle).toLowerCase())?.hint || '';
+    badges.push({
+      label: lifecycleLabel(entry.lifecycle),
+      title: hint,
+      className: `badge ${lifecycleClass(entry.lifecycle)}`,
+    });
+  }
+  if (entry.status === 'incompatible' || entry.status === 'unusable') {
+    badges.push({
+      label: pluginStatusLabel(entry.status),
+      title: pluginStatusHint(entry.status),
+      className: `badge ${pluginStatusClass(entry.status)}`,
+    });
+  }
+  if (entry.installed && entry.availability && String(entry.availability).toLowerCase() !== 'available') {
+    const name = String(entry.availability).toLowerCase();
+    badges.push({
+      label: availabilityLabel(entry.availability),
+      title: AVAILABILITY.find((a) => a.value === name)?.hint || '',
+      className: `badge ${name === 'staged' ? 'badge-staged' : 'badge-warning'}`,
+    });
+  }
+  const sdk = sdkBadge(entry, serverSdkVersion);
+  if (sdk) badges.push(sdk);
+  return badges;
+}
+
 // ── Platform limits ───────────────────────────────────────────────────────────
 
 /**

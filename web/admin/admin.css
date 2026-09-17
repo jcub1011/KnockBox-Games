@@ -83,6 +83,9 @@
   /* ── Layout Dimensions ─────────────────────────────────────────────────── */
   --admin-header-height: 60px;
   --logs-view-padding: 3rem;
+  /* Compact plugin rows: one fixed height for rows and skeletons alike, so content
+     size and list↔skeleton swaps never move the rows below. */
+  --plugin-row-height: 5.25rem;
 }
 
 /* ── Base Reset ──────────────────────────────────────────────────────────── */
@@ -1592,6 +1595,11 @@ code, pre {
 .plugin-skeleton-card {
   pointer-events: none;
   user-select: none;
+  height: var(--plugin-row-height);
+  min-height: var(--plugin-row-height);
+  max-height: var(--plugin-row-height);
+  justify-content: center;
+  overflow: hidden;
 }
 
 .plugin-skeleton-bar {
@@ -1909,103 +1917,139 @@ code, pre {
   box-shadow: var(--shadow-sm);
 }
 
-.game-card-header {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.9rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.game-card-header h3 {
-  font-family: var(--font-display);
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: var(--text-main);
-  letter-spacing: -0.01em;
-}
-
-.game-card-header code {
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  background-color: var(--bg-well);
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--border-subtle);
-}
-
-.plugin-details-btn {
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  padding: 0.25rem 0.45rem;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.plugin-details-btn:hover {
-  color: var(--text-main);
-  background-color: var(--bg-hover);
-  border-color: var(--border-default);
-}
-
-.plugin-details-btn .dots-icon {
-  width: 1.15rem;
-  height: 1.15rem;
-}
-
-.game-facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.game-fact {
+/* ── Compact plugin rows ───────────────────────────────────────────────────
+   Fixed two-line rows with constant height regardless of content: the top line carries
+   name + author, the tag strip, and the version indicator; the bottom line carries the
+   single-line description plus mini status badges and the size readout. The row is one big
+   button (see pluginCard) that opens the metadata modal, where all controls live. Every
+   truncation is ellipsis + a `title` tooltip holding the full text. */
+.plugin-row {
+  height: var(--plugin-row-height);
+  min-height: var(--plugin-row-height);
+  max-height: var(--plugin-row-height);
+  padding: 0.6rem 0.9rem;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  min-width: 0;
+  justify-content: center;
+  gap: 0.3rem;
+  overflow: hidden;
+  cursor: pointer;
 }
 
-.game-fact-label {
-  font-family: var(--font-display);
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
+.plugin-row:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
 }
 
-.game-fact-value {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-main);
-  font-variant-numeric: tabular-nums;
+.plugin-row:focus-visible {
+  outline: 2px solid var(--accent-mint);
+  outline-offset: 2px;
 }
 
-.game-fact-sub {
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
-  color: var(--text-muted);
-  overflow-wrap: anywhere;
-}
-
-.game-actions {
+.plugin-row-top,
+.plugin-row-bottom {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  flex-wrap: wrap;
-  padding-top: 0.9rem;
-  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.plugin-row-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.plugin-row-name {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-row-author {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 2;
+}
+
+/* The tag strip takes the flexible middle: chips never wrap, overflow is hidden, and
+   fitPluginTags hides what doesn't fit behind the `…` chip (full list as its tooltip). */
+.plugin-row-tags {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.plugin-row-tags .badge {
+  flex-shrink: 0;
+}
+
+.plugin-row-version {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.plugin-row-update {
+  color: var(--accent-amber-text);
+  font-weight: 700;
+}
+
+.plugin-row-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plugin-row-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.plugin-mini-badge {
+  font-size: 0.62rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.plugin-row-size {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  /* The author is the most expendable top-line item on a narrow viewport. */
+  .plugin-row-author {
+    display: none;
+  }
 }
 
 .game-hint {

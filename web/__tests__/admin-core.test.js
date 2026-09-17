@@ -12,8 +12,10 @@ import {
   formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
   playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
+  pluginRowBadges, pluginRowSize, pluginRowVersion,
   tabFromHash, topTabFromHash, uploadGuard,
   validateLimits, versionAction, versionOptionValue, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
+  visibleTagCount,
   webhookEventLabel, checkWebhook, webhookLastDelivery,   mergeSamples, seriesRate, seriesValue,
   seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
   PLUGIN_SORTS, pluginStatusSeverity, sortPlugins,
@@ -851,6 +853,123 @@ describe('formatVersion', () => {
   it('dashes when there is no version, which is normal for a hand-made game', () => {
     expect(formatVersion(null)).toBe('--');
     expect(formatVersion('')).toBe('--');
+  });
+});
+
+describe('compact plugin rows', () => {
+  describe('pluginRowVersion', () => {
+    it('shows installed → available when an update is pending', () => {
+      const row = pluginRowVersion({
+        installed: true, installedVersion: '1.2.0', availableVersion: '1.3.0',
+        status: 'updateAvailable', sourceName: 'Official',
+      });
+      expect(row.text).toBe('v1.2.0 → v1.3.0');
+      expect(row.hasUpdate).toBe(true);
+      expect(row.title).toContain('v1.2.0');
+      expect(row.title).toContain('v1.3.0');
+    });
+
+    it('shows just the installed version when up to date, even with an available version present', () => {
+      const row = pluginRowVersion({
+        installed: true, installedVersion: '1.3.0', availableVersion: '1.3.0', status: 'upToDate',
+      });
+      expect(row.text).toBe('v1.3.0');
+      expect(row.hasUpdate).toBe(false);
+    });
+
+    it('shows the available version for a game that is not installed', () => {
+      const row = pluginRowVersion({ installed: false, availableVersion: '2.0.0', status: 'notInstalled' });
+      expect(row.text).toBe('v2.0.0');
+      expect(row.hasUpdate).toBe(false);
+    });
+
+    it('dashes when there is nothing to show', () => {
+      expect(pluginRowVersion({ installed: true, installedVersion: null, status: 'installedOnly' }).text).toBe('--');
+      expect(pluginRowVersion({ installed: false, availableVersion: null }).text).toBe('--');
+    });
+  });
+
+  describe('pluginRowSize', () => {
+    it('reports total disk usage with the files/compressed/package breakdown as tooltip', () => {
+      const row = pluginRowSize({
+        installed: true, diskBytes: 1000, directoryBytes: 800,
+        compressedBytes: 100, packageBytes: 100, packageBacked: true,
+      });
+      expect(row.text).toBe('1000 B');
+      expect(row.title).toContain('800 B');
+      expect(row.title).toContain('100 B');
+    });
+
+    it('omits the package part for a plain folder game', () => {
+      const row = pluginRowSize({
+        installed: true, diskBytes: 12000, directoryBytes: 8000,
+        compressedBytes: 4000, packageBacked: false,
+      });
+      expect(row.text).toContain('KB');
+      expect(row.title).not.toContain('package');
+    });
+
+    it('reports the download size for a game that is not installed', () => {
+      const row = pluginRowSize({ installed: false, sizeBytes: 1_000_000 });
+      expect(row.text).toBe('977 KB');
+      expect(row.title).toMatch(/download/i);
+    });
+  });
+
+  describe('visibleTagCount', () => {
+    it('fits all tags when they fit', () => {
+      expect(visibleTagCount([40, 50, 30], 200, 20)).toBe(3);
+    });
+
+    it('reserves room for the ellipsis chip when tags overflow', () => {
+      // 40 + 50 + ellipsis 20 = 110 <= 110, but adding the 30 tag needs 140.
+      expect(visibleTagCount([40, 50, 30], 110, 20)).toBe(2);
+    });
+
+    it('returns 0 when even the ellipsis alone overflows', () => {
+      expect(visibleTagCount([40, 50], 10, 20)).toBe(0);
+    });
+
+    it('treats missing or nonsense widths as no tags', () => {
+      expect(visibleTagCount(null, 200, 20)).toBe(0);
+      expect(visibleTagCount([40], -1, 20)).toBe(0);
+    });
+  });
+
+  describe('pluginRowBadges', () => {
+    it('is empty for an ordinary available game — the row already shows its state', () => {
+      expect(pluginRowBadges(
+        { installed: true, availability: 'available', lifecycle: 'ready', status: 'upToDate', sdkStatus: 'unknown' },
+        '1.0.0')).toEqual([]);
+    });
+
+    it('surfaces a busy lifecycle, a problem status, and a non-default availability', () => {
+      const badges = pluginRowBadges(
+        { installed: true, availability: 'staged', lifecycle: 'draining', status: 'upToDate', sdkStatus: 'unknown' },
+        '1.0.0');
+      expect(badges.map((b) => b.label)).toEqual(['Draining', 'Staged']);
+      for (const badge of badges) expect(badge.title).toBeTruthy();
+    });
+
+    it('badges incompatible entries and an outdated SDK stamp', () => {
+      const badges = pluginRowBadges(
+        {
+          installed: false, status: 'incompatible', sdkStatus: 'behind',
+          sdk: { godot: '0.9.0' }, availability: null, lifecycle: 'ready',
+        },
+        '1.0.0');
+      expect(badges.map((b) => b.label)).toEqual(['Incompatible', 'SDK outdated']);
+    });
+
+    it('never badges update-available — the version arrow already says that', () => {
+      const badges = pluginRowBadges(
+        {
+          installed: true, availability: 'available', lifecycle: 'ready',
+          status: 'updateAvailable', sdkStatus: 'unknown',
+        },
+        '1.0.0');
+      expect(badges).toEqual([]);
+    });
   });
 });
 
