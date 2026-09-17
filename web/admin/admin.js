@@ -14,7 +14,7 @@ import {
   checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
   filterPlugins, filterSettings, formatByteLimit, formatBytes, formatClock, formatCount, formatDateTime, formatDuration, formatVersion,
   formatNotificationTime, formatNotificationTimeFull,
-  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isTerminalJob, jobProgress,
+  getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isHttpUrl, isTerminalJob, jobProgress,
   lifecycleLabel, logLevelClass, logLevelTag,   mergeJobs, mergePluginEntries, mergeSamples,
   noLimitOverrides, playerRange, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
   pluginStatusLabel, ratePerSecond,
@@ -1637,6 +1637,8 @@ const pluginSelectedVersions = new Map();
 let lastGamesSummary = null;
 let lastSourceFilterSources = null;
 let renderPendingOnBlur = false;
+let renderPendingFresh = true;
+let renderPendingStale = false;
 
 function summarizeGames(games = []) {
   return (games || []).map((g) => `${g.id}:${g.version}:${g.availability}:${g.lifecycle}:${g.activeLobbies}:${g.activePlayers}`).join('|');
@@ -1648,6 +1650,8 @@ export function resetPluginStateForTests() {
   lastGamesSummary = null;
   lastSourceFilterSources = null;
   renderPendingOnBlur = false;
+  renderPendingFresh = true;
+  renderPendingStale = false;
   activePluginTab = 'installed';
   pluginSort = { installed: 'name-az', updates: 'name-az', available: 'status' };
   pluginsDirty = false;
@@ -1658,7 +1662,7 @@ export function resetPluginStateForTests() {
 
 async function refreshGames({ force = false, render = false } = {}) {
   const data = await getJson('/admin/api/games');
-  if (!data) return;
+  if (!data) return false;
   gameData = data;
   const summary = summarizeGames(data.games);
   const changed = force || summary !== lastGamesSummary;
@@ -1670,20 +1674,33 @@ async function refreshGames({ force = false, render = false } = {}) {
     if (render) renderPlugins();
     else markPluginsStale();
   }
+  return true;
 }
 
 export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
   // The explicit refresh: skeleton, refetch everything, then one render. Poll ticks never come
   // through here — they take refreshGames/refreshJobs directly, which only mark stale.
   const seq = beginPluginsLoad();
-  await Promise.all([
+  const [gamesOk, catalogOk, jobsOk] = await Promise.all([
     refreshGames({ force: true }),
     refreshCatalog({ refresh: refreshCatalogNow }),
     refreshJobs(),
   ]);
   if (seq !== pluginsFetchSeq) return;
   pluginsLoading = false;
-  renderPlugins();
+  if (!gamesOk && !catalogOk && !jobsOk) {
+    // Every feed failed (getJson already showed the error pill): the skeletons hold no data, so
+    // there is nothing to render — and stamping "List updated" would bless an empty list as
+    // fresh. Raise stale instead (beginPluginsLoad hid it) and release the busy state.
+    const host = el('plugins-list') || el('mkt-list') || el('games-list');
+    host?.removeAttribute('aria-busy');
+    markPluginsStale();
+    return;
+  }
+  // A partial failure still renders what arrived, but stays stale on its old timestamp — only a
+  // full success claims freshness.
+  const fresh = Boolean(gamesOk && catalogOk && jobsOk);
+  renderPlugins({ fresh, stale: !fresh });
 }
 
 /**
@@ -1694,10 +1711,17 @@ export async function refreshPlugins({ refreshCatalogNow = false } = {}) {
  */
 async function enterPluginsTab() {
   const seq = beginPluginsLoad();
-  await Promise.all([refreshGames({ force: true }), refreshCatalog(), refreshJobs()]);
+  const [gamesOk, catalogOk, jobsOk] = await Promise.all([refreshGames({ force: true }), refreshCatalog(), refreshJobs()]);
   if (seq !== pluginsFetchSeq) return;
   pluginsLoading = false;
-  renderPlugins();
+  if (!gamesOk && !catalogOk && !jobsOk) {
+    const host = el('plugins-list') || el('mkt-list') || el('games-list');
+    host?.removeAttribute('aria-busy');
+    markPluginsStale();
+    return;
+  }
+  const fresh = Boolean(gamesOk && catalogOk && jobsOk);
+  renderPlugins({ fresh, stale: !fresh });
 }
 
 /**
@@ -1716,7 +1740,9 @@ export function setPluginTab(name) {
   }
   const sort = el('plugins-sort');
   if (sort) sort.value = pluginSort[name] ?? 'name-az';
-  renderPlugins();
+  // Re-slice only: the data is no fresher than it was, so this render must neither clear a
+  // stale pill nor stamp the timestamp.
+  renderPlugins({ fresh: false });
 }
 
 /** Tab counts: each tab's share of the search+source-filtered merge, painted on every render. */
@@ -1768,11 +1794,12 @@ function beginPluginsLoad() {
     host.setAttribute('aria-busy', 'true');
     host.replaceChildren(...Array.from({ length: 6 }, makePluginSkeleton));
   }
-  el('last-updated-plugins').textContent = 'Loading…';
+  const updatedEl = el('last-updated-plugins');
+  if (updatedEl) updatedEl.textContent = 'Loading…';
   return pluginsFetchSeq;
 }
 
-export function renderPlugins() {
+export function renderPlugins({ fresh = true, stale = false } = {}) {
   renderSourceFilter();
   const host = el('plugins-list') || el('mkt-list') || el('games-list');
   if (!host) return;
@@ -1781,6 +1808,8 @@ export function renderPlugins() {
   // do NOT interrupt them. Defer rendering until they blur.
   if (host.contains(document.activeElement)) {
     renderPendingOnBlur = true;
+    renderPendingFresh = fresh;
+    renderPendingStale = stale;
     return;
   }
   renderPendingOnBlur = false;
@@ -1790,7 +1819,7 @@ export function renderPlugins() {
     host.addEventListener('focusout', () => {
       setTimeout(() => {
         if (!host.contains(document.activeElement) && renderPendingOnBlur) {
-          renderPlugins();
+          renderPlugins({ fresh: renderPendingFresh, stale: renderPendingStale });
         }
       }, 50);
     });
@@ -1852,6 +1881,10 @@ export function renderPlugins() {
   if (!isIdentical) {
     host.replaceChildren(...newCards);
   }
+  ensurePluginTagObserver(host);
+  // Cards are fit pre-insertion at creation (widths read 0 there) and observer delivery is
+  // async, so fit explicitly after insert — otherwise rows flash unfitted until the next resize.
+  for (const card of host.querySelectorAll('.plugin-row')) fitPluginTags(card);
   host.removeAttribute('aria-busy');
 
   const disabledBanner = el('mkt-disabled');
@@ -1888,14 +1921,20 @@ export function renderPlugins() {
   setNavCount('marketplace', updatesAvailable());
   setNavCount('games', totalInstalled);
 
-  // The list now reflects the caches, whatever triggered this render — so any stale pill is
-  // answered, the loading state (if this render ends one) resolves, and the panel's timestamp
-  // records the render rather than the last background poll.
+  // The list now reflects the caches, whatever triggered this render — so the loading state
+  // (if this render ends one) resolves. A fully fresh render also answers any stale pill and
+  // records the render in the panel's timestamp; a partial one (fresh: false) leaves both alone —
+  // the rows show what arrived, but the missing feed(s) keep the panel stale. `stale: true`
+  // raises the pill for that case, including on a blur-deferred render.
   pluginsRendered = true;
   pluginsLoading = false;
-  hidePluginsStale();
-  const updatedEl = el('last-updated-plugins');
-  if (updatedEl) updatedEl.textContent = `List updated ${new Date().toLocaleTimeString()}`;
+  if (fresh) {
+    hidePluginsStale();
+    const updatedEl = el('last-updated-plugins');
+    if (updatedEl) updatedEl.textContent = `List updated ${new Date().toLocaleTimeString()}`;
+  } else if (stale) {
+    markPluginsStale();
+  }
 }
 
 export function renderGames() {
@@ -2007,22 +2046,30 @@ export function pluginCard(entry) {
   return card;
 }
 
-// One observer for every compact row's tag strip: when a row resizes (window, sidebar, filter
-// bar), its visible tags are re-fit. Observed nodes are looked up back to their card, so a
-// re-render that replaces the node simply stops being observed — no other state to clean up.
+// One observer on the stable list host: when it resizes (window, sidebar, filter bar),
+// every row's tag strip is re-fit. The host outlives re-renders, so it is observed once —
+// per-strip observation leaked a detached target on every render, since detached nodes stay
+// registered until explicitly unobserved.
 const pluginTagObserver = typeof ResizeObserver === 'function'
   ? new ResizeObserver((records) => {
     for (const record of records) {
-      const card = record.target.closest?.('.plugin-row');
-      if (card) fitPluginTags(card);
+      for (const card of record.target.querySelectorAll?.('.plugin-row') || []) fitPluginTags(card);
     }
   })
   : null;
 
+function ensurePluginTagObserver(host) {
+  if (pluginTagObserver && host && !host._tagsObserved) {
+    host._tagsObserved = true;
+    pluginTagObserver.observe(host);
+  }
+}
+
 /**
  * Hides the tag chips that overflow the strip, showing the `…` chip (with the full tag list as
  * its tooltip) when any are hidden. Unhides everything first, because a hidden chip measures 0
- * and a re-fit off stale measurements would hide one more chip every resize.
+ * and a re-fit off stale measurements would hide one more chip every resize. The ellipsis is
+ * measured while visible for the same reason — hidden it reads 0 and no space is reserved for it.
  *
  * Runs after layout — where there is none (jsdom) every width reads 0 and all tags stay visible,
  * which the unit tests assert structurally instead of by pixels.
@@ -2030,18 +2077,25 @@ const pluginTagObserver = typeof ResizeObserver === 'function'
 export function fitPluginTags(card) {
   const strip = card?.querySelector?.('.plugin-row-tags');
   if (!strip) return;
-  if (pluginTagObserver && !strip._fitObserved) {
-    strip._fitObserved = true;
-    pluginTagObserver.observe(strip);
-  }
   const chips = [...strip.querySelectorAll('.plugin-tag-chip')];
   const ellipsis = strip.querySelector('.plugin-tag-ellipsis');
   if (!ellipsis) return;
   for (const chip of chips) chip.hidden = false;
-  ellipsis.hidden = true;
-  if (chips.length === 0 || strip.clientWidth === 0) return;
+  ellipsis.hidden = false;
+  if (chips.length === 0 || strip.clientWidth === 0) {
+    ellipsis.hidden = true;
+    return;
+  }
   const widths = chips.map((chip) => chip.offsetWidth);
-  const visible = visibleTagCount(widths, strip.clientWidth, ellipsis.offsetWidth || 0);
+  const ellipsisWidth = ellipsis.offsetWidth || 0;
+  let gapWidth = 0;
+  try {
+    const rawGap = getComputedStyle(strip).columnGap;
+    const parsed = parseFloat(rawGap);
+    if (Number.isFinite(parsed) && parsed > 0) gapWidth = parsed;
+  } catch { /* jsdom or no layout — gap stays 0 */ }
+  ellipsis.hidden = true;
+  const visible = visibleTagCount(widths, strip.clientWidth, ellipsisWidth, gapWidth);
   chips.forEach((chip, i) => { chip.hidden = i >= visible; });
   if (visible < chips.length) {
     const all = chips.map((chip) => chip.textContent).join(', ');
@@ -2861,7 +2915,7 @@ async function openLogFiles() {
 // arrivals (notably job completions) update the caches and raise the stale pill instead.
 async function refreshCatalog({ refresh = false, render = false } = {}) {
   const data = await getJson(`/admin/api/marketplace/catalog${refresh ? '?refresh=1' : ''}`);
-  if (!data) return;
+  if (!data) return false;
   catalogData = data;
   // The catalog reply carries the current job set too, so entering the tab costs one request rather
   // than two.
@@ -2869,11 +2923,12 @@ async function refreshCatalog({ refresh = false, render = false } = {}) {
   jobCursor = Math.max(jobCursor, Number(data.jobsLastSequence) || 0);
   if (render) renderPlugins();
   else markPluginsStale();
+  return true;
 }
 
 async function refreshJobs() {
   let data = await getJson(`/admin/api/packages/jobs?after=${jobCursor}`);
-  if (!data) return;
+  if (!data) return false;
 
   // A sequence that went BACKWARDS means the server restarted: the registry is in-memory, so it begins
   // again at 1. Without this, every real job that follows sorts below the stale rows we are still
@@ -2890,7 +2945,7 @@ async function refreshJobs() {
     // missed: re-read at zero in this same tick rather than leaving per-card progress absent until
     // the next poll.
     data = await getJson(`/admin/api/packages/jobs?after=0`);
-    if (!data) return;
+    if (!data) return false;
   }
 
   const lastSequence = Number(data.lastSequence) || 0;
@@ -2924,6 +2979,7 @@ async function refreshJobs() {
     refreshGames();
     refreshCatalog();
   }
+  return true;
 }
 
 function announceJob(job) {
@@ -3254,7 +3310,10 @@ function renderSources() {
     const url = document.createElement('a');
     url.className = 'source-url';
     url.textContent = source.catalogUrl;
-    if (source.catalogUrl) {
+    // Stored settings are operator-controlled (hand-edited file, legacy data): only http(s)
+    // becomes a clickable link, anything else stays inert text. `javascript:`/`data:` URLs
+    // would otherwise be click-to-script for the admin.
+    if (source.catalogUrl && isHttpUrl(source.catalogUrl)) {
       url.href = source.catalogUrl;
       url.target = '_blank';
       url.rel = 'noopener noreferrer';

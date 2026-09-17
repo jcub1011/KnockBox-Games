@@ -1397,22 +1397,26 @@ export function pluginRowSize(entry) {
  *
  * `tagWidths` is the measured width of each chip in order; when not every tag fits, a trailing
  * `...` chip of `ellipsisWidth` px takes the last slot, so the count is the largest `n` with
- * `sum(widths[0..n-1]) + ellipsisWidth <= containerWidth`. Returns all tags when they fit, 0
- * when even the ellipsis alone overflows (the row then shows just `...` with the full list as
- * its tooltip). Pure so it is unit-testable — jsdom has no layout.
+ * `sum(widths[0..n-1]) + ellipsisWidth + gapWidth * n <= containerWidth` (one gap between each
+ * visible chip and one more before the ellipsis). Returns all tags when they fit
+ * (`sum + gapWidth * (n-1) <= containerWidth`), 0 when even the ellipsis alone overflows (the
+ * row then shows just `...` with the full list as its tooltip). Pure so it is unit-testable —
+ * jsdom has no layout.
  */
-export function visibleTagCount(tagWidths, containerWidth, ellipsisWidth = 0) {
+export function visibleTagCount(tagWidths, containerWidth, ellipsisWidth = 0, gapWidth = 0) {
   const widths = Array.isArray(tagWidths) ? tagWidths : [];
   const container = Number(containerWidth);
   const ellipsis = Number(ellipsisWidth);
   if (!Number.isFinite(container) || container < 0) return 0;
-  const total = widths.reduce((sum, w) => sum + (Number(w) || 0), 0);
+  const gapValue = Number(gapWidth);
+  const gap = Number.isFinite(gapValue) && gapValue > 0 ? gapValue : 0;
+  const total = widths.reduce((sum, w) => sum + (Number(w) || 0), 0) + gap * Math.max(0, widths.length - 1);
   if (total <= container) return widths.length;
-  const gap = Number.isFinite(ellipsis) && ellipsis > 0 ? ellipsis : 0;
+  const ell = Number.isFinite(ellipsis) && ellipsis > 0 ? ellipsis : 0;
   let used = 0;
   let count = 0;
   for (const w of widths) {
-    if (used + (Number(w) || 0) + gap > container) break;
+    if (used + (Number(w) || 0) + ell + gap * (count + 1) > container) break;
     used += Number(w) || 0;
     count++;
   }
@@ -1796,6 +1800,18 @@ export const WEBHOOK_EVENTS = [
 
 export function webhookEventLabel(value) {
   return WEBHOOK_EVENTS.find((e) => e.value === value)?.label ?? value;
+}
+
+/**
+ * Whether a stored URL is safe to render as a clickable link. Only http(s) qualifies — stored
+ * settings are operator-controlled (hand-edited file, legacy data), so a `javascript:`/`data:`
+ * URL would otherwise be click-to-script for the admin. Display hardening only; the server
+ * remains the authority on what is fetchable.
+ */
+export function isHttpUrl(value) {
+  let parsed;
+  try { parsed = new URL(String(value ?? '').trim()); } catch { return false; }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:';
 }
 
 /**

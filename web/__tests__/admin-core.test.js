@@ -9,7 +9,7 @@ import {
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
   BYTE_MULTIPLIERS, BYTE_SCALES, BYTE_UNITS, formatByteLimit, splitBytes,
   cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
-  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isTerminalJob,
+  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isHttpUrl, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
   playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
   pluginRowBadges, pluginRowSize, pluginRowVersion,
@@ -429,8 +429,9 @@ describe('availability metadata', () => {
 
   it('explains what each state does, since the difference is not obvious', () => {
     for (const option of AVAILABILITY) expect(option.hint.length).toBeGreaterThan(10);
-    // The one that most needs saying out loud: staged is visibility, not access control.
-    expect(AVAILABILITY.find((a) => a.value === 'staged').hint).toMatch(/not access control/i);
+    // The one that most needs saying out loud: staged hides the game from players but the
+    // direct link still starts it.
+    expect(AVAILABILITY.find((a) => a.value === 'staged').hint).toMatch(/direct link/i);
   });
 
   it('labels a known state and passes through an unknown one', () => {
@@ -902,6 +903,35 @@ describe('compact plugin rows', () => {
     it('treats missing or nonsense widths as no tags', () => {
       expect(visibleTagCount(null, 200, 20)).toBe(0);
       expect(visibleTagCount([40], -1, 20)).toBe(0);
+    });
+
+    it('accounts for the gap between chips and before the ellipsis', () => {
+      // No gap: 40 + 50 + ellipsis 20 = 110 <= 110 → 2.
+      expect(visibleTagCount([40, 50, 30], 110, 20)).toBe(2);
+      // A 6px gap: 40 + 50 + 20 + 2 gaps (12) = 122 > 110 → 1.
+      expect(visibleTagCount([40, 50, 30], 110, 20, 6)).toBe(1);
+      // All fit including inter-chip gaps: 40 + 50 + 30 + 2*6 = 132 <= 140 → 3.
+      expect(visibleTagCount([40, 50, 30], 140, 20, 6)).toBe(3);
+      // Zero/negative/nonsense gaps behave like no gap.
+      expect(visibleTagCount([40, 50, 30], 110, 20, 0)).toBe(2);
+      expect(visibleTagCount([40, 50, 30], 110, 20, -4)).toBe(2);
+      expect(visibleTagCount([40, 50, 30], 110, 20, NaN)).toBe(2);
+    });
+  });
+
+  describe('isHttpUrl', () => {
+    it('accepts http and https URLs', () => {
+      expect(isHttpUrl('https://example.com/CATALOG.json')).toBe(true);
+      expect(isHttpUrl('http://localhost:8080/catalog.json')).toBe(true);
+    });
+
+    it('rejects script-capable and unparseable URLs', () => {
+      expect(isHttpUrl('javascript:alert(1)')).toBe(false);
+      expect(isHttpUrl('data:text/html,<h1>x</h1>')).toBe(false);
+      expect(isHttpUrl('not a url')).toBe(false);
+      expect(isHttpUrl('')).toBe(false);
+      expect(isHttpUrl(null)).toBe(false);
+      expect(isHttpUrl(undefined)).toBe(false);
     });
   });
 
@@ -1382,11 +1412,12 @@ describe('sdkBadge', () => {
     expect(badge.title).toContain('1.0.0');
   });
 
-  it('reports ahead without alarm, since the game still runs', () => {
+  it('reports ahead without alarm, naming what it was built against', () => {
     const badge = sdkBadge({ sdkStatus: 'ahead', sdk: { phaser: '2.0.0' } }, SERVER);
     expect(badge.label).toBe('SDK newer');
     expect(badge.className).toContain('badge-muted');
-    expect(badge.title).toMatch(/still run/);
+    expect(badge.title).toContain('phaser 2.0.0');
+    expect(badge.title).toContain('1.0.0');
   });
 
   it('lists several stamped addons in a stable order', () => {
