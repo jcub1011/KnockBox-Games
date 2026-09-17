@@ -17,7 +17,7 @@ import {
   validateLimits, versionAction, versionOptionValue, versionOptions, checkCodeEntry, blockedShare, WEBHOOK_EVENTS,
   visibleTagCount,
   webhookEventLabel, checkWebhook, webhookLastDelivery,   mergeSamples, seriesRate, seriesValue,
-  seriesCpuPercent, downsample, sparklinePath, formatDateTime, scheduleNote, hourOptionLabel,
+  seriesCpuPercent, downsample, sparklinePath, formatDateTime, hourOptionLabel,
   PLUGIN_SORTS, pluginStatusSeverity, sortPlugins,
   SIDEBAR_COLLAPSED_KEY, getStoredSidebarCollapsed, setStoredSidebarCollapsed, sdkBadge, compareSemVer,
   NOTIFICATION_KINDS, NOTIFICATION_LIMIT, NOTIFICATION_STORAGE_KEY, normalizeNotificationKind,
@@ -247,37 +247,6 @@ describe('formatCount and formatClock', () => {
   it('renders a date as well as a time for something days away', () => {
     expect(formatDateTime('2026-08-16T03:00:00.000Z')).not.toBe('--');
     expect(formatDateTime('not a date')).toBe('--');
-  });
-});
-
-describe('scheduleNote', () => {
-  const base = {
-    summary: 'weekly, Sundays at 03:00 UTC',
-    nextRunUtc: '2026-08-16T03:00:00.000Z',
-    enrolled: 2,
-  };
-
-  it('states the schedule, the next run and the enrolment', () => {
-    const note = scheduleNote(base);
-
-    expect(note).toContain('weekly, Sundays at 03:00 UTC');
-    expect(note).toContain('(your time)');
-    expect(note).toContain('2 game(s) enrolled');
-  });
-
-  it('says nothing is scheduled when checks are off', () => {
-    expect(scheduleNote({ ...base, summary: 'never (scheduled checks are off)', nextRunUtc: null }))
-      .toContain('No check is scheduled.');
-  });
-
-  it('warns when a schedule has nothing to act on', () => {
-    // A pass with an empty enrolment makes no request at all, so the schedule alone does nothing —
-    // an operator who set one and saw no activity would reasonably think it was broken.
-    expect(scheduleNote({ ...base, enrolled: 0 })).toContain('No game is enrolled');
-  });
-
-  it('renders nothing at all when the marketplace is off', () => {
-    expect(scheduleNote(null)).toBe('');
   });
 });
 

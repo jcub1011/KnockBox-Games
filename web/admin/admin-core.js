@@ -438,28 +438,6 @@ export function hourOptionLabel(hourUtc, reference = new Date()) {
   return `${utc} (${local} local${suffix})`;
 }
 
-/**
- * The sentence under the update-schedule form.
- *
- * The next run is stated in the operator's OWN time zone even though the schedule is set in UTC: the
- * point of the line is "will this happen when I think it will", and answering it in the same zone they
- * just typed proves nothing. The enrolment count is here because a schedule with nothing enrolled makes
- * no request at all — an operator who set one and saw no activity would otherwise assume it was broken.
- */
-export function scheduleNote(schedule) {
-  if (!schedule) return '';
-  const parts = [`Checks run ${schedule.summary || 'on no schedule'}.`];
-  parts.push(schedule.nextRunUtc
-    ? `Next check ${formatDateTime(schedule.nextRunUtc)} (your time).`
-    : 'No check is scheduled.');
-  const enrolled = toNumber(schedule.enrolled) ?? 0;
-  parts.push(enrolled > 0
-    ? `${formatCount(enrolled)} game(s) enrolled in automatic updates.`
-    : 'No game is enrolled in automatic updates, so a check currently installs nothing — '
-      + 'set a game’s update policy on the Marketplace tab.');
-  return parts.join(' ');
-}
-
 // ── Rates from cumulative counters ────────────────────────────────────────────
 
 /**

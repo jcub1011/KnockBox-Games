@@ -584,7 +584,7 @@ describe('banned room codes', () => {
 });
 
 describe('update schedule', () => {
-  it('renders the schedule in force and when it next runs', async () => {
+  it('renders the schedule in force', async () => {
     await openPlatform();
 
     expect(el('schedule-cadence').value).toBe('daily');
@@ -594,8 +594,6 @@ describe('update schedule', () => {
     expect(el('schedule-hour').options.length).toBe(24);
     expect(el('schedule-hour').options[3].textContent).toContain('03:00 UTC');
     expect(el('schedule-hour').options[3].textContent).toContain('local');
-    expect(el('schedule-note').textContent).toContain('daily at 03:00 UTC');
-    expect(el('schedule-note').textContent).toContain('2 game(s) enrolled');
     // Not overridden: this is still the configured default.
     expect(el('schedule-badge').hidden).toBe(true);
   });
@@ -664,24 +662,13 @@ describe('update schedule', () => {
     expect(post.body).toEqual({});
   });
 
-  it('says so and disables the form when the marketplace is switched off', async () => {
+  it('disables the form when the marketplace is switched off', async () => {
     await openPlatform({
       'GET /admin/api/updates/schedule': { status: 409, body: { error: 'The marketplace is disabled.' } },
     });
 
     expect(el('schedule-cadence').disabled).toBe(true);
     expect(el('schedule-save').disabled).toBe(true);
-    expect(el('schedule-note').textContent).toContain('MarketplaceEnabled=false');
-  });
-
-  it('warns when a schedule has nothing enrolled to act on', async () => {
-    // A schedule with no enrolled game makes no request at all, so an operator who set one and saw
-    // nothing happen would reasonably conclude it was broken.
-    await openPlatform({
-      'GET /admin/api/updates/schedule': { body: schedule({ enrolled: 0 }) },
-    });
-
-    expect(el('schedule-note').textContent).toContain('No game is enrolled');
   });
 });
 

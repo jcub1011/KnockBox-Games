@@ -18,7 +18,7 @@ import {
   lifecycleLabel, logLevelClass, logLevelTag,   mergeJobs, mergePluginEntries, mergeSamples,
   noLimitOverrides, playerRange, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
   pluginStatusLabel, ratePerSecond,
-  scheduleNote, seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
+  seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
   sortPlugins, sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
   visibleTagCount,
   webhookEventLabel, webhookLastDelivery,
@@ -3545,9 +3545,6 @@ function renderSchedule(data) {
   el('schedule-badge').hidden = !data?.overridden;
 
   if (!available) {
-    el('schedule-note').textContent =
-      'The marketplace is switched off (KnockBox:MarketplaceEnabled=false), so nothing is checked on a '
-      + 'schedule.';
     return;
   }
 
@@ -3557,7 +3554,6 @@ function renderSchedule(data) {
   if (document.activeElement !== hour) hour.value = String(data.hourUtc ?? 3);
 
   applyScheduleCadence();
-  el('schedule-note').textContent = scheduleNote(data);
 }
 
 /** Greys out the fields the chosen cadence does not use. Driven by the select, not by the last save. */
