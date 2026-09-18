@@ -51,8 +51,8 @@ jobs:
     name: .NET build & tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - run: dotnet test --solution KnockBox-Games.slnx
@@ -61,8 +61,8 @@ jobs:
     name: Native AOT publish (warnings gate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       # Native AOT compiles to a native object and links it via clang against zlib; the SDK doesn't
@@ -79,13 +79,13 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "lts/*"
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm ci
+      - run: npm install
       - run: npm test
 
   clients-phaser:
@@ -95,13 +95,13 @@ jobs:
       run:
         working-directory: clients/phaser
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "lts/*"
           cache: npm
           cache-dependency-path: clients/phaser/package-lock.json
-      - run: npm ci
+      - run: npm install
       - run: npm run lint
       - run: npm test
 
@@ -112,13 +112,13 @@ jobs:
       run:
         working-directory: tools/pack-game
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "lts/*"
           cache: npm
           cache-dependency-path: tools/pack-game/package-lock.json
-      - run: npm ci
+      - run: npm install
       - run: npm test
       # Build the release archives on every run, not just at release time. The manifest's file lists
       # are the release job's only input, and a stale entry there would otherwise surface for the
@@ -131,13 +131,13 @@ jobs:
     name: Docker image build & smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      # Needed by the .kbg smoke test below, which builds a package with the real packer. Pinned for
-      # the same reason as the other Node jobs rather than relying on the runner's default version.
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # Needed by the .kbg smoke test below, which builds a package with the real packer. Floated
+      # on lts/* like the other Node jobs rather than relying on the runner's default version.
+      - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "lts/*"
           cache: npm
           cache-dependency-path: tools/pack-game/package-lock.json
 
@@ -176,7 +176,7 @@ jobs:
       # regressed, which is the harder case to notice. Labels live in the image config rather than the
       # layers, so the gha cache still hits.
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         # This action uploads a `*.dockerbuild` build record as a workflow artifact by default. Nothing
         # in this repo reads it, and release.yml pays for it: its download step used to fetch every
         # artifact in the run, so a flake on this one failed a release whose every gate had passed.
@@ -591,7 +591,7 @@ jobs:
       # exercised: the server must expand the package into its own writable cache instead.
       - name: Hot drop-in — a .kbg package installs itself into a read-only games mount
         run: |
-          (cd tools/pack-game && npm ci --silent)
+          (cd tools/pack-game && npm install --silent)
           # tictactoe is the only game committed in full (the others are gitignored build output), so
           # package a copy of it under a DIFFERENT id: the plain tictactoe folder is already in the
           # mount from the step above, and a folder deliberately wins a contested id.
@@ -1096,7 +1096,7 @@ jobs:
 
       - name: Upload the image artifact
         if: inputs.export_image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: container-image
           path: ${{ runner.temp }}/knockbox-image.tar

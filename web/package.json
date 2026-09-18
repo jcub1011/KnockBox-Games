@@ -12,7 +12,7 @@
     "node": ">=24"
   },
   "devDependencies": {
-    "jsdom": "^29.1.1",
-    "vitest": "^4.1.8"
+    "jsdom": "30.x",
+    "vitest": "5.x"
   }
 }

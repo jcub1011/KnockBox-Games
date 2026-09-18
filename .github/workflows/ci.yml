@@ -72,13 +72,13 @@ jobs:
       contents: write    # upload release assets + commit the regenerated index
       id-token: write    # npm trusted publishing (OIDC) — no long-lived NPM_TOKEN in this repo
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: main      # the index is committed to main, not to the detached tag
           fetch-depth: 0
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "lts/*"
           registry-url: https://registry.npmjs.org
 
       # The tag must agree with the manifest, or the index would advertise a version whose archives
