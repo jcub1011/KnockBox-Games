@@ -18,7 +18,7 @@
     "knockbox-pack": "pack-game.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "files": [
     "knockbox.mjs",
@@ -32,6 +32,6 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "vitest": "^4.1.8"
+    "vitest": "5.x"
   }
 }
