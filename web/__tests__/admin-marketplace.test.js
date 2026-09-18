@@ -180,11 +180,17 @@ describe('marketplace catalog', () => {
     expect(body.textContent).toContain('MIT');
 
     const links = [...body.querySelectorAll('.mkt-links a')];
-    expect(links.map((a) => a.textContent)).toEqual(['Homepage', 'Report a problem']);
+    // Icon-only buttons: the glyph carries no text, so the accessible name and the tooltip
+    // carry the function instead.
+    expect(links.map((a) => a.getAttribute('aria-label'))).toEqual(['Homepage', 'Report a problem']);
+    expect(links.map((a) => a.title)).toEqual(['Homepage', 'Report a problem']);
     expect(links.map((a) => a.getAttribute('href')))
       .toEqual(['https://example.com/word-rush', 'https://example.com/word-rush/issues']);
-    // The destination is chosen by the game's author, so it gets neither a window handle nor a referrer.
-    for (const link of links) expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    for (const link of links) {
+      // The destination is chosen by the game's author, so it gets neither a window handle nor a referrer.
+      expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+      expect(link.querySelector('svg.btn-icon-svg[aria-hidden="true"]')).not.toBeNull();
+    }
 
     el('plugin-details-close').click();
   });
@@ -1324,6 +1330,48 @@ describe('combined plugins tile and metadata dialog', () => {
     expect(body.textContent).toContain('v1.0.0');
     expect(body.textContent).toContain('Installed');
     expect(body.textContent).toContain('Downgrade');
+
+    el('plugin-details-close').click();
+  });
+
+  it('clamps the Location path with a full-path tooltip and caps the releases list at four rows', async () => {
+    fake = await openMarketplace({
+      'GET /admin/api/marketplace/plugins/word-rush/versions': {
+        body: {
+          id: 'word-rush',
+          name: 'Word Rush',
+          repo: 'owner/word-rush',
+          currentVersion: '1.3.0',
+          versions: [
+            { version: '1.3.0', tag: 'v1.3.0', sizeBytes: 2_000_000, publishedAt: '2026-09-02T15:00:00Z', isCurrent: true },
+            { version: '1.2.0', tag: 'v1.2.0', sizeBytes: 1_900_000, publishedAt: '2026-08-20T15:00:00Z', isCurrent: false },
+            { version: '1.1.0', tag: 'v1.1.0', sizeBytes: 1_850_000, publishedAt: '2026-08-10T15:00:00Z', isCurrent: false },
+            { version: '1.0.1', tag: 'v1.0.1', sizeBytes: 1_820_000, publishedAt: '2026-08-05T15:00:00Z', isCurrent: false },
+            { version: '1.0.0', tag: 'v1.0.0', sizeBytes: 1_800_000, publishedAt: '2026-08-01T10:00:00Z', isCurrent: false },
+          ],
+        },
+      },
+    });
+
+    card('word-rush').click();
+    await tick();
+    await tick();
+
+    const body = el('plugin-details-body');
+
+    // Location: truncated to two lines in CSS, full path on the tooltip.
+    const locField = [...body.querySelectorAll('.details-field')]
+      .find((f) => f.querySelector('.details-label')?.textContent === 'Location');
+    expect(locField).not.toBeUndefined();
+    const locValue = locField.querySelector('.details-value');
+    expect(locValue.textContent).toBe('/app/games-unpacked/word-rush');
+    expect(locValue.title).toBe('/app/games-unpacked/word-rush');
+    expect(locValue.classList.contains('details-value-clamp')).toBe(true);
+
+    // Releases: every row still rendered, but the wrapper caps the visible height at four.
+    const wrap = body.querySelector('.releases-scroll');
+    expect(wrap).not.toBeNull();
+    expect(wrap.querySelectorAll('tbody tr')).toHaveLength(5);
 
     el('plugin-details-close').click();
   });
