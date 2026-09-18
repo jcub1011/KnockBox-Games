@@ -1,4 +1,9 @@
 using KnockBox.Server.Admin;
+using KnockBox.Server.Games;
+using KnockBox.Server.Hosting;
+using KnockBox.Server.Lobbies;
+using KnockBox.Server.Marketplace;
+using KnockBox.Server.Networking;
 using KnockBox.Server.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -133,5 +138,98 @@ public class GameUpdateCoordinatorTests : IDisposable
         store.SetMaintenance(true, null);
 
         Assert.Equal(UpdatePolicy.Auto, NewStore().GetUpdatePolicy("not-installed-yet"));
+    }
+
+    [Fact]
+    public async Task An_enrolled_game_without_an_installed_version_still_updates()
+    {
+        // Every hand-made game (including all bundled samples) declares no GAME.json version, so the
+        // evaluator reports InstalledVersionUnknown rather than UpdateAvailable. The scheduler must
+        // still apply the catalog's offered version once the operator enrolled the game — otherwise
+        // Refresh discovers an update on every visit while no cadence ever applies one.
+        var root = Path.Combine(_dir, "scheduled");
+        var gamesRoot = Path.Combine(root, "games");
+        var unpackedRoot = Path.Combine(root, "games-unpacked");
+        var managedRoot = Path.Combine(root, "games-managed");
+        Directory.CreateDirectory(Path.Combine(gamesRoot, "demo"));
+        File.WriteAllText(
+            Path.Combine(gamesRoot, "demo", "GAME.json"),
+            """{"id":"demo","name":"Demo","entry":"index.html","maxPlayers":2}""");
+        File.WriteAllText(Path.Combine(gamesRoot, "demo", "index.html"), "<html></html>");
+        Directory.CreateDirectory(unpackedRoot);
+        Directory.CreateDirectory(managedRoot);
+
+        var catalog = new GameCatalog([gamesRoot], NullLogger<GameCatalog>.Instance);
+        catalog.Discover();
+        Assert.True(catalog.TryGet("demo", out _));
+
+        var store = NewStore();
+        Assert.Null(store.SetUpdatePolicy("demo", UpdatePolicy.Auto));
+
+        const string catalogUrl = "http://127.0.0.1:9/CATALOG.json";
+        var catalogJson = """
+            {
+              "schemaVersion": "1.0.0",
+              "name": "Test",
+              "revision": 1,
+              "plugins": [
+                {
+                  "id": "demo",
+                  "name": "Demo",
+                  "version": "1.0.0",
+                  "source": {
+                    "type": "github-release",
+                    "repo": "o/r",
+                    "tag": "v1",
+                    "asset": "demo.kbg",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                }
+              ]
+            }
+            """;
+        var fakeHttp = new FakeHttpMessageHandler();
+        fakeHttp.Map(catalogUrl, catalogJson);
+        var options = new MarketplaceOptions(
+            true, catalogUrl, "https://github.com",
+            4L * 1024 * 1024, 100L * 1024 * 1024,
+            TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(10));
+        var registry = new MarketplaceSourceRegistry(
+            fakeHttp.Client(), options, GamePackageLimits.Default, store,
+            maxSources: 8, NullLoggerFactory.Instance);
+
+        var paths = new ContentPaths.Resolved(
+            Path.Combine(root, "web"), gamesRoot, Path.Combine(root, "logs"),
+            Path.Combine(root, "games-compressed"), unpackedRoot, managedRoot)
+        { BlobsRoot = Path.Combine(root, "blobs") };
+        var installer = new GamePackageInstaller(
+            [new(gamesRoot, PackageMarker.GamesRoot), new(managedRoot, PackageMarker.ManagedRoot)],
+            unpackedRoot, GamePackageLimits.Default, null, NullLogger<GamePackageInstaller>.Instance);
+        var jobs = new PackageJobRegistry(TimeProvider.System);
+        var lobbies = new LobbyManager(TimeProvider.System);
+        var connections = new ConnectionManager();
+        var gate = new GameLifecycleGate(store);
+        var packages = new PackageManager(
+            paths, catalog, installer, jobs, gate, lobbies,
+            new LobbyCloser(lobbies, connections, NullLogger<LobbyCloser>.Instance),
+            GamePackageLimits.Default, new PackageManagerOptions(),
+            TimeProvider.System, NullLogger<PackageManager>.Instance);
+
+        var coordinator = new GameUpdateCoordinator(
+            registry, packages, catalog, store, NullLogger<GameUpdateCoordinator>.Instance);
+
+        try
+        {
+            var pass = await coordinator.RunOnceAsync();
+            Assert.Null(pass.Error);
+            Assert.Equal(1, pass.Considered);
+            Assert.Equal(1, pass.Started);
+        }
+        finally
+        {
+            catalog.Dispose();
+            foreach (var job in jobs.Snapshot())
+                jobs.Cancel(job.JobId);
+        }
     }
 }
