@@ -220,7 +220,7 @@ public class GameUpdateCoordinatorTests : IDisposable
 
         try
         {
-            var pass = await coordinator.RunOnceAsync();
+            var pass = await coordinator.RunOnceAsync(TestContext.Current.CancellationToken);
             Assert.Null(pass.Error);
             Assert.Equal(1, pass.Considered);
             Assert.Equal(1, pass.Started);

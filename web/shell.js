@@ -1726,7 +1726,25 @@ initHeroTileDrag();
 // functions (and call connect() itself) without an auto-connect to suppress.
 export function bootstrap() {
   applyRandomFavicon();
+  loadServerVersion();
   connect();
+}
+
+// The server version under the hero title — same shape as the portal's label: a public endpoint,
+// silent on failure, hidden until painted.
+async function loadServerVersion() {
+  try {
+    const res = await fetch('/api/server-version');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data?.version !== 'string' || !data.version) return;
+    const link = el('server-version');
+    if (!link) return;
+    link.textContent = `v${data.version}`;
+    link.hidden = false;
+  } catch {
+    // Leave the label hidden; the page is fully usable without it.
+  }
 }
 
 // Swap the page's favicon to a random cat on load (recreating the legacy server's per-render pick).

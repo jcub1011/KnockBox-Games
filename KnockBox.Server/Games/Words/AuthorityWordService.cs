@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
-using KnockBox.Contracts;
 
 namespace KnockBox.Server.Games.Words;
 

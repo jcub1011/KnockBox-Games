@@ -1,5 +1,3 @@
-using KnockBox.Contracts;
-
 namespace KnockBox.Server.Games.Words;
 
 /// <summary>

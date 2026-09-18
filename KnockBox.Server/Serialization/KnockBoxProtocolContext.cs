@@ -49,6 +49,9 @@ namespace KnockBox.Server.Serialization;
 [JsonSerializable(typeof(AdminWebhooksResponse))]
 [JsonSerializable(typeof(AdminMetricHistoryResponse))]
 [JsonSerializable(typeof(AdminUpdateScheduleResponse))]
+// The public, unauthenticated version endpoint (Hosting/ServerVersionApi). A wire type like any
+// other, so it needs the entry like any other — see AdminApiSerializationTests.
+[JsonSerializable(typeof(ServerVersionResponse))]
 // Request bodies.
 [JsonSerializable(typeof(AdminCloseLobbiesRequest))]
 [JsonSerializable(typeof(AdminPurgeStaleRequest))]

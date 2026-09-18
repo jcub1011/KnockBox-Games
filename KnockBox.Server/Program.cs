@@ -1308,6 +1308,12 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
     }
 });
 
+// The server version for the unauthenticated player shell (the admin origin maps the same path
+// inside its own branch in MapAdminApi — a MapWhen branch never falls through to here). Public:
+// the version is printed in page headers, so hiding it behind a session would only move the
+// label behind the login it sits above.
+app.MapServerVersion();
+
 // ── Admin origin (separate port in dev, subdomain in prod) ─────────────────────
 // Dedicated admin portal. Public player files, game bundles (/games), and /ws are excluded.
 app.MapWhen(

@@ -1,6 +1,5 @@
 using System.Text.Json;
 using KnockBox.Contracts;
-using KnockBox.Server.Admin;
 using KnockBox.Server.Games;
 using KnockBox.Server.Games.Words;
 using KnockBox.Server.Lobbies;

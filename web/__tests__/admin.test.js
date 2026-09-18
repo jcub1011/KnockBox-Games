@@ -225,6 +225,50 @@ describe('bootstrap favicon', () => {
   });
 });
 
+describe('server version label', () => {
+  it('paints the version under the portal title from the public endpoint', async () => {
+    fake = installFakeFetch({
+      'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } },
+      'GET /api/server-version': { body: { version: '1.4.0' } },
+    });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    // Renders even before login: the endpoint needs no session.
+    const link = el('server-version');
+    expect(link.hidden).toBe(false);
+    expect(link.textContent).toBe('v1.4.0');
+    expect(link.getAttribute('href')).toBe('https://github.com/jcub1011/KnockBox-Games/releases');
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
+
+  it('stays hidden when the version endpoint is unreachable', async () => {
+    fake = installFakeFetch({
+      'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } },
+    });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    expect(el('server-version').hidden).toBe(true);
+    // And no error pill for one decorative string.
+    expect(el('server-status-pill').hidden).toBe(true);
+  });
+
+  it('stays hidden on a malformed version payload', async () => {
+    fake = installFakeFetch({
+      'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } },
+      'GET /api/server-version': { body: { version: 42 } },
+    });
+    await importAdmin();
+    admin.bootstrap();
+    await tick();
+
+    expect(el('server-version').hidden).toBe(true);
+  });
+});
+
 describe('auth state selects the view', () => {
   it('shows the setup form on an unclaimed server', async () => {
     fake = installFakeFetch({ 'GET /admin/api/auth/status': { body: { configured: false, authenticated: false } } });

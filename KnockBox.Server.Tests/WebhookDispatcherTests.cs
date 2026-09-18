@@ -87,7 +87,7 @@ public class WebhookDispatcherTests : IDisposable
             WebhookEvent.MaintenanceChanged, "Maintenance mode ON.", _time.GetUtcNow()));
         await DrainOnce(dispatcher, queue);
 
-        var body = await Assert.Single(_http.Requests).Content!.ReadAsStringAsync();
+        var body = await Assert.Single(_http.Requests).Content!.ReadAsStringAsync(TestContext.Current.CancellationToken);
         using var json = JsonDocument.Parse(body);
         // Discord renders `content` and ignores the rest; Slack renders `text`. Carrying both is what lets
         // an operator paste either kind of URL in and have it just work, with no per-service formatting.
