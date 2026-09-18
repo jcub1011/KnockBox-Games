@@ -177,6 +177,28 @@ code, pre {
   margin-left: 1px;
 }
 
+/* Brand title + server version stack: the version sits directly under the title as a quiet
+   sub-line. Inline anchor, so the UA [hidden] rule keeps working until admin.js paints it. */
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.brand-version {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  text-decoration: none;
+  width: fit-content;
+}
+
+.brand-version:hover {
+  color: var(--accent-mint);
+  text-decoration: underline;
+}
+
 .header-actions {
   display: flex;
   align-items: center;

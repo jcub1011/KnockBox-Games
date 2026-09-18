@@ -7,7 +7,7 @@
 // (b) the WebSocket protocol + DOM events. Assertions read observable state: sent frames, DOM
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { loadShellDom, FakeWebSocket, installFakeWebSocket, stubClipboard, tick } from './helpers.js';
+import { loadShellDom, FakeWebSocket, installFakeWebSocket, installFakeFetch, stubClipboard, tick } from './helpers.js';
 import { ADMIN_FAVICON, FAVICONS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
 
 const el = (id) => document.getElementById(id);
@@ -128,6 +128,42 @@ describe('handshake & identity', () => {
     const pathname = new URL(link.href).pathname;
     expect(FAVICONS).toContain(pathname);
     expect(pathname).not.toBe(ADMIN_FAVICON);
+  });
+});
+
+describe('server version label', () => {
+  it('paints the version under the hero title from the public endpoint', async () => {
+    installFakeFetch({ 'GET /api/server-version': { body: { version: '1.4.0' } } });
+    await importShell();
+    shell.bootstrap();
+    await tick();
+
+    const link = el('server-version');
+    expect(link.hidden).toBe(false);
+    expect(link.textContent).toBe('v1.4.0');
+    expect(link.getAttribute('href')).toBe('https://github.com/jcub1011/KnockBox-Games/releases');
+    expect(link.getAttribute('target')).toBe('_blank');
+    // Centered between the banner and the tagline, not inside the hero.
+    expect(link.previousElementSibling.classList.contains('hero-banner')).toBe(true);
+    expect(link.nextElementSibling.classList.contains('hero-tagline')).toBe(true);
+  });
+
+  it('stays hidden when the version endpoint is unreachable', async () => {
+    installFakeFetch({});
+    await importShell();
+    shell.bootstrap();
+    await tick();
+
+    expect(el('server-version').hidden).toBe(true);
+  });
+
+  it('stays hidden on a malformed version payload', async () => {
+    installFakeFetch({ 'GET /api/server-version': { body: { version: null } } });
+    await importShell();
+    shell.bootstrap();
+    await tick();
+
+    expect(el('server-version').hidden).toBe(true);
   });
 });
 

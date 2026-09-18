@@ -4345,5 +4345,25 @@ function applyAdminFavicon() {
 export function bootstrap() {
   applyAdminFavicon();
   wire();
+  loadServerVersion();
   checkAuthStatus();
+}
+
+// The server version under the portal title. Public and unauthenticated on purpose: the label
+// renders on the setup/login views too, and the version is not sensitive. Silent on failure —
+// a missing label beats an error pill for one decorative string, so this deliberately does not
+// go through getJson (which would paint one).
+async function loadServerVersion() {
+  try {
+    const res = await fetch('/api/server-version');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data?.version !== 'string' || !data.version) return;
+    const link = el('server-version');
+    if (!link) return;
+    link.textContent = `v${data.version}`;
+    link.hidden = false;
+  } catch {
+    // Leave the label hidden; the page is fully usable without it.
+  }
 }
