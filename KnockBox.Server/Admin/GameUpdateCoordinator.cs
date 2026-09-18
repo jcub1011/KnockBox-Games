@@ -36,6 +36,10 @@ public sealed class GameUpdateCoordinator(
     /// <see cref="PluginUpdateStatus.Incompatible"/> outranks an available update, so a game whose new
     /// version cannot run on this server is never started — <see cref="PluginUpdateEvaluator"/> has
     /// already made that call, and this only acts on <see cref="PluginUpdateStatus.UpdateAvailable"/>.
+    /// An enrolled game whose installed copy declares no comparable version
+    /// (<see cref="PluginUpdateStatus.InstalledVersionUnknown"/>) is also acted on: the operator
+    /// explicitly asked for automatic updates, so the "don't nag about every hand-made game" rule
+    /// no longer applies, and the catalog's offered version is the only comparable one there is.
     /// </remarks>
     public async Task<PassResult> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -70,7 +74,14 @@ public sealed class GameUpdateCoordinator(
                 var id = status.Entry.Id ?? "";
                 // First source to offer an id wins, matching how the portal's merged view resolves it.
                 if (id.Length == 0 || !claimed.Add(id)) continue;
-                if (status.Status != PluginUpdateStatus.UpdateAvailable) continue;
+                // UpdateAvailable is the normal case. InstalledVersionUnknown is the version-less
+                // installed copy (every hand-made game, including all bundled samples): with no
+                // installed version to compare, the evaluator can never report UpdateAvailable, so
+                // an enrolled game would otherwise be discovered on every Refresh yet never applied
+                // on any schedule, regardless of cadence. Incompatible/InstalledAhead/UpToDate and
+                // the rest are still correct skips.
+                if (status.Status != PluginUpdateStatus.UpdateAvailable &&
+                    status.Status != PluginUpdateStatus.InstalledVersionUnknown) continue;
 
                 var policy = settings.GetUpdatePolicy(id);
                 if (policy == UpdatePolicy.Manual) continue;

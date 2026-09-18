@@ -253,6 +253,17 @@ const NOTIF_ICON_X = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" 
   + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
   + '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
 
+// Glyphs for the plugin-details homepage/issues icon buttons, same stroke treatment
+// (stroke currentColor) as the header and notification icons. Static strings, like NOTIF_ICON_*.
+const MKT_ICON_GLOBE = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line>'
+  + '<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>';
+const MKT_ICON_BUG = '<svg class="btn-icon-svg" viewBox="0 0 24 24" fill="none" '
+  + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<rect x="8.5" y="7" width="7" height="13" rx="3.5"></rect><line x1="12" y1="7" x2="12" y2="20"></line>'
+  + '<path d="M9 7V4M15 7V4M8.5 10.5H4M8.5 14H4M8.5 17.5H5.5M15.5 10.5H20M15.5 14H20M15.5 17.5H18.5"></path></svg>';
+
 /**
  * Paints a mark read/unread toggle as the icon for the action it will take. Icon-only, so the
  * accessible name carries the meaning the text used to.
@@ -2218,7 +2229,7 @@ export function openPluginDetails(entry) {
         addDetailField(gridStorage, 'Retained Backups Size', formatBytes(entry.backupBytes));
       }
       if (entry.directory) {
-        addDetailField(gridStorage, 'Location', entry.directory, true);
+        addDetailField(gridStorage, 'Location', entry.directory, true, entry.directory);
       }
     } else {
       addDetailField(gridStorage, 'Download Size', formatBytes(entry.sizeBytes));
@@ -2432,7 +2443,8 @@ export function openPluginDetails(entry) {
 
       const renderReleasesTable = (releases) => {
         const tableWrap = document.createElement('div');
-        tableWrap.className = 'table-scroll';
+        // Capped at four rows before scrolling, so a long release history doesn't stretch the modal.
+        tableWrap.className = 'table-scroll releases-scroll';
         const table = document.createElement('table');
         table.className = 'data-table';
         table.innerHTML = '<thead><tr><th>Version</th><th>Tag</th><th>Size</th><th>Released Date</th><th>Action</th></tr></thead>';
@@ -2686,7 +2698,7 @@ export function openPluginDetails(entry) {
   modal.classList.remove('hidden');
 }
 
-function addDetailField(host, label, value, isCode = false) {
+function addDetailField(host, label, value, isCode = false, tooltip = null) {
   const field = document.createElement('div');
   field.className = 'details-field';
   const l = document.createElement('span');
@@ -2696,6 +2708,11 @@ function addDetailField(host, label, value, isCode = false) {
   const v = document.createElement(isCode ? 'code' : 'span');
   v.className = 'details-value';
   v.textContent = value;
+  if (tooltip) {
+    // Truncated with an ellipsis (see .details-value-clamp); the full text lives on the tooltip.
+    v.title = tooltip;
+    v.classList.add('details-value-clamp');
+  }
   field.appendChild(v);
   host.appendChild(field);
 }
@@ -2717,20 +2734,26 @@ function httpsUrl(value) {
   }
 }
 
-/** The homepage/issues row, or null when the entry offers neither usable link. */
+/** The homepage/issues row as icon buttons, or null when the entry offers neither usable link. */
 function marketplaceLinks(entry) {
   const targets = [
-    ['Homepage', httpsUrl(entry.homepage)],
-    ['Report a problem', httpsUrl(entry.bugs)],
+    ['Homepage', httpsUrl(entry.homepage), MKT_ICON_GLOBE],
+    ['Report a problem', httpsUrl(entry.bugs), MKT_ICON_BUG],
   ].filter(([, href]) => href);
   if (targets.length === 0) return null;
 
   const row = document.createElement('div');
   row.className = 'mkt-links';
-  for (const [label, href] of targets) {
+  for (const [label, href, icon] of targets) {
     const link = document.createElement('a');
     link.href = href;
-    link.textContent = label;
+    // Icon-only, so the accessible name and the tooltip both carry the function the glyph alone
+    // cannot (same aria-label/title pairing as .btn-icon-only elsewhere in the portal).
+    link.className = 'btn btn-secondary btn-small btn-icon-only';
+    link.setAttribute('aria-label', label);
+    link.title = label;
+    // Static glyphs, same trust shape as NOTIF_ICON_*: the href above is the only author-supplied part.
+    link.innerHTML = icon;
     link.target = '_blank';
     // noreferrer as well as noopener: the destination is chosen by the game's author, and an admin
     // portal URL is not something they need to be told.
