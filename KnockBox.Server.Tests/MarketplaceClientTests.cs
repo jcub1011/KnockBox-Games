@@ -62,7 +62,7 @@ public class MarketplaceClientTests : IDisposable
     {
         _http.Map(MarketplaceFixture.CatalogUrl, MarketplaceFixture.Catalog(new Entry(Id: "demo", Version: "1.2.3")));
 
-        var catalog = await New().GetCatalogAsync();
+        var catalog = await New().GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal("demo", Assert.Single(catalog.Plugins!).Id);
         Assert.Equal("1.2.3", catalog.Plugins![0].Version);
@@ -75,8 +75,8 @@ public class MarketplaceClientTests : IDisposable
         _http.MapConditional(MarketplaceFixture.CatalogUrl, body, "\"rev-4\"");
 
         var client = New();
-        var first = await client.GetCatalogAsync();
-        var second = await client.GetCatalogAsync();
+        var first = await client.GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken);
+        var second = await client.GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Same content, and the second call sent a conditional request rather than re-reading a body.
         Assert.Equal("1.2.3", second.Plugins![0].Version);
@@ -92,8 +92,8 @@ public class MarketplaceClientTests : IDisposable
         _http.MapConditional(MarketplaceFixture.CatalogUrl, body, "\"rev-4\"");
 
         var client = New();
-        await client.GetCatalogAsync();
-        await client.GetCatalogAsync(forceRefresh: true);
+        await client.GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken);
+        await client.GetCatalogAsync(forceRefresh: true, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.DoesNotContain("If-None-Match", _http.Requests[1].Headers.Select(h => h.Key));
     }
@@ -103,7 +103,7 @@ public class MarketplaceClientTests : IDisposable
     {
         _http.MapStatus(MarketplaceFixture.CatalogUrl, HttpStatusCode.ServiceUnavailable);
 
-        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New().GetCatalogAsync())).Message;
+        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New().GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken))).Message;
 
         Assert.Contains("503", message);
         Assert.Contains(MarketplaceFixture.CatalogUrl, message);
@@ -114,7 +114,7 @@ public class MarketplaceClientTests : IDisposable
     {
         _http.MapUnreachable(MarketplaceFixture.CatalogUrl);
 
-        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New().GetCatalogAsync())).Message;
+        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New().GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken))).Message;
         Assert.Contains("could not reach", message);
     }
 
@@ -125,7 +125,7 @@ public class MarketplaceClientTests : IDisposable
         _http.Map(MarketplaceFixture.CatalogUrl, new string('x', 4096));
         var options = MarketplaceFixture.Options() with { MaxCatalogBytes = 512 };
 
-        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New(options).GetCatalogAsync())).Message;
+        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New(options).GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken))).Message;
 
         Assert.Contains("512-byte limit", message);
         Assert.Contains("MarketplaceMaxCatalogBytes", message);
@@ -137,7 +137,7 @@ public class MarketplaceClientTests : IDisposable
         _http.MapHang(MarketplaceFixture.CatalogUrl);
         var options = MarketplaceFixture.Options() with { CatalogTimeout = TimeSpan.FromMilliseconds(150) };
 
-        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New(options).GetCatalogAsync())).Message;
+        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New(options).GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken))).Message;
 
         Assert.Contains("timed out", message);
         Assert.Contains("MarketplaceCatalogTimeoutSeconds", message);
@@ -158,7 +158,7 @@ public class MarketplaceClientTests : IDisposable
     {
         var options = MarketplaceFixture.Options() with { CatalogUrl = "http://marketplace.test/CATALOG.json" };
 
-        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New(options).GetCatalogAsync())).Message;
+        var message = (await Assert.ThrowsAsync<MarketplaceException>(() => New(options).GetCatalogAsync(cancellationToken: TestContext.Current.CancellationToken))).Message;
 
         Assert.Contains("MarketplaceCatalogUrl", message);
         Assert.Empty(_http.Requests);
@@ -172,14 +172,14 @@ public class MarketplaceClientTests : IDisposable
         var package = MarketplaceFixture.Package("demo", "1.0.0");
         var plugin = Publish("demo", "1.0.0", package);
 
-        using var downloaded = await New().DownloadAsync(plugin, _dir);
+        using var downloaded = await New().DownloadAsync(plugin, _dir, TestContext.Current.CancellationToken);
 
         Assert.Equal("demo", downloaded.Id);
         Assert.Equal("1.0.0", downloaded.Version);
         Assert.Equal(package.Length, downloaded.Bytes);
         Assert.Equal(MarketplaceFixture.Sha256(package), downloaded.Sha256);
         Assert.True(File.Exists(downloaded.Path));
-        Assert.Equal(package, await File.ReadAllBytesAsync(downloaded.Path));
+        Assert.Equal(package, await File.ReadAllBytesAsync(downloaded.Path, TestContext.Current.CancellationToken));
         Assert.EndsWith(GamePackage.Extension, downloaded.Path);
     }
 
@@ -187,7 +187,7 @@ public class MarketplaceClientTests : IDisposable
     public async Task Builds_the_download_url_from_the_catalog_rather_than_taking_one()
     {
         var plugin = Publish("demo");
-        using var _ = await New().DownloadAsync(plugin, _dir);
+        using var _ = await New().DownloadAsync(plugin, _dir, TestContext.Current.CancellationToken);
 
         Assert.Equal(
             $"{MarketplaceFixture.DownloadBase}/{MarketplaceFixture.Repo}/releases/download/{MarketplaceFixture.Tag}/demo.kbg",
@@ -197,7 +197,7 @@ public class MarketplaceClientTests : IDisposable
     [Fact]
     public async Task Disposing_a_download_removes_the_file()
     {
-        var downloaded = await New().DownloadAsync(Publish(), _dir);
+        var downloaded = await New().DownloadAsync(Publish(), _dir, TestContext.Current.CancellationToken);
         var path = downloaded.Path;
 
         downloaded.Dispose();
@@ -349,7 +349,7 @@ public class MarketplaceClientTests : IDisposable
         var plugin = Catalogued(new Entry(
             SourceJson: MarketplaceFixture.Source("demo.kbg", MarketplaceFixture.Sha256(package))));
 
-        await Assert.ThrowsAnyAsync<Exception>(() => New().DownloadAsync(plugin, _dir));
+        await Assert.ThrowsAnyAsync<Exception>(() => New().DownloadAsync(plugin, _dir, TestContext.Current.CancellationToken));
         AssertNothingLeftBehind();
     }
 
@@ -414,7 +414,7 @@ public class MarketplaceClientTests : IDisposable
 
         var strict = Generous with { MaxEntries = 1 };
         var message = (await Assert.ThrowsAsync<MarketplaceException>(
-            () => New(limits: strict).DownloadAsync(plugin, _dir))).Message;
+            () => New(limits: strict).DownloadAsync(plugin, _dir, TestContext.Current.CancellationToken))).Message;
 
         Assert.Contains("not a valid .kbg package", message);
         Assert.Contains("entries", message);
@@ -442,13 +442,13 @@ public class MarketplaceClientTests : IDisposable
         var client = New();
         var plugin = Publish("demo", "1.0.0");
 
-        using var first = await client.DownloadAsync(plugin, _dir);
-        using var again = await client.DownloadAsync(plugin, _dir);
+        using var first = await client.DownloadAsync(plugin, _dir, TestContext.Current.CancellationToken);
+        using var again = await client.DownloadAsync(plugin, _dir, TestContext.Current.CancellationToken);
         Assert.Equal(first.Path, again.Path);
         Assert.Single(Directory.GetFiles(_dir));
 
         var other = Publish("other", "1.0.0");
-        using var second = await client.DownloadAsync(other, _dir);
+        using var second = await client.DownloadAsync(other, _dir, TestContext.Current.CancellationToken);
         Assert.NotEqual(first.Path, second.Path);
         Assert.Equal(2, Directory.GetFiles(_dir).Length);
     }
@@ -536,13 +536,13 @@ public class MarketplaceClientTests : IDisposable
         var url = $"{MarketplaceFixture.DownloadBase}/repos/owner/alpha/releases";
         _http.Map(url, json);
 
-        var releases = await client.GetRepoReleasesAsync("owner/alpha", "alpha");
+        var releases = await client.GetRepoReleasesAsync("owner/alpha", "alpha", cancellationToken: TestContext.Current.CancellationToken);
         Assert.Single(releases);
         Assert.Equal("1.0.0", releases[0].Version);
         Assert.Single(_http.Requests);
 
         // Second call hits cache without calling HTTP again
-        var cached = await client.GetRepoReleasesAsync("owner/alpha", "alpha");
+        var cached = await client.GetRepoReleasesAsync("owner/alpha", "alpha", cancellationToken: TestContext.Current.CancellationToken);
         Assert.Single(cached);
         Assert.Equal("1.0.0", cached[0].Version);
         Assert.Single(_http.Requests);

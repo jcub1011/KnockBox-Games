@@ -172,7 +172,7 @@ public class AtomicFileTests : IDisposable
     {
         var (source, destination) = Pair();
 
-        await AtomicFile.MoveWithRetryAsync(source, destination);
+        await AtomicFile.MoveWithRetryAsync(source, destination, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal("new", File.ReadAllText(destination));
         Assert.False(File.Exists(source));

@@ -69,13 +69,13 @@ public sealed class GamePackageExporterTests : IDisposable
         var gameId = "pkg-game";
         var pkgBytes = PackageFixture.Valid(gameId, "Pkg Game", "1.0.0");
         var pkgPath = Path.Combine(_paths.GamesManagedRoot, gameId + GamePackage.Extension);
-        await File.WriteAllBytesAsync(pkgPath, pkgBytes);
+        await File.WriteAllBytesAsync(pkgPath, pkgBytes, TestContext.Current.CancellationToken);
 
         var location = new GameCatalog.GameLocation(
             new GameManifest(gameId, "Pkg Game", "index.html", null, 2, Version: "1.0.0"),
             Path.Combine(_paths.GamesUnpackedRoot, gameId));
 
-        await using var export = await GamePackageExporter.OpenAsync(location, _paths);
+        await using var export = await GamePackageExporter.OpenAsync(location, _paths, TestContext.Current.CancellationToken);
         Assert.Equal("pkg-game.kbg", export.FileName);
         Assert.Equal(GamePackageExporter.KbgContentType, export.ContentType);
         Assert.Equal(pkgBytes.Length, export.Length);
@@ -90,21 +90,20 @@ public sealed class GamePackageExporterTests : IDisposable
         Directory.CreateDirectory(gameDir);
         Directory.CreateDirectory(Path.Combine(gameDir, "assets"));
 
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "GAME.json"),
-            """{"id":"folder-game","name":"Folder Game","entry":"index.html","maxPlayers":4}""");
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "index.html"), "<!doctype html><title>Game</title>");
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "assets", "data.txt"), "hello from assets");
+        await File.WriteAllTextAsync(Path.Combine(gameDir, "GAME.json"), """{"id":"folder-game","name":"Folder Game","entry":"index.html","maxPlayers":4}""", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(gameDir, "index.html"), "<!doctype html><title>Game</title>", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(gameDir, "assets", "data.txt"), "hello from assets", TestContext.Current.CancellationToken);
         // Internal markers that must be excluded from the zip export
-        await File.WriteAllTextAsync(Path.Combine(gameDir, PackageMarker.FileName), "dummy marker");
-        await File.WriteAllTextAsync(Path.Combine(gameDir, ".kb-precompress.index"), "dummy index");
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "temp.tmp"), "dummy temp");
+        await File.WriteAllTextAsync(Path.Combine(gameDir, PackageMarker.FileName), "dummy marker", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(gameDir, ".kb-precompress.index"), "dummy index", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(gameDir, "temp.tmp"), "dummy temp", TestContext.Current.CancellationToken);
 
         var location = new GameCatalog.GameLocation(
             new GameManifest(gameId, "Folder Game", "index.html", null, 4),
             gameDir);
 
         byte[] bytes;
-        await using (var export = await GamePackageExporter.OpenAsync(location, _paths))
+        await using (var export = await GamePackageExporter.OpenAsync(location, _paths, TestContext.Current.CancellationToken))
         {
             Assert.Equal("folder-game.zip", export.FileName);
             Assert.Equal(GamePackageExporter.ZipContentType, export.ContentType);
@@ -129,7 +128,7 @@ public sealed class GamePackageExporterTests : IDisposable
         var htmlEntry = zip.GetEntry("index.html");
         Assert.NotNull(htmlEntry);
         using var reader = new StreamReader(htmlEntry.Open(), Encoding.UTF8);
-        var htmlContent = await reader.ReadToEndAsync();
+        var htmlContent = await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
         Assert.Equal("<!doctype html><title>Game</title>", htmlContent);
     }
 
@@ -141,7 +140,7 @@ public sealed class GamePackageExporterTests : IDisposable
             Path.Combine(_paths.GamesRoot, "missing"));
 
         await Assert.ThrowsAsync<DirectoryNotFoundException>(() =>
-            GamePackageExporter.OpenAsync(location, _paths));
+            GamePackageExporter.OpenAsync(location, _paths, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -157,14 +156,14 @@ public sealed class GamePackageExporterTests : IDisposable
         Directory.CreateDirectory(gameDir);
 
         var stale = Path.Combine(gameDir, "index.html");
-        await File.WriteAllTextAsync(stale, "<!doctype html>");
+        await File.WriteAllTextAsync(stale, "<!doctype html>", TestContext.Current.CancellationToken);
         File.SetLastWriteTimeUtc(stale, new DateTime(1979, 12, 31, 23, 59, 58, DateTimeKind.Utc));
 
         var location = new GameCatalog.GameLocation(
             new GameManifest(gameId, "Ancient Game", "index.html", null, 4),
             gameDir);
 
-        await using var export = await GamePackageExporter.OpenAsync(location, _paths);
+        await using var export = await GamePackageExporter.OpenAsync(location, _paths, TestContext.Current.CancellationToken);
         using var memory = new MemoryStream(await ReadAll(export.Content));
         using var zip = new ZipArchive(memory, ZipArchiveMode.Read);
 
@@ -181,14 +180,14 @@ public sealed class GamePackageExporterTests : IDisposable
         Directory.CreateDirectory(gameDir);
 
         var file = Path.Combine(gameDir, "index.html");
-        await File.WriteAllTextAsync(file, "<!doctype html>");
+        await File.WriteAllTextAsync(file, "<!doctype html>", TestContext.Current.CancellationToken);
         File.SetLastWriteTimeUtc(file, new DateTime(2150, 1, 1, 0, 0, 0, DateTimeKind.Utc));
 
         var location = new GameCatalog.GameLocation(
             new GameManifest(gameId, "Future Game", "index.html", null, 4),
             gameDir);
 
-        await using var export = await GamePackageExporter.OpenAsync(location, _paths);
+        await using var export = await GamePackageExporter.OpenAsync(location, _paths, TestContext.Current.CancellationToken);
         using var memory = new MemoryStream(await ReadAll(export.Content));
         using var zip = new ZipArchive(memory, ZipArchiveMode.Read);
 
@@ -203,14 +202,14 @@ public sealed class GamePackageExporterTests : IDisposable
         var gameId = "tidy-game";
         var gameDir = Path.Combine(_paths.GamesRoot, gameId);
         Directory.CreateDirectory(gameDir);
-        await File.WriteAllTextAsync(Path.Combine(gameDir, "index.html"), "<!doctype html>");
+        await File.WriteAllTextAsync(Path.Combine(gameDir, "index.html"), "<!doctype html>", TestContext.Current.CancellationToken);
 
         var location = new GameCatalog.GameLocation(
             new GameManifest(gameId, "Tidy Game", "index.html", null, 4),
             gameDir);
 
         var before = Directory.EnumerateFiles(Path.GetTempPath(), "kb-export-*.zip").Count();
-        await using (var export = await GamePackageExporter.OpenAsync(location, _paths))
+        await using (var export = await GamePackageExporter.OpenAsync(location, _paths, TestContext.Current.CancellationToken))
         {
             await ReadAll(export.Content);
         }

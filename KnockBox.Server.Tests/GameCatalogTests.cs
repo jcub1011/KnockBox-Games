@@ -223,7 +223,7 @@ public class GameCatalogTests : IDisposable
         // Poll tick (≤50ms) + debounce (~500ms); generous deadline to absorb CI scheduling noise.
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < deadline && !catalog.TryGet("ttt", out _))
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
 
         Assert.True(catalog.TryGet("ttt", out _));
     }
@@ -741,7 +741,7 @@ public class GameCatalogTests : IDisposable
 
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < deadline && Volatile.Read(ref rescans) == 0)
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
 
         Assert.True(Volatile.Read(ref rescans) > 0, "dropping a .kbg should trigger a rescan");
     }

@@ -374,7 +374,7 @@ public class GamePackageReaderTests : IDisposable
             var plan = GamePackageReader.Read(archive, Generous);
 
             var ex = Assert.Throws<GamePackageException>(
-                () => GamePackageReader.Extract(plan, destination, Generous));
+                () => GamePackageReader.Extract(plan, destination, Generous, TestContext.Current.CancellationToken));
             Assert.Contains("index.html", ex.Message);
         }
         finally

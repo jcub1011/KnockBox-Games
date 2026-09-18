@@ -25,7 +25,7 @@ public class ServerVersionTests
         await ServerVersionApi.Current().ExecuteAsync(ctx);
 
         ctx.Response.Body.Seek(0, SeekOrigin.Begin);
-        var json = await new StreamReader(ctx.Response.Body).ReadToEndAsync();
+        var json = await new StreamReader(ctx.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken);
         var back = JsonSerializer.Deserialize(json, KnockBoxProtocolContext.Default.ServerVersionResponse);
 
         Assert.NotNull(back);

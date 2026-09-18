@@ -130,7 +130,7 @@ public class PackageManagerTests : IDisposable
     {
         var package = PackageFixture.Valid("demo");
 
-        using var staged = await New().ReceiveAsync(Bytes(package));
+        using var staged = await New().ReceiveAsync(Bytes(package), TestContext.Current.CancellationToken);
 
         Assert.True(File.Exists(staged.Path));
         Assert.Equal(package.Length, staged.Bytes);
@@ -150,7 +150,7 @@ public class PackageManagerTests : IDisposable
             NullLogger<PackageManager>.Instance);
 
         await Assert.ThrowsAsync<PackageManager.PackageTooLargeException>(
-            () => manager.ReceiveAsync(Bytes(new byte[4096])));
+            () => manager.ReceiveAsync(Bytes(new byte[4096]), TestContext.Current.CancellationToken));
 
         Assert.Empty(Directory.GetFiles(ManagedPackageLayout.StagingDir(_paths.GamesManagedRoot)));
     }
@@ -168,7 +168,7 @@ public class PackageManagerTests : IDisposable
             new GamePackageLimits(0, 1000, 10_000), new PackageManagerOptions(), _clock,
             NullLogger<PackageManager>.Instance);
 
-        using var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+        using var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")), TestContext.Current.CancellationToken);
 
         Assert.True(File.Exists(staged.Path));
     }
@@ -180,7 +180,7 @@ public class PackageManagerTests : IDisposable
         // GamePackageException nor IOException — so it escaped the catch here, surfaced as an unhandled
         // 500 the operator could do nothing with, and skipped the Dispose that removes the staged upload.
         var manager = New();
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.CorruptBrotli("demo")));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.CorruptBrotli("demo")), TestContext.Current.CancellationToken);
 
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
 
@@ -195,7 +195,7 @@ public class PackageManagerTests : IDisposable
     public async Task Sweeping_staging_clears_an_interrupted_upload()
     {
         var manager = New();
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")), TestContext.Current.CancellationToken);
 
         manager.SweepStaging();
 
@@ -231,7 +231,7 @@ public class PackageManagerTests : IDisposable
     public async Task Bytes_that_are_not_a_package_are_refused_before_a_job_exists()
     {
         var manager = New();
-        var staged = await manager.ReceiveAsync(Bytes([1, 2, 3, 4, 5]));
+        var staged = await manager.ReceiveAsync(Bytes([1, 2, 3, 4, 5]), TestContext.Current.CancellationToken);
 
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
 
@@ -247,7 +247,7 @@ public class PackageManagerTests : IDisposable
     public async Task A_plain_zip_with_no_kbg_header_is_refused_with_an_actionable_message()
     {
         var manager = New();
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.ZipWithoutHeader()));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.ZipWithoutHeader()), TestContext.Current.CancellationToken);
 
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
 
@@ -265,11 +265,11 @@ public class PackageManagerTests : IDisposable
         PumpInstaller();
         _lobbies.TryCreate("demo", "host", 4, out _);
 
-        var first = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+        var first = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")), TestContext.Current.CancellationToken);
         var started = manager.StartInstallFromFile(first, PackageJobSource.Upload, PackageApplyMode.Drain);
         Assert.True(started.Started);
 
-        var second = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+        var second = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")), TestContext.Current.CancellationToken);
         var refused = manager.StartInstallFromFile(second, PackageJobSource.Upload, PackageApplyMode.Drain);
 
         Assert.False(refused.Started);
@@ -287,7 +287,7 @@ public class PackageManagerTests : IDisposable
         File.WriteAllBytes(Path.Combine(_paths.GamesRoot, "demo.kbg"), PackageFixture.Valid("demo"));
 
         var manager = New();
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Valid("demo")), TestContext.Current.CancellationToken);
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
 
         Assert.False(start.Started);
@@ -303,7 +303,7 @@ public class PackageManagerTests : IDisposable
         Assert.False(manager.CanInstall);
         Assert.Contains("ManagedPackages", manager.InstallBlockedReason()!, StringComparison.Ordinal);
 
-        var staged = await New().ReceiveAsync(Bytes(PackageFixture.Valid("demo")));
+        var staged = await New().ReceiveAsync(Bytes(PackageFixture.Valid("demo")), TestContext.Current.CancellationToken);
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
 
         Assert.False(start.Started);
@@ -378,7 +378,7 @@ public class PackageManagerTests : IDisposable
         await UploadAsync(manager, PackageFixture.Versioned("demo", "Demo", "1.0.0"));
         PumpInstaller();
 
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")), TestContext.Current.CancellationToken);
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Force);
         Assert.True(start.Started, start.Error);
 
@@ -411,13 +411,13 @@ public class PackageManagerTests : IDisposable
         PumpInstaller();
         _lobbies.TryCreate("demo", "host", 4, out var lobby);
 
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")), TestContext.Current.CancellationToken);
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
         Assert.True(start.Started);
 
         // Wait for the job to actually reach the waiting state before asserting on the gate.
         for (var i = 0; i < 200 && _jobs.Get(start.Job!.JobId)!.Status != PackageJobStatus.WaitingForLobbies; i++)
-            await Task.Delay(25);
+            await Task.Delay(25, TestContext.Current.CancellationToken);
 
         Assert.Equal(PackageJobStatus.WaitingForLobbies, _jobs.Get(start.Job!.JobId)!.Status);
         // The whole point of draining: no NEW lobby may start, or the wait would never end.
@@ -441,10 +441,10 @@ public class PackageManagerTests : IDisposable
         PumpInstaller();
         _lobbies.TryCreate("demo", "host", 4, out _);
 
-        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")));
+        var staged = await manager.ReceiveAsync(Bytes(PackageFixture.Versioned("demo", "Demo", "2.0.0")), TestContext.Current.CancellationToken);
         var start = manager.StartInstallFromFile(staged, PackageJobSource.Upload, PackageApplyMode.Drain);
         for (var i = 0; i < 200 && _jobs.Get(start.Job!.JobId)!.Status != PackageJobStatus.WaitingForLobbies; i++)
-            await Task.Delay(25);
+            await Task.Delay(25, TestContext.Current.CancellationToken);
 
         Assert.Equal(PackageCancelOutcome.Cancelled, _jobs.Cancel(start.Job!.JobId));
         var job = await SettleAsync(start.Job.JobId);
