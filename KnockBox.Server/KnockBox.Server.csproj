@@ -42,9 +42,11 @@
          assembly and report its internal RequiresUnreferencedCode sites per-site; per-assembly collapse
          (TrimmerSingleWarn / ilc singlewarnassembly) does not apply to rooted assemblies, so the codes
          are suppressed here — the design's decided fallback (SERVER_AUTHORITY_DESIGN.md §14.1). All
-         four flagged 4.11.0 sites are unreachable from our usage. Jint floats within 4.* so minor
-         bumps arrive silently — the /warnaserror AOT gate is the tripwire: any new trim warning fails
-         the build and forces a re-audit of this list before it may be suppressed:
+         four flagged 4.11.0 sites are unreachable from our usage. Jint floats within 4.* but the
+         lock pins what restore resolved — a new Jint arrives only via an explicit re-float
+         (dotnet restore /p:RestoreForceEvaluate=true) plus a committed lock, and the /warnaserror
+         AOT gate is the tripwire: any new trim warning fails the build and forces a re-audit of
+         this list before it may be suppressed:
            - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs under AllowClr,
              which is never enabled.
            - DefaultTypeConverter.BuildDelegate: expression-tree marshaling for typed .NET delegates
@@ -99,8 +101,10 @@
 
        Rooting makes ILC surface Jint's internal RequiresUnreferencedCode sites as per-site IL2026
        errors under /warnaserror. All four flagged paths are unreachable from our usage, verified
-       4.11.0. Jint floats within 4.* (see the NoWarn note above) — the AOT gate re-verifies this on
-       every build rather than on a pinned upgrade:
+        4.11.0. Jint floats within 4.* but the lock pins what restore resolved (see the NoWarn
+        note above) — a new Jint arrives only via an explicit re-float
+        (dotnet restore /p:RestoreForceEvaluate=true) plus a committed lock, which the AOT gate
+        then re-verifies:
          - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs when AllowClr
            is enabled, which it never is.
          - DefaultTypeConverter.BuildDelegate: expression-tree marshaling for typed .NET delegates

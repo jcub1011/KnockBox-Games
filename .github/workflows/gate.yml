@@ -80,6 +80,7 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
+      # lts/* is deliberate: CI tracks latest LTS while each package's `engines` enforces the dev floor.
       - uses: actions/setup-node@v7
         with:
           node-version: "lts/*"
