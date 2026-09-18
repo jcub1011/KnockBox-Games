@@ -85,7 +85,7 @@ jobs:
           node-version: "lts/*"
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm install
+      - run: npm ci
       - run: npm test
 
   clients-phaser:
@@ -101,7 +101,7 @@ jobs:
           node-version: "lts/*"
           cache: npm
           cache-dependency-path: clients/phaser/package-lock.json
-      - run: npm install
+      - run: npm ci
       - run: npm run lint
       - run: npm test
 
@@ -118,7 +118,7 @@ jobs:
           node-version: "lts/*"
           cache: npm
           cache-dependency-path: tools/pack-game/package-lock.json
-      - run: npm install
+      - run: npm ci
       - run: npm test
       # Build the release archives on every run, not just at release time. The manifest's file lists
       # are the release job's only input, and a stale entry there would otherwise surface for the
@@ -591,7 +591,7 @@ jobs:
       # exercised: the server must expand the package into its own writable cache instead.
       - name: Hot drop-in — a .kbg package installs itself into a read-only games mount
         run: |
-          (cd tools/pack-game && npm install --silent)
+          (cd tools/pack-game && npm ci --silent)
           # tictactoe is the only game committed in full (the others are gitignored build output), so
           # package a copy of it under a DIFFERENT id: the plain tictactoe folder is already in the
           # mount from the step above, and a folder deliberately wins a contested id.
