@@ -3,12 +3,22 @@
   <!-- NuGet lock files (packages.lock.json, committed per project): the declared PackageReference
        versions float within their majors (e.g. 4.*), and the lock records what restore actually
        resolved — the npm package-lock.json equivalent. A plain local restore regenerates the lock
-       when inputs change; run dotnet restore /p:RestoreForceEvaluate=true to deliberately
+       when inputs change; run `dotnet restore KnockBox-Games.slnx /p:RestoreForceEvaluate=true`
+       (NO `-r` flag — a single-RID restore REPLACES the other RID's sections) to deliberately
        re-float to the newest matching versions. CI restores fail (NU1004) on a stale lock instead of silently
-       updating, so version movement is always an explicit commit. -->
+       updating, so version movement is always an explicit commit. An SDK bump moves the
+       SDK-implicit packages (ILCompiler/ILLink) too, so it must be committed together with a
+       re-float — see the `sdk` pin in global.json. -->
   <PropertyGroup>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+    <!-- The two RIDs the release ships (linux-x64 container + win-x64 desktop). Declaring both
+         here (rather than restoring with a single `-r`) is what makes each packages.lock.json
+         carry BOTH `net10.0/linux-x64` and `net10.0/win-x64` sections: a single `-r` restore
+         REPLACES the other RID's section, so the next CI job on the other RID fails with NU1004.
+         A plain `dotnet restore` preserves the sections; to regenerate them, restore once with
+         /p:RestoreForceEvaluate=true and no `-r` flag. -->
+    <RuntimeIdentifiers>linux-x64;win-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
 </Project>

@@ -68,9 +68,14 @@ jobs:
       # Native AOT compiles to a native object and links it via clang against zlib; the SDK doesn't
       # ship the toolchain (mirrors the Dockerfile's build stage).
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+      # The lock file carries BOTH linux-x64 and win-x64 sections (see RuntimeIdentifiers in
+      # Directory.Build.props). A `-r` restore narrows to that single RID and fails locked-mode
+      # validation (NU1004) against the multi-RID lock, so restore explicitly first with no `-r`
+      # (locked via CI=true) and publish with --no-restore.
+      - run: dotnet restore KnockBox.Server
       # The full ILC compile is the only thing that surfaces trim/AOT (ILxxxx) warnings; /warnaserror
       # fails the build on any new one, so the app stays AOT-clean as code and dependencies change.
-      - run: dotnet publish KnockBox.Server -r linux-x64 -c Release /warnaserror
+      - run: dotnet publish KnockBox.Server --no-restore -r linux-x64 -c Release /warnaserror
 
   web:
     name: Web (shell + SDK) tests

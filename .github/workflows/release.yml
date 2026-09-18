@@ -245,8 +245,12 @@ jobs:
       # The publish profile owns the whole layout — self-contained native exe, web/ and
       # appsettings.json as loose files beside it, games/ and logs/ created on first run. Do not
       # re-specify -r/-c here; the profile sets them and a conflicting flag silently wins.
+      # Restore explicitly first with no `-r` (locked via CI=true) and publish with --no-restore:
+      # the lock file carries both RIDs and a `-r`/profile-RID restore narrows to one (NU1004).
       - name: Publish the desktop build
-        run: dotnet publish KnockBox.Server -p:PublishProfile=win-x64-desktop
+        run: |
+          dotnet restore KnockBox.Server
+          dotnet publish KnockBox.Server --no-restore -p:PublishProfile=win-x64-desktop
 
       # Zip, not tar: the payload is Windows, and the executable bit is meaningless there.
       - name: Zip it
@@ -280,7 +284,11 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
 
       - name: Publish the linux-x64 build
-        run: dotnet publish KnockBox.Server -r linux-x64 -c Release -o publish/linux-x64
+        # Restore explicitly first with no `-r` (locked via CI=true) and publish with
+        # --no-restore: the lock file carries both RIDs and a `-r` restore narrows to one (NU1004).
+        run: |
+          dotnet restore KnockBox.Server
+          dotnet publish KnockBox.Server --no-restore -r linux-x64 -c Release -o publish/linux-x64
 
       # tar, not zip: zip does not carry the executable bit, and a downloaded server that needs
       # `chmod +x` before it will start is a support question nobody should have to ask.

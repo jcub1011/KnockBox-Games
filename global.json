@@ -1,4 +1,14 @@
 {
+  "sdk": {
+    // Pinned so every restore (dev + CI) resolves the same SDK-implicit packages
+    // (Microsoft.DotNet.ILCompiler / Microsoft.NET.ILLink.Tasks, driven by PublishAot).
+    // setup-dotnet honours this over its `10.0.x` input. An SDK bump is an explicit
+    // commit: update this version AND re-float the packages.lock.json files
+    // (dotnet restore /p:RestoreForceEvaluate=true for both linux-x64 and win-x64)
+    // in the same commit, or CI fails with NU1004.
+    "version": "10.0.400",
+    "rollForward": "disable"
+  },
   "test": {
     "runner": "Microsoft.Testing.Platform"
   }
