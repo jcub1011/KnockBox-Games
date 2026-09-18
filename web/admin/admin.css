@@ -2324,6 +2324,19 @@ code, pre {
   word-break: break-word;
 }
 
+/* Two lines, then an ellipsis, with the full text on the title tooltip: for values (like the
+   Storage Location path) that must not stretch their grid cell open. Same line-clamp idiom as
+   .notif-message and #mkt-sources .source-url. */
+.details-value-clamp {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 .details-badges {
   display: flex;
   flex-wrap: wrap;
@@ -2673,10 +2686,19 @@ code, pre {
 
 .mkt-links {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 0.9rem;
+  gap: 0.5rem;
   margin: 0.5rem 0 0;
   font-size: 0.85rem;
+}
+
+/* Repository releases in the details modal: four rows visible, then scroll, so a long release
+   history doesn't stretch the modal. Scoped here so the backups table and every other
+   .table-scroll are unaffected. The sticky thead (.data-table th) keeps the header pinned. */
+#plugin-details-body .releases-scroll {
+  max-height: 15rem;
+  overflow-y: auto;
 }
 
 .job-row {
