@@ -62,15 +62,52 @@ public class ServerVersionTests
         Assert.DoesNotContain($"\"{ServerVersionApi.Path}\"", program, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Current_is_served_no_store()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Response.Body = new MemoryStream();
+        ctx.RequestServices = new ServiceCollection().AddLogging().BuildServiceProvider();
+
+        await ServerVersionApi.Current().ExecuteAsync(ctx);
+
+        Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
+    }
+
     private static string? FindMapGet(string source)
     {
-        // The registration lives or dies by the constant, so locate the MapGet line mentioning it.
-        foreach (var line in source.Split('\n'))
+        // Balanced, rather than "the MapGet line": a formatter wrap would otherwise fail the test
+        // for a reason unrelated to the code (see AdminRouteGuardTests.Registration).
+        const string marker = "MapGet(";
+        for (var at = source.IndexOf(marker, StringComparison.Ordinal); at >= 0;
+             at = source.IndexOf(marker, at + marker.Length, StringComparison.Ordinal))
         {
-            if (line.Contains("MapGet(", StringComparison.Ordinal)
-                && line.Contains("ServerVersionApi", StringComparison.Ordinal))
-                return line;
+            var registration = Registration(source, at + marker.Length);
+            if (registration.Contains("ServerVersionApi", StringComparison.Ordinal))
+                return registration;
         }
         return null;
+    }
+
+    private static string Registration(string source, int from)
+    {
+        var depth = 1;
+        var inString = false;
+        for (var i = from; i < source.Length; i++)
+        {
+            var c = source[i];
+            if (inString)
+            {
+                if (c == '\\') i++;
+                else if (c == '"') inString = false;
+                continue;
+            }
+
+            if (c == '"') inString = true;
+            else if (c == '(') depth++;
+            else if (c == ')' && --depth == 0) return source[from..i];
+        }
+
+        throw new InvalidOperationException("Unbalanced MapGet registration in AdminApi.cs.");
     }
 }
