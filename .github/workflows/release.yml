@@ -82,10 +82,10 @@ jobs:
     steps:
       # fetch-depth: 0 — the :latest monotonicity check below compares against every existing v* tag,
       # and a shallow clone has none of them.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
@@ -237,8 +237,8 @@ jobs:
     # of the release, which is precisely why it belongs in the gate.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
@@ -260,7 +260,7 @@ jobs:
           $out = "$env:RUNNER_TEMP/knockbox-${{ needs.preflight.outputs.version }}-win-x64.zip"
           Compress-Archive -Path KnockBox.Server/bin/publish/win-x64/* -DestinationPath $out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: asset-win-x64
           path: ${{ runner.temp }}/knockbox-*-win-x64.zip
@@ -271,8 +271,8 @@ jobs:
     needs: preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       # Same toolchain the `aot` CI job installs: Native AOT compiles to a native object and links it
@@ -290,7 +290,7 @@ jobs:
           tar -C publish/linux-x64 -czf \
             "$RUNNER_TEMP/knockbox-${{ needs.preflight.outputs.version }}-linux-x64.tar.gz" .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: asset-linux-x64
           path: ${{ runner.temp }}/knockbox-*-linux-x64.tar.gz
@@ -301,10 +301,10 @@ jobs:
     needs: preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: "lts/*"
 
       # A compose bundle for someone with no checkout: the repo's compose file with its `build:`
       # stanza rewritten to a pinned `image:`. Generated, not a second committed copy — see
@@ -334,7 +334,7 @@ jobs:
           grep -q 'appsettings.json:/app/appsettings.json:ro' bundle/docker-compose.yml
           (cd bundle && zip -q -r "$RUNNER_TEMP/knockbox-$VERSION-docker.zip" .)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: asset-docker
           path: ${{ runner.temp }}/knockbox-*-docker.zip
@@ -355,7 +355,7 @@ jobs:
       TAG: ${{ needs.preflight.outputs.tag }}
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # PATTERN, not everything. Without it this downloads every artifact in the run - which includes
       # the `*.dockerbuild` build record that docker/build-push-action uploads on its own, and which
@@ -368,7 +368,7 @@ jobs:
       #
       # merge-multiple stays at its default of false, so each artifact still lands in
       # incoming/<name>/ and the two steps below keep their paths.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: incoming
           pattern: "{asset-*,container-image}"
@@ -446,7 +446,7 @@ jobs:
             echo "deleted tag $TAG"
           fi
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: '!inputs.DryRun'
         with:
           registry: ghcr.io

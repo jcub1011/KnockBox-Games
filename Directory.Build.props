@@ -1,0 +1,14 @@
+<Project>
+
+  <!-- NuGet lock files (packages.lock.json, committed per project): the declared PackageReference
+       versions float within their majors (e.g. 4.*), and the lock records what restore actually
+       resolved — the npm package-lock.json equivalent. A plain local restore regenerates the lock
+       when inputs change; run dotnet restore /p:RestoreForceEvaluate=true to deliberately
+       re-float to the newest matching versions. CI restores fail (NU1004) on a stale lock instead of silently
+       updating, so version movement is always an explicit commit. -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+
+</Project>
