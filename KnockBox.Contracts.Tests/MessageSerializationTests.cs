@@ -1,5 +1,4 @@
 using System.Text.Json;
-using KnockBox.Contracts;
 using Microsoft.Extensions.Logging;
 using Xunit;
 

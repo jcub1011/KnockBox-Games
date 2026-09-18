@@ -1,5 +1,4 @@
 using System.Text.Json;
-using KnockBox.Contracts;
 using Xunit;
 
 namespace KnockBox.Contracts.Tests;
