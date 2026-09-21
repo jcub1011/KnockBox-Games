@@ -456,6 +456,20 @@ export function formatGameVersion(version) {
   return `v${stripped}`;
 }
 
+// Where the header version labels point. One constant (mirrored in
+// web/admin/admin-core.js, since the shell and portal are separate bundles with
+// no shared chunk) so the four copies — two pages' markup plus two painters —
+// cannot drift apart silently.
+export const SERVER_RELEASES_URL = 'https://github.com/jcub1011/KnockBox-Games/releases';
+
+// Reads the public /api/server-version payload into a display string ("1.4.0" →
+// "v1.4.0"), or null when the payload is missing/malformed. Pure so the two
+// label painters (shell.js, admin.js) share the rule instead of each
+// shape-checking the payload inline.
+export function parseServerVersion(data) {
+  return formatGameVersion(data?.version);
+}
+
 // Whether a GAME.json `homepage` is safe to render as a link. Author-supplied and untrusted:
 // only absolute https:// URLs pass, so a `javascript:`/data:/relative value stays inert text.
 // The server normalizes this too, but the shell re-checks — the wire is untrusted either way.

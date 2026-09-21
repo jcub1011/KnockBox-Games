@@ -9,7 +9,8 @@ import {
   UPDATE_POLICIES, SETTINGS_GROUPS, ALL_SETTINGS, appendLogEntries, availabilityLabel,
   BYTE_MULTIPLIERS, BYTE_SCALES, BYTE_UNITS, formatByteLimit, splitBytes,
   cpuPercentBetween, filterCatalog, filterGames, filterLobbies, filterPlugins, filterSettings, formatBytes,
-  formatClock, formatCount, formatDuration, formatVersion, isBusyLifecycle, isHttpUrl, isTerminalJob,
+  formatClock, formatCount, formatDuration, formatVersion, parseServerVersion, SERVER_RELEASES_URL,
+  isBusyLifecycle, isHttpUrl, isTerminalJob,
   jobProgress, lifecycleLabel, logLevelClass, logLevelTag, mergeJobs, mergePluginEntries, noLimitOverrides,
   playerRange, pluginRestoreWarning, pluginStatusClass, pluginStatusLabel, ratePerSecond, settingFromHash,
   pluginRowBadges, pluginRowSize, pluginRowVersion,
@@ -823,6 +824,25 @@ describe('formatVersion', () => {
   it('dashes when there is no version, which is normal for a hand-made game', () => {
     expect(formatVersion(null)).toBe('--');
     expect(formatVersion('')).toBe('--');
+  });
+});
+
+describe('parseServerVersion', () => {
+  it('reads the version payload into a display string', () => {
+    expect(parseServerVersion({ version: '1.4.0' })).toBe('v1.4.0');
+    expect(parseServerVersion({ version: 'v1.4.0' })).toBe('v1.4.0');
+  });
+
+  it('returns null for a missing or malformed payload', () => {
+    expect(parseServerVersion(null)).toBeNull();
+    expect(parseServerVersion(undefined)).toBeNull();
+    expect(parseServerVersion({})).toBeNull();
+    expect(parseServerVersion({ version: 42 })).toBeNull();
+    expect(parseServerVersion({ version: '  ' })).toBeNull();
+  });
+
+  it('points the label at the releases page', () => {
+    expect(SERVER_RELEASES_URL).toBe('https://github.com/jcub1011/KnockBox-Games/releases');
   });
 });
 

@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, SERVER_RELEASES_URL, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, parseServerVersion, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -1736,11 +1736,12 @@ async function loadServerVersion() {
   try {
     const res = await fetch('/api/server-version');
     if (!res.ok) return;
-    const data = await res.json();
-    if (typeof data?.version !== 'string' || !data.version) return;
+    const painted = parseServerVersion(await res.json());
+    if (!painted) return;
     const link = el('server-version');
     if (!link) return;
-    link.textContent = `v${data.version}`;
+    link.textContent = painted;
+    link.href = SERVER_RELEASES_URL;
     link.hidden = false;
   } catch {
     // Leave the label hidden; the page is fully usable without it.

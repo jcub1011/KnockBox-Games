@@ -24,10 +24,9 @@ on:
 permissions:
   contents: read
 
-# One deploy at a time; a PR build never cancels a main deploy.
-concurrency:
-  group: pages
-  cancel-in-progress: false
+# No workflow-level concurrency: PR builds must run in parallel with each other.
+# Only the deploy job below is serialized (group: pages), so a PR build never
+# blocks — or cancels — a main deploy, and vice versa.
 
 jobs:
   build:
@@ -46,11 +45,13 @@ jobs:
       # --strict catches nav->missing-file, but not the reverse: a new
       # docs/*.md without a nav entry builds fine and deploys unreachable.
       # Fail here so an orphaned page blocks the run before any publish.
+      # Anchored on ": <file>" (fixed string): an unanchored substring match
+      # would let ADMIN.md pass off ADMIN-EXTRA.md's nav line, or off a comment.
       - name: Every docs page is in nav
         run: |
           for f in docs/*.md; do
             base=$(basename "$f")
-            grep -q "$base" mkdocs.yml || { echo "Missing $base in mkdocs.yml nav"; exit 1; }
+            grep -qF -- ": $base" mkdocs.yml || { echo "Missing $base in mkdocs.yml nav"; exit 1; }
           done
       # --strict turns link warnings into errors, so a PR with a broken
       # ./OTHER-DOC.md link or missing nav entry fails here, not after deploy.
@@ -68,6 +69,10 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: [build]
     runs-on: ubuntu-latest
+    # One deploy at a time; scoped to this job so PR builds run in parallel.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

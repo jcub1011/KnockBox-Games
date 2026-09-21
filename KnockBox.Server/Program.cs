@@ -1312,7 +1312,18 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
 // inside its own branch in MapAdminApi — a MapWhen branch never falls through to here). Public:
 // the version is printed in page headers, so hiding it behind a session would only move the
 // label behind the login it sits above.
-app.MapServerVersion();
+//
+// Shell-only: a bare top-level MapGet would answer on EVERY non-admin origin, including the game
+// origin (the game MapWhen branch rejoins the pipeline, so its requests reach the outer endpoint
+// table too). The game SDK never needs the version, so a game-origin request gets a 404 rather
+// than a third copy of the endpoint.
+app.MapGet(ServerVersionApi.Path, (HttpContext ctx) =>
+{
+    if (OriginRouting.IsGameOrigin(
+            ctx.Connection.LocalPort, ctx.Request.Host.Host, gamesPort, gamesHost))
+        return Results.NotFound();
+    return ServerVersionApi.Current();
+});
 
 // ── Admin origin (separate port in dev, subdomain in prod) ─────────────────────
 // Dedicated admin portal. Public player files, game bundles (/games), and /ws are excluded.

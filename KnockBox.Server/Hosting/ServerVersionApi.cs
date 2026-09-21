@@ -42,7 +42,13 @@ public static class ServerVersionApi
         }
     }
 
-    /// <summary>Maps the endpoint. Call once per origin that must serve it (shell, admin).</summary>
+    /// <summary>Maps the endpoint. Call once per origin that must serve it (admin).</summary>
+    /// <remarks>
+    /// The shell origin does NOT use this: its top-level registration would also answer on the game
+    /// origin (whose <c>MapWhen</c> branch rejoins the pipeline), so Program.cs maps the same path
+    /// with a game-origin guard instead. Both registrations share <see cref="Path"/> and
+    /// <see cref="Current"/>, so there is still exactly one payload and one cache policy.
+    /// </remarks>
     public static void MapServerVersion(this IEndpointRouteBuilder routes) =>
         routes.MapGet(Path, () => Current());
 }
