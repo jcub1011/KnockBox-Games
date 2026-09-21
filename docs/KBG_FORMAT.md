@@ -5,7 +5,7 @@ games directory and the server installs it: no CLI, no restart, no unzipping by 
 
 This document is the normative specification. It is written so that an independent implementation
 can produce and consume `.kbg` files correctly. The reference implementations live in
-[`tools/pack-game/kbg.mjs`](../tools/pack-game/kbg.mjs) (writer) and
+[`tools/pack-game/kbg.mjs`](https://github.com/jcub1011/KnockBox-Games/blob/main/tools/pack-game/kbg.mjs) (writer) and
 `KnockBox.Server/Games/GamePackageInstaller.cs` (reader).
 
 - **Extension:** `.kbg`

@@ -114,7 +114,7 @@ node tools/pack-game/pack-game.mjs --in . --manifest GAME.json
 The package is named after your `id`, and the manifest/thumbnail may live outside the build (e.g. an
 `export/` folder). Pass `--out ~/builds/` to write it somewhere that doesn't touch the platform, or
 `--dir dist-game` to get the plain folder layout instead when you want to inspect exactly what was
-packaged. See [`tools/pack-game/README.md`](../tools/pack-game/README.md) for all options and
+packaged. See [`tools/pack-game/README.md`](https://github.com/jcub1011/KnockBox-Games/blob/main/tools/pack-game/README.md) for all options and
 [`KBG_FORMAT.md`](./KBG_FORMAT.md) for the format itself.
 
 Packing runs Brotli at maximum quality, which takes ~50 seconds for a 38 MB WASM export. That cost is
@@ -966,7 +966,7 @@ new Phaser.Game({
 The plugin connects automatically on start: it reads the ticket + endpoint the shell put in the URL
 fragment, opens its own WebSocket, authenticates, then fires `ready`. Full API — signals, sending,
 `KBAuthority`, and the server-less local peer — is in
-[`clients/phaser/README.md`](../clients/phaser/README.md).
+[`clients/phaser/README.md`](https://github.com/jcub1011/KnockBox-Games/blob/main/clients/phaser/README.md).
 
 Then package as usual (§9): `knockbox pack --in dist --manifest GAME.json --build "npm run build"`.
 
