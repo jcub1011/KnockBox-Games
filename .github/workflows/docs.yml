@@ -42,6 +42,15 @@ jobs:
       # wanted, bump the range deliberately: "mkdocs-material>=10,<11".
       - name: Install MkDocs Material
         run: pip install "mkdocs-material>=9,<10"
+      # --strict catches nav->missing-file, but not the reverse: a new
+      # docs/*.md without a nav entry builds fine and deploys unreachable.
+      # Fail here so an orphaned page blocks the run before any publish.
+      - name: Every docs page is in nav
+        run: |
+          for f in docs/*.md; do
+            base=$(basename "$f")
+            grep -q "$base" mkdocs.yml || { echo "Missing $base in mkdocs.yml nav"; exit 1; }
+          done
       # --strict turns link warnings into errors, so a PR with a broken
       # ./OTHER-DOC.md link or missing nav entry fails here, not after deploy.
       - name: Build (strict)
@@ -52,8 +61,10 @@ jobs:
 
   deploy:
     name: Deploy to Pages
-    # PRs build only — nothing publishes except main (and manual dispatches).
-    if: github.event_name != 'pull_request'
+    # PRs build only — nothing publishes except main. The ref check matters
+    # because workflow_dispatch can run from any branch: dispatching from a
+    # draft branch to "preview" must not publish that draft to production.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: [build]
     runs-on: ubuntu-latest
     permissions:
