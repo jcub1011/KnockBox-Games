@@ -119,7 +119,11 @@ Readers must reject an archive if any path:
 - has a segment that is a Windows reserved device name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
   `LPT1`–`LPT9` — with or without an extension;
 - contains a character from the platform's invalid-filename set;
+- exceeds 200 characters;
 - resolves, after joining to the destination directory, to anything outside that directory.
+
+Directory entries in the ZIP carry no content and are ignored; the closed-list check applies to file
+entries.
 
 The last check must be performed **in addition to** the syntactic ones, not instead of them.
 
@@ -144,9 +148,9 @@ A conforming reader, given a candidate `.kbg`, must in this order:
 7. Verify each file's decompressed byte count against `size`, and its `sha256` when present.
    Byte counts must be measured **while copying**; the sizes declared in ZIP headers are
    attacker-controlled and must not be trusted for allocation or limit checks.
-8. Confirm a root `GAME.json` exists, parses, and that its `id` equals `KBG.json`'s `id`. A mismatch
-   is fatal: the installed folder is named from `id`, and KnockBox skips a game whose folder name
-   does not match its manifest.
+8. Confirm a root `GAME.json` entry exists. Portal install paths additionally parse it and
+   require its `id` to equal `KBG.json`'s `id`. A hand-dropped package whose manifest id differs
+   installs under the header id and the catalog then skips it under the folder-name rule.
 
 Readers should also impose resource ceilings — a total uncompressed-byte cap, an entry-count cap, and
 a compression-ratio cap — and reject archives that exceed them. The KnockBox server's defaults are
@@ -206,9 +210,10 @@ archive. Six reasons, in rough order of how hard each is to work around:
 3. **Every negotiation miss falls through to the raw file**, which is where the content type, `ETag`,
    `Content-Length` and range support come from: identity clients, files under `PrecompressMinBytes`,
    incompressible extensions, `Precompress=false`, and every thumbnail.
-4. **Some files are read as files, not served.** `GAME.json`, a `serverAuthority` module and the
+4. **Some files are read as files, not served.** A `serverAuthority` module and the
    `authorityWords` dictionaries are opened from disk (and cached by mtime and length) — and they are
-   deliberately excluded from the compressed cache, so a variant-only store would hold nothing for them.
+   excluded from the compressed cache, so a variant-only store would hold nothing for them.
+   `GAME.json` is read from disk the same way and served normally.
 5. **Discovery is directory-shaped**: the catalog enumerates directories under each root and requires the
    folder name to equal the manifest `id`.
 6. **`games/` is mounted read-only in production**, so nothing can be expanded in place. A separate

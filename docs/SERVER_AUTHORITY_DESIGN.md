@@ -1,9 +1,8 @@
 # KnockBox Games — Server-Authoritative Mode (Design)
 
-**Status: Phases 0–2 implemented** on `feature/server-authoratative-state` (2026-07-10); Phase 3
-(docs) in progress; Phase 4 (WASM backend) remains (§13). This document is the design for an
-optional, per-game server-authoritative mode. Most file/line references now describe the code
-*as-built*; a few (WASM, §3c/§13 Phase 4) still describe where later work lands.
+**Status: Phases 0–3 implemented**; Phase 4 (WASM backend) remains (§13). This document is the
+design for an optional, per-game server-authoritative mode. Most file/line references describe
+the code *as-built*; §3c/§13 Phase 4 describe where later work lands.
 
 > Architecture background: **[INFRASTRUCTURE.md](./INFRASTRUCTURE.md)**. Game authoring:
 > **[GAME_DEVELOPER_GUIDE.md](./GAME_DEVELOPER_GUIDE.md)** (§5 documents the host-authoritative
@@ -18,8 +17,9 @@ INFRASTRUCTURE.md §1 principle 4). That has three structural costs:
 
 1. **Latency**: every guest input round-trips through the host before anyone sees the result, so a
    high-latency host penalizes the whole lobby.
-2. **Fragility**: `Lobby.HostId` is immutable (`Lobby/Lobby.cs`), there is no host migration, and
-   the guide is explicit — *"if the host leaves for good, the session effectively ends."*
+2. **Fragility**: before this mode, `Lobby.HostId` was immutable (`Lobby/Lobby.cs`), there was
+   no host migration, and the guide stated — *"if the host leaves for good, the session
+   effectively ends."*
 3. **Trust**: the host browser can cheat; the server relay is blind
    (`WebSocketHandler.HandleGameMessage` never inspects payloads).
 
@@ -63,7 +63,8 @@ existing KBAuthority games port their model file to the server with a few-line a
                       └───────────────────────────────────────────────┴──      (later, .wasm)  ────┘
 ```
 
-- `GAME.json` gains `"serverAuthority": "authority.js"` (or `"authority.wasm"`).
+- `GAME.json` gains `"serverAuthority": "authority.js"`. A `.wasm` module is a later phase and
+  rejected for now.
 - On lobby creation for such a game, a per-lobby **actor** loads the module into a sandboxed
   runtime. All module calls happen on one drain task fed by a bounded channel (the
   `Networking/Connection.cs` pattern).
@@ -74,8 +75,8 @@ existing KBAuthority games port their model file to the server with a few-line a
   the existing contract simply behaves as a guest. **Lobby-owner powers (kick, open/close) start
   with the creator** — "owner" and "authority" become separate concepts — and the authority module
   can transfer them (`kb.setOwner`, §3).
-- The module ABI is runtime-agnostic (JSON in, JSON out), with two backends: **Jint** (JavaScript,
-  v1) and **WASM** (any language — C#, Rust, Go, Zig… — later phase).
+- The module ABI is runtime-agnostic (JSON in, JSON out). The shipping backend is **Jint**
+  (JavaScript); a **WASM** backend (any language — C#, Rust, Go, Zig… — Phase 4) stays additive.
 
 ---
 
@@ -120,7 +121,8 @@ The module also receives a tiny frozen capability object at creation:
 | `kb.setOwner(playerId)` | **Owner migration primitive.** Reassigns the lobby owner (kick/open powers + `isOwner` on clients). The server validates the target is a current member, updates `Lobby.HostId`, and pushes an `OwnerChanged` event (§5f). *Policy* is the game's: typically called from `onPlayerLeft` when the departed player was the owner. A module that never calls it leaves the lobby owner-less after the creator departs — allowed and documented. |
 | `kb.now()` | Milliseconds since epoch, server clock (backed by `TimeProvider` so tests can fake it). Modules must not reach for their own clock — engine setup **deletes the `Date` global** (Jint ships the full ECMAScript `Date` by default, so this is an active removal, verified in the Phase 0 spike), making `kb.now()` the only time source. |
 | `kb.log.info/warn/error/debug(msg)` | Serilog under a `KnockBox.Authority` category (the `KnockBox.GameLog` precedent), stamped with gameId/lobbyId. |
-| `kb.words.has/count/pick/countOfLength/pickOfLength` | Read-only queries over the game's declared word dictionaries (`GAME.json` `authorityWords`). Each dictionary is loaded **once** by `AuthorityWordService` into a shared, immutable, length-bucketed structure (`WordPoolSet`) that every lobby engine of the game shares — and deduped across games by **content hash** (SHA-256), so byte-identical dictionaries shipped under different names collapse to a single copy — the dictionary never enters the JS heap or the per-invocation memory budget; only the boolean/number/string result of a query crosses the boundary. Backed by `ClrFunction` (the same no-reflection path as the rest of `kb`), so it stays AOT-clean. Guarded: an unknown key / out-of-range index returns `false`/`0`/`null`, never a fatal throw. This is the answer to games needing a large dictionary (a word list) without the naive per-lobby copy or a raised memory cap. |
+| `kb.words.has/count/pick/countOfLength/pickOfLength/rangeOfPrefix/pickRange` | Read-only queries over the game's declared word dictionaries (`GAME.json` `authorityWords`). Each dictionary is loaded **once** by `AuthorityWordService` into a shared, immutable, length-bucketed structure (`WordPoolSet`) that every lobby engine of the game shares — and deduped across games by **content hash** (SHA-256), so byte-identical dictionaries shipped under different names collapse to a single copy — the dictionary never enters the JS heap or the per-invocation memory budget; only the boolean/number/string result of a query crosses the boundary. Backed by `ClrFunction` (the same no-reflection path as the rest of `kb`), so it stays AOT-clean. Guarded: an unknown key / out-of-range index returns `false`/`0`/`null` (ranges clamp or return an empty range), never a fatal throw. `pickRange` results are capped by `AuthorityMaxWordsPerCall`. This is the answer to games needing a large dictionary (a word list) without the naive per-lobby copy or a raised memory cap. |
+| `kb.budgetRemainingMs()` | Milliseconds left in the current call's wall-clock budget (`0` outside a call). |
 
 `kb.setOwner` and `kb.setLobbyOpen` are **deferred effects**: a call during a module invocation
 only records the request; the actor applies it (validation, `HostId` update, event broadcasts)
@@ -194,10 +196,10 @@ Engine setup, one engine per lobby:
 ```csharp
 var engine = new Engine(o => o
     .Strict()
-    .LimitMemory(opts.MaxMemoryBytes)        // default 32 MB
+    .LimitMemory(opts.MaxMemoryBytes)        // default 32 MB per-invocation allocation budget
     .TimeoutInterval(opts.CallTimeout)       // default 250 ms, re-armed per invocation
-    .MaxStatements(opts.MaxStatements)       // default 1,000,000 per invocation
-    .LimitRecursion(opts.RecursionLimit));   // default 64
+    .MaxStatements(opts.MaxStatements)       // opt-in, off by default
+    .LimitRecursion(opts.RecursionLimit));   // opt-in, off by default; StackOverflowGuard always on
 engine.Modules.Add("authority", File.ReadAllText(path));   // path pre-validated by GameCatalog
 var ns = engine.Modules.Import("authority");
 ```
@@ -213,7 +215,7 @@ Sandbox properties, by construction:
   nondeterminism is acceptable while nothing replays module calls (§1 non-goals). We inject only
   the `kb` object (§3), built with `JsValue`-typed callbacks — Jint's no-reflection-marshaling
   path (`ClrFunction`/`JsCallDelegate`) — never typed-delegate `SetValue` overloads.
-- **Bounded CPU/memory per call**: the four constraints above. Jint re-arms all constraints
+- **Bounded CPU/memory per call**: the armed constraints above. Jint re-arms armed constraints
   automatically at the start of every invocation (inside `Engine.ExecuteWithConstraints`, which
   `Invoke`/`Call`/`Evaluate` route through — there is no public whole-engine reset API); a
   dedicated unit test pins that behavior (a timeout-limited engine invoked twice must budget each
@@ -260,7 +262,7 @@ file extension.
   "name": "Tic-Tac-Toe (server)",
   "entry": "index.html",
   "maxPlayers": 2,
-  "serverAuthority": "authority.js"     // ← the opt-in; ".wasm" selects the WASM backend
+  "serverAuthority": "authority.js"     // ← the opt-in; must be a single-file .js module
 }
 ```
 
@@ -457,7 +459,8 @@ Two new files under `KnockBox.Server/Games/`:
 |---|---|---|
 | Module throws inside one call (`applyIntent`, a hook, `tick`) | **Contained** — engine state is still consistent (the interpreter unwound one call) | Log under `KnockBox.Authority` with gameId/lobbyId/fromId context; drop the intent; **re-broadcast `snapshot()`** so all clients converge (guide §5: on an illegal intent, re-broadcast the *unchanged* state so the offending client re-syncs); increment a consecutive-failure counter. |
 | 5 consecutive contained failures | Escalate | → fatal. |
-| Constraint violation — memory limit, call timeout, statement/fuel overflow | **Fatal** — the engine may be mid-mutation; state is untrustworthy | Log error; broadcast `LobbyClosedMessage(lobbyId, "authority-failed")` on control sockets; abort members' game sockets; `lobbies.Remove`; dispose the actor. |
+| Constraint violation — memory limit, recursion, unclassified, or a timeout/statement trip outside a tick | **Fatal** — the engine may be mid-mutation; state is untrustworthy | Log error; broadcast `LobbyClosedMessage(lobbyId, "authority-failed")` on control sockets; abort members' game sockets; `lobbies.Remove`; dispose the actor. |
+| Timeout or statement-budget trip on a `tick` | **Recoverable overrun** — ticks coalesce by design | Drop the tick; close only after `AuthorityMaxConsecutiveOverruns` in a row. |
 | Module load / `init` failure at lobby creation | Fatal at birth | `TryStart` fails → lobby creation fails with a clear `Error` to the creator. |
 
 The bias: a buggy-but-recoverable module keeps the lobby alive and converged; anything that could
@@ -478,9 +481,9 @@ New `AuthorityOptions` record (`ServerLimits.FromConfiguration` pattern), all un
 | Key | Default | Meaning |
 |---|---|---|
 | `AuthorityEnabled` | `true` | Master switch. When `false`, creating a lobby for a `serverAuthority` game fails with a clear error (no silent host-mode downgrade). |
-| `AuthorityMaxMemoryBytes` | 33554432 (32 MB) | Per-engine memory limit (Jint `LimitMemory` / WASM store limit). |
+| `AuthorityMaxMemoryBytes` | 33554432 (32 MB) | Per-invocation allocation budget (Jint `LimitMemory`). |
 | `AuthorityCallTimeoutMs` | 250 | Wall-clock budget per module invocation, and the only runaway guard armed by default. A blunt fatal trigger (a GC pause or thread-pool stall inside the call counts against it), so the default leaves headroom. |
-| `AuthorityMaxStatements` | 0 (off) | Statement/fuel budget per invocation. Opt-in: Jint 4.16 checks *exact* (non-amortizable) constraints before every statement and disarms its tight-loop lanes while two are registered; `MaxStatements` and `LimitMemory` are both exact, `TimeoutInterval` is not. Arming the pair measured **4.4x slower** on a real module (2,500 ticks, identical deterministic workload, median of 5 runs: 224 ms armed vs 51 ms not), to re-guard runaway CPU that the wall clock already bounds. |
+| `AuthorityMaxStatements` | 0 (off) | Statement budget per invocation. Opt-in: Jint checks this constraint before every statement and disarms its tight-loop lanes while armed; the wall clock already bounds runaway CPU. Arming it with the recursion limit measured **4.4x slower** on a real module (2,500 ticks, identical deterministic workload, median of 5 runs: 224 ms armed vs 51 ms not). |
 | `AuthorityRecursionLimit` | 0 (off) | Call-depth limit (Jint), superseded by `StackOverflowGuard`. Setting it narrows the guard back to call expressions only. |
 | `AuthorityMaxArrayLength` | 10000000 | Structural bound on array size — what a wall clock cannot catch in a single statement. |
 | `AuthoritySlowCallWarnFraction` | 0.5 | Warn when one call reaches this fraction of its budget. `0` disables. |
@@ -490,7 +493,7 @@ New `AuthorityOptions` record (`ServerLimits.FromConfiguration` pattern), all un
 | `AuthorityTickHzMax` | 20 | Clamp on a module's requested `config.tickHz`. |
 | `AuthorityMaxScriptBytes` | 1048576 (1 MB) | Max module file size (checked at discovery and load). |
 | `AuthorityMaxWordFileBytes` | 33554432 (32 MB) | Max size of a single `authorityWords` dictionary file (checked at discovery). Larger than the module cap because dictionaries are the big blobs; they live on the shared CLR heap, not in a per-invocation budget. |
-| `AuthorityQueueCapacity` | 256 | Actor inbound channel bound (two-tier: intents drop-oldest, ticks coalesce, roster work never dropped — §6). |
+| `AuthorityQueueCapacity` | 256 | Actor inbound channel bound (two-tier: full channel drops the incoming intent, ticks coalesce, roster work never dropped — §6). |
 | `AuthorityMaxLobbies` | 0 (unlimited) | Cap on concurrent server-authority lobbies. Off by default: a refusal nobody configured is worse than letting the host bound it. **Runtime-editable** from the portal and persisted. |
 | `AuthorityModuleCacheIdleMinutes` | 30 | How long a game's shared prepared module is kept once no lobby is using it (`0` = process lifetime). **Runtime-editable** from the portal and persisted. |
 
@@ -603,9 +606,9 @@ with `LobbyClosed{reason:"authority-failed"}`.
 
 ## 10. SDK impact (small, all additive)
 
-- **`web/kb-core.js`**: pure `normalizeReady(msg)` helper → `{ playerId, players, isHost,
+- **`web/kb-protocol.js`**: pure `normalizeReady(msg)` helper → `{ playerId, players, isHost,
   authority, ownerId, isOwner }` with old-server fallbacks (`authority ?? 'host'`,
-  `ownerId ?? (isHost ? playerId : null)`). Lives in kb-core because it's pure and Vitest-tested.
+  `ownerId ?? (isHost ? playerId : null)`), re-exported through `kb-core.js` and Vitest-tested.
 - **`web/knockbox.js`**: use `normalizeReady` in the `Ready` case; expose `authority`, `ownerId`,
   `isOwner` as properties and in the `onReady` payload. **No send-path changes** — `sendToHost`
   already routes to the authority.

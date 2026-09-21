@@ -38,12 +38,11 @@ Instead of building from source you can pull a published image from GitHub Conta
 docker pull ghcr.io/jcub1011/knockbox-games:latest
 ```
 
-Two tags are published:
+Images are published per release:
 
 | Tag | Channel | Built from |
 |---|---|---|
-| `:latest` | **Stable release** — run this in production. | A release (`v1.2.3`), cut by hand from the release workflow. Versioned tags (`:1.2.3`, `:1.2`) are published alongside it if you want to pin. `:latest` only ever moves *forward*: a prerelease or a back-ported patch publishes its version tags without touching it. |
-| `:develop` | **Pre-release test build** — run an unstable build (e.g. to verify a deployment before promoting it to stable). | Every push to `main`. |
+| `:latest` | **Stable release** — run this in production. | A release (`v1.2.3`), cut from the release workflow. Versioned tags (`:1.2.3`, `:1.2`) are published alongside it if you want to pin. `:latest` only ever moves *forward*: a prerelease or a back-ported patch publishes its version tags without touching it. |
 
 Every stable release also has a [GitHub release](https://github.com/jcub1011/KnockBox-Games/releases)
 carrying three downloads, if you would rather not clone this repo:
@@ -60,8 +59,7 @@ will not run on ARM hosts.
 > **First publish is private.** New GHCR packages start private. A maintainer sets the visibility
 > to **Public** once — repo **Packages** → the package → **Package settings** → **Change
 > visibility** → *Public*. Visibility is per **package**, not per tag, so this single flip exposes
-> **both** `:latest` and `:develop` (and the version tags). That is intentional: a server admin who
-> wants to run an unstable build can pull `:develop` with no credentials, just like `:latest`.
+> `:latest` and the version tags.
 
 To use it with the compose file, comment out the `build:` block on the `knockbox` service and set
 an `image:` instead (the commented lines are already there):
@@ -69,11 +67,11 @@ an `image:` instead (the commented lines are already there):
 ```yaml
 services:
   knockbox:
-    image: ghcr.io/jcub1011/knockbox-games:latest   # or :develop for the test channel
+    image: ghcr.io/jcub1011/knockbox-games:latest
 ```
 
-> **TrueNAS** (or any OCI host): point a Custom App at `ghcr.io/jcub1011/knockbox-games:latest`
-> (or `:develop`). Once the package is public (see the one-time step above), no registry
+> **TrueNAS** (or any OCI host): point a Custom App at `ghcr.io/jcub1011/knockbox-games:latest`.
+> Once the package is public (see the one-time step above), no registry
 > credentials are needed. Map ports `8080`/`8081` 1:1 (or pin `KnockBox__GamesOrigin`) and mount your
 > games directory read-only at `/games`, plus **all four** writable paths — same as the compose setup
 > below:
@@ -623,9 +621,9 @@ win-x64/
   `ASPNETCORE_HTTP_PORTS="8080;8081;8082"` — same effect, the newer port-only form.) **Any explicit
   setting takes over from the built-in default above completely**: it replaces the port list rather
   than adding to it, so an origin you leave out is never listened on and answers `connection refused`
-  — even though `GamesPort`/`AdminPort` still route it. Watch the startup log: it prints the address
-  each origin actually bound, and warns `Admin portal is UNREACHABLE …` when the admin port isn't
-  among them.
+  — even though `GamesPort`/`AdminPort` still route it. Watch the startup log: it reports the
+  address the admin origin bound and warns `Admin portal is UNREACHABLE …` when the admin port
+  isn't among the bound ports.
 - For LAN play, bind `0.0.0.0` via `ASPNETCORE_URLS` (as above), allow the **shell and games** ports
   through Windows Firewall, and have players open `http://<your-LAN-IP>:5114` — the games origin is
   derived from the same host automatically. Leave the **admin** port on `localhost` (don't add
