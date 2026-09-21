@@ -65,7 +65,7 @@ public class WebhookTargetGuardTests : IDisposable
     [InlineData("http://169.254.169.254/latest/meta-data/")]
     public async Task Refuses_an_inward_target_before_opening_a_socket(string url)
     {
-        var result = await Build(allowPrivateTargets: false).DeliverAsync(Endpoint(url), Payload());
+        var result = await Build(allowPrivateTargets: false).DeliverAsync(Endpoint(url), Payload(), TestContext.Current.CancellationToken);
 
         Assert.False(result.Ok);
         // No status at all: nothing was ever sent, which is exactly what makes this useless as a probe —
@@ -81,7 +81,7 @@ public class WebhookTargetGuardTests : IDisposable
         // than on the guard — which is the difference this test is about. A monitoring agent on the same
         // host must be reachable when the knob is set.
         var result = await Build(allowPrivateTargets: true)
-            .DeliverAsync(Endpoint("http://127.0.0.1:9/hook"), Payload());
+            .DeliverAsync(Endpoint("http://127.0.0.1:9/hook"), Payload(), TestContext.Current.CancellationToken);
 
         Assert.False(result.Ok);
         Assert.DoesNotContain(PrivateAddressGuard.Knob, result.Error ?? "");

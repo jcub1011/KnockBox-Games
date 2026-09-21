@@ -1,0 +1,85 @@
+name: Docs
+
+# MkDocs Material site for docs/ — in-site search + sidebar/tab navigation.
+# Standalone on purpose: it neither calls gate.yml nor touches it, so the
+# read-only suite both ci.yml and release.yml rely on is unaffected.
+#
+# One manual step outside this file: Settings > Pages > Source > GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No workflow-level concurrency: PR builds must run in parallel with each other.
+# Only the deploy job below is serialized (group: pages), so a PR build never
+# blocks — or cancels — a main deploy, and vice versa.
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      # Floating-major pin: newest 9.x today, never a silent jump to 10.
+      # Major resolved live against PyPI (9.7.7 on 2026-09-21). When v10 is
+      # wanted, bump the range deliberately: "mkdocs-material>=10,<11".
+      - name: Install MkDocs Material
+        run: pip install "mkdocs-material>=9,<10"
+      # --strict catches nav->missing-file, but not the reverse: a new
+      # docs/*.md without a nav entry builds fine and deploys unreachable.
+      # Fail here so an orphaned page blocks the run before any publish.
+      # Anchored on ": <file>" (fixed string): an unanchored substring match
+      # would let ADMIN.md pass off ADMIN-EXTRA.md's nav line, or off a comment.
+      - name: Every docs page is in nav
+        run: |
+          for f in docs/*.md; do
+            base=$(basename "$f")
+            grep -qF -- ": $base" mkdocs.yml || { echo "Missing $base in mkdocs.yml nav"; exit 1; }
+          done
+      # --strict turns link warnings into errors, so a PR with a broken
+      # ./OTHER-DOC.md link or missing nav entry fails here, not after deploy.
+      - name: Build (strict)
+        run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to Pages
+    # PRs build only — nothing publishes except main. The ref check matters
+    # because workflow_dispatch can run from any branch: dispatching from a
+    # draft branch to "preview" must not publish that draft to production.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [build]
+    runs-on: ubuntu-latest
+    # One deploy at a time; scoped to this job so PR builds run in parallel.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+      - id: deployment
+        uses: actions/deploy-pages@v5

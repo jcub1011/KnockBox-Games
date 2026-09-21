@@ -355,7 +355,7 @@ public class ServerAuthorityFlowTests : IDisposable
         Assert.True(authorities.TryGet(lobby.Id, out var actor));
         // Wait for the actor to apply the effect without tearing it down (more powers to test).
         var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (lobby.HostId != "guest" && DateTime.UtcNow < deadline) await Task.Delay(10);
+        while (lobby.HostId != "guest" && DateTime.UtcNow < deadline) await Task.Delay(10, TestContext.Current.CancellationToken);
         Assert.Equal("guest", lobby.HostId);
 
         // After migration: honored from the new owner, refused from the old one.

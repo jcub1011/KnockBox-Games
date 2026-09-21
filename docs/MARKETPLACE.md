@@ -84,9 +84,10 @@ Consequently:
   field, so there is nothing for a tampered entry to point at another host. `repo`, `tag`, and
   `asset` are each pattern-checked before any request leaves the process.
 - Only `https` is accepted (loopback `http` excepted, for tests and offline mirrors).
-- No GitHub API is used. Deriving the URL avoids the 60-requests-per-hour unauthenticated API limit
-  and removes a second failure mode; the cost is that a malformed `asset` is a hard error, which is
-  the right trade — it is a marketplace bug, fixable in one commit, and the error names it.
+- Package download URLs are derived, so downloads use no GitHub API. Version listing and
+  pinned-version installs resolve available versions through the GitHub releases API, which carries
+  its rate limits; a malformed `asset` is a hard error, which is the right trade — it is a
+  marketplace bug, fixable in one commit, and the error names it.
 
 ### What a download must prove
 
@@ -244,6 +245,5 @@ dotnet test KnockBox.Server.Tests --filter "FullyQualifiedName~MarketplaceLive"
 - **Signature verification beyond the published hash.** The catalog's commit history is the trust root;
   nothing is signed.
 - **The `local-path` source type.** Named in the schema, refused by `ValidateEntry`.
-- **Scheduled update windows.** The check runs on a fixed interval, with no "only overnight".
 
 None of them change the contracts above.

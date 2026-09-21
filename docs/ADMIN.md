@@ -87,7 +87,7 @@ Blocks new lobby creation across **every** game. Sessions already running are un
 normally — this is a drain, not a stop. Use it before a restart or a deploy.
 
 The optional message is shown to a player whose lobby creation is refused, so
-*"Back at 09:00 UTC"* beats the generic text. Maintenance mode is persisted (see §5), so it survives a
+*"Back at 09:00 UTC"* beats the generic text. Maintenance mode is persisted (see §7), so it survives a
 restart — including a restart you didn't intend.
 
 ---
@@ -144,7 +144,8 @@ from.
 - the game's own files (under `games/`, or under the unpacked-package root if it was installed from a
   `.kbg`),
 - the pre-compressed `.br`/`.gz` variants the server derived from them,
-- and the source `.kbg` archive, if there is one — it stays in `games/`, because that file is what the
+- and the source `.kbg` archive, if there is one — in its package root (`games/` for a
+  hand-placed package, the managed root for a portal install), because that file is what the
   installer watches to decide whether the game should still exist.
 
 Reporting only the first would understate a large WASM game by roughly the size of its own cache.
@@ -288,8 +289,9 @@ Note the trust difference. A marketplace package is checked against a hash its c
 uploaded one has no such hash** — it is validated for structure and safety, but the person supplying the
 bytes is the only thing vouching for what is inside.
 
-Once the bytes are accepted the request is over. Anything after that — a malformed archive, an id already
-provided by `games/`, a full disk — surfaces on the job, not on the upload dialog.
+A malformed archive, an id already provided by `games/`, or a busy game is refused on the
+upload request itself. Once a job starts, later failures — a full disk, an extraction fault —
+surface on the job, not on the upload dialog.
 
 ### Sources
 
@@ -334,9 +336,9 @@ started; anything older is only in the files.
 
 ## 6. Platform
 
-Settings, not a live view — and the one tab that **does not poll**. Everything here is a form, and a timer
-would overwrite what you are halfway through typing. It reads when you open the tab, after every save, and
-when you click Refresh.
+Settings, not a live view — and the area that **does not poll** (Platform and its settings
+panels). Everything here is a form, and a timer would overwrite what you are halfway through
+typing. It reads when you open the tab, after every save, and when you click Refresh.
 
 ### Limits & Caps
 
@@ -611,7 +613,7 @@ All keys take the `KnockBox:` prefix (`KnockBox__Key` as an environment variable
 | `AdminHost` / `AdminOrigin` | — | Route the portal by subdomain instead of by port. |
 | `AdminPasswordPath` | `admin.secret` beside the app | The PBKDF2 password hash. Must be writable and persisted. |
 | `AdminSessionTtlHours` | `8` | Session cookie lifetime. Sessions also drop on restart. |
-| `AdminSettingsPath` | `admin-settings.json` beside the password | Persisted operator policy (§5). |
+| `AdminSettingsPath` | `admin-settings.json` beside the password | Persisted operator policy (§7). |
 | `AdminNotificationKeyPath` | `admin-notifications.key.json` beside the password | Persisted notification encryption keys (one per admin account). Same requirements as the password file — writable, and on a persisted volume in Docker. Delete it to clear stored notifications once; a corrupt file recovers the same way on its own. |
 | `AdminStaleLobbyMinutes` | `30` | Idle time before a lobby counts as stale. `0` judges staleness only by "nobody is connected". |
 | `AdminLogBufferSize` | `2000` | Events held for the live log view. |
@@ -662,6 +664,28 @@ Package management and the marketplace (§4):
 | `MarketplaceUpdateDayOfWeek` | `sunday` | Day the weekly check runs on. |
 | `MarketplaceMaxSources` | `8` | Extra marketplaces that may be registered, beyond the built-in official one. |
 | `MaxPackageBytes` | 512 MiB | Also the upload cap, enforced against bytes actually received. |
+| `MaxPackageEntries` | `20000` | Cap on files in a package. `0` = no limit. |
+| `MaxPackageRatio` | `200` | Cap on uncompressed ÷ archive size. `0` = no limit. |
+| `MarketplaceCatalogUrl` | official catalog on `main` | Where the index lives. Must be `https` (or loopback). |
+| `MarketplaceDownloadBaseUrl` | `https://github.com` | Origin that release URLs are built on. |
+| `MarketplaceMaxCatalogBytes` | 4 MiB | Cap on the catalog body, enforced while reading. |
+| `MarketplaceMaxDownloadBytes` | 512 MiB | Cap on a package, enforced against bytes received. |
+| `MarketplaceCatalogTimeoutSeconds` | `30` | Timeout for a catalog fetch. |
+| `MarketplaceDownloadTimeoutSeconds` | `600` | Timeout for one package download. |
+
+Startup-only networking and blobs (configuration + restart; see INFRASTRUCTURE.md §9 for detail):
+
+| Key | Default | What it does |
+| :--- | :--- | :--- |
+| `HandshakeTimeoutSeconds` | `10` | A socket must send its first frame within this deadline. `0` disables. |
+| `DisconnectGraceSeconds` | `60` | How long a member is held after their control socket drops. `0` = immediate removal. |
+| `BlobsEnabled` | `true` | Master switch for blob sharing. Off ⇒ the blob root is never created and uploads are refused. |
+| `BlobMaxBytes` | 100 MiB | Cap on a single blob, enforced while streaming. `0` = no limit. |
+| `BlobLobbyQuotaBytes` | 1 GiB | Total blob bytes one lobby may reference. `0` = no limit. |
+| `BlobTotalQuotaBytes` | 20 GiB | Aggregate cap bounding disk use. `0` = no limit. |
+| `BlobGraceMinutes` | `5` | How long freshly uploaded bytes are protected before any handle references them. |
+| `BlobSweepSeconds` | `300` | Backstop sweep cadence. `0` = no backstop. |
+| `BlobMaxUploadsPerLobby` | `4` | Uploads one lobby may have streaming at once. `0` = unlimited. |
 
 ---
 
@@ -672,8 +696,6 @@ The portal covers live operations. Deliberately absent, and specified in
 
 - **Signature verification beyond the published hash.** A catalog commits to a `sha256` and that is
   enforced on every download, but nothing is signed. See [MARKETPLACE.md](./MARKETPLACE.md).
-- **Scheduled update windows.** The check runs on a fixed interval; there is no "only between 03:00 and
-  05:00".
 
 **Decided against, rather than deferred:**
 

@@ -22,7 +22,7 @@ public class ConnectionTests
         for (var i = 0; i < Overflow; i++) conn.Send(Frame(i));
 
         conn.CompleteOutbound();
-        await conn.SendLoopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        await conn.SendLoopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.True(socket.Sent.Count < Overflow, "some frames should have been dropped");
         Assert.Equal(Overflow - 1, Decode(socket.Sent[^1]));         // newest frame survives
@@ -41,7 +41,7 @@ public class ConnectionTests
         // Crucially we do NOT call CompleteOutbound here — the loop must end on its own, proving the
         // overflow tore the connection down (so the owning handler will clean it up).
         var loop = conn.SendLoopAsync(CancellationToken.None);
-        await loop.WaitAsync(TimeSpan.FromSeconds(5));
+        await loop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.True(loop.IsCompletedSuccessfully);
         Assert.True(socket.Sent.Count < Overflow, "frames past the cap are lost on a stuck socket");
@@ -56,7 +56,7 @@ public class ConnectionTests
         var loop = conn.SendLoopAsync(CancellationToken.None); // draining keeps the queue from filling
         for (var i = 0; i < 100; i++) conn.Send(Frame(i));
         conn.CompleteOutbound();
-        await loop.WaitAsync(TimeSpan.FromSeconds(5));
+        await loop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         Assert.Equal(100, socket.Sent.Count);
         Assert.Equal(Enumerable.Range(0, 100), socket.Sent.Select(Decode));

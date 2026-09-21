@@ -455,3 +455,7 @@ FodyWeavers.xsd
 # The generated index (.addons/ADDONS.json) IS committed — it is served from raw.githubusercontent
 # and is the trust root every addon install verifies against.
 .addons/*.zip
+
+# MkDocs local build output (`mkdocs build` in a dev checkout). The published
+# site is built by .github/workflows/docs.yml, never committed.
+site/

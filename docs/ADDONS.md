@@ -148,7 +148,7 @@ sake hold the sentinel `0.0.0-dev`, and the build stamps the real value in:
 | Godot `plugin.cfg` | `tools/build-addons.mjs` stamps it into the release archive. |
 | `tools/pack-game/package.json` | CI stamps it before `npm publish`. |
 | `KnockBox.Server` (`KnockBoxSdk`) | Reads the manifest, **embedded into the assembly** by the csproj. |
-| `clients/phaser/`, `web/` `package.json` | Nothing — both are `private`, unpublished, and their version was never used for anything. |
+| `clients/phaser/`, `web/` `package.json` | Stamped into the release archive only; both stay `private` and unpublished in-repo. |
 
 `AddonManifestTests` asserts every in-repo declaration is *still the sentinel*, not that it equals
 `sdkVersion`. That distinction is the point: an equality check still leaves six real numbers that must
@@ -354,8 +354,10 @@ covers it.
 ## 7. Known gap: the Godot addon's protocol surface
 
 The Godot addon does not implement `normalizeReady`, `LOG_LEVELS` or `makeLogger`. Concretely, a Godot
-game cannot use `KnockBox.log.*` and cannot see `authority`, `ownerId` or `isOwner` — the
-server-authority owner contract that `web/` and `clients/phaser/` both gained.
+game cannot use `KnockBox.log.*` or Play Log, cannot see `authority`, `ownerId` or `isOwner`, and
+has no reconnect-grace presence or owner-changed events — the surface `web/` and
+`clients/phaser/` carry. Its `kb_authority.gd` also lacks the client-side forgery hardening the
+Phaser helper applies in server mode (the server relay still enforces it).
 
 This is tracked, not hidden: `web/__tests__/client-parity.test.js` pins the gap in a named allowlist
 and fails if the allowlist goes stale in either direction. Closing it is a separate task

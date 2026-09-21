@@ -44,6 +44,8 @@ import {
   formatPlayerCapacity,
   formatTagsTooltip,
   formatGameVersion,
+  parseServerVersion,
+  SERVER_RELEASES_URL,
   isSafeHomepageUrl,
   normalizeTags,
   filterAndSortGames,
@@ -839,6 +841,26 @@ describe('formatGameVersion', () => {
     expect(formatGameVersion('   ')).toBeNull();
     expect(formatGameVersion('v')).toBeNull();
     expect(formatGameVersion(123)).toBeNull();
+  });
+});
+
+describe('parseServerVersion', () => {
+  it('reads the version payload into a display string', () => {
+    expect(parseServerVersion({ version: '1.4.0' })).toBe('v1.4.0');
+    expect(parseServerVersion({ version: 'v1.4.0' })).toBe('v1.4.0');
+  });
+
+  it('returns null for a missing or malformed payload', () => {
+    expect(parseServerVersion(null)).toBeNull();
+    expect(parseServerVersion(undefined)).toBeNull();
+    expect(parseServerVersion({})).toBeNull();
+    expect(parseServerVersion({ version: 42 })).toBeNull();
+    expect(parseServerVersion({ version: null })).toBeNull();
+    expect(parseServerVersion({ version: '  ' })).toBeNull();
+  });
+
+  it('points the label at the releases page', () => {
+    expect(SERVER_RELEASES_URL).toBe('https://github.com/jcub1011/KnockBox-Games/releases');
   });
 });
 

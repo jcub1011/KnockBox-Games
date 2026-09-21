@@ -26,7 +26,7 @@ to folders you own (a TrueNAS dataset, `/srv/knockbox/...`, etc.), then `docker 
 ```yaml
 services:
   knockbox:
-    image: ghcr.io/jcub1011/knockbox-games:latest   # or :develop for the pre-release channel
+    image: ghcr.io/jcub1011/knockbox-games:latest
     restart: unless-stopped
     ports:
       - "8080:8080"   # shell — players open this
@@ -59,7 +59,7 @@ services:
       #   source: /srv/knockbox/logs
       #   target: /app/logs
     environment:
-      KnockBox__GamesPollSeconds: "10"   # hot-reload poll (bind-mount file events don't propagate)
+      KnockBox__GamesPollSeconds: "5"   # hot-reload poll (bind-mount file events don't propagate)
 ```
 
 Then open `http://<host>:8080` and copy `.kbg` packages (or game folders) into your games directory —

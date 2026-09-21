@@ -119,6 +119,11 @@ internal static class AdminApi
         admin.UseEndpoints(routes =>
         {
             routes.MapGet("/admin/api/auth/status", ctx => AuthStatus(ctx, options));
+            // The server version, intentionally WITHOUT RequireSession: the version is printed in the
+            // portal header before login and on the unauthenticated player shell, and it is not
+            // sensitive. See ServerVersionApi for why this is its own endpoint rather than the
+            // marketplace response's AppVersion field made public.
+            routes.MapServerVersion();
             // JsonRequired, not Json: all three ALWAYS carry a body, so the content type is demanded
             // outright. Without that, an HTML form with enctype="text/plain" posts a body that parses as
             // valid JSON, and setup needs no cookie (it is claim-on-first-use) — so a page the operator

@@ -76,23 +76,29 @@ can be dropped into a server's games directory.
 | `tags` | — | Category/genre labels (`["party", "word-game"]`). Rendered as chips on your tile and matched by the search box. Never validated; blank and non-text entries are dropped rather than drawn. |
 | `description` | — | One short line about your game. Not shown on the tile, but matched by the search box, so it is worth filling in. |
 | `homepage` | — | Link to your game's own page or repository. Must be an absolute `https://` URL — anything else is dropped with a warning and the badge stays plain text. Rendered as the in-game version badge's link (opens in a new tab) and shown in the marketplace listing. `knockbox pack` rejects a non-https value so you fix it here. |
-| `createdAt` / `updatedAt` | — | ISO 8601 timestamps (`"2026-01-15T10:00:00Z"`) backing the home page's **Newest** and **Recently Updated** sorts. When you omit them the server derives them from your `GAME.json` file's own timestamps — which for a `.kbg` means *when this build was installed on that server*, and a `.kbg` update resets it, since the game folder is re-extracted. Set `createdAt` yourself if you want your game to hold a stable position under "Newest" across releases. |
+| `createdAt` / `updatedAt` | — | ISO 8601 timestamps (`"2026-01-15T10:00:00Z"`) backing the home page's **Newest** and **Recently Updated** sorts. When you omit them the server derives `createdAt` from your `GAME.json` file's timestamps and `updatedAt` from the install marker for package-backed games — which for a `.kbg` means *when this build was installed on that server*, and a `.kbg` update resets it, since the game folder is re-extracted. Set `createdAt` yourself if you want your game to hold a stable position under "Newest" across releases. |
 | `crossOriginIsolated` | — | `true` makes the platform serve your game with COOP/COEP so a **threaded** Godot/Unity export can use `SharedArrayBuffer`. Leave `false` for hand-written games and single-threaded exports. |
+| `themeColor` / `themeTextColor` | — | CSS colors tinting the in-game header chrome. Invalid values are ignored. |
+| `serverAuthority` | — | Path to a single-file `.js` authority module (see §5b). Invalid or missing ⇒ the game is skipped, never downgraded to host mode. |
+| `authorityWords` | — | Named word dictionaries for server-authority games (see §5b). Requires `serverAuthority`. Never served on the game origin. |
+| `sdk` | — | Stamped by `knockbox pack` from `knockbox.json` (`{ "<addon>": "<version>" }`). Never validated; shown in the portal's catalog badges. |
+| `license` / `contentRating` | — | Display metadata surfaced with the game. |
 
 Your game **loads as soon as a player creates or joins a lobby** — there is no minimum-player gate.
 Show your own "waiting for players" UI and decide when play begins. You control who may join with
 `setLobbyOpen(true/false)` (§4); a lobby is **open** (listed + joinable) by default.
 
 The catalog **hot-reloads**: drop in, edit, or remove a game folder and the change is picked up
-within a second or two — **no server restart**.
+within a second or two via the file watcher — **no server restart**. Under Docker bind mounts the
+polling fallback (`GamesPollSeconds`) is the signal that notices the change.
 
 ### Packaging your game
 
 To **ship** a game, package it into a single `.kbg` file. An administrator copies that one file into
 their server's games directory and the server installs it — no unzipping, no CLI on their host, no
 restart. The packer also **validates your manifest against the same rules the server enforces**, so a
-bad `id`, a missing `entry`, or a thumbnail typo fails immediately instead of being silently skipped
-at runtime.
+bad `id`, a missing `entry`, or a thumbnail typo fails at pack time. The server skips a game with a
+bad `id` or `entry`; a bad thumbnail only 404s on the shell origin.
 
 ```sh
 # Vite/Phaser: build, then package dist/ (lands in this platform's games/, so it installs at once)
@@ -108,7 +114,7 @@ node tools/pack-game/pack-game.mjs --in . --manifest GAME.json
 The package is named after your `id`, and the manifest/thumbnail may live outside the build (e.g. an
 `export/` folder). Pass `--out ~/builds/` to write it somewhere that doesn't touch the platform, or
 `--dir dist-game` to get the plain folder layout instead when you want to inspect exactly what was
-packaged. See [`tools/pack-game/README.md`](../tools/pack-game/README.md) for all options and
+packaged. See [`tools/pack-game/README.md`](https://github.com/jcub1011/KnockBox-Games/blob/main/tools/pack-game/README.md) for all options and
 [`KBG_FORMAT.md`](./KBG_FORMAT.md) for the format itself.
 
 Packing runs Brotli at maximum quality, which takes ~50 seconds for a 38 MB WASM export. That cost is
@@ -153,18 +159,22 @@ automatically — **don't strip the fragment** from your entry URL.
 |---|---|---|
 | `KnockBox.playerId` | `string` | Your player's id in this session. |
 | `KnockBox.players` | `{ id, displayName }[]` | Everyone in the lobby. **Order is stable and shared by all clients** — index 0 is the host/creator. Use it to assign seats/roles. |
-| `KnockBox.isHost` | `boolean` | True if *you* are the authoritative host. |
+| `KnockBox.isHost` | `boolean` | True if *you* are the authoritative host. Always `false` in server-authority mode. |
+| `KnockBox.authority` | `"host" \| "server"` | Which side owns the rules for this lobby. |
+| `KnockBox.ownerId` | `string \| null` | Player holding lobby powers (kick, open/close). Equals the creator in host mode. |
+| `KnockBox.isOwner` | `boolean` | True if you hold lobby powers. Gate kick buttons and open/close toggles on this, not `isHost`. |
 
 ### Lifecycle callbacks
 
 | Method | Fires when | Argument |
 |---|---|---|
-| `KnockBox.onReady(cb)` | The data socket attached and the server handed you identity + roster. Start here. | `{ playerId, players, isHost }` |
+| `KnockBox.onReady(cb)` | The data socket attached and the server handed you identity + roster. Start here. | `{ playerId, players, isHost, authority, ownerId, isOwner }` |
 | `KnockBox.onMessage(cb)` | A relayed message arrives for you. | `{ from, payload }` |
 | `KnockBox.onPlayerJoined(cb)` | A player joins the lobby. | the new `player` |
 | `KnockBox.onPlayerLeft(cb)` | A player leaves for good (or their reconnect grace elapsed). | their `playerId` |
 | `KnockBox.onPlayerDisconnected(cb)` | A player's tab dropped (refresh/close/network blip) but they're held in the lobby for the reconnect grace window. They stay in `players` — show a "reconnecting…" state. | their `playerId` |
 | `KnockBox.onPlayerConnected(cb)` | A previously-disconnected player reconnected within the grace window. | their `playerId` |
+| `KnockBox.onOwnerChanged(cb)` | Lobby ownership moved (server-authority succession). | the new `ownerId` |
 
 ### Sending
 
@@ -583,9 +593,10 @@ worst. If you see that during development, act on it: it is the only warning you
 start being disconnected. If your game genuinely needs more room, an operator can raise it for that
 game alone with `KnockBox:AuthorityCallTimeoutMsByGame:<your-game-id>`.
 
-A `tick` that overruns is dropped and the lobby survives (up to `AuthorityMaxConsecutiveOverruns`, 3
-by default, in a row). An overrun in `applyIntent` or a roster hook is fatal on the first occurrence —
-there is no safe way to half-apply someone's move.
+A `tick` that hits its timeout or statement budget is dropped and the lobby survives (up to
+`AuthorityMaxConsecutiveOverruns`, 3 by default, in a row). Any other overrun — memory, recursion,
+or a timeout outside a tick — is fatal on the first occurrence; there is no safe way to
+half-apply someone's move.
 
 ### Owner ≠ authority
 
@@ -599,16 +610,17 @@ callback when it moves.
 
 ### Limits & error semantics
 
-Each module call is budgeted (memory / wall-clock / statement count — see the `Authority*` knobs in
-INFRASTRUCTURE.md §9). Two failure classes:
+Each module call is budgeted (memory and wall-clock by default, with an opt-in statement
+budget — see the `Authority*` knobs in INFRASTRUCTURE.md §9). Two failure classes:
 - **Contained** — your `applyIntent`/hook *throws*: the intent is dropped, the current `snapshot()`
   is re-broadcast so clients re-converge, and the lobby stays alive. In development the error message
   is relayed to the browser console as `{ "_kb": "error", … }`; production leaks nothing. Five
   consecutive contained failures escalate to fatal.
-- **Fatal** — a constraint violation (timeout / memory / statement overflow) or a load/`init`
-  failure: the engine is untrustworthy, so the lobby is **closed loudly** — members get a
-  `LobbyClosed` control event (the shell returns them home) and the game sockets are dropped. A
-  load/`init` failure at creation just fails lobby creation with an error to the creator.
+- **Fatal** — a constraint violation or a load/`init` failure: the engine is untrustworthy, so the
+  lobby is **closed loudly** — members get a `LobbyClosed` control event (the shell returns them
+  home) and the game sockets are dropped. A timeout or statement-budget trip on a `tick` is the
+  one exception: it is dropped like a slow tick (see above). A load/`init` failure at creation
+  just fails lobby creation with an error to the creator.
 
 ### Hidden information (server mode makes this real)
 
@@ -632,12 +644,15 @@ Three tiers — see §11 for the mechanics; server-authority specifics:
      log: { info(){}, warn(){}, error(){}, debug(){} },
      setLobbyOpen(_open) {},
      setOwner(id) { ownerId = id; },
+     budgetRemainingMs: () => 250,
      words: {
        has: (_key, w) => words.has(String(w).toLowerCase()),
        count: () => words.size,
        pick: (_key, i) => [...words][i] ?? null,
        countOfLength: (_key, len) => [...words].filter((w) => w.length === len).length,
        pickOfLength: (_key, len, i) => [...words].filter((w) => w.length === len)[i] ?? null,
+       rangeOfPrefix: (_key, len, prefix) => [0, 0],
+       pickRange: () => [],
      },
    };
    const a = createAuthority(fakeKb);
@@ -770,11 +785,17 @@ The platform doesn't care how your iframe was built. Two integration routes:
 
   ```jsonc
   → { "type": "Attach", "ticket": "<kbTicket>" }            // your first frame
-  ← { "type": "Ready",  "playerId": "…", "players": [ { "id": "…", "displayName": "…" } ], "isHost": true }
+  ← { "type": "Ready",  "playerId": "…", "players": [ { "id": "…", "displayName": "…" } ], "isHost": true, "authority": "host", "ownerId": "…" }
   → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }   // send
   ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }     // receive
+  → { "type": "SetLobbyOpen", "open": true|false }          // owner only
+  → { "type": "Log", "level": "Information", "message": "…" }
+  → { "type": "PlayLog", "metadata": { … } }
   ← { "type": "GamePlayerJoined", "player": { … } }
   ← { "type": "GamePlayerLeft",   "playerId": "…" }
+  ← { "type": "GamePlayerDisconnected", "playerId": "…" }
+  ← { "type": "GamePlayerConnected", "playerId": "…" }
+  ← { "type": "GameOwnerChanged", "ownerId": "…" }
   ```
 
   Connect to `kbEndpoint` (the data socket). On a *transient* drop, reconnect with the same ticket
@@ -809,14 +830,16 @@ It has three layers; use as much as you want:
 1. **`KnockBox` autoload** — the raw transport (a `WebSocketPeer` port of the JS SDK). Signals
    `session_ready(player_id, players, is_host)`, `message_received(from_id, payload)`,
    `player_joined`, `player_left`, `closed(terminal)`, `resumed`; methods `send_to_host`,
-   `send_to_all`, `send_to`. On web it auto-attaches from the URL fragment; sends made before the
+   `send_to_all`, `send_to`. It covers the core roster and relay surface; reconnect-grace
+   presence, owner tracking, server-side log forwarding and Play Log are JS/Phaser-only.
+   On web it auto-attaches from the URL fragment; sends made before the
    socket is open are queued and flushed on connect.
 
 2. **`KBNet`** (`kb_net.gd`) — a façade you register as an autoload named `Net`. On web it forwards
    `KnockBox`; **in the editor it runs a built-in single-player loopback** so you press Play and
    develop with no server and no ticket. Same signals/methods as `KnockBox` (plus a `reconnected`
-   flag and `set_lobby_open(open)` for the host's join policy), so your code is identical in both.
-   For native testing against a real server, call `Net.connect_with(ticket, endpoint)`.
+   flag and `set_lobby_open(open)` for the host's join policy). For native testing against a real
+   server, call `Net.connect_with(ticket, endpoint)`.
 
 3. **`KBAuthority`** (`kb_authority.gd`) — *optional* host-authoritative glue. You write a **model**;
    it runs the guest-sync / host-broadcast / late-join / reconnect loop for you (plus `set_open(open)`
@@ -943,7 +966,7 @@ new Phaser.Game({
 The plugin connects automatically on start: it reads the ticket + endpoint the shell put in the URL
 fragment, opens its own WebSocket, authenticates, then fires `ready`. Full API — signals, sending,
 `KBAuthority`, and the server-less local peer — is in
-[`clients/phaser/README.md`](../clients/phaser/README.md).
+[`clients/phaser/README.md`](https://github.com/jcub1011/KnockBox-Games/blob/main/clients/phaser/README.md).
 
 Then package as usual (§9): `knockbox pack --in dist --manifest GAME.json --build "npm run build"`.
 

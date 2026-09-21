@@ -99,12 +99,14 @@ chosen by its **first frame**. Messages are UTF-8 **JSON envelopes** discriminat
 field (`System.Text.Json` polymorphism; camelCase on the wire). Request/response ops carry a
 client-generated `cid`.
 
-**Naming convention** (keep new types consistent): **commands** (client→server) are imperative verbs
-(`CreateLobby`, `JoinLobby`, `RejoinLobby`, `RequestTicket`, `KickPlayer`); **responses**
-(cid-correlated) are noun + past participle (`LobbyCreated`, `LobbyJoined`, `RejoinRejected`,
-`GameCatalog`, `Ticket`); **events** (push, no cid) are past-tense and plane-tagged. The `Game` prefix
-is **reserved for the data plane** — the relay payload (`Game`) and the roster mirrors (`GamePlayer*`,
-the data-plane twins of the control `Player*` events, which omit `lobbyId`).
+**Naming convention** (keep new types consistent): **commands** (client→server) are typically
+imperative verbs (`CreateLobby`, `JoinLobby`, `RequestTicket`, `SetLobbyOpen`); **responses** are
+typically noun + past participle (`LobbyCreated`, `LobbyJoined`, `RejoinRejected`); **events**
+(push, no cid) are past-tense and plane-tagged. The `Game` prefix is **reserved for the data
+plane** — the relay payload (`Game`) and the roster mirrors (`GamePlayer*`, the data-plane twins
+of the control `Player*` events, which omit `lobbyId`). `Hello`/`Welcome`, `Attach`/`Ready`,
+`ListGames`/`GameCatalog`, `RequestTicket`/`Ticket` and `Error` predate the convention and keep
+their names.
 
 The first frame also carries a **protocol version** (`"proto"`, see `KnockBoxProtocol.Version` —
 currently `1`). SDKs get copied into games and can outlive server upgrades, so the server accepts
@@ -134,13 +136,15 @@ Push events (no `cid`): `PlayerJoined`, `PlayerLeft`, and the reconnect-grace pa
 socket dropped but they're held in the lobby for the grace window, then returned within it — they
 stay on the roster the whole time). `EnterGame{lobbyId,gameId,hostId,players}` is sent to a
 single player when they enter a lobby (create/join/rejoin) — it means "load the game now", not a
-min-players threshold.
+min-players threshold. `Kicked` tells a member they were removed, `LobbyClosed{lobbyId,reason}`
+tells members the server closed a live lobby, `OwnerChanged{lobbyId,ownerId}` tracks lobby-power
+succession, and `AnnouncementPosted`/`AnnouncementCleared` carry the player banner.
 
 ### Data role (a game iframe's own socket) — first frame `Attach`
 
 ```jsonc
 → { "type": "Attach", "ticket": "<from RequestTicket>" }
-← { "type": "Ready",  "playerId": "<id>", "players": [ … ], "isHost": true }
+← { "type": "Ready",  "playerId": "<id>", "players": [ … ], "isHost": true, "authority": "host", "ownerId": "<id>" }
 
 → { "type": "Game", "to": "host"|"all"|"<playerId>", "payload": { … } }      // game sends
 ← { "type": "Game", "to": …, "payload": { … }, "from": "<senderId>" }        // server stamps From
@@ -149,6 +153,7 @@ min-players threshold.
 → { "type": "PlayLog", "metadata": { "placement": "1", … } } // → forwarded to this player's CONTROL socket
 ← { "type": "GamePlayerJoined", "player": { … } }   ← { "type": "GamePlayerLeft", "playerId": "…" }
 ← { "type": "GamePlayerDisconnected", "playerId": "…" }   ← { "type": "GamePlayerConnected", "playerId": "…" }  // reconnect grace
+← { "type": "GameOwnerChanged", "ownerId": "…" }
 ```
 The server validates the ticket signature **and live lobby membership**, binds the connection to
 `(playerId, lobbyId)`, and resolves all routing from that binding — **the game never sends a lobby
@@ -204,7 +209,8 @@ truth.
   kept in the lobby (so the lobby stays alive and their game ticket stays valid); the server
   broadcasts `PlayerDisconnected`/`GamePlayerDisconnected`. A reconnect within the window (a fresh
   shell `Hello` + `RejoinLobby`) clears the flag and broadcasts `PlayerConnected`/`GamePlayerConnected`
-  with no roster churn. A background reaper (sweeping every ~5s) removes any member whose grace
+  with no roster churn. A background reaper (sweeping every `clamp(grace,1,5)` seconds, 5s at the
+  default grace) removes any member whose grace
   elapses — broadcasting `PlayerLeft`/`GamePlayerLeft` and deleting the lobby if it empties; the
   reaper re-checks for a live control socket first, so a player who reconnected is never evicted.
   Setting the grace to `0` restores the old behaviour: a control-socket close leaves immediately.
@@ -293,13 +299,17 @@ shell pipelines.
   once (pinned by `AdminAuthServiceTests`).
 - **Not on the games/shell path:** because the branch is selected before them, an admin request never
   touches the precompressed-asset negotiation, the `.kbg` gate, or COOP/COEP handling.
-- **Reads and controls.** Beyond the four auth routes, `/admin/api/*` serves `system/status`, `metrics`,
-  `metrics/history`, `lobbies`, `games`, `logs`, `logs/files` and `logs/files/{name}` (raw download),
-  `limits`, `room-codes`, `announcement` and `webhooks`, plus POSTs for closing a lobby, bulk-closing (all or
-  per game), purging stale lobbies, kicking a member, setting a game's availability, deleting a game,
-  rescanning the catalog, toggling maintenance mode, editing the runtime limits and lobby caps, replacing the
-  room-code blocklist, posting or clearing the player announcement, and registering, removing or testing a
-  webhook endpoint. Every one is behind
+- **Reads and controls.** Beyond the four auth routes, `/admin/api/*` includes `system/status`,
+  `metrics`, `metrics/history`, `lobbies`, `games` (plus `games/{id}/export`), `logs`,
+  `logs/files` and `logs/files/{name}` (raw download), `limits`, `room-codes`, `announcement`,
+  `webhooks`, `blob-quota`, `notifications/key`, `updates/schedule`, `marketplace/catalog`,
+  `marketplace/plugins/{id}/versions` and `packages/jobs`/`packages/jobs/{jobId}`, plus POSTs for
+  closing a lobby, bulk-closing (all or per game), purging stale lobbies, kicking a member, setting
+  a game's availability, deleting a game, rescanning the catalog, toggling maintenance mode, editing
+  the runtime limits and lobby caps, replacing the room-code blocklist, posting or clearing the
+  player announcement, registering, removing or testing a webhook endpoint, marketplace and package
+  installs/updates/rollbacks/uninstalls, the update schedule, blob quotas and notification keys.
+  Every one is behind
   `RequireSession`; the mutating ones additionally pass `WriteGuard`, which requires a JSON content type and
   rejects a cross-site `Sec-Fetch-Site`. That is defence in depth behind `SameSite=Strict` and the isolated
   port, not a substitute for either — a header a client may simply omit cannot be a security boundary, so a
@@ -348,8 +358,8 @@ inherited by the admin origin, which never opens one.
 | `/games/{id}/<thumbnail>` (shell origin) | `games/{id}/<thumbnail>` | **Only** the manifest's declared thumbnail for the lobby browser; every other `/games/*` path 404s here (the full build is reachable only on the game origin). |
 | `/games/{id}/…`, `/knockbox.js` (game origin) | `games/{id}/…`, `web/` | The game build + SDK; COOP/COEP added when the manifest sets `crossOriginIsolated`. |
 | `/games/*.kbg` (any origin) | — | Always **404**. The package's contents are public (they are the game), but serving a multi-megabyte uncacheable archive at a guessable URL is a needless bandwidth amplifier. |
-| `/`, `/admin.js`, `/admin-core.js`, `/admin.css`, `/terminal.js`, `/terminal.html` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. `admin-core.js` is the pure, DOM-free half (formatting, filtering, rate arithmetic), the same split `kb-core.js` has from `shell.js`. Carrier pages (`/`, `/index.html`, `/terminal.html`) carry the admin bundle's content-hash token exactly like the shell — no manual version. |
-| `/admin*` (shell **or** game origin) | — | Always **404**, so the portal is unreachable from any origin a player can browse. |
+| `/`, `/admin.js`, `/admin-core.js`, `/admin-notifications.js`, `/admin.css`, `/terminal.js`, `/terminal.html` (admin origin) | `web/admin/` | The operator dashboard, served at the admin origin's root. Its API lives under `/admin/api/*`. `admin-core.js` is the pure, DOM-free half (formatting, filtering, rate arithmetic), the same split `kb-core.js` has from `shell.js`. Carrier pages (`/`, `/index.html`, `/terminal.html`) carry the admin bundle's content-hash token exactly like the shell — no manual version. |
+| `/admin`, `/admin/*` (shell **or** game origin) | — | Always **404**, so the portal is unreachable from any origin a player can browse. |
 
 Game assets resolve through a `CompositeFileProvider` over `games/` then `GamesUnpackedRoot`, in the
 same order the catalog searches — so a request's manifest and its assets always come from the same
@@ -429,7 +439,7 @@ into `games/` and it appears within a second or two — no restart.
 | `ManagedPackages` | `true` | Master switch for portal installs. Off ⇒ the managed root is never created and every install is refused with a reason the portal shows; packages copied into `games/` by hand still work. Implied off when `Packages=false`, since nothing would extract what was installed. |
 | `PackageBackupCount` | `1` | Previous versions of each managed package retained for one-click rollback. `0` keeps none, and makes an update a bare atomic move with no copy. Counted in the game's disk figure. |
 | `MaxConcurrentInstalls` | `1` | Downloads/extractions in flight at once. Bounds bandwidth and peak disk — two simultaneous half-gigabyte downloads on a small VPS is not a feature — not the number of jobs. |
-| `Blobs` | `true` | Master switch for **blob sharing** — the side channel a game uses to share media its players cannot receive over `/ws`, whose 512 KiB frame cap makes a multi-megabyte map image impossible to send. Off ⇒ the blob root is never created and every upload is refused with a reason the game can show. |
+| `BlobsEnabled` | `true` | Master switch for **blob sharing** — the side channel a game uses to share media its players cannot receive over `/ws`, whose 512 KiB frame cap makes a multi-megabyte map image impossible to send. Off ⇒ the blob root is never created and every upload is refused with a reason the game can show. |
 | `BlobsRoot` | auto (sibling `blobs`) | Where uploaded blobs live, content-addressed by SHA-256 and sharded on the first two hex characters. Same precedence as `GamesRoot`. **Must be writable and must not overlap `GamesRoot`, `GamesUnpackedRoot` or `GamesManagedRoot`** — the server refuses an overlapping configuration, and this one would destroy data rather than merely confuse a watcher, because the whole root is **cleared on every startup**. Nothing here is worth persisting: a blob's lifetime is its lobby's, lobbies are in-memory and die with the process, so after a restart every blob is orphaned by definition. What it *does* need is room — see the sizing note below `BlobTotalQuotaBytes`. |
 | `BlobMaxBytes` | `104857600` (100 MiB) | Cap on a single blob, enforced against bytes actually written rather than `Content-Length` (which is the client's claim, and absent entirely on a chunked request). Also raises the host's own request-body cap for the upload route only. `0` = no limit. |
 | `BlobLobbyQuotaBytes` | `1073741824` (1 GiB) | Total blob bytes one lobby's registrations may reference. Identical content is stored once and charged once, however many names point at it. Overridable per game from the admin portal. `0` = no limit. |
@@ -478,19 +488,19 @@ into `games/` and it appears within a second or two — no restart.
 | `AdminLoginAttemptsPerMinuteGlobal` | `60` | Cap on admin password attempts across **all** callers, checked after the per-IP bucket and still before any hashing. This is the one that bounds CPU no matter what a caller claims its address to be: 60/min ≈ one hash per second ≈ 40% of one core at worst. `0` disables. |
 | `DisconnectGraceSeconds` | `60` | How long a member is held in their lobby after their **control** socket drops, so a tab refresh / brief network loss doesn't kick them out (see §Disconnect & reconnect). `0` disables grace (immediate removal on drop). |
 | `AuthorityEnabled` | `true` | Master switch for server-authoritative mode (games with `GAME.json` `serverAuthority`, see SERVER_AUTHORITY_DESIGN.md). `false` ⇒ creating a lobby for such a game fails with a clear error — never a silent downgrade to host mode. |
-| `AuthorityMaxMemoryBytes` | `33554432` (32 MB) | Per-engine memory budget for the sandboxed authority runtime (Jint `LimitMemory`; a per-invocation allocation budget, see design §8). |
+| `AuthorityMaxMemoryBytes` | `33554432` (32 MB) | Per-invocation allocation budget for the sandboxed authority runtime (Jint `LimitMemory`, see design §8). |
 | `AuthorityCallTimeoutMs` | `250` | Wall-clock budget per module invocation, and the **only runaway guard armed by default**. A blunt fatal trigger (a GC pause counts against it), so the default leaves headroom. |
-| `AuthorityMaxStatements` | `0` (off) | Statement budget per invocation — the *deterministic* runaway guard, now opt-in. Jint 4.16 checks *exact* (non-amortizable) constraints before every statement and disarms its tight-loop lanes while two are registered; `MaxStatements` and `LimitMemory` are both exact, `TimeoutInterval` is not. Arming the pair measured **4.4x slower** on a real module (2,500 ticks, identical deterministic workload, median of 5 runs: 224 ms armed vs 51 ms not), to re-guard runaway CPU that the wall clock already bounds. A runaway loop is still caught, by the clock. Setting this costs roughly a 3x interpreter slowdown for every authority game on the server. |
+| `AuthorityMaxStatements` | `0` (off) | Statement budget per invocation — the *deterministic* runaway guard, now opt-in. Jint checks this constraint before every statement and disarms its tight-loop lanes while armed. Arming it with the recursion limit measured **4.4x slower** on a real module (2,500 ticks, identical deterministic workload, median of 5 runs: 224 ms armed vs 51 ms not), to re-guard runaway CPU that the wall clock already bounds. A runaway loop is still caught, by the clock. |
 | `AuthorityRecursionLimit` | `0` (off) | Call-depth limit, superseded by Jint's `StackOverflowGuard` (always on), which is cheaper and covers every route into a function body rather than the call expression alone. Setting this **narrows** the guard: Jint gives `MaxRecursionDepth` precedence when both are set. |
 | `AuthorityMaxArrayLength` | `10000000` | Structural bound on `new Array(n)` and array growth — the one allocation shape a wall clock is bad at catching, since a single statement can ask for billions of slots. Checked at the array operation, not per statement. |
 | `AuthoritySlowCallWarnFraction` | `0.5` | Fraction of the per-call budget a single call may reach before the server logs a warning naming the game. Fires on each new worst, not per call. **A game developer cannot measure this from a browser** — solo play runs the same module JIT-compiled over an in-memory dictionary — so without it the first signal of a module near its budget was a lobby closing. `0` disables. |
-| `AuthorityMaxConsecutiveOverruns` | `3` | Consecutive budget overruns on a **tick** before the lobby is closed. Ticks are droppable by design (they coalesce), so one slow tick is now a hitch rather than the end of everybody's game; a module that cannot finish a tick at all still dies. Overruns on any other call remain fatal on the first occurrence. |
+| `AuthorityMaxConsecutiveOverruns` | `3` | Consecutive timeout/statement-budget overruns on a **tick** before the lobby is closed. Ticks are droppable by design (they coalesce), so one slow tick is a hitch rather than the end of everybody's game; a module that cannot finish a tick at all still dies. Memory/recursion trips and overruns on any other call remain fatal on the first occurrence. |
 | `AuthorityMaxWordsPerCall` | `512` | Cap on how many words one `kb.words.pickRange` call may return, bounding both the JS array and the host allocations behind it. |
 | `AuthorityCallTimeoutMsByGame:<gameId>` | — | Per-game override of `AuthorityCallTimeoutMs`, for a game whose honest worst call needs more room. Read at engine construction like every other per-call constraint, so it applies to lobbies started afterwards — which is why it is configuration rather than a portal knob. |
 | `AuthorityTickHzMax` | `20` | Clamp on a module's requested `config.tickHz` (a module exporting `tick` opts into a server-driven timer). |
 | `AuthorityMaxScriptBytes` | `1048576` (1 MB) | Max authority-module file size; checked at discovery (oversize ⇒ the game is skipped) and at load. |
 | `AuthorityMaxWordFileBytes` | `33554432` (32 MB) | Max size of a single `authorityWords` dictionary file; checked at discovery (oversize ⇒ the game is skipped). Dictionaries load once into a shared CLR structure (not a per-lobby budget), so this cap is generous. |
-| `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: intents drop-oldest, ticks coalesce, roster events are never dropped (design §6). |
+| `AuthorityQueueCapacity` | `256` | Per-lobby actor inbound-channel bound. Two-tier overflow: a full channel drops the incoming intent, ticks coalesce, roster events are never dropped (design §6). |
 | `AuthorityMaxLobbies` | `0` (unlimited) | Cap on concurrent server-authority lobbies; creation past it fails. Each such lobby holds a Jint engine, so this is the one lobby count with a real memory cost — but it is **off by default**, because a refusal nobody configured is worse than letting the host (in Docker, `mem_limit`) be the bound. Set it when you want the server to refuse *before* the GC starts fighting. Also editable at runtime from the admin portal, which persists an override — this is the value a deployment starts from. |
 | `AuthorityModuleCacheIdleMinutes` | `30` | How long a game's shared parsed authority module is kept after the last lobby using it ends; `0` keeps it for the process lifetime. Swept once a minute, so expiry lands in `[window, window + 60s)`. Costs one re-parse when the game is next played, and never affects a running lobby (each engine holds its own reference). Also editable at runtime from the admin portal. |
 | `MaxLobbies` | `0` (unlimited) | Cap on simultaneous lobbies across every game. Also editable at runtime from the admin portal, which persists an override — this is the value a deployment starts from. Enforced in `HandleCreateLobby` before the player is moved out of any lobby they were already in, so a refusal never costs them their current game. |

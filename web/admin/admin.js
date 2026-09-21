@@ -8,7 +8,7 @@
 // display names are untrusted input.
 
 import {
-  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, BYTE_MULTIPLIERS, BYTE_UNITS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, STARTUP_LIMITS, TABS,
+  ADMIN_FAVICON, AVAILABILITY, ALL_SETTINGS, BYTE_MULTIPLIERS, BYTE_UNITS, CODE_ALPHABET, LIMIT_FIELDS, SETTINGS_GROUPS, SERVER_RELEASES_URL, STARTUP_LIMITS, TABS,
   TOP_TABS, TAB_MAPPING,
   UPDATE_MODES, UPDATE_POLICIES, WEBHOOK_EVENTS, appendLogEntries, availabilityLabel, blockedShare,
   checkCodeEntry, checkWebhook, compareSemVer, cpuPercentBetween, downsample, filterCatalog, filterGames, filterLobbies,
@@ -16,7 +16,7 @@ import {
   formatNotificationTime, formatNotificationTimeFull,
   getStoredSidebarCollapsed, hourOptionLabel, isBusyLifecycle, isHttpUrl, isTerminalJob, jobProgress,
   lifecycleLabel, logLevelClass, logLevelTag,   mergeJobs, mergePluginEntries, mergeSamples,
-  noLimitOverrides, playerRange, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
+  noLimitOverrides, playerRange, parseServerVersion, pluginRestoreWarning, pluginRowBadges, pluginRowSize, pluginRowVersion,
   pluginStatusLabel, ratePerSecond,
   seriesCpuPercent, seriesValue, setStoredSidebarCollapsed, settingFromHash,
   sortPlugins, sparklinePath, splitBytes, tabFromHash, topTabFromHash, uploadGuard, validateLimits, versionAction, versionOptionValue, versionOptions,
@@ -4345,5 +4345,26 @@ function applyAdminFavicon() {
 export function bootstrap() {
   applyAdminFavicon();
   wire();
+  loadServerVersion();
   checkAuthStatus();
+}
+
+// The server version under the portal title. Public and unauthenticated on purpose: the label
+// renders on the setup/login views too, and the version is not sensitive. Silent on failure —
+// a missing label beats an error pill for one decorative string, so this deliberately does not
+// go through getJson (which would paint one).
+async function loadServerVersion() {
+  try {
+    const res = await fetch('/api/server-version');
+    if (!res.ok) return;
+    const painted = parseServerVersion(await res.json());
+    if (!painted) return;
+    const link = el('server-version');
+    if (!link) return;
+    link.textContent = painted;
+    link.href = SERVER_RELEASES_URL;
+    link.hidden = false;
+  } catch {
+    // Leave the label hidden; the page is fully usable without it.
+  }
 }

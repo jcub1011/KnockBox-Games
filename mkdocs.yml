@@ -1,0 +1,46 @@
+site_name: KnockBox-Games Docs
+site_description: Operator and developer docs for the KnockBox game-hosting platform.
+site_url: https://jcub1011.github.io/KnockBox-Games/
+repo_url: https://github.com/jcub1011/KnockBox-Games
+repo_name: jcub1011/KnockBox-Games
+docs_dir: docs
+
+# Material theme. The dependency itself is pinned as a FLOATING MAJOR in
+# .github/workflows/docs.yml (`mkdocs-material>=9,<10`, major 9 resolved live
+# 2026-09-21) so builds pick up the newest 9.x without ever silently jumping a
+# major. If you bump the range there, no change is needed here.
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+# Operator-first: operate the server before building games for it.
+nav:
+  - Home: index.md
+  - Operate:
+      - Hosting Guide: HOSTING.md
+      - Admin Portal: ADMIN.md
+      - Marketplace: MARKETPLACE.md
+  - Develop:
+      - Game Developer Guide: GAME_DEVELOPER_GUIDE.md
+      - KBG Package Format: KBG_FORMAT.md
+      - Server Authority: SERVER_AUTHORITY_DESIGN.md
+  - Reference:
+      - Infrastructure: INFRASTRUCTURE.md
+      - Client Addons: ADDONS.md

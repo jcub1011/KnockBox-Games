@@ -1340,6 +1340,23 @@ export function formatVersion(version) {
   return text ? `v${text.replace(/^v/i, '')}` : '--';
 }
 
+// Where the portal's header version label points. Mirrors SERVER_RELEASES_URL in
+// web/kb-core.js: the shell and portal are separate bundles with no shared chunk,
+// so each owns one constant rather than four hardcoded copies drifting apart.
+export const SERVER_RELEASES_URL = 'https://github.com/jcub1011/KnockBox-Games/releases';
+
+// Reads the public /api/server-version payload into a display string, or null when
+// it is missing/malformed. Same rule as kb-core.js parseServerVersion, kept beside
+// it in behaviour (and covered by the same-shaped tests) rather than shared.
+export function parseServerVersion(data) {
+  if (typeof data?.version !== 'string') return null;
+  const trimmed = data.version.trim();
+  if (!trimmed) return null;
+  const stripped = trimmed.replace(/^v/i, '');
+  if (!stripped) return null;
+  return `v${stripped}`;
+}
+
 // ── Compact plugin rows ─────────────────────────────────────────────────────
 
 /**

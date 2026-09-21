@@ -15,7 +15,7 @@
          it back off the assembly at runtime; marketplace catalog entries declare minAppVersion /
          maxAppVersion against it, so a game that needs a newer server is never offered to an older
          one. Bump this when releasing. -->
-    <Version>1.1.2</Version>
+    <Version>1.1.3</Version>
     <PublishAot>True</PublishAot>
     <!-- GC: keep Server GC (best throughput for the WebSocket relay), but rein in its footprint.
          Server GC allocates a heap per logical CPU and retains memory aggressively, which on a
@@ -41,11 +41,10 @@
          IL2026/IL3053 are Jint's. Rooting Jint (TrimmerRootAssembly below) makes ILC analyze the whole
          assembly and report its internal RequiresUnreferencedCode sites per-site; per-assembly collapse
          (TrimmerSingleWarn / ilc singlewarnassembly) does not apply to rooted assemblies, so the codes
-         are suppressed here — the design's decided fallback (SERVER_AUTHORITY_DESIGN.md §14.1). All
-         four flagged 4.11.0 sites are unreachable from our usage. Jint floats within 4.* but the
-         lock pins what restore resolved — a new Jint arrives only via an explicit re-float
-         (dotnet restore /p:RestoreForceEvaluate=true) plus a committed lock, and the /warnaserror
-         AOT gate is the tripwire: any new trim warning fails the build and forces a re-audit of
+          are suppressed here — the design's decided fallback (SERVER_AUTHORITY_DESIGN.md §14.1). All
+          four flagged 4.11.0 sites are unreachable from our usage. Jint is pinned to an exact
+          version — a new Jint arrives only via an explicit version bump, and the /warnaserror
+          AOT gate is the tripwire: any new trim warning fails the build and forces a re-audit of
          this list before it may be suppressed:
            - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs under AllowClr,
              which is never enabled.
@@ -89,9 +88,9 @@
        gate via NuGet audit. Don't re-add it without an endpoint that needs it. (Dropping it also
        retired the direct Microsoft.OpenApi override that used to sit here purely to patch it.) -->
   <ItemGroup>
-    <PackageReference Include="Jint" Version="4.*" />
-    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.*" />
-    <PackageReference Include="Serilog.AspNetCore" Version="10.*" />
+    <PackageReference Include="Jint" Version="4.16.3" />
+    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
   </ItemGroup>
 
   <!-- Jint is a pure-C# interpreter with an official Native AOT sample; rooting the assembly keeps
@@ -100,11 +99,10 @@
        see Games/JsAuthorityRuntime.cs.
 
        Rooting makes ILC surface Jint's internal RequiresUnreferencedCode sites as per-site IL2026
-       errors under /warnaserror. All four flagged paths are unreachable from our usage, verified
-        4.11.0. Jint floats within 4.* but the lock pins what restore resolved (see the NoWarn
-        note above) — a new Jint arrives only via an explicit re-float
-        (dotnet restore /p:RestoreForceEvaluate=true) plus a committed lock, which the AOT gate
-        then re-verifies:
+        errors under /warnaserror. All four flagged paths are unreachable from our usage, verified
+         4.11.0. Jint is pinned to an exact version (see the NoWarn
+         note above) — a new Jint arrives only via an explicit version bump, which the AOT gate
+         then re-verifies:
          - Options.Apply → NamespaceReference (×2): CLR namespace loading; only runs when AllowClr
            is enabled, which it never is.
          - DefaultTypeConverter.BuildDelegate: expression-tree marshaling for typed .NET delegates
