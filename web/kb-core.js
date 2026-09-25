@@ -485,6 +485,33 @@ export function isSafeHomepageUrl(url) {
   }
 }
 
+// Where a game version tag points. The in-game header badge (shell.js setGameVersion) and the
+// home-card version chip open the identical link: the game's own releases page when `homepage`
+// names a GitHub repository (`owner/repo` → `.../releases`, tolerating a trailing slash, a
+// `.git` suffix and a `www.` host), otherwise the homepage itself. Anything that is not a safe
+// absolute https:// URL yields null, and the tag stays inert text.
+export function gameReleasesUrl(homepage) {
+  if (!isSafeHomepageUrl(homepage)) return null;
+  const trimmed = homepage.trim();
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'github.com' || host === 'www.github.com') {
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length === 2) {
+      const owner = parts[0];
+      let repo = parts[1];
+      if (repo.toLowerCase().endsWith('.git')) repo = repo.slice(0, -'.git'.length);
+      if (owner && repo) return `https://github.com/${owner}/${repo}/releases`;
+    }
+  }
+  return trimmed;
+}
+
 // Unified filtering and sorting pipeline for the games catalog.
 export function filterAndSortGames(gamesList, { search = '', playerCount = '', sort = 'newest' } = {}) {
   const base = Array.isArray(gamesList) ? gamesList : [];

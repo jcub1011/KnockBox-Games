@@ -291,6 +291,53 @@ describe('game catalog rendering', () => {
     expect(chip.querySelector('img')).toBeNull();
   });
 
+  it('links the version chip to the releases page and opens it without launching the game', async () => {
+    localStorage.setItem('kb.displayName', 'Alice');
+    await importShell();
+    const ws = await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', version: '1.2.3',
+      homepage: 'https://github.com/jcub1011/Alpha-Chain-Phaser-',
+    }]);
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    const chip = el('games').querySelector('.game-chin-tag-version');
+    expect(chip.textContent).toBe('v1.2.3');
+    expect(chip.classList.contains('is-link')).toBe(true);
+    expect(chip.title).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
+
+    chip.click();
+    expect(open).toHaveBeenCalledWith('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases', '_blank', 'noopener');
+    // The click must not bubble into the tile's createLobby handler.
+    expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(false);
+  });
+
+  it('links the version chip to the homepage itself when it is not a GitHub repo URL', async () => {
+    await importShell();
+    await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', version: '1.2.3',
+      homepage: 'https://example.com/my-game',
+    }]);
+
+    const chip = el('games').querySelector('.game-chin-tag-version');
+    expect(chip.classList.contains('is-link')).toBe(true);
+    expect(chip.title).toBe('https://example.com/my-game');
+  });
+
+  it('leaves the version chip inert when the homepage is missing or unsafe', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'no-home', name: 'No Home', version: '1.0.0' },
+      { id: 'evil-home', name: 'Evil Home', version: '1.0.0', homepage: 'javascript:alert(1)' },
+    ]);
+
+    const chips = el('games').querySelectorAll('.game-chin-tag-version');
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) {
+      expect(chip.classList.contains('is-link')).toBe(false);
+      expect(chip.getAttribute('title')).toBeNull();
+    }
+  });
+
   it('filters games list dynamically with search input', async () => {
     await importShell();
     await bootWithGames([
@@ -817,7 +864,7 @@ describe('game version subtitle', () => {
     expect(el('game-version').textContent).toBe('');
   });
 
-  it('links the version to the game source when the manifest declares a homepage', async () => {
+  it('links the version to the game releases page when the manifest declares a homepage', async () => {
     await importShell();
     const ws = await bootWithGames([{
       id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
@@ -827,14 +874,27 @@ describe('game version subtitle', () => {
     await createLobbySuccess(ws);
     const badge = el('game-version');
     expect(badge.textContent).toBe('v1.2.3');
-    expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+    expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
     expect(badge.getAttribute('target')).toBe('_blank');
     expect(badge.getAttribute('rel')).toBe('noopener noreferrer');
-    expect(badge.getAttribute('title')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+    expect(badge.getAttribute('title')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
 
     shell.showLobbyView();
     expect(badge.getAttribute('href')).toBeNull();
     expect(badge.getAttribute('target')).toBeNull();
+  });
+
+  it('links the version to the homepage itself when it is not a GitHub repo URL', async () => {
+    await importShell();
+    const ws = await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
+      homepage: 'https://example.com/my-game',
+    }]);
+
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.getAttribute('href')).toBe('https://example.com/my-game');
+    expect(badge.getAttribute('title')).toBe('https://example.com/my-game');
   });
 
   it('leaves the version as plain text with a tooltip when the game provides no source link', async () => {
