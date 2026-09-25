@@ -73,7 +73,15 @@ let cidSeq = 0;
 // so no stale game entry survives — a later Back on home leaves the site rather than revisiting
 // a game that was already left.
 let historyPushed = false;   // this session owns the top history entry
-let expectingPop = false;    // the next popstate is our own programmatic history.back()
+// Generation-tagged outstanding programmatic back(): consumeGameHistory records the session
+// generation its history.back() belongs to, and the popstate handler swallows exactly one pop
+// for that generation. A new pushState invalidates any still-outstanding generation, so a
+// history.back() that never produced a pop (silent no-op in some embeds) cannot latch and
+// swallow the NEXT session's genuine user-Back. Tradeoff: a stale pop arriving after the next
+// push is indistinguishable from user input and is treated as such — unreachable in practice
+// (a new push needs a server round trip; the programmatic pop lands within a task or two).
+let historyGen = 0;         // id of the current/last pushed session entry
+let expectingPopGen = -1;   // generation awaiting its programmatic pop, -1 = none outstanding
 
 // ── WebSocket plumbing (control plane) ────────────────────────────────────────
 export function connect() {
@@ -1509,9 +1517,16 @@ function startExitMorph() {
     if (covered) return;
     covered = true;
     if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
-    exitAnims = [];
+    // Take the cover pair out of the registry first, then cancel it only AFTER the reveal
+    // pair is animating the same properties: dropping a fill:'forwards' animation without a
+    // successor snaps the wipe back to unclipped, and keeping it leaks a finished animation
+    // onto the reused #game-exit-wipe every exit (+4 per join/leave cycle via getAnimations).
+    const prev = exitAnims.splice(0);
     swapToHome();   // under full cover — invisible
     startExitReveal();
+    for (const a of prev) {
+      try { a.cancel(); } catch { /* already finished — nothing to cancel */ }
+    }
   };
   cover.finished.then(onCovered, () => {});
   exitTimer = setTimeout(onCovered, GAME_EXIT_MS + 120);
@@ -1540,7 +1555,8 @@ function startExitReveal() {
     if (revealed) return;
     revealed = true;
     if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
-    exitAnims = [];
+    // No exitAnims reset here: finishShowLobbyView -> clearExitMorph cancels the reveal pair.
+    // Resetting first would drop the refs and leak 2 more finished fill:'forwards' animations.
     finishShowLobbyView();
   };
   uncover.finished.then(onRevealed, () => {});
@@ -1648,20 +1664,22 @@ function pushGameHistory() {
   try {
     history.pushState({ kbInGame: true }, '');
     historyPushed = true;
+    historyGen++;
+    expectingPopGen = -1;   // a new entry supersedes any pop that never landed
   } catch { /* non-browser env or push failure — Back just leaves the site */ }
 }
 
 // Undo pushGameHistory for every programmatic exit. history.back() (not replaceState) genuinely
 // removes the game entry, so a later Back on home leaves the site instead of needing two presses.
-// The resulting popstate is ours — expectingPop tells handlePopState to swallow it.
+// The resulting popstate is ours — expectingPopGen tells handlePopState to swallow it.
 function consumeGameHistory() {
   if (!historyPushed) return;
   historyPushed = false;
-  expectingPop = true;
+  expectingPopGen = historyGen;
   try {
     history.back();
   } catch {
-    expectingPop = false;
+    expectingPopGen = -1;
   }
 }
 
@@ -1777,10 +1795,10 @@ window.addEventListener('message', (e) => {
 // dispatching a real PopStateEvent would also fire every stale module copy's listener in the
 // shared jsdom window.
 export function handlePopState(event) {
-  if (expectingPop) {
+  if (expectingPopGen !== -1) {
     // Our own programmatic history.back() landing. If the landing entry still claims to be a
     // game (a stale forward entry revisited), neutralize it so it doesn't cost an extra Back.
-    expectingPop = false;
+    expectingPopGen = -1;
     if (event && event.state && event.state.kbInGame) neutralizeGameHistoryEntry();
     return;
   }

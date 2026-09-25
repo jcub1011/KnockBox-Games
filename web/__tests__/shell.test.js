@@ -1928,6 +1928,26 @@ describe('game exit animation', () => {
     expect(el('game-view').style.display).toBe('none');
     expect(el('game-view').classList.contains('is-exiting')).toBe(false);
   });
+
+  it('cancels each finished leg instead of accumulating fill:forwards animations', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubWipeAnimation();
+
+    leaveViaButton();
+    expect(exit.calls).toHaveLength(2);
+
+    exit.finish(0);   // cover lands -> reveal starts, cover pair must be cancelled, not dropped
+    await tick();
+    expect(exit.calls).toHaveLength(4);
+    expect(exit.cancelled).toBe(2);
+
+    exit.finish(2);   // reveal lands -> home, reveal pair cancelled via the finish path
+    await tick();
+    expect(el('game-exit-wipe').hidden).toBe(true);
+    expect(exit.cancelled).toBe(4);
+  });
 });
 
 describe('browser Back button', () => {
@@ -2040,6 +2060,33 @@ describe('browser Back button', () => {
     expect(leaves(ws)).toHaveLength(2);
     expect(window.history.back).toHaveBeenCalledTimes(1);
     expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('a programmatic back() that never pops does not swallow the next session Back', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AAAA' });
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    expect(leaves(ws, 'AAAA')).toHaveLength(1);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+    // No popstate delivered: history.back() was a silent no-op in this embed.
+
+    // Next session pushes a new entry (answer the latest CreateLobby, as above).
+    const p = shell.createLobby('ttt');
+    const latest = ws.sent.filter((f) => f.type === 'CreateLobby').at(-1);
+    ws._recv({ cid: latest.cid, type: 'LobbyCreated', lobbyId: 'BBBB' });
+    await p;
+    expect(window.history.pushState).toHaveBeenCalledTimes(2);
+    expect(el('game-view').style.display).toBe('block');
+
+    // Genuine user-Back out of game B: must confirm and leave, not be swallowed as game A's pop.
+    shell.handlePopState({ state: null });
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(leaves(ws, 'BBBB')).toHaveLength(1);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).toHaveBeenCalledTimes(1); // user-Back already popped; no second back
   });
 
   it('forward into a stale game entry stays home and neutralizes the slot', async () => {
