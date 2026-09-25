@@ -1572,6 +1572,14 @@ body.in-game::after {
     pointer-events: none;
     background-color: var(--banner-yellow);
     background-repeat: repeat;
+    /* The ribbon's own horizontal drift, so the screen is alive while it rolls: one tile width
+       (1536px, see --img-w) per 48s is the ribbon's 32px/s exactly, keeping the two seamless. */
+    animation: exit-wipe-scroll 48s linear infinite;
+}
+
+@keyframes exit-wipe-scroll {
+    from { background-position: 0 0; }
+    to   { background-position: -1536px 0; }
 }
 
 .game-exit-roller {
@@ -1892,6 +1900,7 @@ body.in-game::after {
         box-shadow: 7px 7px 0 var(--tile-shadow-hover, rgba(255, 0, 85, 0.65));
     }
     .hero-ribbon-track { animation: none; }
+    #game-exit-wipe { animation: none; }
     body:not(.in-game)::before,
     body:not(.in-game)::after { animation: none; }
     .home-error-toast,

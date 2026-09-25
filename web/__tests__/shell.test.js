@@ -1882,6 +1882,10 @@ describe('game exit animation', () => {
     const css = readFileSync(resolve(process.cwd(), 'home.css'), 'utf8');
     expect(shell.EXIT_WIPE_TEXTURE).toBe('/assets/backgrounds/yellow-vertical_loop_crop.webp');
     expect(css).toContain(`url("${shell.EXIT_WIPE_TEXTURE}")`);
+    // The wipe keeps the ribbon's horizontal drift while it rolls — pinned here so the motion
+    // can't be dropped from the CSS without failing loudly.
+    expect(css).toContain('@keyframes exit-wipe-scroll');
+    expect(css).toMatch(/#game-exit-wipe\s*{[^}]*exit-wipe-scroll/);
   });
 
   it('skips the animation under reduced motion', async () => {
