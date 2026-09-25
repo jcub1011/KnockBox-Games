@@ -306,8 +306,14 @@ describe('game catalog rendering', () => {
     expect(chip.title).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
 
     chip.click();
-    expect(open).toHaveBeenCalledWith('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases', '_blank', 'noopener');
+    expect(open).toHaveBeenCalledWith('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases', '_blank', 'noopener,noreferrer');
     // The click must not bubble into the tile's createLobby handler.
+    expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(false);
+
+    // Middle-click (auxclick) opens the same link without launching the game.
+    open.mockClear();
+    chip.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, button: 1, cancelable: true }));
+    expect(open).toHaveBeenCalledWith('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases', '_blank', 'noopener,noreferrer');
     expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(false);
   });
 

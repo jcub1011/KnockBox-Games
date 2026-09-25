@@ -487,14 +487,24 @@ export function renderGames() {
         // the tile <button> (invalid HTML, and the click would bubble into createLobby), so
         // the chip stays a span that opens the link in a new tab and stops the click reaching
         // the tile. Keyboard users reach the same link via the header badge once the game is
-        // open. Without a safe homepage the chip stays inert text, exactly as before.
+        // open — a separately-focusable control inside a <button> would be invalid ARIA.
+        // Without a safe homepage the chip stays inert text, exactly as before.
         const link = gameReleasesUrl(g.homepage);
         if (link) {
           versionChip.classList.add('is-link');
           versionChip.title = link;
-          versionChip.addEventListener('click', (e) => {
+          const openLink = (e) => {
             e.stopPropagation();
-            window.open(link, '_blank', 'noopener');
+            window.open(link, '_blank', 'noopener,noreferrer');
+          };
+          versionChip.addEventListener('click', openLink);
+          // Middle-click fires auxclick, not click: without this the chip silently
+          // does nothing on a middle-click while the badge opens a new tab.
+          versionChip.addEventListener('auxclick', (e) => {
+            if (e.button === 1) {
+              e.preventDefault();
+              openLink(e);
+            }
           });
         }
         tagsEl.appendChild(versionChip);
