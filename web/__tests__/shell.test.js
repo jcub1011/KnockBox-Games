@@ -1886,6 +1886,8 @@ describe('game exit animation', () => {
     // can't be dropped from the CSS without failing loudly.
     expect(css).toContain('@keyframes exit-wipe-scroll');
     expect(css).toMatch(/#game-exit-wipe\s*{[^}]*exit-wipe-scroll/);
+    // ...and its projector-screen shading, so the curl can't be dropped either.
+    expect(css).toContain('#game-exit-wipe::before');
   });
 
   it('skips the animation under reduced motion', async () => {
