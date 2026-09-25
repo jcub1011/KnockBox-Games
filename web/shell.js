@@ -65,6 +65,16 @@ let announcement = null;
 const pending = new Map();      // cid -> resolver
 let cidSeq = 0;
 
+// ── Browser navigation (Back button) ────────────────────────────────────────
+// The shell is a single-page view swap, so without help the browser's Back button leaves the
+// site entirely while the player is in a game. Entering a session pushes one history entry, so
+// Back pops back to this page and the popstate handler exits to the home view instead of leaving
+// the site. Programmatic exits (Leave button, kick, close) consume the entry with history.back(),
+// so no stale game entry survives — a later Back on home leaves the site rather than revisiting
+// a game that was already left.
+let historyPushed = false;   // this session owns the top history entry
+let expectingPop = false;    // the next popstate is our own programmatic history.back()
+
 // ── WebSocket plumbing (control plane) ────────────────────────────────────────
 export function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -789,6 +799,9 @@ export async function enterGame(starting) {
 
 export function showLobbyView() {
   lobby = null;
+  // Consume this session's history entry, if any. A user-Back exit already popped it (the popstate
+  // handler cleared historyPushed first), so this only fires for programmatic exits.
+  consumeGameHistory();
   // Every way out of a session lands here (Leave, Kicked, RejoinRejected, session-ended, and the
   // overlay's own escape hatch), so this one call retires any launch still in flight.
   abortLaunch();
@@ -1466,8 +1479,34 @@ function launchArtUrl(manifest) {
 function revealGameView() {
   el('game-view').style.display = 'block';
   el('lobby-view').style.display = 'none';
+  pushGameHistory();
   if (launchOverlayUp()) el('game-view').classList.add('launch-veil');
   else unveilGameView();
+}
+
+// One entry per session: reconnects re-run enterGame and must not stack entries. Pushed at the
+// session commit (showRoom/reveal), never at the launch overlay — backing out of a launch that
+// hasn't committed has no entry to pop.
+function pushGameHistory() {
+  if (historyPushed) return;
+  try {
+    history.pushState({ kbInGame: true }, '');
+    historyPushed = true;
+  } catch { /* non-browser env or push failure — Back just leaves the site */ }
+}
+
+// Undo pushGameHistory for every programmatic exit. history.back() (not replaceState) genuinely
+// removes the game entry, so a later Back on home leaves the site instead of needing two presses.
+// The resulting popstate is ours — expectingPop tells handlePopState to swallow it.
+function consumeGameHistory() {
+  if (!historyPushed) return;
+  historyPushed = false;
+  expectingPop = true;
+  try {
+    history.back();
+  } catch {
+    expectingPop = false;
+  }
 }
 
 function unveilGameView() {
@@ -1574,6 +1613,58 @@ window.addEventListener('message', (e) => {
     showError('The game session ended.');
   }
 });
+
+// ── Browser Back button + accidental-leave prompt ─────────────────────────────
+// Back while in a session pops the entry pushGameHistory added; confirm ("Are you sure you want
+// to leave the game?") and exit to home instead of leaving the site. Cancelling re-pushes the
+// entry, so the next Back asks again. Exported (like handle) so the suite drives it directly —
+// dispatching a real PopStateEvent would also fire every stale module copy's listener in the
+// shared jsdom window.
+export function handlePopState(event) {
+  if (expectingPop) {
+    // Our own programmatic history.back() landing. If the landing entry still claims to be a
+    // game (a stale forward entry revisited), neutralize it so it doesn't cost an extra Back.
+    expectingPop = false;
+    if (event && event.state && event.state.kbInGame) neutralizeGameHistoryEntry();
+    return;
+  }
+  if (lobby) {
+    // Back out of a game: confirm first, so an accidental press doesn't drop the player out of
+    // the session. The pop already consumed our entry — on Cancel put it back so the next Back
+    // asks again; on confirm clear the flag BEFORE leaving, or showLobbyView would go back a
+    // second time.
+    if (!window.confirm('Are you sure you want to leave the game?')) {
+      historyPushed = false;
+      pushGameHistory();
+      return;
+    }
+    historyPushed = false;
+    leaveGame();
+    return;
+  }
+  // Forward into a stale game entry with no session behind it: stay home and neutralize the slot.
+  // Anything else (lobby == null, ordinary state) is a real Back off the site — do nothing.
+  if (event && event.state && event.state.kbInGame) neutralizeGameHistoryEntry();
+}
+
+// A forward entry for a session that no longer exists: rewrite the slot to home so it doesn't
+// cost the player an extra Back press later. Never rejoins — the ticket is gone by design.
+function neutralizeGameHistoryEntry() {
+  try {
+    history.replaceState(null, '');
+  } catch { /* ignore */ }
+}
+
+// Prompt before the tab closes, reloads, or navigates away mid-session. Home unloads silently.
+// (Custom text is ignored by modern browsers; setting returnValue raises the stock prompt.)
+export function handleBeforeUnload(event) {
+  if (!lobby) return;
+  event.preventDefault();
+  event.returnValue = '';
+}
+
+window.addEventListener('popstate', handlePopState);
+window.addEventListener('beforeunload', handleBeforeUnload);
 
 el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
 

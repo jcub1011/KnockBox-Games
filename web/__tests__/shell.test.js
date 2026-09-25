@@ -79,6 +79,14 @@ beforeEach(() => {
   sessionStorage.clear();
   loadShellDom();
   getWs = installFakeWebSocket();
+  // shell.js pushes/consumes a history entry around each game session. Neutralize the real jsdom
+  // history: a real back() would pop asynchronously into the popstate listeners of stale module
+  // copies (one window per file), and navigation is asserted through these spies instead. Tests
+  // drive shell.handlePopState directly rather than dispatching a real PopStateEvent, which would
+  // likewise fire every stale copy's listener. Restored by restoreAllMocks in afterEach.
+  vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+  vi.spyOn(window.history, 'back').mockImplementation(() => {});
+  vi.spyOn(window.history, 'replaceState').mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -1647,6 +1655,149 @@ describe('leaving the game', () => {
     el('game-title').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
     expect(el('lobby-view').style.display).not.toBe('block');
+  });
+});
+
+describe('browser Back button', () => {
+  let confirmSpy;
+  beforeEach(() => {
+    localStorage.setItem('kb.displayName', 'Alice');
+    // Back out of a game asks first; default to confirming so tests read the leave path.
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  });
+
+  const leaves = (ws, lobbyId) =>
+    ws.sent.filter((f) => f.type === 'LeaveLobby' && (!lobbyId || f.lobbyId === lobbyId));
+
+  it('pushes one entry when the session commits, not while launching', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    const p = shell.createLobby('ttt');
+    // Overlay is up but no session yet — nothing pushed.
+    expect(window.history.pushState).not.toHaveBeenCalled();
+    const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+    ws._recv({ cid: frame.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+    await p;
+    expect(window.history.pushState).toHaveBeenCalledTimes(1);
+    expect(window.history.pushState).toHaveBeenCalledWith({ kbInGame: true }, '');
+    // A second reveal of the same session (reconnect rebuilds the view) stacks nothing.
+    shell.showRoom();
+    expect(window.history.pushState).toHaveBeenCalledTimes(1);
+  });
+
+  it('Back while in a game confirms, then leaves without going back again', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    expect(el('game-view').style.display).toBe('block');
+
+    // The pop already consumed our entry: confirm, leave, but don't call back() a second time.
+    shell.handlePopState({ state: null });
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(leaves(ws, 'AB12')).toHaveLength(1);
+    expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).not.toHaveBeenCalled();
+  });
+
+  it('Back + Cancel stays in the game and re-arms for the next Back', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    expect(window.history.pushState).toHaveBeenCalledTimes(1);
+
+    confirmSpy.mockReturnValue(false);
+    shell.handlePopState({ state: null });
+    expect(leaves(ws)).toHaveLength(0);
+    expect(sessionStorage.getItem('kb.lobbyId')).toBe('AB12');
+    expect(el('game-view').style.display).toBe('block');
+    // The popped entry was put back, so the next Back asks again instead of leaving the site.
+    expect(window.history.pushState).toHaveBeenCalledTimes(2);
+
+    confirmSpy.mockReturnValue(true);
+    shell.handlePopState({ state: null });
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(leaves(ws, 'AB12')).toHaveLength(1);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).not.toHaveBeenCalled();
+  });
+
+  it('Leave button consumes the entry; its programmatic pop is swallowed', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    expect(leaves(ws, 'AB12')).toHaveLength(1);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+
+    // The pop landing from our own back(): still home, no second leave, no second back().
+    shell.handlePopState({ state: null });
+    expect(leaves(ws)).toHaveLength(1);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+    expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('game A, Leave, game B, Back, Back: no resurrection, final Back is a no-op', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AAAA' });
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    shell.handlePopState({ state: null }); // swallow our programmatic pop
+    expect(el('lobby-view').style.display).toBe('block');
+
+    // createLobbySuccess would answer the FIRST CreateLobby frame (game A's, long resolved);
+    // answer the latest one so game B's promise settles.
+    const p = shell.createLobby('ttt');
+    const latest = ws.sent.filter((f) => f.type === 'CreateLobby').at(-1);
+    ws._recv({ cid: latest.cid, type: 'LobbyCreated', lobbyId: 'BBBB' });
+    await p;
+    expect(window.history.pushState).toHaveBeenCalledTimes(2);
+    expect(el('game-view').style.display).toBe('block');
+
+    shell.handlePopState({ state: null }); // Back out of game B
+    expect(leaves(ws, 'BBBB')).toHaveLength(1);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).toHaveBeenCalledTimes(1); // only game A's Leave went back
+
+    // Back again on home: a real Back off the site — nothing to do in-app.
+    shell.handlePopState({ state: null });
+    expect(leaves(ws)).toHaveLength(2);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+    expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('forward into a stale game entry stays home and neutralizes the slot', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    shell.handlePopState({ state: { kbInGame: true } });
+    expect(window.history.replaceState).toHaveBeenCalledTimes(1);
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+    expect(el('lobby-view').style.display).not.toBe('none');
+  });
+
+  it('beforeunload prompts in a game and stays silent on home', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+    // A stub, not a real Event: jsdom's Event carries its own legacy returnValue, which would
+    // shadow the assignment the handler performs on a real BeforeUnloadEvent.
+    const inGame = { preventDefault: vi.fn(), returnValue: undefined };
+    shell.handleBeforeUnload(inGame);
+    expect(inGame.preventDefault).toHaveBeenCalledTimes(1);
+    expect(inGame.returnValue).toBe('');
+
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    const home = { preventDefault: vi.fn(), returnValue: undefined };
+    shell.handleBeforeUnload(home);
+    expect(home.preventDefault).not.toHaveBeenCalled();
+    expect(home.returnValue).toBeUndefined();
   });
 });
 
