@@ -632,6 +632,9 @@ body.in-game::after {
     font: inherit;
     color: inherit;
     position: relative;
+    /* Grid item: defeat the automatic minimum (min-content), so a tile's contents can never
+       force its track wider than the viewport — tiles shrink to any width, no floor. */
+    min-width: 0;
     transition: transform 220ms cubic-bezier(.34, 1.56, .64, 1), filter 200ms ease;
 }
 
@@ -679,7 +682,8 @@ body.in-game::after {
     border-radius: 18px;
 }
 
-/* Shared interactive surface for all game tiles. */
+/* Shared interactive surface for all game tiles. min-width: 0 so min-content from the
+   chin bar (unvalidated author tags, nowrap capacity) can't propagate past .game-tile. */
 .game-tile-surface {
     display: flex;
     flex-direction: column;
@@ -687,6 +691,7 @@ body.in-game::after {
     border: 5px solid #000;
     border-radius: 16px;
     width: 100%;
+    min-width: 0;
     background-color: black;
     box-shadow: 4px 4px 0 var(--tile-shadow-color, rgba(255, 0, 85, 0.45));
     transition: transform 0.15s ease, box-shadow 0.15s ease;
@@ -1864,6 +1869,16 @@ body.in-game::after {
 @media (max-width: 500px) {
     .rc-modal-card { padding: 36px 24px; gap: 20px; }
     .header-actions { gap: 6px; }
+}
+
+/* Very narrow phones: the chin bar can't fit capacity + chips, so the decorative genre chips
+   go and only the version chip stays. The version rule comes second to win the
+   equal-specificity tie with the hiding rule above it. */
+@media (max-width: 480px) {
+    .game-chin-tag { display: none; }
+    .game-chin-tag-version { display: inline-block; }
+    /* The no-art fallback sets the game name large; shrink it so long names fit small tiles. */
+    .game-tile-fallback { font-size: 1.15rem; }
 }
 
 /* Short viewports (landscape phones): trim the vertical padding so actions stay reachable. */
