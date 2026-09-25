@@ -1468,8 +1468,8 @@ function endGameMorph() {
 // style-recalc race), with the same safety-net shape: a `finished` promise plus a timer held
 // outside launchTimers so finishing can cancel it. The iframe stays alive and `body.in-game`
 // stays set until the screen is fully down — hiding either mid-wipe would be the snap this
-// exists to remove. The screen wears the header's own background (themed per game), so it reads
-// as unrolling from the header itself; a dark roller bar rides the leading edge.
+// exists to remove. The screen wears the home screen's ribbon texture (EXIT_WIPE_TEXTURE), so it
+// reads as a piece of the home page unrolling over the game; a dark roller bar rides the leading edge.
 //
 // Two phases, one duration each way: roll down (cover), swap, roll up (reveal). A cancel rejects
 // instead of resolving, so an aborted phase never advances the sequence.
@@ -1547,6 +1547,11 @@ function startExitReveal() {
   exitTimer = setTimeout(onRevealed, GAME_EXIT_MS + 120);
 }
 
+// The screen's material: the home screen's own ribbon texture, so the wipe reads as a piece of
+// the home page unrolling over the game. Mirrors .hero-ribbon-tile's background-image in
+// home.css — change them together (a test pins it).
+export const EXIT_WIPE_TEXTURE = '/assets/backgrounds/yellow-vertical_loop_crop.webp';
+
 // The screen itself: a body-level panel (created on first exit, reused after) with a roller bar
 // riding its leading edge. Hidden by default; the caller unhides it once every check has passed.
 function ensureExitWipe() {
@@ -1560,14 +1565,7 @@ function ensureExitWipe() {
     wipe.appendChild(roller);
     document.body.appendChild(wipe);
   }
-  // Wear the header's own background so the screen reads as unrolling from the header itself.
-  // Read off the live header (themed per game by themeHeader); fall back to header white.
-  let bg = null;
-  const header = document.querySelector('.game-header');
-  if (header) {
-    try { bg = getComputedStyle(header).backgroundColor; } catch { bg = null; }
-  }
-  wipe.style.background = bg || '#fff';
+  wipe.style.backgroundImage = `url("${EXIT_WIPE_TEXTURE}")`;
   return wipe;
 }
 

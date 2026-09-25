@@ -1558,10 +1558,11 @@ body.in-game::after {
     pointer-events: none;
 }
 
-/* The exit wipe itself: a body-level panel wearing the header's own background (set inline per
-   exit by shell.js, themed per game), clipped top-down for the roll-down and bottom-up for the
-   reveal. A dark roller bar rides the leading edge. Hidden by default; shell.js unhides it once
-   every exit check has passed. */
+/* The exit wipe itself: a body-level panel in the home screen's ribbon texture (the image is
+   stamped inline per exit by shell.js from EXIT_WIPE_TEXTURE, mirroring .hero-ribbon-tile below;
+   the sampled banner yellow is the fallback while it loads or if it fails). Tiled to cover, clipped
+   top-down for the roll-down and bottom-up for the reveal. A dark roller bar rides the leading edge.
+   Hidden by default; shell.js unhides it once every exit check has passed. */
 #game-exit-wipe[hidden] { display: none; }
 
 #game-exit-wipe {
@@ -1569,6 +1570,8 @@ body.in-game::after {
     inset: 0;
     z-index: 60;
     pointer-events: none;
+    background-color: var(--banner-yellow);
+    background-repeat: repeat;
 }
 
 .game-exit-roller {

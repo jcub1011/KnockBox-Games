@@ -7,6 +7,8 @@
 // (b) the WebSocket protocol + DOM events. Assertions read observable state: sent frames, DOM
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, installFakeFetch, stubClipboard, tick } from './helpers.js';
 import { ADMIN_FAVICON, FAVICONS, GAME_EXIT_EASING, GAME_EXIT_MS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
 
@@ -1745,7 +1747,7 @@ describe('game exit animation', () => {
     // Phase 1 (cover): the screen unrolls from the header over the still-live game.
     const wipe = el('game-exit-wipe');
     expect(wipe.hidden).toBe(false);
-    expect(wipe.style.background).toBeTruthy();   // the header's own background
+    expect(wipe.style.backgroundImage).toContain('yellow-vertical_loop_crop.webp');
     expect(wipe.querySelector('.game-exit-roller')).toBeTruthy();
     expect(el('game-view').style.display).toBe('block');
     expect(el('game-view').classList.contains('is-exiting')).toBe(true);
@@ -1871,6 +1873,15 @@ describe('game exit animation', () => {
     expect(el('game-view').style.display).toBe('none');
     expect(el('lobby-view').style.display).toBe('block');
     expect(el('game-exit-wipe').hidden).toBe(true);
+  });
+
+  it('wipes in the home screen ribbon texture, not a flat color', async () => {
+    await importShell();
+    // shell.js stamps the URL inline; home.css owns the ribbon. Both must name the same file,
+    // or the wipe stops matching the home page it reveals.
+    const css = readFileSync(resolve(process.cwd(), 'home.css'), 'utf8');
+    expect(shell.EXIT_WIPE_TEXTURE).toBe('/assets/backgrounds/yellow-vertical_loop_crop.webp');
+    expect(css).toContain(`url("${shell.EXIT_WIPE_TEXTURE}")`);
   });
 
   it('skips the animation under reduced motion', async () => {
