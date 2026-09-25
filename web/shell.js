@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, SERVER_RELEASES_URL, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameReleasesUrl, gameWsEndpoint, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, parseServerVersion, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
+import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, SERVER_RELEASES_URL, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameReleasesUrl, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, parseServerVersion, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -672,10 +672,40 @@ export function clearGameVersion() {
   badge.hidden = true;
 }
 
+// The in-game header title links to the game's own homepage as declared in GAME.json, opened
+// as-is (NOT the releases-page resolution the version badge uses — a GitHub repo homepage
+// opens the repo itself). New tab, opener unlinked, URL as tooltip. With no safe homepage
+// the title is inert text: clicking it does nothing (it no longer leaves the session).
+export function setGameTitleLink(manifest) {
+  const title = el('game-title');
+  if (!title) return;
+  const raw = manifest?.homepage;
+  const link = isSafeHomepageUrl(raw) ? raw.trim() : null;
+  if (link) {
+    title.href = link;
+    title.target = '_blank';
+    title.rel = 'noopener noreferrer';
+    title.title = link;
+  } else {
+    clearGameTitleLink();
+  }
+}
+
+export function clearGameTitleLink() {
+  const title = el('game-title');
+  if (!title) return;
+  title.removeAttribute('href');
+  title.removeAttribute('target');
+  title.removeAttribute('rel');
+  title.removeAttribute('title');
+}
+
 export function showRoom() {
   const manifest = lobby.gameId ? games.get(lobby.gameId) : null;
   const displayName = manifest ? manifest.name : (lobby.gameId || `Lobby ${lobby.lobbyId}`);
   el('game-title').textContent = displayName;
+  setGameTitleLink(manifest);
+  resetLeaveButton();
   setGameVersion(manifest);
   setDocumentTitle(displayName);
   el('lobby-code').textContent = lobby.lobbyId;
@@ -707,6 +737,8 @@ export async function enterGame(starting) {
   };
 
   el('game-title').textContent = manifest.name;
+  setGameTitleLink(manifest);
+  resetLeaveButton();
   setGameVersion(manifest);
   setDocumentTitle(manifest.name);
   el('lobby-code').textContent = starting.lobbyId;
@@ -764,6 +796,7 @@ export function showLobbyView() {
   closeCodeModal();
   resetHeaderTheme();
   clearGameVersion();
+  clearGameTitleLink();
   setDocumentTitle(null);
   el('frame-host').innerHTML = '';
   document.body.classList.remove('in-game');
@@ -1545,21 +1578,67 @@ window.addEventListener('message', (e) => {
 el('join-form').addEventListener('submit', (e) => { e.preventDefault(); joinByCode(); });
 
 export function leaveGame() {
+  resetLeaveButton();
   if (lobby) send({ type: 'LeaveLobby', lobbyId: lobby.lobbyId });
   sessionStorage.removeItem('kb.lobbyId');
   showLobbyView();
 }
 
-el('leave').onclick = leaveGame;
+// Leaving is two-click: the first click arms the button ("Confirm?", red) and starts a 5 s
+// window; a second click inside the window actually leaves, otherwise the button reverts.
+// This lives on #leave only — launch-cancel and every other exit path keep their behavior.
+export const LEAVE_CONFIRM_MS = 5000;
+let leaveArmed = false;
+let leaveTimer = null;
+
+// Which stacked label a screen reader (and the crossfade) treats as visible. The labels
+// live in the markup; JS only flips the class and the aria-hidden pair, so the swap is a
+// pure CSS crossfade with no layout shift.
+function showLeaveLabel(btn, which) {
+  for (const name of ['leave', 'confirm']) {
+    const span = btn.querySelector(`.leave-label-${name}`);
+    if (!span) continue;
+    if (name === which) span.removeAttribute('aria-hidden');
+    else span.setAttribute('aria-hidden', 'true');
+  }
+}
+
+export function resetLeaveButton() {
+  leaveArmed = false;
+  if (leaveTimer !== null) { clearTimeout(leaveTimer); leaveTimer = null; }
+  const btn = el('leave');
+  if (!btn) return;
+  btn.classList.remove('confirm');
+  btn.removeAttribute('aria-label');
+  showLeaveLabel(btn, 'leave');
+}
+
+export function handleLeaveClick() {
+  const btn = el('leave');
+  if (leaveArmed) {
+    leaveGame();
+    return;
+  }
+  leaveArmed = true;
+  if (btn) {
+    btn.classList.add('confirm');
+    btn.setAttribute('aria-label', 'Confirm leaving the game');
+    showLeaveLabel(btn, 'confirm');
+  }
+  if (leaveTimer !== null) clearTimeout(leaveTimer);
+  leaveTimer = setTimeout(resetLeaveButton, LEAVE_CONFIRM_MS);
+}
+
+el('leave').onclick = handleLeaveClick;
 
 // Escape hatch for a launch that stalls before the in-game header (and its Leave button) exists.
 if (el('launch-cancel')) el('launch-cancel').onclick = leaveGame;
 
-// The game name doubles as a "home" link: leave the session and return to the lobby view in-SPA.
-// href="/" is the no-JS fallback; we intercept so the control socket stays up.
+// The game title opens the game's homepage in a new tab (set per-session by setGameTitleLink).
+// href="/" is the no-JS fallback; with no safe homepage the title is inert, so intercept and
+// do nothing instead of leaving. With a homepage, let the anchor's own target=_blank do it.
 el('game-title').addEventListener('click', (e) => {
-  e.preventDefault();
-  leaveGame();
+  if (!el('game-title').hasAttribute('href')) e.preventDefault();
 });
 
 // ── Room code button: click crossfades the code; dbl-click opens a big modal; right-click and

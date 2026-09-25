@@ -1227,6 +1227,7 @@ describe('launch overlay', () => {
       const ws = await bootWithGames();
       await createLobbySuccess(ws, { lobbyId: 'AB12' });
       el('leave').click();
+      el('leave').click();
       expect(launchRetired()).toBe(true);
       // The home view must not be left faded out; that would look like a dead app.
       expect(el('lobby-view').classList.contains('is-launching')).toBe(false);
@@ -1584,23 +1585,68 @@ describe('control-plane messages', () => {
 describe('leaving the game', () => {
   beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
 
-  it('leaveGame sends LeaveLobby, clears the lobby, and returns home', async () => {
+  it('leave needs two clicks: first arms Confirm?, second leaves', async () => {
     await importShell();
     const ws = await bootWithGames();
     await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const btn = el('leave');
+    const label = (name) => btn.querySelector(`.leave-label-${name}`);
 
-    el('leave').click();
+    btn.click();
+    expect(btn.classList.contains('confirm')).toBe(true);
+    expect(label('leave').getAttribute('aria-hidden')).toBe('true');
+    expect(label('confirm').hasAttribute('aria-hidden')).toBe(false);
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+
+    btn.click();
     expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
     expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
     expect(el('lobby-view').style.display).toBe('block');
+    // The confirmed leave disarms the button for the next session.
+    expect(btn.classList.contains('confirm')).toBe(false);
+    expect(label('leave').hasAttribute('aria-hidden')).toBe(false);
+    expect(label('confirm').getAttribute('aria-hidden')).toBe('true');
   });
 
-  it('clicking the game title also leaves (in-SPA home link)', async () => {
+  it('reverts to Leave after 5 s without leaving', async () => {
     await importShell();
     const ws = await bootWithGames();
     await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const btn = el('leave');
+
+    btn.click();
+    expect(btn.classList.contains('confirm')).toBe(true);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(btn.classList.contains('confirm')).toBe(false);
+    expect(btn.querySelector('.leave-label-leave').hasAttribute('aria-hidden')).toBe(false);
+    expect(btn.querySelector('.leave-label-confirm').getAttribute('aria-hidden')).toBe('true');
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+    expect(el('lobby-view').style.display).not.toBe('block');
+  });
+
+  it('clicking the game title no longer leaves; it links the homepage itself in a new tab', async () => {
+    await importShell();
+    const ws = await bootWithGames([
+      { id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', maxPlayers: 2, homepage: 'https://github.com/owner/repo' },
+    ]);
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const title = el('game-title');
+    // The raw homepage — NOT the version badge's releases-page resolution.
+    expect(title.getAttribute('href')).toBe('https://github.com/owner/repo');
+    expect(title.target).toBe('_blank');
+    expect(title.rel).toContain('noopener');
+    title.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+  });
+
+  it('clicking the game title without a homepage does nothing', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    expect(el('game-title').hasAttribute('href')).toBe(false);
     el('game-title').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(true);
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+    expect(el('lobby-view').style.display).not.toBe('block');
   });
 });
 

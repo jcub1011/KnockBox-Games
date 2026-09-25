@@ -1211,7 +1211,8 @@ body.in-game::after {
     line-height: 1.05;
 }
 
-.game-header-title:hover { text-decoration: underline; }
+.game-header-title[href]:hover { text-decoration: underline; }
+.game-header-title:not([href]) { cursor: default; }
 
 /* Two-line title stack: the game name with its version as a small subtitle beneath it. The
    stack (not the link) is the header's flex child, so it carries the flex growth and the
@@ -1311,9 +1312,8 @@ body.in-game::after {
 .room-code-btn.revealed .room-code-value { opacity: 1; }
 
 .leave-session-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: grid;
+    place-items: center;
     min-height: 44px; /* comfortable touch target */
     padding: 0 14px;
     border-radius: 8px;
@@ -1327,9 +1327,37 @@ body.in-game::after {
     font-family: var(--font-primary);
     text-transform: uppercase;
     letter-spacing: 0.06em;
+    /* Crossfade the Leave ⇄ Confirm? state change (arming and timer-expiry revert) both ways. */
+    transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 .leave-session-btn:hover { background: var(--gh-btn-bg-hover); }
+
+/* Armed (two-click) leave confirmation: solid danger red that wins over the per-game
+   header tint vars, with white text. Removed when the 5 s window lapses or the leave
+   completes, restoring the themed button above. */
+.leave-session-btn.confirm { background: #c0392b; color: #fff; }
+.leave-session-btn.confirm:hover { background: #a93226; }
+
+/* Two labels stacked in the same grid cell; crossfade with a slight rise on .confirm.
+   The button sizes to the wider label up front, so arming never shifts the header layout. */
+.leave-session-btn .leave-label {
+    grid-area: 1 / 1;
+    white-space: nowrap;
+    transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.leave-session-btn .leave-label-confirm {
+    opacity: 0;
+    transform: translateY(4px);
+}
+.leave-session-btn.confirm .leave-label-leave {
+    opacity: 0;
+    transform: translateY(-4px);
+}
+.leave-session-btn.confirm .leave-label-confirm {
+    opacity: 1;
+    transform: none;
+}
 
 .game-body {
     flex: 1;
@@ -1817,6 +1845,7 @@ body.in-game::after {
     /* No hover lift/slide under reduced motion — keep only the (non-moving) shadow cue. */
     .game-tile:hover:not(:disabled) { transform: none; }
     .game-chin-tag-version.is-link { transition: none; }
+    .leave-session-btn, .leave-session-btn .leave-label { transition: none; }
     .game-chin-tag-version.is-link:hover { transform: none; }
     .game-tile:hover:not(:disabled) > .game-tile-surface {
         transform: none;
