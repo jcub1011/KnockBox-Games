@@ -693,7 +693,9 @@ export function clearGameVersion() {
 // The in-game header title links to the game's own homepage as declared in GAME.json, opened
 // as-is (NOT the releases-page resolution the version badge uses — a GitHub repo homepage
 // opens the repo itself). New tab, opener unlinked, URL as tooltip. With no safe homepage
-// the title is inert text: clicking it does nothing (it no longer leaves the session).
+// the title is inert text: clicking it does nothing (it no longer leaves the session), and it
+// keeps an explanatory tooltip like the version badge does.
+const GAME_TITLE_NO_HOMEPAGE_TITLE = 'Game does not provide a homepage link.';
 export function setGameTitleLink(manifest) {
   const title = el('game-title');
   if (!title) return;
@@ -715,7 +717,7 @@ export function clearGameTitleLink() {
   title.removeAttribute('href');
   title.removeAttribute('target');
   title.removeAttribute('rel');
-  title.removeAttribute('title');
+  title.title = GAME_TITLE_NO_HOMEPAGE_TITLE;
 }
 
 export function showRoom() {

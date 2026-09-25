@@ -1654,6 +1654,8 @@ describe('leaving the game', () => {
     const ws = await bootWithGames();
     await createLobbySuccess(ws, { lobbyId: 'AB12' });
     expect(el('game-title').hasAttribute('href')).toBe(false);
+    // Inert but explained, like the version badge's no-source tooltip.
+    expect(el('game-title').title).toBe('Game does not provide a homepage link.');
     el('game-title').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
     expect(el('lobby-view').style.display).not.toBe('block');
