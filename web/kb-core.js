@@ -199,27 +199,30 @@ export const LAUNCH_MAX_MS = 45000;
 // How the launch ends. Nothing holds either exit back — making a game that has finished loading wait
 // out an animation reads as clunky. Both MIRROR durations in home.css; change them together.
 //
-// MORPH: the good ending. The tile is replaced by the game in the very rect it occupied, which then
-//   expands to fill the screen like a video going fullscreen. The overlay is gone from the first
-//   frame of it, so nothing of the launch is ever drawn over a running game.
-// EXIT:  the fallback fade, for an ending with no tile to hand over from (join-by-code before the
-//   game is named, a rejoin) or no game to hand over to (an error, a deliberate bail-out).
-export const LAUNCH_MORPH_MS = 300;
+// PROJECTOR: the good ending. The game header slides in from the top behind the still-visible
+//   launch overlay, and the game itself drops down out of it like a projector screen unrolling —
+//   the tile-zoom handoff is gone, replaced by this projector aesthetic. The overlay drops only
+//   once the unroll lands, so the screen is never bare mid-sequence.
+// EXIT:  the fallback fade, for an ending with no game to hand over to (an error, a deliberate
+//   bail-out, the LAUNCH_MAX_MS ceiling).
 export const LAUNCH_EXIT_MS = 220;
 
-// The morph's curve. Eased IN: the tile flight's ease-out suits a small object arriving somewhere, but
-// on a full-screen expand it spends most of its travel in the first few frames, which lands as a jolt.
-// This is at 4% / 10% / 36% by 40 / 60 / 100ms — a gentle start that still decelerates into the finish
-// rather than slamming against the viewport edge at peak speed. (A stronger ease-in overshoots the
-// other way: so little early movement that it reads as a hitch.)
-export const LAUNCH_MORPH_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
+// The projector enter: the header slides down first, then the game body unrolls beneath it. The
+// header slide is shorter so the screen follows almost at once — one gesture, not two waits. Both
+// MIRROR durations in home.css; change them together.
+export const HEADER_ENTER_MS = 250;
+export const HEADER_ENTER_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
+export const PROJECTOR_DROP_MS = 300;
+export const PROJECTOR_DROP_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
 
-// How leaving a game ends. The header rolls a screen down over the game like a projector screen,
-// the views swap underneath full cover, and the screen rolls back up to reveal the home page —
-// one duration each way, same curve as the enter morph so the gestures rhyme. Both MIRROR
-// durations in home.css (#game-exit-wipe); change them together.
-export const GAME_EXIT_MS = 300;
-export const GAME_EXIT_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
+// How leaving a game ends: the reverse of the enter. The game rolls back up into the header, then
+// the header slides up out of view, revealing the already-settled home page underneath — one
+// duration per phase, same curves as the enter so the gestures rhyme. Both MIRROR durations in
+// home.css; change them together.
+export const GAME_EXIT_MS = PROJECTOR_DROP_MS;
+export const GAME_EXIT_EASING = PROJECTOR_DROP_EASING;
+export const HEADER_EXIT_MS = 250;
+export const HEADER_EXIT_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
 
 // "Starting Tic Tac Toe…". The join-by-code path doesn't learn which game it is until EnterGame
 // arrives, so fall back to a generic label rather than rendering "Starting …" with a hole in it.

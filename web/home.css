@@ -1197,12 +1197,8 @@ body.in-game::after {
     box-shadow: 0px 6px 0px rgba(0, 0, 0, 0.6), 0px -12px 0px var(--gh-bg);
     z-index: 99;
     transition: background-color 0.4s ease, color 0.4s ease;
-    animation: header-enter 0.4s cubic-bezier(0.25, 1, 0.5, 1) both;
-}
-
-@keyframes header-enter {
-    from { opacity: 0; transform: translateY(-100%); }
-    to   { opacity: 1; transform: translateY(0); }
+    /* No entrance animation here: the game header slides in via shell.js's projector-enter
+       Web Animations call once the game has loaded, so a CSS animation would double-play it. */
 }
 
 .game-header-title {
@@ -1538,78 +1534,35 @@ body.in-game::after {
    a hidden one still fetches. */
 #game-view.launch-veil { visibility: hidden; }
 
-/* The good ending: rather than fading a loading screen away over a game that has already arrived, the
-   tile hands over to it — the game takes the rect the tile had reached, rounded corners and all, and
-   expands to fullscreen like a video.
-   The motion itself is a Web Animations call in shell.js (startGameMorph), NOT a transition here: a
-   transition has to be armed by writing a start value and clearing it, which raced style recalc and
-   was seen sticking at the start matrix, freezing the game at tile size. This class is only the state
-   marker, plus a compositor hint for the transform being animated. */
-#game-view.launch-morph {
+/* The good ending: rather than fading a loading screen away over a game that has already arrived,
+   the projector enter plays behind the still-visible overlay — the game header slides in from the
+   top, then the game body drops down out of it like a projector screen unrolling — and the overlay
+   drops outright only once the unroll lands. The motion itself is Web Animations calls in shell.js
+   (startProjectorEnter), NOT transitions here: a transition has to be armed by writing a start
+   value and clearing it, which raced style recalc and was seen sticking at the start state. This
+   class is only the state marker, plus compositor hints for what is being animated. */
+#game-view.is-entering .game-header {
     will-change: transform;
 }
 
-/* The exit: a projector-screen wipe rolled down out of the header. The settled game is pinned in
-   place (its header competes in the root stacking context, so without this it would paint above
-   the wipe instead of being masked by it) while shell.js unrolls #game-exit-wipe over it with a
-   Web Animations call — never a transition here, for the same style-recalc race as the enter
-   morph. This class is only the state marker and the pinning. z-index 50 sits above the home
-   page but below the wipe (60) and the launch overlay (100), so a relaunch mid-exit still
-   covers it. The 0.3s wipe mirrors GAME_EXIT_MS in kb-core.js — change them together. */
+#game-view.is-entering .game-body {
+    will-change: clip-path;
+}
+
+/* The exit — the reverse of the enter: the game body rolls back up into the header, then the
+   header slides up out of view, revealing the home page underneath. The settled game is pinned
+   in place (its header competes in the root stacking context, so without this it would not
+   cleanly cover the home page placed beneath it) while shell.js retracts the body and slides
+   the header with Web Animations calls — never transitions here, for the same style-recalc
+   race as the enter. This class is only the state marker and the pinning. z-index 50 sits
+   above the home page but below the launch overlay (100), so a relaunch mid-exit still
+   covers it. The roll mirrors GAME_EXIT_MS and the slide HEADER_EXIT_MS in kb-core.js —
+   change them together. */
 #game-view.is-exiting {
     position: fixed;
     inset: 0;
     z-index: 50;
     pointer-events: none;
-}
-
-/* The exit wipe itself: a body-level panel in the home screen's ribbon texture (the image is
-   stamped inline per exit by shell.js from EXIT_WIPE_TEXTURE, mirroring .hero-ribbon-tile below;
-   the sampled banner yellow is the fallback while it loads or if it fails). Tiled to cover, clipped
-   top-down for the roll-down and bottom-up for the reveal. A dark roller bar rides the leading edge.
-   Hidden by default; shell.js unhides it once every exit check has passed. */
-#game-exit-wipe[hidden] { display: none; }
-
-#game-exit-wipe {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-    pointer-events: none;
-    background-color: var(--banner-yellow);
-    background-repeat: repeat;
-    /* The ribbon's own horizontal drift, so the screen is alive while it rolls: one tile width
-       (1536px, see --img-w) per 48s is the ribbon's 32px/s exactly, keeping the two seamless. */
-    animation: exit-wipe-scroll 48s linear infinite;
-}
-
-/* Projector-screen shading over the texture: curled top and bottom edges (a shadow lip fading
-   into a soft highlight, mirrored) plus a faint overall falloff and side vignette. A pseudo-layer
-   rather than part of the wipe's own background so it never disturbs the scrolling texture — and
-   being a child of the wipe, it is clipped by the roll animation and travels with the screen. */
-#game-exit-wipe::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background:
-        linear-gradient(to bottom, rgba(0, 0, 0, 0.38) 0, rgba(0, 0, 0, 0.12) 14px, rgba(255, 255, 255, 0.10) 24px, rgba(0, 0, 0, 0) 48px),
-        linear-gradient(to top, rgba(0, 0, 0, 0.38) 0, rgba(0, 0, 0, 0.12) 14px, rgba(255, 255, 255, 0.10) 24px, rgba(0, 0, 0, 0) 48px),
-        linear-gradient(to bottom, rgba(0, 0, 0, 0.10) 0, rgba(0, 0, 0, 0) 25%, rgba(0, 0, 0, 0) 75%, rgba(0, 0, 0, 0.14) 100%),
-        linear-gradient(to right, rgba(0, 0, 0, 0.12) 0, rgba(0, 0, 0, 0) 8%, rgba(0, 0, 0, 0) 92%, rgba(0, 0, 0, 0.12) 100%);
-}
-
-@keyframes exit-wipe-scroll {
-    from { background-position: 0 0; }
-    to   { background-position: -1536px 0; }
-}
-
-.game-exit-roller {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 8px;
-    background: rgba(0, 0, 0, 0.55);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
 
 .launch-stage {
@@ -1914,8 +1867,8 @@ body.in-game::after {
        inline start transform, so the transition has to be killed here or the tile would jump. */
     .launch-tile { transition: none; }
     .launch-overlay.is-leaving { animation: none; opacity: 1; }
-    /* The expand-to-fullscreen is skipped in shell.js (startGameMorph bails on reduced motion), so the
-       game simply is fullscreen — nothing to disable here. */
+    /* The projector enter and roll-up exit are skipped in shell.js (both bail on reduced motion),
+       so the game simply is fullscreen and leaving is instant — nothing to disable here. */
     /* Keep an activity cue — frozen dots read as "broken" — but as opacity only, no travel. */
     .launch-dots span { animation: launch-dot-pulse 1.6s ease-in-out infinite; }
     #lobby-view.is-launching { transition: none; }
@@ -1930,7 +1883,6 @@ body.in-game::after {
         box-shadow: 7px 7px 0 var(--tile-shadow-hover, rgba(255, 0, 85, 0.65));
     }
     .hero-ribbon-track { animation: none; }
-    #game-exit-wipe { animation: none; }
     body:not(.in-game)::before,
     body:not(.in-game)::after { animation: none; }
     .home-error-toast,
