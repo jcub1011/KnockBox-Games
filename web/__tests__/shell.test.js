@@ -8,7 +8,7 @@
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, installFakeFetch, stubClipboard, tick } from './helpers.js';
-import { ADMIN_FAVICON, FAVICONS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
+import { ADMIN_FAVICON, FAVICONS, GAME_EXIT_EASING, GAME_EXIT_MS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -1655,6 +1655,261 @@ describe('leaving the game', () => {
     el('game-title').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
     expect(el('lobby-view').style.display).not.toBe('block');
+  });
+});
+
+describe('game exit animation', () => {
+  beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
+
+  // jsdom has no Web Animations API. The enter leg keeps an instance stub on #game-view (as in
+  // the launch block); the exit wipe is created on demand, so its animations are intercepted on
+  // Element.prototype instead, with per-animation resolvers the test drives. The prototype stub is
+  // restored after each test so later suites keep the no-animation immediate path.
+  let origElementAnimate;
+  beforeEach(() => { origElementAnimate = Element.prototype.animate; });
+  afterEach(() => {
+    if (origElementAnimate === undefined) delete Element.prototype.animate;
+    else Element.prototype.animate = origElementAnimate;
+  });
+
+  function stubWipeAnimation() {
+    const rec = { calls: [], cancelled: 0, resolvers: [] };
+    rec.finish = (i = 0) => { rec.resolvers[i](); };
+    rec.finishAll = () => { rec.resolvers.splice(0).forEach((f) => f()); };
+    Element.prototype.animate = function (keyframes, options) {
+      rec.calls.push({ target: this, keyframes, options });
+      return {
+        finished: new Promise((res) => { rec.resolvers.push(res); }),
+        cancel: () => { rec.cancelled++; },
+      };
+    };
+    return rec;
+  }
+
+  // Instance stub for the ENTER morph only (mirrors the launch block's stubMorphAnimation).
+  function stubEnterAnimation() {
+    const rec = { calls: [], cancelled: 0 };
+    let finish;
+    rec.finish = () => { finish(); };
+    el('game-view').animate = (keyframes, options) => {
+      rec.calls.push({ keyframes, options });
+      return { finished: new Promise((res) => { finish = res; }), cancel: () => { rec.cancelled++; } };
+    };
+    return rec;
+  }
+
+  // Drive a click-launched game all the way to a settled fullscreen session (overlay retired,
+  // background swapped), with layout stubbed throughout. Returns the live iframe.
+  async function playGame(ws) {
+    el('games').querySelector('.game-tile').getBoundingClientRect = () =>
+      ({ left: 40, top: 200, width: 240, height: 160, right: 280, bottom: 360 });
+    el('launch-tile').getBoundingClientRect = () =>
+      ({ left: 350, top: 300, width: 300, height: 200, right: 650, bottom: 500 });
+    el('game-view').getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 1000, height: 800, right: 1000, bottom: 800 });
+    const enter = stubEnterAnimation();
+    el('games').querySelector('.game-tile').click();
+    const reply = ws.sent.find((f) => f.type === 'CreateLobby');
+    ws._recv({ cid: reply.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+    await tick();
+    shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+    const ticket = ws.sent.find((f) => f.type === 'RequestTicket');
+    ws._recv({ cid: ticket.cid, type: 'Ticket', ticket: 't' });
+    await tick();
+    const frame = el('game-frame');
+    frame.dispatchEvent(new Event('load'));
+    enter.finish();
+    await tick();
+    expect(document.body.classList.contains('in-game')).toBe(true);
+    expect(el('launch-overlay').hidden).toBe(true);
+    return frame;
+  }
+
+  function leaveViaButton() {
+    const btn = el('leave');
+    btn.click();   // arms Confirm?
+    btn.click();   // confirms
+  }
+
+  it('rolls a screen down over the game on Leave, swaps underneath, and reveals home', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubWipeAnimation();
+
+    leaveViaButton();
+
+    // Network + bookkeeping are immediate; only the visuals wait out the wipe.
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
+    expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
+    // Phase 1 (cover): the screen unrolls from the header over the still-live game.
+    const wipe = el('game-exit-wipe');
+    expect(wipe.hidden).toBe(false);
+    expect(wipe.style.background).toBeTruthy();   // the header's own background
+    expect(wipe.querySelector('.game-exit-roller')).toBeTruthy();
+    expect(el('game-view').style.display).toBe('block');
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+    expect(el('game-frame')).toBeTruthy();
+    expect(document.body.classList.contains('in-game')).toBe(true);
+    expect(exit.calls).toHaveLength(2);
+    const [cover, roll] = exit.calls;
+    expect(cover.target).toBe(wipe);
+    expect(cover.keyframes).toEqual([{ clipPath: 'inset(0 0 100% 0)' }, { clipPath: 'inset(0 0 0% 0)' }]);
+    expect(cover.options.duration).toBe(GAME_EXIT_MS);
+    expect(cover.options.easing).toBe(GAME_EXIT_EASING);
+    expect(cover.options.fill).toBe('forwards');   // hold full cover until the swap
+    expect(roll.target).toBe(wipe.firstElementChild);
+    expect(roll.keyframes).toEqual([{ transform: 'translateY(0)' }, { transform: 'translateY(800px)' }]);
+
+    exit.finish(0);   // cover lands
+    await tick();
+
+    // Phase 2: swapped under full cover, now rolling back up to reveal the home page.
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(document.body.classList.contains('in-game')).toBe(false);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(wipe.hidden).toBe(false);
+    expect(exit.calls).toHaveLength(4);
+    const [uncover, rollBack] = exit.calls.slice(2);
+    expect(uncover.target).toBe(wipe);
+    expect(uncover.keyframes).toEqual([{ clipPath: 'inset(0 0 0% 0)' }, { clipPath: 'inset(0 0 100% 0)' }]);
+    expect(rollBack.keyframes).toEqual([{ transform: 'translateY(800px)' }, { transform: 'translateY(0)' }]);
+
+    exit.finish(2);   // reveal lands
+    await tick();
+
+    expect(wipe.hidden).toBe(true);
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('game-view').classList.contains('is-exiting')).toBe(false);
+  });
+
+  it('finishes the exit even if the wipe never reports finishing', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    stubWipeAnimation();   // never resolved
+
+    leaveViaButton();
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(GAME_EXIT_MS + 200);   // cover safety net: swapped, revealing
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(el('game-exit-wipe').hidden).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(GAME_EXIT_MS + 200);   // reveal safety net: home
+    expect(el('game-exit-wipe').hidden).toBe(true);
+    expect(el('game-view').style.display).toBe('none');
+    expect(document.body.classList.contains('in-game')).toBe(false);
+  });
+
+  it('plays the same wipe on Back navigation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubWipeAnimation();
+
+    shell.handlePopState({ state: null });
+
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+    expect(exit.calls).toHaveLength(2);
+
+    exit.finish(0);
+    await tick();
+    exit.finishAll();
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(el('game-exit-wipe').hidden).toBe(true);
+    expect(window.history.back).not.toHaveBeenCalled(); // user-Back already popped the entry
+  });
+
+  it('plays the same wipe on a kick, then toasts', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubWipeAnimation();
+
+    shell.handle({ type: 'Kicked', lobbyId: 'AB12' });
+
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+    expect(exit.calls).toHaveLength(2);
+
+    exit.finish(0);
+    await tick();
+    exit.finishAll();
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.querySelector('.home-error-toast').textContent).toContain('kicked');
+  });
+
+  it('wipes out of the waiting room too, even with no game iframe', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    // Retire the launch overlay so the waiting room counts as settled (no cover without one).
+    shell.hideLaunchOverlay();
+    await vi.advanceTimersByTimeAsync(LAUNCH_EXIT_MS);
+    expect(el('launch-overlay').hidden).toBe(true);
+    el('game-view').getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 1000, height: 800, right: 1000, bottom: 800 });
+    const exit = stubWipeAnimation();
+
+    leaveViaButton();
+
+    expect(exit.calls).toHaveLength(2);
+    expect(exit.calls[0].keyframes).toEqual(
+      [{ clipPath: 'inset(0 0 100% 0)' }, { clipPath: 'inset(0 0 0% 0)' }]);
+
+    exit.finish(0);
+    await tick();
+    exit.finishAll();
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(el('game-exit-wipe').hidden).toBe(true);
+  });
+
+  it('skips the animation under reduced motion', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    // Reduced motion from here on: entering already played; leaving must not.
+    vi.stubGlobal('matchMedia', (q) => ({
+      matches: q === '(prefers-reduced-motion: reduce)',
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const exit = stubWipeAnimation();
+
+    leaveViaButton();
+
+    expect(exit.calls).toHaveLength(0);
+    expect(el('game-exit-wipe')).toBeNull();
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('a second exit mid-wipe fast-forwards home instead of stacking animations', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubWipeAnimation();
+
+    leaveViaButton();
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+
+    shell.showLobbyView();   // e.g. a kick landing mid-wipe
+    expect(exit.cancelled).toBe(2);   // cover + roller, both dropped
+    expect(el('game-exit-wipe').hidden).toBe(true);
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('game-view').classList.contains('is-exiting')).toBe(false);
   });
 });
 

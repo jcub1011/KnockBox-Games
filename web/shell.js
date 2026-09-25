@@ -2,7 +2,7 @@
 // starts it requests a lobby-scoped ticket and embeds the game in a cross-origin iframe (the game
 // origin). It does NOT bridge gameplay: the game opens its own data websocket via the ticket and
 // talks to the server directly. The shell and game are isolated (separate origins) on purpose.
-import { LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, SERVER_RELEASES_URL, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameReleasesUrl, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, parseServerVersion, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
+import { GAME_EXIT_EASING, GAME_EXIT_MS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_EASING, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS, PROTOCOL_VERSION, SERVER_RELEASES_URL, announcementSeverity, announcementText, appendPlayLog, buildGameSrc, buildJoinLink, calculateDragTilt, debounce, dominantColorFromPixels, filterAndSortGames, formatGameVersion, formatPlayerCapacity, formatTagsTooltip, gameReleasesUrl, gameWsEndpoint, isSafeHomepageUrl, launchFlipFrom, launchMessage, normalizeTags, ordinal, parseGameParam, parseJoinParam, parseRgbComponents, parseServerVersion, partitionPlayLogMetadata, pickContrastText, pickRandomFavicon, reconnectDelay, rosterAdd, rosterRemove, rotationFromMatrix, sanitizeGameOrigin, shouldShowAnnouncement, stepSpring1D } from './kb-core.js';
 
 // ── Identity (client-side) ───────────────────────────────────────────────────
 // The server mints the playerId and a signed token on first connect; we persist the TOKEN (not the
@@ -798,23 +798,52 @@ export async function enterGame(starting) {
 }
 
 export function showLobbyView() {
+  // A second exit landing while the wipe is still running (double-Leave, Back-during-exit,
+  // Kicked-during-exit): fast-forward to home rather than starting a second animation.
+  if (exitAnims.length || exitTimer) { finishShowLobbyView(); return; }
+  const view = el('game-view');
+  // Animate only a settled game view. A launch still on screen (waiting room, slow ticket round
+  // trip) or a game that never finished expanding has no fullscreen to roll the screen over —
+  // the launch teardown below already covers those endings.
+  const wasSettledGame = !!view && view.style.display === 'block' && !launchOverlayUp() && !gameMorph;
   lobby = null;
   // Consume this session's history entry, if any. A user-Back exit already popped it (the popstate
-  // handler cleared historyPushed first), so this only fires for programmatic exits.
+  // handler cleared historyPushed first), so this only fires for programmatic exits. Synchronous,
+  // never deferred to the animation end — a Back pressed mid-wipe must not pop again.
   consumeGameHistory();
-  // Every way out of a session lands here (Leave, Kicked, RejoinRejected, session-ended, and the
-  // overlay's own escape hatch), so this one call retires any launch still in flight.
+  // Every way out of a session lands here (Leave, Back, Kicked, LobbyClosed, RejoinRejected,
+  // session-ended, and the overlay's own escape hatch), so this one call retires any launch still
+  // in flight.
   abortLaunch();
   clearGameMorph();   // leaving mid-expand must not strand a transform on the game view
   closeCodeModal();
+  if (wasSettledGame && startExitMorph()) return; // async; finishes via finishShowLobbyView
+  finishShowLobbyView();
+}
+
+// The deferred half of showLobbyView: everything visual. Runs immediately when there is nothing to
+// animate (or motion is unwanted), otherwise once the wipe has rolled back up. Idempotent — safe
+// to call twice (re-entrant exits, relaunch flushing a pending exit).
+function finishShowLobbyView() {
+  clearExitMorph();
+  hideExitWipe();
+  swapToHome();
+}
+
+// The view swap itself, with no animation state touched: the wipe (when one is running) stays
+// exactly as it is, so the roll-down phase can swap the views underneath full cover and the
+// roll-up phase can reveal the already-settled home page.
+function swapToHome() {
   resetHeaderTheme();
   clearGameVersion();
   clearGameTitleLink();
   setDocumentTitle(null);
   el('frame-host').innerHTML = '';
   document.body.classList.remove('in-game');
-  el('game-view').style.display = 'none';
-  el('lobby-view').style.display = 'block';
+  const view = el('game-view');
+  if (view) view.style.display = 'none';
+  const home = el('lobby-view');
+  if (home) home.style.display = 'block';
   // Belt and braces with the overlay teardown: if is-launching survived, the home page we just
   // switched back to would render at opacity 0 and the app would look dead.
   clearLaunchingClass();
@@ -1160,6 +1189,7 @@ export function launchOverlayUp() {
 export function showLaunchOverlay(gameName, artUrl, sourceEl) {
   const overlay = el('launch-overlay');
   if (!overlay) return; // overlay markup not present (some test fixtures)
+  if (exitAnims.length || exitTimer) finishShowLobbyView(); // a relaunch mid-exit starts from settled home
   const seq = ++launchSeq;
   clearLaunchTimers();
   clearGameMorph();               // a relaunch during a morph must not inherit its half-done geometry
@@ -1428,6 +1458,133 @@ function endGameMorph() {
   document.body.classList.add('in-game');
 }
 
+// ── Game exit animation (projector-screen wipe) ────────────────────────────
+// Leaving rolls a screen down out of the header, masking the game top-to-bottom like a projector
+// screen; the views swap underneath full cover, and the screen rolls back up to reveal the home
+// page. Every exit path funnels through showLobbyView, so this one call covers the Leave button,
+// Back navigation, kicks, closes and session-ended alike.
+//
+// Like the enter morph, the motion is Web Animations calls rather than CSS transitions (same
+// style-recalc race), with the same safety-net shape: a `finished` promise plus a timer held
+// outside launchTimers so finishing can cancel it. The iframe stays alive and `body.in-game`
+// stays set until the screen is fully down — hiding either mid-wipe would be the snap this
+// exists to remove. The screen wears the header's own background (themed per game), so it reads
+// as unrolling from the header itself; a dark roller bar rides the leading edge.
+//
+// Two phases, one duration each way: roll down (cover), swap, roll up (reveal). A cancel rejects
+// instead of resolving, so an aborted phase never advances the sequence.
+let exitAnims = [];
+let exitTimer = null;
+let exitTravel = 0;   // the roller's travel, measured at cover time so the reveal matches it exactly
+
+// Roll the screen down over the settled game view. Returns false when there is nothing to
+// animate (or motion is unwanted), so the caller falls back to the immediate swap.
+function startExitMorph() {
+  const view = el('game-view');
+  if (!view) return false;
+  if (prefersReducedMotion()) return false;
+  clearExitMorph();   // normalize (no exit is in flight — the caller guards re-entrancy)
+  // Pin the game in place over the page: its header competes in the root stacking context, so
+  // without this it would paint above the wipe instead of being masked by it.
+  view.classList.add('is-exiting');
+  const from = view.getBoundingClientRect();
+  if (!from || !from.width || !from.height) { view.classList.remove('is-exiting'); return false; }
+  const wipe = ensureExitWipe();
+  if (typeof wipe.animate !== 'function') { view.classList.remove('is-exiting'); return false; }
+  wipe.hidden = false;
+  exitTravel = from.height;
+  const cover = wipe.animate(
+    [{ clipPath: 'inset(0 0 100% 0)' }, { clipPath: 'inset(0 0 0% 0)' }],
+    { duration: GAME_EXIT_MS, easing: GAME_EXIT_EASING, fill: 'forwards' },
+  );
+  const roller = wipe.firstElementChild;
+  const roll = roller.animate(
+    [{ transform: 'translateY(0)' }, { transform: `translateY(${from.height}px)` }],
+    { duration: GAME_EXIT_MS, easing: GAME_EXIT_EASING, fill: 'forwards' },
+  );
+  exitAnims = [cover, roll];
+  // Guarded: the safety timer and the promise can both fire, but the phase advances once.
+  let covered = false;
+  const onCovered = () => {
+    if (covered) return;
+    covered = true;
+    if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
+    exitAnims = [];
+    swapToHome();   // under full cover — invisible
+    startExitReveal();
+  };
+  cover.finished.then(onCovered, () => {});
+  exitTimer = setTimeout(onCovered, GAME_EXIT_MS + 120);
+  return true;
+}
+
+// Roll the screen back up, revealing the already-swapped home page underneath.
+function startExitReveal() {
+  const wipe = el('game-exit-wipe');
+  if (!wipe || wipe.hidden || typeof wipe.animate !== 'function') { finishShowLobbyView(); return; }
+  // The cover leg's own travel: the view is hidden by now, so the viewport is all that is left
+  // to measure, and it may no longer agree with what the roller actually rode down.
+  const height = exitTravel || (typeof window !== 'undefined' && window.innerHeight) || 800;
+  const uncover = wipe.animate(
+    [{ clipPath: 'inset(0 0 0% 0)' }, { clipPath: 'inset(0 0 100% 0)' }],
+    { duration: GAME_EXIT_MS, easing: GAME_EXIT_EASING, fill: 'forwards' },
+  );
+  const roller = wipe.firstElementChild;
+  const rollBack = roller.animate(
+    [{ transform: `translateY(${height}px)` }, { transform: 'translateY(0)' }],
+    { duration: GAME_EXIT_MS, easing: GAME_EXIT_EASING, fill: 'forwards' },
+  );
+  exitAnims = [uncover, rollBack];
+  let revealed = false;
+  const onRevealed = () => {
+    if (revealed) return;
+    revealed = true;
+    if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
+    exitAnims = [];
+    finishShowLobbyView();
+  };
+  uncover.finished.then(onRevealed, () => {});
+  exitTimer = setTimeout(onRevealed, GAME_EXIT_MS + 120);
+}
+
+// The screen itself: a body-level panel (created on first exit, reused after) with a roller bar
+// riding its leading edge. Hidden by default; the caller unhides it once every check has passed.
+function ensureExitWipe() {
+  let wipe = el('game-exit-wipe');
+  if (!wipe) {
+    wipe = document.createElement('div');
+    wipe.id = 'game-exit-wipe';
+    wipe.setAttribute('aria-hidden', 'true');
+    const roller = document.createElement('div');
+    roller.className = 'game-exit-roller';
+    wipe.appendChild(roller);
+    document.body.appendChild(wipe);
+  }
+  // Wear the header's own background so the screen reads as unrolling from the header itself.
+  // Read off the live header (themed per game by themeHeader); fall back to header white.
+  let bg = null;
+  const header = document.querySelector('.game-header');
+  if (header) {
+    try { bg = getComputedStyle(header).backgroundColor; } catch { bg = null; }
+  }
+  wipe.style.background = bg || '#fff';
+  return wipe;
+}
+
+function hideExitWipe() {
+  const wipe = el('game-exit-wipe');
+  if (wipe) wipe.hidden = true;
+}
+
+function clearExitMorph() {
+  for (const a of exitAnims.splice(0)) {
+    try { a.cancel(); } catch { /* already finished — nothing to cancel */ }
+  }
+  if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
+  const view = el('game-view');
+  if (view) view.classList.remove('is-exiting');
+}
+
 function teardownLaunchOverlay() {
   resetHeroDragState();
   const overlay = el('launch-overlay');
@@ -1477,6 +1634,7 @@ function launchArtUrl(manifest) {
 // change the one thing the launch animation keeps still. Both are released by hideLaunchOverlay's
 // cross-fade, or immediately when no launch is covering (a reconnect that rebuilds the view).
 function revealGameView() {
+  if (exitAnims.length || exitTimer) finishShowLobbyView(); // a rejoin mid-exit starts from settled home
   el('game-view').style.display = 'block';
   el('lobby-view').style.display = 'none';
   pushGameHistory();

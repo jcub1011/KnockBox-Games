@@ -214,6 +214,13 @@ export const LAUNCH_EXIT_MS = 220;
 // other way: so little early movement that it reads as a hitch.)
 export const LAUNCH_MORPH_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
 
+// How leaving a game ends. The header rolls a screen down over the game like a projector screen,
+// the views swap underneath full cover, and the screen rolls back up to reveal the home page —
+// one duration each way, same curve as the enter morph so the gestures rhyme. Both MIRROR
+// durations in home.css (#game-exit-wipe); change them together.
+export const GAME_EXIT_MS = 300;
+export const GAME_EXIT_EASING = 'cubic-bezier(0.45, 0, 0.25, 1)';
+
 // "Starting Tic Tac Toe…". The join-by-code path doesn't learn which game it is until EnterGame
 // arrives, so fall back to a generic label rather than rendering "Starting …" with a hole in it.
 export function launchMessage(gameName) {

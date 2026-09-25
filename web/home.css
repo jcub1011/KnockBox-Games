@@ -1544,6 +1544,43 @@ body.in-game::after {
     will-change: transform;
 }
 
+/* The exit: a projector-screen wipe rolled down out of the header. The settled game is pinned in
+   place (its header competes in the root stacking context, so without this it would paint above
+   the wipe instead of being masked by it) while shell.js unrolls #game-exit-wipe over it with a
+   Web Animations call — never a transition here, for the same style-recalc race as the enter
+   morph. This class is only the state marker and the pinning. z-index 50 sits above the home
+   page but below the wipe (60) and the launch overlay (100), so a relaunch mid-exit still
+   covers it. The 0.3s wipe mirrors GAME_EXIT_MS in kb-core.js — change them together. */
+#game-view.is-exiting {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+}
+
+/* The exit wipe itself: a body-level panel wearing the header's own background (set inline per
+   exit by shell.js, themed per game), clipped top-down for the roll-down and bottom-up for the
+   reveal. A dark roller bar rides the leading edge. Hidden by default; shell.js unhides it once
+   every exit check has passed. */
+#game-exit-wipe[hidden] { display: none; }
+
+#game-exit-wipe {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+}
+
+.game-exit-roller {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 8px;
+    background: rgba(0, 0, 0, 0.55);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
 .launch-stage {
     position: relative;
     display: flex;
