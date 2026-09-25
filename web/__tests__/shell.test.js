@@ -7,8 +7,10 @@
 // (b) the WebSocket protocol + DOM events. Assertions read observable state: sent frames, DOM
 // text/visibility, storage.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadShellDom, FakeWebSocket, installFakeWebSocket, installFakeFetch, stubClipboard, tick } from './helpers.js';
-import { ADMIN_FAVICON, FAVICONS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_MORPH_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
+import { ADMIN_FAVICON, FAVICONS, GAME_EXIT_EASING, GAME_EXIT_MS, HEADER_ENTER_EASING, HEADER_ENTER_MS, HEADER_EXIT_EASING, HEADER_EXIT_MS, LAUNCH_EXIT_MS, LAUNCH_MAX_MS, LAUNCH_SLOW_MS } from '../kb-core.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -63,9 +65,10 @@ async function createLobbySuccess(ws, { gameId = 'ttt', lobbyId = 'AB12' } = {})
 //
 // vitest reuses one `window` per FILE, so a REAL timer armed by one test's module copy is still
 // pending when the next test starts, and its callback resolves `document.body` and getElementById
-// against the DOM that is there WHEN IT FIRES — the next test's. A launch fade (220 ms) or the morph
-// safety net (420 ms) armed while examining one launch therefore landed `in-game` on the body of a
-// test that had launched nothing, and the launch-overlay assertions read it as state they had caused.
+// against the DOM that is there WHEN IT FIRES — the next test's. A launch fade (220 ms) or the
+// projector-enter safety net (header + drop + 120 ms) armed while examining one launch therefore
+// landed `in-game` on the body of a test that had launched nothing, and the launch-overlay
+// assertions read it as state they had caused.
 // The launch block alone was already on a fake clock for this reason; that stopped it arming leaky
 // timers but not the rest of the file arming them AT it, which is why it still failed about one full
 // run in three while passing every time the file ran alone.
@@ -79,6 +82,14 @@ beforeEach(() => {
   sessionStorage.clear();
   loadShellDom();
   getWs = installFakeWebSocket();
+  // shell.js pushes/consumes a history entry around each game session. Neutralize the real jsdom
+  // history: a real back() would pop asynchronously into the popstate listeners of stale module
+  // copies (one window per file), and navigation is asserted through these spies instead. Tests
+  // drive shell.handlePopState directly rather than dispatching a real PopStateEvent, which would
+  // likewise fire every stale copy's listener. Restored by restoreAllMocks in afterEach.
+  vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+  vi.spyOn(window.history, 'back').mockImplementation(() => {});
+  vi.spyOn(window.history, 'replaceState').mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -289,6 +300,59 @@ describe('game catalog rendering', () => {
     const chip = el('games').querySelector('.game-chin-tag-version');
     expect(chip.textContent).toBe('v<img src=x onerror=alert(1)>');
     expect(chip.querySelector('img')).toBeNull();
+  });
+
+  it('links the version chip to the releases page and opens it without launching the game', async () => {
+    localStorage.setItem('kb.displayName', 'Alice');
+    await importShell();
+    const ws = await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', version: '1.2.3',
+      homepage: 'https://github.com/jcub1011/Alpha-Chain-Phaser-',
+    }]);
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    const chip = el('games').querySelector('.game-chin-tag-version');
+    expect(chip.textContent).toBe('v1.2.3');
+    expect(chip.classList.contains('is-link')).toBe(true);
+    expect(chip.title).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
+
+    chip.click();
+    expect(open).toHaveBeenCalledWith('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases', '_blank', 'noopener,noreferrer');
+    // The click must not bubble into the tile's createLobby handler.
+    expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(false);
+
+    // Middle-click (auxclick) opens the same link without launching the game.
+    open.mockClear();
+    chip.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, button: 1, cancelable: true }));
+    expect(open).toHaveBeenCalledWith('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases', '_blank', 'noopener,noreferrer');
+    expect(ws.sent.some((f) => f.type === 'CreateLobby')).toBe(false);
+  });
+
+  it('links the version chip to the homepage itself when it is not a GitHub repo URL', async () => {
+    await importShell();
+    await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', version: '1.2.3',
+      homepage: 'https://example.com/my-game',
+    }]);
+
+    const chip = el('games').querySelector('.game-chin-tag-version');
+    expect(chip.classList.contains('is-link')).toBe(true);
+    expect(chip.title).toBe('https://example.com/my-game');
+  });
+
+  it('leaves the version chip inert when the homepage is missing or unsafe', async () => {
+    await importShell();
+    await bootWithGames([
+      { id: 'no-home', name: 'No Home', version: '1.0.0' },
+      { id: 'evil-home', name: 'Evil Home', version: '1.0.0', homepage: 'javascript:alert(1)' },
+    ]);
+
+    const chips = el('games').querySelectorAll('.game-chin-tag-version');
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) {
+      expect(chip.classList.contains('is-link')).toBe(false);
+      expect(chip.getAttribute('title')).toBeNull();
+    }
   });
 
   it('filters games list dynamically with search input', async () => {
@@ -817,7 +881,7 @@ describe('game version subtitle', () => {
     expect(el('game-version').textContent).toBe('');
   });
 
-  it('links the version to the game source when the manifest declares a homepage', async () => {
+  it('links the version to the game releases page when the manifest declares a homepage', async () => {
     await importShell();
     const ws = await bootWithGames([{
       id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
@@ -827,14 +891,27 @@ describe('game version subtitle', () => {
     await createLobbySuccess(ws);
     const badge = el('game-version');
     expect(badge.textContent).toBe('v1.2.3');
-    expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+    expect(badge.getAttribute('href')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
     expect(badge.getAttribute('target')).toBe('_blank');
     expect(badge.getAttribute('rel')).toBe('noopener noreferrer');
-    expect(badge.getAttribute('title')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-');
+    expect(badge.getAttribute('title')).toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
 
     shell.showLobbyView();
     expect(badge.getAttribute('href')).toBeNull();
     expect(badge.getAttribute('target')).toBeNull();
+  });
+
+  it('links the version to the homepage itself when it is not a GitHub repo URL', async () => {
+    await importShell();
+    const ws = await bootWithGames([{
+      id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', version: '1.2.3',
+      homepage: 'https://example.com/my-game',
+    }]);
+
+    await createLobbySuccess(ws);
+    const badge = el('game-version');
+    expect(badge.getAttribute('href')).toBe('https://example.com/my-game');
+    expect(badge.getAttribute('title')).toBe('https://example.com/my-game');
   });
 
   it('leaves the version as plain text with a tooltip when the game provides no source link', async () => {
@@ -886,10 +963,11 @@ describe('game version subtitle', () => {
 });
 
 describe('launch overlay', () => {
-  // This block is the one that made the leak visible: the overlay arms short timers (the morph runs
-  // 300 ms, its safety net fires at 420 ms, the fade teardown at 220 ms) and then asserts on exactly the
-  // state those callbacks change. It used to install its own fake clock here, which stopped it arming
-  // leaky timers but not the rest of the file arming them AT it. The file-level beforeEach now owns that.
+  // This block is the one that made the leak visible: the overlay arms short timers (the projector
+  // enter runs header + drop ms, its safety net 120 ms later, the fade teardown at 220 ms) and then
+  // asserts on exactly the state those callbacks change. It used to install its own fake clock here,
+  // which stopped it arming leaky timers but not the rest of the file arming them AT it. The
+  // file-level beforeEach now owns that.
 
   // Drive enterGame to a live iframe. Returns the frame element.
   async function embedGame(ws, { lobbyId = 'AB12', gameId = 'ttt' } = {}) {
@@ -902,6 +980,15 @@ describe('launch overlay', () => {
 
   describe('with a name entered', () => {
     beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
+
+    // The enter tests stub Element.prototype.animate (jsdom has none). The stub must not leak
+    // into tests that assert the no-animation fallback path — the window is shared per file.
+    let origAnimate;
+    beforeEach(() => { origAnimate = Element.prototype.animate; });
+    afterEach(() => {
+      if (origAnimate === undefined) delete Element.prototype.animate;
+      else Element.prototype.animate = origAnimate;
+    });
 
     it('appears the instant a tile is clicked, named, before any reply', async () => {
       await importShell();
@@ -1000,15 +1087,19 @@ describe('launch overlay', () => {
       expect(launchRetired()).toBe(true);
     });
 
-    // jsdom has no Web Animations API, so stand in for Element.animate and hand back a morph whose
-    // completion the test controls. Returns the recorded call plus the resolver.
-    function stubMorphAnimation() {
-      const rec = { calls: [], cancelled: 0 };
-      let finish;
-      rec.finish = () => { finish(); };
-      el('game-view').animate = (keyframes, options) => {
-        rec.calls.push({ keyframes, options });
-        return { finished: new Promise((res) => { finish = res; }), cancel: () => { rec.cancelled++; } };
+    // jsdom has no Web Animations API, so stand in for Element.animate and hand back
+    // animations whose completion the test controls. The projector enter animates the header
+    // (slide down) and the body (unroll), in that call order.
+    function stubEnterAnimation() {
+      const rec = { calls: [], cancelled: 0, resolvers: [] };
+      rec.finish = (i = 0) => { rec.resolvers[i](); };
+      rec.finishAll = () => { rec.resolvers.splice(0).forEach((f) => f()); };
+      Element.prototype.animate = function (keyframes, options) {
+        rec.calls.push({ target: this, keyframes, options });
+        return {
+          finished: new Promise((res) => { rec.resolvers.push(res); }),
+          cancel: () => { rec.cancelled++; },
+        };
       };
       return rec;
     }
@@ -1020,93 +1111,95 @@ describe('launch overlay', () => {
       const reply = ws.sent.find((f) => f.type === 'CreateLobby');
       ws._recv({ cid: reply.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
       await tick();
-      const frame = await embedGame(ws);
-      // The tile has reached (or is passing through) this rect; the game must take it over exactly.
-      el('launch-tile').getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 });
-      el('game-view').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 800 });
-      return frame;
+      return embedGame(ws);
     }
 
-    it('hands the tile over to the game, which expands to fullscreen from that exact rect', async () => {
+    it('slides the header in, then drops the game down out of it like a projector screen', async () => {
       await importShell();
       const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
       const frame = await launchWithTile(ws);
-      const morph = stubMorphAnimation();
+      const enter = stubEnterAnimation();
 
       frame.dispatchEvent(new Event('load'));
 
-      // No loading screen is left over a game that has arrived — the overlay is gone in the same frame.
-      expect(el('launch-overlay').hidden).toBe(true);
+      // The overlay stays until the unroll lands — retiring it up front would leave the bare
+      // in-game background on screen while the header slides in.
+      expect(el('launch-overlay').hidden).toBe(false);
       expect(el('launch-overlay').classList.contains('is-leaving')).toBe(false);
       expect(el('game-view').classList.contains('launch-veil')).toBe(false);
-      expect(el('game-view').classList.contains('launch-morph')).toBe(true);
-      // Starts on the tile's rect — scaled 400/1000 by 200/800, offset to (100, 50) — and ends at rest.
-      const { keyframes, options } = morph.calls[0];
-      expect(keyframes[0].transform).toBe('translate(100px, 50px) scale(0.4, 0.25)');
-      expect(keyframes[1].transform).toBe('none');
-      // Corner radii are pre-divided by each axis' scale so the squashed corner still reads as 16px.
-      expect(keyframes[0].borderRadius).toBe('40px / 64px');
-      expect(options.duration).toBe(LAUNCH_MORPH_MS);
-      expect(el('game-view').style.transformOrigin).toBe('0 0');
-      // The background waits: swapping it now would snap the atmosphere behind a game that is still
-      // only part of the screen.
-      expect(document.body.classList.contains('in-game')).toBe(false);
-
-      morph.finish();
-      await tick();
-      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
-      expect(el('game-view').style.transformOrigin).toBe('');   // no remnants
-      expect(el('game-view').style.overflow).toBe('');
+      expect(el('game-view').classList.contains('is-entering')).toBe(true);
+      // The background swaps up front: the game covers the screen from the first frame of the slide.
       expect(document.body.classList.contains('in-game')).toBe(true);
+      expect(enter.calls).toHaveLength(2);
+      const [slide, drop] = enter.calls;
+      expect(slide.target).toBe(el('game-view').querySelector('.game-header'));
+      expect(slide.keyframes).toEqual([{ transform: 'translateY(-100%)' }, { transform: 'translateY(0)' }]);
+      expect(slide.options.duration).toBe(HEADER_ENTER_MS);
+      expect(slide.options.easing).toBe(HEADER_ENTER_EASING);
+      expect(drop.target).toBe(el('game-view').querySelector('.game-body'));
+      expect(drop.keyframes).toEqual([{ clipPath: 'inset(0 0 100% 0)' }, { clipPath: 'inset(0 0 0% 0)' }]);
+      expect(drop.options.duration).toBe(GAME_EXIT_MS);
+      expect(drop.options.easing).toBe(GAME_EXIT_EASING);
+      expect(drop.options.delay).toBe(HEADER_ENTER_MS);
+      // Collapsed during the slide delay, or the full game flashes before the drop starts.
+      expect(drop.options.fill).toBe('backwards');
+
+      enter.finish(1);   // the drop lands last
+      await tick();
+      expect(el('game-view').classList.contains('is-entering')).toBe(false);
+      expect(document.body.classList.contains('in-game')).toBe(true);
+      // The game fully covers the screen now — the overlay drops outright, no fade.
+      expect(el('launch-overlay').hidden).toBe(true);
+      expect(el('launch-overlay').classList.contains('is-leaving')).toBe(false);
     });
 
-    it('swaps the background even if the expand never reports finishing', async () => {
+    it('finishes the enter even if the animations never report finishing', async () => {
       await importShell();
       const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
       const frame = await launchWithTile(ws);
-      stubMorphAnimation();   // never resolved
+      stubEnterAnimation();   // never resolved
 
-      vi.useFakeTimers();
       frame.dispatchEvent(new Event('load'));
-      expect(document.body.classList.contains('in-game')).toBe(false);
+      expect(el('game-view').classList.contains('is-entering')).toBe(true);
+      expect(el('launch-overlay').hidden).toBe(false);
 
-      vi.advanceTimersByTime(LAUNCH_MORPH_MS + 200);
+      await vi.advanceTimersByTimeAsync(HEADER_ENTER_MS + GAME_EXIT_MS + 200);
       expect(document.body.classList.contains('in-game')).toBe(true);
-      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
+      expect(el('game-view').classList.contains('is-entering')).toBe(false);
+      expect(el('launch-overlay').hidden).toBe(true);
     });
 
-    it('falls back to a fade when there is no tile to hand over from', async () => {
+    it('falls back to a fade when Web Animations is unavailable', async () => {
       await importShell();
       const ws = await bootWithGames();   // no thumbnail, so no tile was ever shown
       await createLobbySuccess(ws, { lobbyId: 'AB12' });
       const frame = await embedGame(ws);
+      // No animate stub: jsdom has none, so the projector enter declines.
 
-      vi.useFakeTimers();
       frame.dispatchEvent(new Event('load'));
 
-      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
+      expect(el('game-view').classList.contains('is-entering')).toBe(false);
       expect(el('game-view').classList.contains('launch-veil')).toBe(false);
       expect(document.body.classList.contains('in-game')).toBe(true);
       expect(el('launch-overlay').classList.contains('is-leaving')).toBe(true);
 
-      vi.advanceTimersByTime(LAUNCH_EXIT_MS);
+      await vi.advanceTimersByTimeAsync(LAUNCH_EXIT_MS);
       expect(el('launch-overlay').hidden).toBe(true);
     });
 
-    it('cancels the expand and leaves nothing behind when a player leaves mid-morph', async () => {
+    it('cancels the enter and leaves nothing behind when a player leaves mid-enter', async () => {
       await importShell();
       const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
       const frame = await launchWithTile(ws);
-      const morph = stubMorphAnimation();
+      const enter = stubEnterAnimation();
       frame.dispatchEvent(new Event('load'));
-      expect(el('game-view').classList.contains('launch-morph')).toBe(true);
+      expect(el('game-view').classList.contains('is-entering')).toBe(true);
 
       shell.showLobbyView();
-      // A half-scaled game view left running would break the next session.
-      expect(morph.cancelled).toBe(1);
-      expect(el('game-view').classList.contains('launch-morph')).toBe(false);
-      expect(el('game-view').style.transformOrigin).toBe('');
-      expect(el('game-view').style.overflow).toBe('');
+      // A half-unrolled game left running would break the next session.
+      expect(enter.cancelled).toBe(2);   // header slide + body drop, both dropped
+      expect(el('game-view').classList.contains('is-entering')).toBe(false);
+      expect(launchRetired()).toBe(true);   // the still-up overlay retires via the fade path
     });
 
     it('veils the game view while the launch is up, so it is never seen half-built', async () => {
@@ -1160,6 +1253,7 @@ describe('launch overlay', () => {
       await importShell();
       const ws = await bootWithGames();
       await createLobbySuccess(ws, { lobbyId: 'AB12' });
+      el('leave').click();
       el('leave').click();
       expect(launchRetired()).toBe(true);
       // The home view must not be left faded out; that would look like a dead app.
@@ -1352,11 +1446,11 @@ describe('launch overlay', () => {
       expect(tile.classList.contains('is-dancing')).toBe(true);
     });
 
-    it('expands fullscreen morph from the current dragged position if load completes mid-drag', async () => {
+    it('plays the projector enter from the header if load completes mid-drag', async () => {
       await importShell();
       const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png' }]);
       const frame = await launchWithTile(ws);
-      const morph = stubMorphAnimation();
+      const enter = stubEnterAnimation();
       const tile = el('launch-tile');
 
       // Drag tile off-center
@@ -1364,12 +1458,13 @@ describe('launch overlay', () => {
       tile.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 250, clientY: 200 }));
       tile.getBoundingClientRect = () => ({ left: 250, top: 150, width: 400, height: 200 });
 
-      // Frame load arrives while dragged
+      // Frame load arrives while dragged: drag state retires and the enter plays from the
+      // header regardless of where the tile was dragged to — no tile geometry feeds it.
       frame.dispatchEvent(new Event('load'));
       expect(tile.classList.contains('is-dragging')).toBe(false);
-      expect(morph.calls.length).toBe(1);
-      const { keyframes } = morph.calls[0];
-      expect(keyframes[0].transform).toBe('translate(250px, 150px) scale(0.4, 0.25)');
+      expect(enter.calls).toHaveLength(2);
+      expect(enter.calls[0].target).toBe(el('game-view').querySelector('.game-header'));
+      expect(enter.calls[1].target).toBe(el('game-view').querySelector('.game-body'));
     });
 
     it('resets drag state and clears is-dragging when launch is aborted', async () => {
@@ -1518,23 +1613,512 @@ describe('control-plane messages', () => {
 describe('leaving the game', () => {
   beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
 
-  it('leaveGame sends LeaveLobby, clears the lobby, and returns home', async () => {
+  it('leave needs two clicks: first arms Confirm?, second leaves', async () => {
     await importShell();
     const ws = await bootWithGames();
     await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const btn = el('leave');
+    const label = (name) => btn.querySelector(`.leave-label-${name}`);
 
-    el('leave').click();
+    btn.click();
+    expect(btn.classList.contains('confirm')).toBe(true);
+    expect(label('leave').getAttribute('aria-hidden')).toBe('true');
+    expect(label('confirm').hasAttribute('aria-hidden')).toBe(false);
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+
+    btn.click();
     expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
     expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
     expect(el('lobby-view').style.display).toBe('block');
+    // The confirmed leave disarms the button for the next session.
+    expect(btn.classList.contains('confirm')).toBe(false);
+    expect(label('leave').hasAttribute('aria-hidden')).toBe(false);
+    expect(label('confirm').getAttribute('aria-hidden')).toBe('true');
   });
 
-  it('clicking the game title also leaves (in-SPA home link)', async () => {
+  it('reverts to Leave after 5 s without leaving', async () => {
     await importShell();
     const ws = await bootWithGames();
     await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const btn = el('leave');
+
+    btn.click();
+    expect(btn.classList.contains('confirm')).toBe(true);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(btn.classList.contains('confirm')).toBe(false);
+    expect(btn.querySelector('.leave-label-leave').hasAttribute('aria-hidden')).toBe(false);
+    expect(btn.querySelector('.leave-label-confirm').getAttribute('aria-hidden')).toBe('true');
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+    expect(el('lobby-view').style.display).not.toBe('block');
+  });
+
+  it('clicking the game title no longer leaves; it links the homepage itself in a new tab', async () => {
+    await importShell();
+    const ws = await bootWithGames([
+      { id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', maxPlayers: 2, homepage: 'https://github.com/owner/repo' },
+    ]);
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const title = el('game-title');
+    // The raw homepage — NOT the version badge's releases-page resolution.
+    expect(title.getAttribute('href')).toBe('https://github.com/owner/repo');
+    expect(title.target).toBe('_blank');
+    expect(title.rel).toContain('noopener');
+    title.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+  });
+
+  it('clicking the game title without a homepage does nothing', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    expect(el('game-title').hasAttribute('href')).toBe(false);
+    // Inert but explained, like the version badge's no-source tooltip.
+    expect(el('game-title').title).toBe('Game does not provide a homepage link.');
     el('game-title').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(true);
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+    expect(el('lobby-view').style.display).not.toBe('block');
+  });
+});
+
+describe('game exit animation', () => {
+  beforeEach(() => localStorage.setItem('kb.displayName', 'Alice'));
+
+  // jsdom has no Web Animations API, so both the projector enter (header slide + body drop)
+  // and the roll-up exit are intercepted on Element.prototype, with per-animation resolvers the
+  // test drives. The prototype stub is restored after each test so later suites keep the
+  // no-animation immediate path.
+  let origElementAnimate;
+  beforeEach(() => { origElementAnimate = Element.prototype.animate; });
+  afterEach(() => {
+    if (origElementAnimate === undefined) delete Element.prototype.animate;
+    else Element.prototype.animate = origElementAnimate;
+  });
+
+  function stubExitAnimation() {
+    const rec = { calls: [], cancelled: 0, resolvers: [] };
+    rec.finish = (i = 0) => { rec.resolvers[i](); };
+    rec.finishAll = () => { rec.resolvers.splice(0).forEach((f) => f()); };
+    Element.prototype.animate = function (keyframes, options) {
+      rec.calls.push({ target: this, keyframes, options });
+      return {
+        finished: new Promise((res) => { rec.resolvers.push(res); }),
+        cancel: () => { rec.cancelled++; },
+      };
+    };
+    return rec;
+  }
+
+  // Drive a click-launched game all the way to a settled fullscreen session (overlay retired,
+  // background swapped), with layout stubbed throughout. Returns the live iframe.
+  async function playGame(ws) {
+    el('games').querySelector('.game-tile').getBoundingClientRect = () =>
+      ({ left: 40, top: 200, width: 240, height: 160, right: 280, bottom: 360 });
+    el('launch-tile').getBoundingClientRect = () =>
+      ({ left: 350, top: 300, width: 300, height: 200, right: 650, bottom: 500 });
+    const enter = stubExitAnimation();
+    el('games').querySelector('.game-tile').click();
+    const reply = ws.sent.find((f) => f.type === 'CreateLobby');
+    ws._recv({ cid: reply.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+    await tick();
+    shell.enterGame({ type: 'EnterGame', lobbyId: 'AB12', gameId: 'ttt', hostId: 'p1', players: [] });
+    const ticket = ws.sent.find((f) => f.type === 'RequestTicket');
+    ws._recv({ cid: ticket.cid, type: 'Ticket', ticket: 't' });
+    await tick();
+    const frame = el('game-frame');
+    frame.dispatchEvent(new Event('load'));
+    enter.finishAll();   // header slide + body drop both land
+    await tick();
+    expect(document.body.classList.contains('in-game')).toBe(true);
+    expect(el('launch-overlay').hidden).toBe(true);
+    // Hand the prototype back: the exit under test installs its own stub below.
+    if (origElementAnimate === undefined) delete Element.prototype.animate;
+    else Element.prototype.animate = origElementAnimate;
+    return frame;
+  }
+
+  function leaveViaButton() {
+    const btn = el('leave');
+    btn.click();   // arms Confirm?
+    btn.click();   // confirms
+  }
+
+  it('rolls the game up into the header on Leave, then slides the header away to reveal home', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubExitAnimation();
+
+    leaveViaButton();
+
+    // Network + bookkeeping are immediate; only the visuals wait out the roll-up.
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
+    expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
+    // Phase 1 (roll up): the game body retracts into the header while the game is still live.
+    expect(el('game-view').style.display).toBe('block');
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+    expect(el('game-frame')).toBeTruthy();
+    // Home is placed underneath up front — page AND atmosphere — so the retracting game reveals
+    // the settled home screen, not the home page painted over the in-game glow.
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.body.classList.contains('in-game')).toBe(false);
+    expect(exit.calls).toHaveLength(1);
+    const [rollup] = exit.calls;
+    expect(rollup.target).toBe(el('game-view').querySelector('.game-body'));
+    expect(rollup.keyframes).toEqual([{ clipPath: 'inset(0 0 0% 0)' }, { clipPath: 'inset(0 0 100% 0)' }]);
+    expect(rollup.options.duration).toBe(GAME_EXIT_MS);
+    expect(rollup.options.easing).toBe(GAME_EXIT_EASING);
+    expect(rollup.options.fill).toBe('forwards');   // hold collapsed while the header slides
+
+    exit.finish(0);   // rolled up
+    await tick();
+
+    // Phase 2: the header slides up out of view. The frame is still torn down only at the end.
+    expect(el('game-frame')).toBeTruthy();
+    expect(document.body.classList.contains('in-game')).toBe(false);
+    expect(exit.calls).toHaveLength(2);
+    const [slide] = exit.calls.slice(1);
+    expect(slide.target).toBe(el('game-view').querySelector('.game-header'));
+    expect(slide.keyframes).toEqual([{ transform: 'translateY(0)' }, { transform: 'translateY(-100%)' }]);
+    expect(slide.options.duration).toBe(HEADER_EXIT_MS);
+    expect(slide.options.easing).toBe(HEADER_EXIT_EASING);
+
+    exit.finish(1);   // header gone
+    await tick();
+
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(document.body.classList.contains('in-game')).toBe(false);
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(el('game-view').classList.contains('is-exiting')).toBe(false);
+  });
+
+  it('finishes the exit even if the animations never report finishing', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    stubExitAnimation();   // never resolved
+
+    leaveViaButton();
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(GAME_EXIT_MS + 200);   // roll-up safety net: header sliding
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.body.classList.contains('in-game')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(HEADER_EXIT_MS + 200);   // header safety net: home
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(el('game-view').style.display).toBe('none');
+    expect(document.body.classList.contains('in-game')).toBe(false);
+  });
+
+  it('plays the same roll-up on Back navigation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubExitAnimation();
+
+    shell.handlePopState({ state: null });
+
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby' && f.lobbyId === 'AB12')).toBe(true);
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+    expect(exit.calls).toHaveLength(1);
+
+    exit.finish(0);
+    await tick();
+    exit.finishAll();
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.querySelector('#game-exit-wipe')).toBeNull();
+    expect(window.history.back).not.toHaveBeenCalled(); // user-Back already popped the entry
+  });
+
+  it('plays the same roll-up on a kick, then toasts', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubExitAnimation();
+
+    shell.handle({ type: 'Kicked', lobbyId: 'AB12' });
+
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+    expect(exit.calls).toHaveLength(1);
+
+    exit.finish(0);
+    await tick();
+    exit.finishAll();
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.querySelector('.home-error-toast').textContent).toContain('kicked');
+  });
+
+  it('rolls up out of the waiting room too, even with no game iframe', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    // Retire the launch overlay so the waiting room counts as settled (no roll without one).
+    shell.hideLaunchOverlay();
+    await vi.advanceTimersByTimeAsync(LAUNCH_EXIT_MS);
+    expect(el('launch-overlay').hidden).toBe(true);
+    const exit = stubExitAnimation();
+
+    leaveViaButton();
+
+    expect(exit.calls).toHaveLength(1);
+    expect(exit.calls[0].target).toBe(el('game-view').querySelector('.game-body'));
+    expect(exit.calls[0].keyframes).toEqual(
+      [{ clipPath: 'inset(0 0 0% 0)' }, { clipPath: 'inset(0 0 100% 0)' }]);
+
+    exit.finish(0);
+    await tick();
+    exit.finishAll();
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(document.querySelector('#game-exit-wipe')).toBeNull();
+  });
+
+  it('pins the exiting game over the home page in CSS, with no wipe panel left', async () => {
+    await importShell();
+    // The exit keeps the settled game fixed above the home page it reveals, and the retired
+    // projector-screen wipe (texture panel, roller, scroll keyframes, shading) stays gone.
+    const css = readFileSync(resolve(process.cwd(), 'home.css'), 'utf8');
+    expect(css).toMatch(/#game-view\.is-exiting\s*{[^}]*position:\s*fixed/);
+    expect(css).toContain('#game-view.is-entering .game-header');
+    expect(css).not.toContain('#game-exit-wipe');
+    expect(css).not.toContain('exit-wipe-scroll');
+    expect(css).not.toContain('game-exit-roller');
+  });
+
+  it('skips the animation under reduced motion', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    // Reduced motion from here on: entering already played; leaving must not.
+    vi.stubGlobal('matchMedia', (q) => ({
+      matches: q === '(prefers-reduced-motion: reduce)',
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const exit = stubExitAnimation();
+
+    leaveViaButton();
+
+    expect(exit.calls).toHaveLength(0);
+    expect(document.querySelector('#game-exit-wipe')).toBeNull();
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('a second exit mid-roll fast-forwards home instead of stacking animations', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubExitAnimation();
+
+    leaveViaButton();
+    expect(el('game-view').classList.contains('is-exiting')).toBe(true);
+
+    shell.showLobbyView();   // e.g. a kick landing mid-roll
+    expect(exit.cancelled).toBe(1);   // the roll-up, dropped
+    expect(document.querySelector('#game-exit-wipe')).toBeNull();
+    expect(el('frame-host').innerHTML).toBe('');
+    expect(el('game-view').style.display).toBe('none');
+    expect(el('game-view').classList.contains('is-exiting')).toBe(false);
+  });
+
+  it('holds the rolled-up game while the header slides, cancelling both at the end', async () => {
+    await importShell();
+    const ws = await bootWithGames([{ id: 'ttt', name: 'Tic Tac Toe', entry: 'index.html', thumbnail: 'tile.png', maxPlayers: 2 }]);
+    await playGame(ws);
+    const exit = stubExitAnimation();
+
+    leaveViaButton();
+    expect(exit.calls).toHaveLength(1);
+
+    exit.finish(0);   // rolled up -> header slide starts, roll-up held (not cancelled)
+    await tick();
+    expect(exit.calls).toHaveLength(2);
+    expect(exit.cancelled).toBe(0);
+
+    exit.finish(1);   // header gone -> home, both cancelled via the finish path
+    await tick();
+    expect(el('game-view').style.display).toBe('none');
+    expect(exit.cancelled).toBe(2);
+  });
+});
+
+describe('browser Back button', () => {
+  let confirmSpy;
+  beforeEach(() => {
+    localStorage.setItem('kb.displayName', 'Alice');
+    // Back out of a game asks first; default to confirming so tests read the leave path.
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  });
+
+  const leaves = (ws, lobbyId) =>
+    ws.sent.filter((f) => f.type === 'LeaveLobby' && (!lobbyId || f.lobbyId === lobbyId));
+
+  it('pushes one entry when the session commits, not while launching', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    const p = shell.createLobby('ttt');
+    // Overlay is up but no session yet — nothing pushed.
+    expect(window.history.pushState).not.toHaveBeenCalled();
+    const frame = ws.sent.find((f) => f.type === 'CreateLobby');
+    ws._recv({ cid: frame.cid, type: 'LobbyCreated', lobbyId: 'AB12' });
+    await p;
+    expect(window.history.pushState).toHaveBeenCalledTimes(1);
+    expect(window.history.pushState).toHaveBeenCalledWith({ kbInGame: true }, '');
+    // A second reveal of the same session (reconnect rebuilds the view) stacks nothing.
+    shell.showRoom();
+    expect(window.history.pushState).toHaveBeenCalledTimes(1);
+  });
+
+  it('Back while in a game confirms, then leaves without going back again', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    expect(el('game-view').style.display).toBe('block');
+
+    // The pop already consumed our entry: confirm, leave, but don't call back() a second time.
+    shell.handlePopState({ state: null });
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(leaves(ws, 'AB12')).toHaveLength(1);
+    expect(sessionStorage.getItem('kb.lobbyId')).toBeNull();
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).not.toHaveBeenCalled();
+  });
+
+  it('Back + Cancel stays in the game and re-arms for the next Back', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    expect(window.history.pushState).toHaveBeenCalledTimes(1);
+
+    confirmSpy.mockReturnValue(false);
+    shell.handlePopState({ state: null });
+    expect(leaves(ws)).toHaveLength(0);
+    expect(sessionStorage.getItem('kb.lobbyId')).toBe('AB12');
+    expect(el('game-view').style.display).toBe('block');
+    // The popped entry was put back, so the next Back asks again instead of leaving the site.
+    expect(window.history.pushState).toHaveBeenCalledTimes(2);
+
+    confirmSpy.mockReturnValue(true);
+    shell.handlePopState({ state: null });
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(leaves(ws, 'AB12')).toHaveLength(1);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).not.toHaveBeenCalled();
+  });
+
+  it('Leave button consumes the entry; its programmatic pop is swallowed', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    expect(leaves(ws, 'AB12')).toHaveLength(1);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+
+    // The pop landing from our own back(): still home, no second leave, no second back().
+    shell.handlePopState({ state: null });
+    expect(leaves(ws)).toHaveLength(1);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+    expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('game A, Leave, game B, Back, Back: no resurrection, final Back is a no-op', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AAAA' });
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    shell.handlePopState({ state: null }); // swallow our programmatic pop
+    expect(el('lobby-view').style.display).toBe('block');
+
+    // createLobbySuccess would answer the FIRST CreateLobby frame (game A's, long resolved);
+    // answer the latest one so game B's promise settles.
+    const p = shell.createLobby('ttt');
+    const latest = ws.sent.filter((f) => f.type === 'CreateLobby').at(-1);
+    ws._recv({ cid: latest.cid, type: 'LobbyCreated', lobbyId: 'BBBB' });
+    await p;
+    expect(window.history.pushState).toHaveBeenCalledTimes(2);
+    expect(el('game-view').style.display).toBe('block');
+
+    shell.handlePopState({ state: null }); // Back out of game B
+    expect(leaves(ws, 'BBBB')).toHaveLength(1);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).toHaveBeenCalledTimes(1); // only game A's Leave went back
+
+    // Back again on home: a real Back off the site — nothing to do in-app.
+    shell.handlePopState({ state: null });
+    expect(leaves(ws)).toHaveLength(2);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+    expect(el('lobby-view').style.display).toBe('block');
+  });
+
+  it('a programmatic back() that never pops does not swallow the next session Back', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AAAA' });
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    expect(leaves(ws, 'AAAA')).toHaveLength(1);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+    // No popstate delivered: history.back() was a silent no-op in this embed.
+
+    // Next session pushes a new entry (answer the latest CreateLobby, as above).
+    const p = shell.createLobby('ttt');
+    const latest = ws.sent.filter((f) => f.type === 'CreateLobby').at(-1);
+    ws._recv({ cid: latest.cid, type: 'LobbyCreated', lobbyId: 'BBBB' });
+    await p;
+    expect(window.history.pushState).toHaveBeenCalledTimes(2);
+    expect(el('game-view').style.display).toBe('block');
+
+    // Genuine user-Back out of game B: must confirm and leave, not be swallowed as game A's pop.
+    shell.handlePopState({ state: null });
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(leaves(ws, 'BBBB')).toHaveLength(1);
+    expect(el('lobby-view').style.display).toBe('block');
+    expect(window.history.back).toHaveBeenCalledTimes(1); // user-Back already popped; no second back
+  });
+
+  it('forward into a stale game entry stays home and neutralizes the slot', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    shell.handlePopState({ state: { kbInGame: true } });
+    expect(window.history.replaceState).toHaveBeenCalledTimes(1);
+    expect(ws.sent.some((f) => f.type === 'LeaveLobby')).toBe(false);
+    expect(el('lobby-view').style.display).not.toBe('none');
+  });
+
+  it('beforeunload prompts in a game and stays silent on home', async () => {
+    await importShell();
+    const ws = await bootWithGames();
+    await createLobbySuccess(ws, { lobbyId: 'AB12' });
+
+    // A stub, not a real Event: jsdom's Event carries its own legacy returnValue, which would
+    // shadow the assignment the handler performs on a real BeforeUnloadEvent.
+    const inGame = { preventDefault: vi.fn(), returnValue: undefined };
+    shell.handleBeforeUnload(inGame);
+    expect(inGame.preventDefault).toHaveBeenCalledTimes(1);
+    expect(inGame.returnValue).toBe('');
+
+    const btn = el('leave');
+    btn.click();
+    btn.click();
+    const home = { preventDefault: vi.fn(), returnValue: undefined };
+    shell.handleBeforeUnload(home);
+    expect(home.preventDefault).not.toHaveBeenCalled();
+    expect(home.returnValue).toBeUndefined();
   });
 });
 

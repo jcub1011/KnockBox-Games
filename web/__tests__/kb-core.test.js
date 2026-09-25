@@ -47,6 +47,7 @@ import {
   parseServerVersion,
   SERVER_RELEASES_URL,
   isSafeHomepageUrl,
+  gameReleasesUrl,
   normalizeTags,
   filterAndSortGames,
 } from '../kb-core.js';
@@ -881,6 +882,38 @@ describe('isSafeHomepageUrl', () => {
     expect(isSafeHomepageUrl(null)).toBe(false);
     expect(isSafeHomepageUrl(undefined)).toBe(false);
     expect(isSafeHomepageUrl(123)).toBe(false);
+  });
+});
+
+describe('gameReleasesUrl', () => {
+  it('resolves a GitHub repo homepage to its releases page', () => {
+    expect(gameReleasesUrl('https://github.com/jcub1011/Alpha-Chain-Phaser-'))
+      .toBe('https://github.com/jcub1011/Alpha-Chain-Phaser-/releases');
+  });
+
+  it('tolerates a trailing slash, a .git suffix and a www host', () => {
+    expect(gameReleasesUrl('https://github.com/owner/repo/'))
+      .toBe('https://github.com/owner/repo/releases');
+    expect(gameReleasesUrl('https://github.com/owner/repo.git'))
+      .toBe('https://github.com/owner/repo/releases');
+    expect(gameReleasesUrl('https://www.github.com/owner/repo'))
+      .toBe('https://github.com/owner/repo/releases');
+  });
+
+  it('falls back to the homepage itself when it is not a repo root', () => {
+    expect(gameReleasesUrl('https://example.com/my-game')).toBe('https://example.com/my-game');
+    // A deeper GitHub path names no releases page — link what the author declared.
+    expect(gameReleasesUrl('https://github.com/owner/repo/tree/main'))
+      .toBe('https://github.com/owner/repo/tree/main');
+  });
+
+  it('returns null for anything that is not a safe homepage URL', () => {
+    expect(gameReleasesUrl('javascript:alert(1)')).toBeNull();
+    expect(gameReleasesUrl('http://example.com/game')).toBeNull();
+    expect(gameReleasesUrl('/relative/path')).toBeNull();
+    expect(gameReleasesUrl('')).toBeNull();
+    expect(gameReleasesUrl(null)).toBeNull();
+    expect(gameReleasesUrl(undefined)).toBeNull();
   });
 });
 

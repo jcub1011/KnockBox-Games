@@ -1114,26 +1114,28 @@ are elastic. Three consequences worth knowing before touching it:
   to be revealed (it must be in the layout to download) but veiled: `#game-view.launch-veil`, plus
   `body.in-game` withheld, both released as the overlay fades. `visibility`, never `display:none`,
   which would entitle the iframe to defer loading.
-- **Nothing of the launch is ever drawn over a running game.** On the iframe's `load` —
-  `hideLaunchOverlay(true)`, the only caller that passes it — the tile *hands over*: `startGameMorph`
-  drops the overlay outright and in the same frame plants `#game-view` in the exact rect the tile had
-  reached (mid-flight or settled, rounded corners and all), then expands it to fullscreen like a video
-  (`LAUNCH_MORPH_MS`/`LAUNCH_MORPH_EASING`). That expand is a **Web Animations call, not a CSS
-  transition** — a transition has to be armed by writing a start value and clearing it, which made it
-  a hostage of style-recalc ordering and was seen sticking at the start matrix with `playState`
-  `running` and `transition-duration: 0s`, freezing the game at tile size. Its safety timer is held
-  outside `launchTimers` so ending the morph cancels it; a stray one strips the class off whatever
-  launch is running by then. The scale is deliberately
-  **non-uniform** — matching the tile's rect on both axes is what sells it, and a uniform scale would
-  start the game at nearly full height on a portrait phone. `body.in-game` is withheld until the morph
-  ends, because that's the first moment the game covers the screen and the background can swap
-  unseen. Every other ending (an error, a bail-out, the `LAUNCH_MAX_MS` ceiling, a launch that never
-  had a tile) takes the `LAUNCH_EXIT_MS` fade instead. Fading a loading screen away over a game that
-  has already arrived was tried and rejected as clunky — don't reintroduce it.
-- Both durations mirror `home.css`; change them together. `clearGameMorph` runs from `showLobbyView`
-  and `showLaunchOverlay` as well as on completion — a stranded inline transform on `#game-view`
-  breaks the next session. And `#lobby-view.is-launching` is cleared in two places on purpose: leave
-  it stuck and the home page renders at `opacity: 0`.
+- **Nothing of the launch is ever drawn over a running game — and the screen is never bare
+  mid-enter either.** On the iframe's `load` — `hideLaunchOverlay(true)`, the only caller that
+  passes it — the projector enter plays behind the still-visible overlay: `startProjectorEnter`
+  slides the game header in from the top, then drops the game body down out of it like a projector
+  screen unrolling (`HEADER_ENTER_MS`/`HEADER_ENTER_EASING`, then `GAME_EXIT_MS`/`GAME_EXIT_EASING`
+  with the drop delayed by the slide, held collapsed through the delay by `fill: 'backwards'`).
+  The overlay drops outright only once the unroll lands. The tile-zoom handoff is gone on purpose —
+  the tile flight covers the load, the projector covers the arrival. The motion is **Web Animations
+  calls, not CSS transitions** — a transition has to be armed by writing a start value and clearing
+  it, which made it a hostage of style-recalc ordering. Its safety timer is held outside
+  `launchTimers` so ending the enter cancels it; a stray one strips the class off whatever launch
+  is running by then. `body.in-game` swaps at the start of the slide, because the game covers the
+  screen from that first frame. Every other ending (an error, a bail-out, the `LAUNCH_MAX_MS`
+  ceiling) takes the `LAUNCH_EXIT_MS` fade instead. Fading a loading screen away over a game that
+  has already arrived was tried and rejected as clunky — don't reintroduce it. Leaving is the reverse:
+  `showLobbyView` → `startExitMorph` rolls the game body back up into the header, then
+  `startExitHeaderSlide` slides the header up out of view (`HEADER_EXIT_MS`/`HEADER_EXIT_EASING`),
+  revealing the home page placed underneath up front.
+- All durations mirror `home.css`; change them together. `clearEnterMorph` runs from
+  `showLobbyView` and `showLaunchOverlay` as well as on completion — a stranded `is-entering`
+  marker breaks the next session's background swap. And `#lobby-view.is-launching` is cleared in
+  two places on purpose: leave it stuck and the home page renders at `opacity: 0`.
 
 ### Logging (server side)
 Serilog is the host logger (`builder.Host.UseSerilog` in `Program.cs`): console + a **daily**
